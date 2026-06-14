@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 from .access import AllAccess, FileAccess
+from .registry import ToolEntry, ToolRegistry
 from .sandbox import LocalSandbox
 
 # Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action,
@@ -88,13 +89,33 @@ TOOL_SCHEMAS = [
 
 
 class LocalToolHost:
-    def __init__(self, root: str | None = None, *, sandbox=None, timeout: int = 30):
+    def __init__(self, root: str | None = None, *, sandbox=None, timeout: int = 30,
+                 registry: ToolRegistry | None = None):
         # root=None → confine to the *current* working directory, resolved per call
         # (so the eval runner, which chdirs into a temp workdir after construction,
         # is confined to that workdir). Pass an explicit root to pin it.
         self._root = root
         self.timeout = timeout
         self.sandbox = sandbox or LocalSandbox()
+        # The registry is the single source of tools; MCP/plugin/skill tools register
+        # into this same object later (Step ③). The host just projects from it.
+        self.registry = registry or ToolRegistry()
+        self._register_builtins()
+
+    def _register_builtins(self) -> None:
+        handlers = {
+            "read_file": self._t_read_file, "list_files": self._t_list_files,
+            "edit_file": self._t_edit_file, "append_to_file": self._t_append,
+            "str_replace": self._t_str_replace, "run_command": self._t_run_command,
+            "execute_code": self._t_execute_code,
+        }
+        for schema in TOOL_SCHEMAS:
+            name = schema["function"]["name"]
+            self.registry.register(ToolEntry(
+                name=name, schema=schema, handler=handlers[name],
+                accesses=(lambda args, n=name: self._builtin_accesses(n, args)),
+                source="builtin",
+            ))
 
     def root(self) -> str:
         return os.path.realpath(self._root or os.getcwd())
@@ -110,11 +131,22 @@ class LocalToolHost:
             raise PermissionError(f"path escapes workspace ({root}): {path}")
         return full
 
+    # --- ToolHost projection: everything comes from the registry now ---
     def schemas(self) -> list[dict]:
-        return TOOL_SCHEMAS
+        return self.registry.schemas()
 
     def accesses(self, name: str, args: dict) -> list:
-        """Declare what each call touches so the scheduler can safely parallelize."""
+        return self.registry.accesses(name, args)
+
+    def run(self, name: str, args: dict) -> str:
+        return self.registry.run(name, args)  # registry wraps the handler in try/except
+
+    def read_text(self, path: str) -> str:
+        with open(self._resolve(path), encoding="utf-8") as f:
+            return f.read()
+
+    def _builtin_accesses(self, name: str, args: dict) -> list:
+        """Declare what each builtin call touches so the scheduler can safely parallelize."""
         p = args.get("path")
         if name == "read_file":
             return [FileAccess("read", p)] if p else []
@@ -126,53 +158,51 @@ class LocalToolHost:
             return [AllAccess()]  # arbitrary execution → globally exclusive
         return [AllAccess()]
 
-    def read_text(self, path: str) -> str:
-        with open(self._resolve(path), encoding="utf-8") as f:
-            return f.read()
+    # --- builtin tool handlers (args) -> str (the registry catches exceptions) ---
+    def _t_read_file(self, args: dict) -> str:
+        return self.read_text(args["path"])
 
-    def run(self, name: str, args: dict) -> str:
-        try:
-            if name == "read_file":
-                return self.read_text(args["path"])
-            if name == "list_files":
-                d = self._resolve(args.get("path") or ".")
-                return "\n".join(sorted(os.listdir(d))) or "(empty)"
-            if name == "edit_file":
-                full = self._resolve(args["path"])
-                self._mkparent(full)
-                with open(full, "w", encoding="utf-8") as f:
-                    f.write(args["content"])
-                return f"Wrote {len(args['content'])} bytes to {args['path']}"
-            if name == "append_to_file":
-                full = self._resolve(args["path"])
-                self._mkparent(full)
-                with open(full, "a", encoding="utf-8") as f:
-                    f.write(args["content"])
-                return f"Appended {len(args['content'])} bytes to {args['path']}"
-            if name == "str_replace":
-                full = self._resolve(args["path"])
-                cur = self.read_text(args["path"])
-                old = args["old_string"]
-                n = cur.count(old)
-                if n == 0:
-                    return f"Error: old_string not found in {args['path']}"
-                if n > 1:
-                    return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
-                updated = cur.replace(old, args["new_string"], 1)
-                with open(full, "w", encoding="utf-8") as f:
-                    f.write(updated)
-                return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
-            if name == "run_command":
-                code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
-                out = out.strip()
-                if code != 0:
-                    return f"Exit code {code}\n{out or '(no output)'}"
-                return out or "(command produced no output)"
-            if name == "execute_code":
-                return self._execute_code(args["code"])
-            return f'Error: unknown tool "{name}"'
-        except Exception as e:  # errors come back as strings so the model can react
-            return f"Error: {e}"
+    def _t_list_files(self, args: dict) -> str:
+        d = self._resolve(args.get("path") or ".")
+        return "\n".join(sorted(os.listdir(d))) or "(empty)"
+
+    def _t_edit_file(self, args: dict) -> str:
+        full = self._resolve(args["path"])
+        self._mkparent(full)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(args["content"])
+        return f"Wrote {len(args['content'])} bytes to {args['path']}"
+
+    def _t_append(self, args: dict) -> str:
+        full = self._resolve(args["path"])
+        self._mkparent(full)
+        with open(full, "a", encoding="utf-8") as f:
+            f.write(args["content"])
+        return f"Appended {len(args['content'])} bytes to {args['path']}"
+
+    def _t_str_replace(self, args: dict) -> str:
+        full = self._resolve(args["path"])
+        cur = self.read_text(args["path"])
+        old = args["old_string"]
+        n = cur.count(old)
+        if n == 0:
+            return f"Error: old_string not found in {args['path']}"
+        if n > 1:
+            return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
+        updated = cur.replace(old, args["new_string"], 1)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(updated)
+        return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
+
+    def _t_run_command(self, args: dict) -> str:
+        code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
+        out = out.strip()
+        if code != 0:
+            return f"Exit code {code}\n{out or '(no output)'}"
+        return out or "(command produced no output)"
+
+    def _t_execute_code(self, args: dict) -> str:
+        return self._execute_code(args["code"])
 
     def _execute_code(self, code: str) -> str:
         """Code-as-action: run the model's script (prelude + code) in the sandbox, with the
