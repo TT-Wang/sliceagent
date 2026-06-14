@@ -127,4 +127,111 @@ CALC = EvalCase(
 )
 
 
-CASES = [STRUTILS, MATHLIB, CALC]
+# ---- 4. REAL REPO: find & fix a bug in a multi-module package (exercises CodeIndex) ----
+# A small but realistic package. The bug is in ONE module (reporting.py) among several
+# distractors, so the agent must DISCOVER the right file (the RELATED CODE tier earns its
+# keep) rather than create from scratch.
+
+_LEDGER = {
+    "ledger/__init__.py": (
+        "from .transactions import Transaction\n"
+        "from .accounts import Account\n"
+        "from .reporting import balance, summary\n"
+    ),
+    "ledger/transactions.py": (
+        "from dataclasses import dataclass\n\n\n"
+        "@dataclass\n"
+        "class Transaction:\n"
+        "    amount: float  # positive = credit, negative = debit\n"
+        "    category: str = 'general'\n"
+        "    note: str = ''\n"
+    ),
+    "ledger/accounts.py": (
+        "class Account:\n"
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+        "        self.transactions = []\n\n"
+        "    def add(self, txn):\n"
+        "        self.transactions.append(txn)\n"
+    ),
+    "ledger/validation.py": (  # distractor (correct)
+        "def is_valid_amount(x):\n"
+        "    return isinstance(x, (int, float)) and x == x\n"
+    ),
+    "ledger/formatting.py": (  # distractor (correct)
+        "def money(x):\n"
+        "    return f'${x:,.2f}'\n"
+    ),
+    "ledger/reporting.py": (   # <-- THE BUG lives here
+        "def balance(transactions):\n"
+        "    # BUG: should sum ALL amounts; this drops debits (only sums credits)\n"
+        "    return sum(t.amount for t in transactions if t.amount > 0)\n\n\n"
+        "def summary(transactions):\n"
+        "    credits = sum(t.amount for t in transactions if t.amount > 0)\n"
+        "    debits = sum(t.amount for t in transactions if t.amount < 0)\n"
+        "    return {'credits': credits, 'debits': debits, 'balance': balance(transactions)}\n"
+    ),
+}
+
+_LEDGER_TEST = (
+    "import os\n"
+    "import sys\n"
+    "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n"
+    "from ledger import Transaction, balance, summary\n\n"
+    "def make():\n"
+    "    return [Transaction(100), Transaction(-30), Transaction(-20), Transaction(50)]\n\n"
+    "assert balance(make()) == 100, f'balance was {balance(make())}'\n"
+    "s = summary(make())\n"
+    "assert s['credits'] == 150, s\n"
+    "assert s['debits'] == -50, s\n"
+    "assert s['balance'] == 100, s\n"
+    "print('ALL TESTS PASSED')\n"
+)
+
+
+def _setup_ledger(w: str) -> None:
+    for rel, body in _LEDGER.items():
+        path = os.path.join(w, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(body)
+    tdir = os.path.join(w, "tests")
+    os.makedirs(tdir, exist_ok=True)
+    with open(os.path.join(tdir, "test_reporting.py"), "w") as f:
+        f.write(_LEDGER_TEST)
+
+
+def _verify_ledger(w: str):
+    # integrity: the agent must not have edited the test to make it pass
+    if open(os.path.join(w, "tests", "test_reporting.py")).read() != _LEDGER_TEST:
+        return (False, "test file was modified (integrity fail)")
+    # independent behavior check with FRESH inputs (ungameable by the visible test)
+    code = (
+        "import sys; sys.path.insert(0, '.')\n"
+        "from ledger import Transaction, balance, summary\n"
+        "txns = [Transaction(200), Transaction(-50), Transaction(-25), Transaction(75)]\n"
+        "assert balance(txns) == 200, f'balance={balance(txns)}'\n"
+        "s = summary(txns)\n"
+        "assert s['credits'] == 275 and s['debits'] == -75 and s['balance'] == 200, s\n"
+        "print('OK')"
+    )
+    p = _py(w, code)
+    return ("OK" in p.stdout, _tail(p))
+
+
+LEDGER = EvalCase(
+    name="repo_fix",
+    prompt=(
+        "This repository (a 'ledger' Python package with several modules) has a failing test. "
+        "Run `python3 tests/test_reporting.py`; it fails. Find which module has the bug, fix it so "
+        "the test prints ALL TESTS PASSED, and do NOT modify anything under tests/. "
+        "Give a one-line summary when done."
+    ),
+    setup=_setup_ledger,
+    verify=_verify_ledger,
+    max_steps=20,
+    use_code_index=True,
+)
+
+
+CASES = [STRUTILS, MATHLIB, CALC, LEDGER]

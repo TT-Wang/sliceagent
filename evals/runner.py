@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from memagent.code_index import make_code_index
 from memagent.events import ToolResult, make_dispatcher
 from memagent.loop import run_turn
 from memagent.memory import NullMemory
@@ -23,6 +24,7 @@ class EvalCase:
     setup: Callable[[str], None]          # write seed files into the workdir
     verify: Callable[[str], tuple[bool, str]]  # independent oracle -> (passed, detail)
     max_steps: int = 30
+    use_code_index: bool = False          # real-repo cases turn on the ripgrep RELATED CODE tier
 
 
 @dataclass
@@ -49,8 +51,9 @@ def run_case(case: EvalCase, llm) -> EvalResult:
     state = Slice()
     state.reset(case.prompt)
     tools = LocalToolHost()
+    retriever = make_code_index(workdir) if case.use_code_index else NullRetriever()
     dispatch = make_dispatcher(slice_sink(state), count_sink)  # silent: no terminal sink during eval
-    build = make_build_slice(state, tools, NullRetriever(), NullMemory(), case.prompt)
+    build = make_build_slice(state, tools, retriever, NullMemory(), case.prompt)
 
     cwd = os.getcwd()
     t0 = time.time()
