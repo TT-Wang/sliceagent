@@ -11,7 +11,19 @@ import os
 import sys
 
 
+def _ensure_importable() -> None:
+    """Make `memagent` importable even when the editable install is flaky:
+    fall back to the repo's src/ on sys.path. (No-op when the package imports fine.)"""
+    try:
+        import memagent  # noqa: F401
+    except ModuleNotFoundError:
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        if os.path.isdir(src) and src not in sys.path:
+            sys.path.insert(0, src)
+
+
 def main() -> None:
+    _ensure_importable()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("AGENT_MODEL", "gpt-5.5"))
     ap.add_argument("--case", default=None, help="run a single case by name")

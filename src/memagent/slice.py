@@ -130,6 +130,15 @@ def build_artifacts(s: Slice, tools) -> str:
     return "\n\n".join(parts)
 
 
+def discovery_query(s: Slice, task: str) -> str:
+    """The code-discovery query adapts to the agent's live focus: the task plus the
+    current error (which usually names the missing symbol/file) — so the RELATED CODE
+    tier tracks what the agent is stuck on, not just the static task."""
+    if s.last_error:
+        return f"{task}\n{s.last_error[:300]}"
+    return task
+
+
 def build_discovery(s: Slice, retriever, query: str) -> str:
     snippets = retriever.retrieve(query, k=DISCOVERY_K)
     if not snippets:
@@ -180,7 +189,7 @@ def make_build_slice(s: Slice, tools, retriever, memory, task: str):
 
     def build() -> list[dict]:
         artifacts = build_artifacts(s, tools)
-        discovery = build_discovery(s, retriever, task)
+        discovery = build_discovery(s, retriever, discovery_query(s, task))
         user = render_slice(s, artifacts, discovery, recalled)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
