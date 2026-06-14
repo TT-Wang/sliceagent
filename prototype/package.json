@@ -1,0 +1,16 @@
+{
+  "name": "mini-code-agent",
+  "version": "1.0.0",
+  "description": "A super simple code agent: read, list, and edit files via tool calls.",
+  "type": "module",
+  "bin": {
+    "agent": "./agent.js"
+  },
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "https-proxy-agent": "^9.1.0",
+    "openai": "^4.77.0"
+  }
+}
