@@ -44,7 +44,8 @@ def append_file(path, content):
 def str_replace(path, old, new):
     with open(path, encoding="utf-8") as _f: _cur = _f.read()
     _n = _cur.count(old)
-    if _n != 1: return f"error: old_string occurs {_n}x in {path} (need exactly 1)"
+    if _n != 1: return (f"error: old_string occurs {_n}x in {path} (need exactly 1) — "
+                        f"add surrounding lines to make it unique, or write_file the whole file")
     with open(path, "w", encoding="utf-8") as _f: _f.write(_cur.replace(old, new, 1))
     return f"replaced 1 occurrence in {path}"
 
@@ -186,7 +187,9 @@ class LocalToolHost:
         old = args["old_string"]
         n = cur.count(old)
         if n == 0:
-            return f"Error: old_string not found in {args['path']}"
+            return (f"Error: old_string not found in {args['path']} — your snippet does not match "
+                    f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
+                    f"the whole file with edit_file. Do NOT retry the same str_replace.")
         if n > 1:
             return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
         updated = cur.replace(old, args["new_string"], 1)
