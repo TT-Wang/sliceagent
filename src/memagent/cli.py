@@ -81,17 +81,17 @@ def main() -> None:
         print("Set OPENAI_API_KEY (or MOONSHOT_API_KEY) — e.g. in a .env file.")
         sys.exit(1)
 
+    from .code_index import make_code_index
     from .llm import OpenAILLM
     from .loop import run_turn
     from .memory import make_memory
     from .oracle import CommandOracle
-    from .retriever import NullRetriever
     from .slice import Slice, make_build_slice, slice_sink
     from .tools import LocalToolHost
 
     llm = OpenAILLM()
     tools = LocalToolHost()
-    retriever = NullRetriever()
+    retriever = make_code_index(os.getcwd())  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
     state = Slice()
 
@@ -107,7 +107,8 @@ def main() -> None:
         hook_list.append(BudgetHook(int(os.environ["AGENT_MAX_TOKENS"])))
     hooks = CompositeHooks(*hook_list)
 
-    print(f"memagent · slice core (run_turn) · model={llm.model} · memory={type(memory).__name__}")
+    print(f"memagent · slice core (run_turn) · model={llm.model} · "
+          f"code={type(retriever).__name__} · memory={type(memory).__name__}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:

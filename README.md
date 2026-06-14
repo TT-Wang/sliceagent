@@ -32,9 +32,11 @@ The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole 
 - **moat:** `slice.py` (typed tiers + reconstruction seam `make_build_slice` + `slice_sink`), `loop.py` (`run_turn`/`run_step` — stateless core over contracts).
 - **contracts:** `interfaces.py` (`LLMClient`/`ToolHost`/`Retriever`/`Oracle`), `events.py` (the loop's only output path), `hooks.py` (policy seam: `OracleHook`/`PermissionHook`/`BudgetHook`).
 - **engineering (borrowed):** `access.py` + `scheduler.py` (Kimi's resource-conflict model → safe parallel tools), `errors.py` (Hermes-style classify + retry/backoff).
-- **default impls:** `tools.py` (`LocalToolHost`), `llm.py` (`OpenAILLM`), `retriever.py` (`NullRetriever`), `oracle.py`, `cli.py` (event-sink host).
+- **default impls:** `tools.py` (`LocalToolHost`), `llm.py` (`OpenAILLM`), `code_index.py` (`RipgrepCodeIndex`) + `retriever.py` (`NullRetriever`), `oracle.py`, `cli.py` (event-sink host).
 
-The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). Ships a local, un-sandboxed `ToolHost` and `NullRetriever` (no code-discovery tier yet).
+The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). Ships a local, un-sandboxed `ToolHost` and a ripgrep-backed `CodeIndex` (falls back to `NullRetriever` when `rg` isn't on PATH).
+
+**Code-discovery tier (CodeIndex).** `code_index.py` fills the RELATED CODE tier from a real repo: each turn it ripgreps the working tree for the identifiers in the task **plus the current error** (which usually names the missing symbol), ranks files by how many distinct query terms they hit, and returns line-numbered context windows — deterministic, no embeddings, no network. `repo_map()` gives a compact file→definitions skeleton for orientation (not folded into every turn, to keep context bounded). tree-sitter is the precision upgrade for definition extraction (drop-in at `_defs_in()`); v1 uses ripgrep + regex.
 
 **Memory tier (memem).** `memory.py` plugs [memem](https://github.com/TT-Wang/memem) in as the cross-session `Memory` (the RELEVANT MEMORY tier): each task recalls relevant lessons via memem's hybrid retrieval; `remember()` stores them. It's behind the `Memory` interface and **optional** — install memem and set `MEMEM_VAULT`/`MEMEM_DIR` to enable it, otherwise it falls back to `NullMemory`. (memem indexes a curated lesson vault, *not* source code — code discovery is a separate `Retriever`, still TODO.)
 
