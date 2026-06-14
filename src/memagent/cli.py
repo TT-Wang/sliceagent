@@ -94,15 +94,22 @@ def main() -> None:
     from .oracle import CommandOracle
     from .policy import make_policy
     from .slice import Slice, make_build_slice, slice_sink
+    from .subagent import SubagentHost
     from .tools import LocalToolHost
 
     root = os.getcwd()
     policy_mode = os.environ.get("AGENT_POLICY", "guard")  # guard | readonly | allow
     mine_mode = os.environ.get("AGENT_MINE", "deterministic")  # deterministic | llm | off
+    sub_depth = int(os.environ.get("AGENT_SUBAGENT_DEPTH", "1"))  # 0 disables delegation
+    policy = make_policy(policy_mode)
     llm = OpenAILLM()
-    tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
+
+    tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
+    if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
+        tools = SubagentHost(tools, llm=llm, retriever=retriever, memory=memory,
+                             policy=policy, max_depth=sub_depth, notify=print)
     state = Slice()
 
     # write side of the memory loop: mine a lesson per successful, error-resolving turn
@@ -121,7 +128,7 @@ def main() -> None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
-    hook_list = [PermissionHook(make_policy(policy_mode))]
+    hook_list = [PermissionHook(policy)]
     if os.environ.get("AGENT_VERIFY_CMD"):
         oracle = CommandOracle(os.environ["AGENT_VERIFY_CMD"])
         hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
@@ -131,7 +138,7 @@ def main() -> None:
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
-          f"mine={mine_mode if miner is not None else 'off'}")
+          f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
