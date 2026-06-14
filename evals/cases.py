@@ -234,4 +234,233 @@ LEDGER = EvalCase(
 )
 
 
+# ================= STRESS BATTERY (each probes a distinct generic dimension) =================
+
+# ---- 5. LARGE FILE: bug in the middle of a long file (stresses OPEN FILES truncation) ----
+
+def _setup_bigmod(w: str) -> None:
+    lines = ['"""A large module of small operations."""', ""]
+    for i in range(60):
+        lines.append(f"def op_{i:02d}(x):")
+        if i == 30:
+            lines.append(f"    return x + {i} + 1  # subtle off-by-one")  # BUG
+        else:
+            lines.append(f"    return x + {i}")
+        lines.append("")
+    with open(os.path.join(w, "bigmod.py"), "w") as f:
+        f.write("\n".join(lines))
+    test = (
+        "import bigmod\n"
+        "assert bigmod.op_05(100) == 105\n"
+        "assert bigmod.op_30(100) == 130, f'op_30={bigmod.op_30(100)}'\n"
+        "assert bigmod.op_59(0) == 59\n"
+        "print('ALL TESTS PASSED')\n"
+    )
+    with open(os.path.join(w, "test_bigmod.py"), "w") as f:
+        f.write(test)
+
+
+_BIGMOD_TEST_HASH = None  # set after setup style below; we re-read in verify
+
+
+def _verify_bigmod(w: str):
+    code = (
+        "import sys; sys.path.insert(0,'.')\n"
+        "import bigmod\n"
+        "assert bigmod.op_30(7) == 37, f'op_30(7)={bigmod.op_30(7)}'\n"
+        "assert bigmod.op_29(0) == 29 and bigmod.op_31(0) == 31\n"
+        "print('OK')"
+    )
+    p = _py(w, code)
+    return ("OK" in p.stdout, _tail(p))
+
+
+BIGMOD = EvalCase(
+    name="large_file_fix",
+    prompt=(
+        "bigmod.py has ~60 functions; exactly one returns a wrong value, which makes "
+        "`python3 test_bigmod.py` fail. Find the single buggy function, fix it in bigmod.py, "
+        "and rerun until the test prints ALL TESTS PASSED. Do not edit test_bigmod.py."
+    ),
+    setup=_setup_bigmod,
+    verify=_verify_bigmod,
+    max_steps=20,
+    use_code_index=True,
+)
+
+# ---- 6. MULTI-FILE: two bugs in two modules; both must be fixed (working-set + coordination) ----
+
+_SHOP = {
+    "shop/__init__.py": "from .checkout import total\n",
+    "shop/discount.py": (
+        "def apply_discount(price):\n"
+        "    # 10% off\n"
+        "    return price  # BUG: discount not applied\n"
+    ),
+    "shop/tax.py": (
+        "def add_tax(price):\n"
+        "    return round(price * 1.8, 2)  # BUG: should be 1.08 (8% tax)\n"
+    ),
+    "shop/checkout.py": (
+        "from .discount import apply_discount\n"
+        "from .tax import add_tax\n\n\n"
+        "def total(price):\n"
+        "    return add_tax(apply_discount(price))\n"
+    ),
+}
+_SHOP_TEST = (
+    "import os, sys\n"
+    "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n"
+    "from shop import total\n"
+    "assert round(total(100), 2) == 97.2, f'total(100)={total(100)}'\n"
+    "print('ALL TESTS PASSED')\n"
+)
+
+
+def _setup_shop(w: str) -> None:
+    for rel, body in _SHOP.items():
+        p = os.path.join(w, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(body)
+    td = os.path.join(w, "tests")
+    os.makedirs(td, exist_ok=True)
+    with open(os.path.join(td, "test_total.py"), "w") as f:
+        f.write(_SHOP_TEST)
+
+
+def _verify_shop(w: str):
+    if open(os.path.join(w, "tests", "test_total.py")).read() != _SHOP_TEST:
+        return (False, "test file was modified (integrity fail)")
+    code = (
+        "import sys; sys.path.insert(0,'.')\n"
+        "from shop.discount import apply_discount\n"
+        "from shop.tax import add_tax\n"
+        "from shop import total\n"
+        "assert round(apply_discount(100),2)==90.0, f'discount={apply_discount(100)}'\n"
+        "assert round(add_tax(100),2)==108.0, f'tax={add_tax(100)}'\n"
+        "assert round(total(200),2)==194.4, f'total(200)={total(200)}'\n"
+        "print('OK')"
+    )
+    p = _py(w, code)
+    return ("OK" in p.stdout, _tail(p))
+
+
+SHOP = EvalCase(
+    name="multi_file_fix",
+    prompt=(
+        "The `shop` package computes an order total as tax applied to a discounted price. "
+        "`python3 tests/test_total.py` fails. There are bugs in MORE THAN ONE module; find and "
+        "fix all of them so the test prints ALL TESTS PASSED. Do not edit anything under tests/."
+    ),
+    setup=_setup_shop,
+    verify=_verify_shop,
+    max_steps=20,
+    use_code_index=True,
+)
+
+# ---- 7. CROSS-LANGUAGE: a JavaScript bug (stresses CodeIndex/tooling language-agnosticism) ----
+
+_MATHOPS_JS = (
+    "function add(a, b) { return a + b; }\n"
+    "function multiply(a, b) { return a + b; }  // BUG: should be a * b\n"
+    "function isEven(n) { return n % 2 === 0; }\n"
+    "module.exports = { add, multiply, isEven };\n"
+)
+_MATHOPS_TEST_JS = (
+    "const { add, multiply, isEven } = require('./mathops');\n"
+    "const assert = require('assert');\n"
+    "assert.strictEqual(add(2, 3), 5);\n"
+    "assert.strictEqual(multiply(3, 4), 12);\n"
+    "assert.strictEqual(isEven(4), true);\n"
+    "assert.strictEqual(isEven(3), false);\n"
+    "console.log('ALL TESTS PASSED');\n"
+)
+
+
+def _setup_js(w: str) -> None:
+    with open(os.path.join(w, "mathops.js"), "w") as f:
+        f.write(_MATHOPS_JS)
+    with open(os.path.join(w, "test.js"), "w") as f:
+        f.write(_MATHOPS_TEST_JS)
+
+
+def _verify_js(w: str):
+    if open(os.path.join(w, "test.js")).read() != _MATHOPS_TEST_JS:
+        return (False, "test file was modified (integrity fail)")
+    chk = "const m=require('./mathops'); if(m.multiply(6,7)===42 && m.add(2,2)===4) console.log('OK');"
+    p = subprocess.run(["node", "-e", chk], cwd=w, capture_output=True, text=True, timeout=30)
+    return ("OK" in p.stdout, _tail(p))
+
+
+JSFIX = EvalCase(
+    name="js_fix",
+    prompt=(
+        "This is a Node.js project. `node test.js` fails. Find and fix the bug in mathops.js so "
+        "the test prints ALL TESTS PASSED. Do not edit test.js. Give a one-line summary when done."
+    ),
+    setup=_setup_js,
+    verify=_verify_js,
+    max_steps=15,
+    use_code_index=True,
+)
+
+# ---- 8. FEATURE ADD: implement a new function that REUSES existing helpers across modules ----
+
+_TEXTKIT = {
+    "textkit/__init__.py": "from .tokens import tokenize\nfrom .casing import title_case\n",
+    "textkit/tokens.py": (
+        "def tokenize(s):\n"
+        "    '''split on whitespace into words'''\n"
+        "    return [w for w in s.split() if w]\n"
+    ),
+    "textkit/casing.py": (
+        "def title_case(word):\n"
+        "    '''capitalize first letter, lowercase the rest'''\n"
+        "    return word[:1].upper() + word[1:].lower() if word else word\n"
+    ),
+}
+# verifier expects headline() to REUSE tokenize + title_case (not reimplement)
+
+
+def _setup_textkit(w: str) -> None:
+    for rel, body in _TEXTKIT.items():
+        p = os.path.join(w, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(body)
+
+
+def _verify_textkit(w: str):
+    code = (
+        "import sys; sys.path.insert(0,'.')\n"
+        "from textkit.headline import headline\n"
+        "assert headline('the QUICK brown FOX') == 'The Quick Brown Fox', headline('the QUICK brown FOX')\n"
+        "assert headline('  hello   WORLD  ') == 'Hello World', repr(headline('  hello   WORLD  '))\n"
+        "import inspect, textkit.headline as h\n"
+        "src = inspect.getsource(h)\n"
+        "assert 'tokenize' in src and 'title_case' in src, 'must reuse existing helpers'\n"
+        "print('OK')"
+    )
+    p = _py(w, code)
+    return ("OK" in p.stdout, _tail(p))
+
+
+TEXTKIT = EvalCase(
+    name="feature_add",
+    prompt=(
+        "The `textkit` package has helpers for tokenizing and casing text. Add a new module "
+        "textkit/headline.py with a function headline(s) that turns a string into a headline: "
+        "each word title-cased and joined by single spaces. REUSE the existing helpers in the "
+        "package rather than reimplementing them. Verify by running python, then summarize."
+    ),
+    setup=_setup_textkit,
+    verify=_verify_textkit,
+    max_steps=15,
+    use_code_index=True,
+)
+
+
 CASES = [STRUTILS, MATHLIB, CALC, LEDGER]
+STRESS_CASES = [BIGMOD, SHOP, JSFIX, TEXTKIT]
+ALL_CASES = CASES + STRESS_CASES

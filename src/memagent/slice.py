@@ -30,10 +30,27 @@ DISCOVERY_K = 6
 _CODE_PATH_RE = re.compile(
     r"\b(?:read_file|write_file|append_file|str_replace)\(\s*['\"]([^'\"]+)['\"]"
 )
+# the underlying operations inside an execute_code body — so the anti-loop tally can see
+# THROUGH code-as-action (otherwise every script is a unique signature and loops hide)
+_CODE_OP_RE = re.compile(
+    r"\b(read_file|write_file|append_file|str_replace|list_files|run)\(\s*['\"]?([^'\",)]*)"
+)
 
 
 def paths_in_code(code: str) -> list[str]:
     return _CODE_PATH_RE.findall(code or "")
+
+
+def code_ops(code: str) -> list[str]:
+    """Normalized operation list inside an execute_code body (op + the tail of its literal arg)."""
+    out, seen = [], set()
+    for op, arg in _CODE_OP_RE.findall(code or ""):
+        arg = arg.strip().split("/")[-1][:24]
+        sig = f"{op} {arg}".strip()
+        if sig not in seen:
+            seen.add(sig)
+            out.append(sig)
+    return out
 
 SYSTEM_PROMPT = (
     "You are a coding agent driven by an ACTIVE MEMORY SLICE (reconstructed state, not chat history). "
@@ -84,7 +101,8 @@ def action_sig(name: str, args: dict) -> str:
     if name == "run_command":
         return f"run_command `{one_line(args.get('command', ''), 50)}`"
     if name == "execute_code":
-        return f"execute_code `{one_line(args.get('code', ''), 50)}`"
+        ops = code_ops(args.get("code", ""))
+        return "execute_code[" + ", ".join(ops[:4]) + "]" if ops else "execute_code(script)"
     if name in ("edit_file", "append_to_file", "str_replace", "read_file"):
         return f"{name} {args.get('path', '')}"
     if name == "list_files":
@@ -116,8 +134,14 @@ def render_action_history(action_log: dict) -> str:
         return "- (nothing repeated or failing)"
     lines = []
     for sig, a in entries:
-        if a["failing"]:
-            warn = "  ⚠ REPEATEDLY FAILING — read the file & fix the root cause" if a["count"] >= 3 else "  (failing)"
+        if a["failing"] and a["count"] >= 3:
+            warn = "  ⚠ REPEATEDLY FAILING — read the file & fix the root cause"
+        elif a["count"] >= 3:
+            # a non-failing action repeated this much is a soft loop (e.g. a str_replace whose
+            # old_string never matches, run via execute_code so it never trips the failing flag)
+            warn = "  ⚠ REPEATED with no progress — STOP; change approach (read the full file, make ONE precise edit)"
+        elif a["failing"]:
+            warn = "  (failing)"
         else:
             warn = ""
         lines.append(f"- {sig} ×{a['count']}{warn} → {a['last']}")

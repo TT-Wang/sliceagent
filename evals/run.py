@@ -26,7 +26,8 @@ def main() -> None:
     _ensure_importable()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("AGENT_MODEL", "gpt-5.5"))
-    ap.add_argument("--case", default=None, help="run a single case by name")
+    ap.add_argument("--case", default=None, help="run a single case by name (searches all suites)")
+    ap.add_argument("--stress", action="store_true", help="run the stress battery instead of the core suite")
     args = ap.parse_args()
 
     from memagent.cli import _load_env
@@ -38,12 +39,15 @@ def main() -> None:
     os.environ["AGENT_MODEL"] = args.model
     from memagent.llm import OpenAILLM
 
-    from .cases import CASES
+    from .cases import ALL_CASES, CASES, STRESS_CASES
     from .runner import print_scorecard, run_eval
 
-    cases = [c for c in CASES if args.case is None or c.name == args.case]
+    if args.case is not None:
+        cases = [c for c in ALL_CASES if c.name == args.case]
+    else:
+        cases = STRESS_CASES if args.stress else CASES
     if not cases:
-        print(f"no case named {args.case!r}; available: {[c.name for c in CASES]}")
+        print(f"no case named {args.case!r}; available: {[c.name for c in ALL_CASES]}")
         sys.exit(1)
 
     llm = OpenAILLM(model=args.model)
