@@ -14,6 +14,7 @@ from .events import (
     ApiRetry,
     AssistantText,
     Event,
+    LessonSaved,
     SliceBuilt,
     ToolResult,
     ToolStarted,
@@ -46,6 +47,8 @@ def log_sink(path: str = LOG_FILE):
             rec = {"role": "assistant", "content": e.content}
         elif isinstance(e, ToolResult):
             rec = {"role": "tool", "name": e.name, "args": e.args, "full": e.output}
+        elif isinstance(e, LessonSaved):
+            rec = {"role": "lesson", "title": e.title, "content": e.content}
         if rec is not None:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
@@ -69,6 +72,8 @@ def cli_sink(show_slice: bool = False):
             print(f"  …retry #{e.attempt} ({e.error})")
         elif isinstance(e, TurnInterrupted):
             print(f"\n[interrupted: {e.reason}]")
+        elif isinstance(e, LessonSaved):
+            print(f"  💡 learned: {e.title}")
         elif isinstance(e, TurnEnd):
             print(f"  [done: {e.stop_reason} · {e.steps} steps · "
                   f"{e.usage.get('prompt_tokens', 0) + e.usage.get('completion_tokens', 0)} tokens]")
@@ -85,6 +90,7 @@ def main() -> None:
     from .llm import OpenAILLM
     from .loop import run_turn
     from .memory import make_memory
+    from .mining import make_miner
     from .oracle import CommandOracle
     from .policy import make_policy
     from .slice import Slice, make_build_slice, slice_sink
@@ -92,14 +98,27 @@ def main() -> None:
 
     root = os.getcwd()
     policy_mode = os.environ.get("AGENT_POLICY", "guard")  # guard | readonly | allow
+    mine_mode = os.environ.get("AGENT_MINE", "deterministic")  # deterministic | llm | off
     llm = OpenAILLM()
     tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
     state = Slice()
 
-    # sinks: update the slice from tool results, persist to disk, print to terminal
-    dispatch = make_dispatcher(slice_sink(state), log_sink(), cli_sink(bool(os.environ.get("SHOW_SLICE"))))
+    # write side of the memory loop: mine a lesson per successful, error-resolving turn
+    miner = None
+    if mine_mode not in ("0", "off", "none"):
+        miner = make_miner(memory, state, llm=llm, mode=mine_mode,
+                           scope=os.path.basename(root) or "default")
+
+    # sinks: update the slice from tool results, mine lessons, persist to disk, print
+    sinks = [slice_sink(state)]
+    if miner is not None:
+        sinks.append(miner)
+    sinks += [log_sink(), cli_sink(bool(os.environ.get("SHOW_SLICE")))]
+    dispatch = make_dispatcher(*sinks)
+    if miner is not None:
+        miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     hook_list = [PermissionHook(make_policy(policy_mode))]
@@ -111,7 +130,8 @@ def main() -> None:
     hooks = CompositeHooks(*hook_list)
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
-          f"code={type(retriever).__name__} · memory={type(memory).__name__}")
+          f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
+          f"mine={mine_mode if miner is not None else 'off'}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
