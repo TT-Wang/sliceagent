@@ -70,6 +70,12 @@ class TurnInterrupted(Event):
     message: str | None = None
 
 
+@dataclass
+class LessonSaved(Event):
+    title: str
+    content: str  # the lesson mined into memem (write side of the memory loop)
+
+
 Dispatcher = Callable[[Event], None]
 
 
