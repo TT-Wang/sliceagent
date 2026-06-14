@@ -514,6 +514,10 @@ WIDE = EvalCase(
 )
 
 
-CASES = [STRUTILS, MATHLIB, CALC, LEDGER]
-STRESS_CASES = [BIGMOD, SHOP, JSFIX, TEXTKIT, WIDE]
+# CORE = stable, low-variance regression gate. repo_fix lives in STRESS: it's a hard
+# multi-distractor discovery + ambiguous-edit case (the buggy expression appears twice, so a
+# naive str_replace hits "occurs 2x" and the model loops ~30% of the time) — high variance by
+# nature, appropriate as a deliberate probe rather than a stability gate.
+CASES = [STRUTILS, MATHLIB, CALC]
+STRESS_CASES = [LEDGER, BIGMOD, SHOP, JSFIX, TEXTKIT, WIDE]
 ALL_CASES = CASES + STRESS_CASES
