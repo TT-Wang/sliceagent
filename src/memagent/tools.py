@@ -11,9 +11,50 @@ Note: Python's str.replace is literal, so str_replace has no $-pattern footgun
 from __future__ import annotations
 
 import os
+import shlex
+import sys
+import tempfile
 
 from .access import AllAccess, FileAccess
 from .sandbox import LocalSandbox
+
+# Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action,
+# Hermes pattern). No imports needed by the model. The workspace is cwd and on sys.path,
+# so `import <workspace_module>` works for testing freshly-written code.
+_CODE_PRELUDE = '''\
+import os as _os, sys as _sys, subprocess as _sp
+_sys.path.insert(0, _os.getcwd())
+
+def read_file(path):
+    with open(path, encoding="utf-8") as _f: return _f.read()
+
+def write_file(path, content):
+    _d = _os.path.dirname(path)
+    if _d: _os.makedirs(_d, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as _f: _f.write(content)
+    return f"wrote {len(content)} bytes to {path}"
+
+def append_file(path, content):
+    _d = _os.path.dirname(path)
+    if _d: _os.makedirs(_d, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as _f: _f.write(content)
+    return f"appended {len(content)} bytes to {path}"
+
+def str_replace(path, old, new):
+    with open(path, encoding="utf-8") as _f: _cur = _f.read()
+    _n = _cur.count(old)
+    if _n != 1: return f"error: old_string occurs {_n}x in {path} (need exactly 1)"
+    with open(path, "w", encoding="utf-8") as _f: _f.write(_cur.replace(old, new, 1))
+    return f"replaced 1 occurrence in {path}"
+
+def list_files(path="."):
+    return sorted(_os.listdir(path))
+
+def run(cmd, timeout=60):
+    _r = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    _o = (_r.stdout or "") + (_r.stderr or "")
+    return _o if _r.returncode == 0 else f"[exit {_r.returncode}]\\n{_o}"
+'''
 
 
 def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
@@ -36,6 +77,13 @@ TOOL_SCHEMAS = [
         ["path", "old_string", "new_string"]),
     _fn("run_command", "Run a shell command; returns combined output (and exit code on failure).",
         {"command": {"type": "string"}}, ["command"]),
+    _fn("execute_code",
+        "Run a Python script that does MULTIPLE file/shell actions in ONE turn, then prints a "
+        "short result. Helpers (no imports needed): read_file(path), write_file(path, content), "
+        "append_file(path, content), str_replace(path, old, new), list_files(path='.'), "
+        "run(shell_cmd). The workspace is the cwd and on sys.path. ONLY what you print() is "
+        "returned. Prefer this to fire several edits AND a test in a single turn.",
+        {"code": {"type": "string"}}, ["code"]),
 ]
 
 
@@ -74,8 +122,8 @@ class LocalToolHost:
             return [FileAccess("search", args.get("path") or ".", recursive=True)]
         if name in ("edit_file", "append_to_file", "str_replace"):
             return [FileAccess("readwrite", p)] if p else [AllAccess()]
-        if name == "run_command":
-            return [AllAccess()]  # shell can do anything → globally exclusive
+        if name in ("run_command", "execute_code"):
+            return [AllAccess()]  # arbitrary execution → globally exclusive
         return [AllAccess()]
 
     def read_text(self, path: str) -> str:
@@ -120,9 +168,32 @@ class LocalToolHost:
                 if code != 0:
                     return f"Exit code {code}\n{out or '(no output)'}"
                 return out or "(command produced no output)"
+            if name == "execute_code":
+                return self._execute_code(args["code"])
             return f'Error: unknown tool "{name}"'
         except Exception as e:  # errors come back as strings so the model can react
             return f"Error: {e}"
+
+    def _execute_code(self, code: str) -> str:
+        """Code-as-action: run the model's script (prelude + code) in the sandbox, with the
+        workspace as cwd. Only stdout returns. The script file lives OUTSIDE the workspace so
+        it isn't mistaken for an artifact; cwd is added to sys.path so workspace imports work."""
+        script = _CODE_PRELUDE + "\n# --- agent code ---\n" + code
+        fd, path = tempfile.mkstemp(suffix=".py", prefix="memagent-exec-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(script)
+            cmd = f"{shlex.quote(sys.executable)} {shlex.quote(path)}"
+            code_n, out = self.sandbox.run(cmd, cwd=self.root(), timeout=self.timeout)
+            out = out.strip()
+            if code_n != 0:
+                return f"Exit code {code_n}\n{out or '(no output)'}"
+            return out or "(execute_code produced no output)"
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     @staticmethod
     def _mkparent(path: str) -> None:
