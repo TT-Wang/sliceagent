@@ -33,7 +33,8 @@ SYSTEM_PROMPT = (
     "exact snippet copied from OPEN FILES. Test files must import what they test. "
     "If an action is REPEATEDLY FAILING, stop repeating it — read the file, fix the root cause, then re-run. "
     "Work in as FEW turns as possible: each turn make ALL edits you can already determine (batch many tool calls), "
-    "then run once to verify. "
+    "then run once to verify. For multi-step work, prefer ONE execute_code call (write several files AND run the "
+    "test in a single Python script, printing a short result) over many separate tool calls. "
     "Never write commentary, explanation, or reasoning as text while working — call tools SILENTLY with empty "
     "message content. Output text ONLY once, as a one-line final summary, and only after the TASK is fully done "
     "and tests pass (then make no tool call)."
@@ -72,6 +73,8 @@ def touch_file(s: Slice, path: str) -> None:
 def action_sig(name: str, args: dict) -> str:
     if name == "run_command":
         return f"run_command `{one_line(args.get('command', ''), 50)}`"
+    if name == "execute_code":
+        return f"execute_code `{one_line(args.get('code', ''), 50)}`"
     if name in ("edit_file", "append_to_file", "str_replace", "read_file"):
         return f"{name} {args.get('path', '')}"
     if name == "list_files":

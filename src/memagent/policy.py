@@ -21,7 +21,7 @@ from .hooks import ToolDecision
 ALLOW = ToolDecision(True)
 
 WRITE_TOOLS = frozenset(("edit_file", "append_to_file", "str_replace"))
-EXEC_TOOLS = frozenset(("run_command",))
+EXEC_TOOLS = frozenset(("run_command", "execute_code"))
 
 # Patterns that are almost never legitimate inside a coding-agent workspace.
 # Kept deliberately narrow so normal dev commands (pytest, pip, npm, git add/commit,
@@ -35,7 +35,7 @@ _DANGEROUS: list[tuple[re.Pattern, str]] = [
     (re.compile(r">\s*/dev/(sd|nvme|disk|hd)"),           "raw write to a device"),
     # rm -rf targeting / ~ $HOME /* .. (workspace-relative rm is fine)
     (re.compile(r"\brm\b[^|;&\n]*\s-[a-z]*(?:rf|fr|r[a-z]*f|f[a-z]*r)\b[^|;&\n]*"
-                r"\s(?:/|~|\$HOME|/\*|\.\.)(?:\s|/|$)", re.IGNORECASE), "recursive delete of / ~ or parent"),
+                r"\s(?:/|~|\$HOME|/\*|\.\.)(?=[\s/*'\"]|$)", re.IGNORECASE), "recursive delete of / ~ or parent"),
     (re.compile(r"\bchmod\b\s+-[a-z]*\s*[0-7]{3,4}\s+/(?:\s|$)", re.IGNORECASE), "chmod on /"),
     (re.compile(r"\bchown\b\s+-[a-z]*r[a-z]*\s+[^\n]*\s/(?:\s|$)", re.IGNORECASE), "recursive chown on /"),
     # remote code piped straight into a shell
@@ -58,10 +58,12 @@ def read_only(name: str, args: dict) -> Optional[ToolDecision]:
 
 
 def no_dangerous_commands(name: str, args: dict) -> Optional[ToolDecision]:
-    """Deny shell commands matching a narrow catastrophic-pattern list."""
+    """Deny shell commands (or execute_code bodies) matching a narrow catastrophic list.
+    Scanning arbitrary Python is best-effort — it catches obvious run('rm -rf /')-style
+    bodies; the sandbox (cwd confine, secret scrub, timeout) is the real guardrail."""
     if name not in EXEC_TOOLS:
         return None
-    cmd = str(args.get("command", ""))
+    cmd = str(args.get("command") or args.get("code") or "")
     for pat, reason in _DANGEROUS:
         if pat.search(cmd):
             return ToolDecision(False, f"blocked dangerous command: {reason}")
