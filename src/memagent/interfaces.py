@@ -1,7 +1,8 @@
-"""The four contracts the core depends on — never the implementations.
+"""The contracts the core depends on — never the implementations.
 
 The moat (loop + tiers) talks only to these. Everything commodity (LLM I/O,
 retrieval, tool execution/sandbox, verification) lives behind them and is swappable.
+Policy (Oracle/permissions/budget) is supplied via hooks.py.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ class ToolCall:
 class AssistantMessage:
     content: str | None
     tool_calls: list[ToolCall] = field(default_factory=list)
-    usage: dict | None = None  # {"prompt_tokens": int, "completion_tokens": int}
+    usage: dict | None = None            # {"prompt_tokens": int, "completion_tokens": int}
+    finish_reason: str | None = None     # provider's raw finish reason → normalized by the loop
 
 
 @dataclass
@@ -32,7 +34,8 @@ class Snippet:
 
 @runtime_checkable
 class LLMClient(Protocol):
-    """Provider-agnostic completion + tool-calling. (borrow: official SDKs / LiteLLM)"""
+    """Provider-agnostic completion + tool-calling. (borrow: official SDKs / LiteLLM)
+    May optionally expose `is_retryable(error) -> bool` for the retry policy."""
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage: ...
 
 
@@ -41,7 +44,8 @@ class ToolHost(Protocol):
     """Executes tools, ideally behind a sandbox. (borrow: container / MCP / OpenHands runtime)"""
     def schemas(self) -> list[dict]: ...
     def run(self, name: str, args: dict) -> str: ...
-    def read_text(self, path: str) -> str: ...  # used to reconstruct the artifacts tier (raises if missing)
+    def read_text(self, path: str) -> str: ...   # reconstruct the artifacts tier (raises if missing)
+    def accesses(self, name: str, args: dict) -> list: ...  # resource accesses for the scheduler
 
 
 @runtime_checkable

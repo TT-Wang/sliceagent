@@ -31,11 +31,16 @@ class OpenAILLM:
         self.client = OpenAI(http_client=http_client, max_retries=2, **kwargs)
         self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
 
+    def is_retryable(self, error: Exception) -> bool:
+        from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+        return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError))
+
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
         resp = self.client.chat.completions.create(
             model=self.model, messages=messages, tools=tools, tool_choice="auto",
         )
-        msg = resp.choices[0].message
+        choice = resp.choices[0]
+        msg = choice.message
         calls: list[ToolCall] = []
         for tc in (msg.tool_calls or []):
             try:
@@ -46,4 +51,6 @@ class OpenAILLM:
         usage = None
         if resp.usage:
             usage = {"prompt_tokens": resp.usage.prompt_tokens, "completion_tokens": resp.usage.completion_tokens}
-        return AssistantMessage(content=msg.content, tool_calls=calls, usage=usage)
+        return AssistantMessage(
+            content=msg.content, tool_calls=calls, usage=usage, finish_reason=choice.finish_reason
+        )

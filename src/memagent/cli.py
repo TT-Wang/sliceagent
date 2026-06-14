@@ -1,10 +1,27 @@
-"""memagent CLI — a thin REPL over the slice core. The real product surfaces (TUI,
-channels, IDE bridge) sit over the same engine via interfaces; this is the minimal one.
+"""memagent CLI — a thin event-sink host over the stateless slice core.
+
+The loop only dispatches events; this host wires the sinks (slice-updater, durable
+log, terminal output) and the policy hooks (permission gate, optional Oracle/budget).
+Other surfaces (TUI, SDK, channels) are just different sinks over the same core.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+
+from .events import (
+    ApiRetry,
+    AssistantText,
+    Event,
+    SliceBuilt,
+    ToolResult,
+    ToolStarted,
+    TurnEnd,
+    TurnInterrupted,
+    make_dispatcher,
+)
+from .hooks import ALLOW, BudgetHook, CompositeHooks, OracleHook, PermissionHook
 
 
 def _load_env(path: str = ".env") -> None:
@@ -19,6 +36,45 @@ def _load_env(path: str = ".env") -> None:
         pass
 
 
+LOG_FILE = "scratch/durable-log.jsonl"
+
+
+def log_sink(path: str = LOG_FILE):
+    def sink(e: Event) -> None:
+        rec = None
+        if isinstance(e, AssistantText):
+            rec = {"role": "assistant", "content": e.content}
+        elif isinstance(e, ToolResult):
+            rec = {"role": "tool", "name": e.name, "args": e.args, "full": e.output}
+        if rec is not None:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return sink
+
+
+def cli_sink(show_slice: bool = False):
+    def sink(e: Event) -> None:
+        if isinstance(e, SliceBuilt) and show_slice:
+            print("\n  ┌─ slice ─────────────")
+            print("\n".join("  │ " + ln for ln in e.rendered.splitlines()))
+            print("  └─────────────")
+        elif isinstance(e, ToolStarted):
+            print(f"  → {e.name}({json.dumps(e.args, ensure_ascii=False)})")
+        elif isinstance(e, ToolResult):
+            print(f"  ← {e.output[:120]}")
+        elif isinstance(e, AssistantText):
+            print(f"\nAssistant: {e.content}")
+        elif isinstance(e, ApiRetry):
+            print(f"  …retry #{e.attempt} ({e.error})")
+        elif isinstance(e, TurnInterrupted):
+            print(f"\n[interrupted: {e.reason}]")
+        elif isinstance(e, TurnEnd):
+            print(f"  [done: {e.stop_reason} · {e.steps} steps · "
+                  f"{e.usage.get('prompt_tokens', 0) + e.usage.get('completion_tokens', 0)} tokens]")
+    return sink
+
+
 def main() -> None:
     _load_env()
     if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")):
@@ -26,18 +82,30 @@ def main() -> None:
         sys.exit(1)
 
     from .llm import OpenAILLM
-    from .loop import run_task
+    from .loop import run_turn
+    from .oracle import CommandOracle
     from .retriever import NullRetriever
-    from .slice import Slice
+    from .slice import Slice, make_build_slice, slice_sink
     from .tools import LocalToolHost
 
     llm = OpenAILLM()
     tools = LocalToolHost()
-    retriever = NullRetriever()  # discovery tier off until memem is plugged in
-    s = Slice()
-    show_slice = bool(os.environ.get("SHOW_SLICE"))
+    retriever = NullRetriever()
+    state = Slice()
 
-    print(f"memagent · slice core · model={llm.model}")
+    # sinks: update the slice from tool results, persist to disk, print to terminal
+    dispatch = make_dispatcher(slice_sink(state), log_sink(), cli_sink(bool(os.environ.get("SHOW_SLICE"))))
+
+    # policy hooks (the seam is always wired; default policy is permissive — P1.5 hardens it)
+    hook_list = [PermissionHook(lambda name, args: ALLOW)]
+    if os.environ.get("AGENT_VERIFY_CMD"):
+        oracle = CommandOracle(os.environ["AGENT_VERIFY_CMD"])
+        hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
+    if os.environ.get("AGENT_MAX_TOKENS"):
+        hook_list.append(BudgetHook(int(os.environ["AGENT_MAX_TOKENS"])))
+    hooks = CompositeHooks(*hook_list)
+
+    print(f"memagent · slice core (run_turn) · model={llm.model}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
@@ -48,7 +116,9 @@ def main() -> None:
         if line in ("exit", "quit"):
             break
         if line:
-            run_task(line, s, llm, tools, retriever, show_slice=show_slice)
+            state.reset(line)
+            build = make_build_slice(state, tools, retriever, line)
+            run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
 
 
 if __name__ == "__main__":
