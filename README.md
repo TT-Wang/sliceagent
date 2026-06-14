@@ -34,7 +34,11 @@ The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole 
 - **engineering (borrowed):** `access.py` + `scheduler.py` (Kimi's resource-conflict model → safe parallel tools), `errors.py` (Hermes-style classify + retry/backoff).
 - **default impls:** `tools.py` (`LocalToolHost`), `llm.py` (`OpenAILLM`), `retriever.py` (`NullRetriever`), `oracle.py`, `cli.py` (event-sink host).
 
-The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). v0.1 ships `NullRetriever` (no discovery tier) and a local, un-sandboxed `ToolHost`. Opt-in via env: `AGENT_VERIFY_CMD` (run tests as the Oracle), `AGENT_MAX_TOKENS` (budget), `SHOW_SLICE=1`.
+The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). Ships a local, un-sandboxed `ToolHost` and `NullRetriever` (no code-discovery tier yet).
+
+**Memory tier (memem).** `memory.py` plugs [memem](https://github.com/TT-Wang/memem) in as the cross-session `Memory` (the RELEVANT MEMORY tier): each task recalls relevant lessons via memem's hybrid retrieval; `remember()` stores them. It's behind the `Memory` interface and **optional** — install memem and set `MEMEM_VAULT`/`MEMEM_DIR` to enable it, otherwise it falls back to `NullMemory`. (memem indexes a curated lesson vault, *not* source code — code discovery is a separate `Retriever`, still TODO.)
+
+Opt-in via env: `MEMEM_VAULT` (enable memem), `AGENT_VERIFY_CMD` (run tests as the Oracle), `AGENT_MAX_TOKENS` (budget), `SHOW_SLICE=1`.
 
 ## Architecture (build / borrow / plug)
 

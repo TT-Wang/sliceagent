@@ -139,8 +139,16 @@ def build_discovery(s: Slice, retriever, query: str) -> str:
     )
 
 
-def render_slice(s: Slice, artifacts: str, discovery: str = "") -> str:
+def render_memory(snippets) -> str:
+    """Render recalled cross-session lessons (from memem) for the RELEVANT MEMORY tier."""
+    if not snippets:
+        return ""
+    return "\n".join(f"- {one_line(sn.text, 160)}" for sn in snippets)
+
+
+def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "") -> str:
     err = f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{s.last_error}\n\n" if s.last_error else ""
+    mem = f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{memory}\n\n" if memory else ""
     steps = "\n".join(
         f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(s.recent[-K:])
     ) or "(none yet — first move)"
@@ -149,7 +157,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "") -> str:
         if discovery else ""
     )
     parts = [
-        err + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        err + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
         f"# RECENT (last {K})", steps, "",
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
         disc,
@@ -158,19 +166,22 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "") -> str:
     return "\n".join(parts)
 
 
-def make_build_slice(s: Slice, tools, retriever, task: str):
+def make_build_slice(s: Slice, tools, retriever, memory, task: str):
     """The reconstruction seam the loop calls each step. Returns [system, user] messages.
-    System (instructions + task) is stable/cacheable; the user message is the volatile slice."""
+    System (instructions + task) is stable/cacheable; the user message is the volatile slice.
+    Cross-session memory is recalled ONCE per task (lessons are task-stable); code discovery
+    is per-turn (it adapts as the agent works)."""
     system = (
         SYSTEM_PROMPT
         + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
         + task
     )
+    recalled = render_memory(memory.recall(task)) if memory is not None else ""
 
     def build() -> list[dict]:
         artifacts = build_artifacts(s, tools)
         discovery = build_discovery(s, retriever, task)
-        user = render_slice(s, artifacts, discovery)
+        user = render_slice(s, artifacts, discovery, recalled)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
     return build
