@@ -1,0 +1,21 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# node (prototype)
+node_modules/
+prototype/node_modules/
+
+# python (core)
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# agent scratch / runtime
+scratch/
+*.jsonl
+.DS_Store
