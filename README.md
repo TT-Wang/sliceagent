@@ -19,6 +19,16 @@ This is the opposite of the field's default ("bigger windows + summarize"): **re
 
 Early. The **core idea is validated** in a ~250-line JS prototype (see [`prototype/`](prototype/)) through controlled experiments vs a classic transcript loop. The production build is Python (aligns with [memem](https://github.com/TT-Wang/memem)).
 
+## Run (Python core, v0.1)
+
+```bash
+uv sync           # or: pip install -e .
+cp .env.example .env   # add OPENAI_API_KEY (gpt-5.5 recommended)
+memagent          # or: python -m memagent.cli
+```
+
+The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the moat is testable offline. Layout under `src/memagent/`: `slice.py` (tiers + renderer), `loop.py` (the loop), `interfaces.py` (the four contracts), `tools.py` · `llm.py` · `retriever.py` · `oracle.py` (default implementations). v0.1 uses a `NullRetriever` (no discovery tier yet) and a local, un-sandboxed `ToolHost` — the deterministic working-set carries context, exactly like the validated prototype.
+
 ## Architecture (build / borrow / plug)
 
 The discipline: **own the thin differentiated core, borrow the thick commodity periphery.**
