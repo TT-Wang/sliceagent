@@ -1,22 +1,29 @@
 """The Active Memory Slice — the moat.
 
-No chat history. Each turn the loop rebuilds the user message from these deterministic
-tiers + retrieval. Every tier is bounded, and each has its own compaction policy:
-  task        -> stable (lives in the system message, cacheable)
+No chat history. The host builds the model-visible messages fresh each step via
+`make_build_slice` (the reconstruction seam the loop calls). Tool results flow back
+into the tiers through `slice_sink` (an event sink) — so the loop stays decoupled
+from slice internals and just dispatches events.
+
+Tiers, each with its own compaction policy:
+  task        -> stable (system message, cacheable)
   error       -> verbatim, auto-cleared on a clean run
-  action tally-> counted; only repeated/failing entries shown (anti-loop)
+  action tally-> counted; only repeated/failing shown (anti-loop)
   recent      -> sliding window of the last K steps
   open files  -> the working set, re-read fresh from ground truth
   related code-> retrieved discovery candidates (fuzzy, agent-correctable)
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
-K = 4                      # recent steps kept verbatim
-MAX_ARTIFACT_CHARS = 1500  # per-file cap (head+tail) — keeps the slice bounded
-DISCOVERY_K = 6            # retrieved candidates per turn
+from .events import Event, ToolResult
+
+K = 4
+MAX_ARTIFACT_CHARS = 1500
+DISCOVERY_K = 6
 
 SYSTEM_PROMPT = (
     "You are a coding agent driven by an ACTIVE MEMORY SLICE (reconstructed state, not chat history). "
@@ -36,9 +43,9 @@ SYSTEM_PROMPT = (
 @dataclass
 class Slice:
     goal: str = ""
-    recent: list[dict] = field(default_factory=list)        # [{"action", "observation"}]
-    action_log: dict[str, dict] = field(default_factory=dict)  # sig -> {"count", "failing", "last"}
-    active_files: list[str] = field(default_factory=list)   # LRU of touched paths
+    recent: list[dict] = field(default_factory=list)
+    action_log: dict[str, dict] = field(default_factory=dict)
+    active_files: list[str] = field(default_factory=list)
     last_error: str = ""
 
     def reset(self, goal: str) -> None:
@@ -53,13 +60,13 @@ def one_line(s, n: int = 80) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
 
 
-def touch_file(s: Slice, path: str, max_files: int = K) -> None:
+def touch_file(s: Slice, path: str) -> None:
     if not path:
         return
     s.active_files = [p for p in s.active_files if p != path]
     s.active_files.append(path)
-    if len(s.active_files) > max_files:
-        s.active_files = s.active_files[-max_files:]
+    if len(s.active_files) > K:
+        s.active_files = s.active_files[-K:]
 
 
 def action_sig(name: str, args: dict) -> str:
@@ -78,25 +85,19 @@ def record_action(s: Slice, name: str, args: dict, out: str) -> None:
     if failing:
         s.last_error = out if len(out) <= 800 else out[:120] + "\n…[trace truncated]…\n" + out[-680:]
     elif name == "run_command":
-        s.last_error = ""  # a clean run resolves the current error
+        s.last_error = ""
     sig = action_sig(name, args)
     prev = s.action_log.get(sig, {"count": 0})
     s.action_log[sig] = {"count": prev["count"] + 1, "failing": failing, "last": one_line(out, 80)}
-    s.recent.append({"action": f"{name}({one_line(_args_str(args), 60)})", "observation": one_line(out, 200)})
+    try:
+        astr = json.dumps(args, ensure_ascii=False)
+    except Exception:
+        astr = str(args)
+    s.recent.append({"action": f"{name}({one_line(astr, 60)})", "observation": one_line(out, 200)})
     s.recent = s.recent[-K:]
 
 
-def _args_str(args: dict) -> str:
-    import json
-    try:
-        return json.dumps(args, ensure_ascii=False)
-    except Exception:
-        return str(args)
-
-
 def render_action_history(action_log: dict) -> str:
-    # Only surface what this tier is FOR: repeated or failing actions. One-off successes
-    # are already visible in RECENT / OPEN FILES, so listing them just bloats the slice.
     entries = [(sig, a) for sig, a in action_log.items() if a["count"] >= 2 or a["failing"]]
     if not entries:
         return "- (nothing repeated or failing)"
@@ -110,8 +111,35 @@ def render_action_history(action_log: dict) -> str:
     return "\n".join(lines)
 
 
+def build_artifacts(s: Slice, tools) -> str:
+    """Re-read the active files FRESH (the working set) — head+tail capped to stay bounded."""
+    if not s.active_files:
+        return "(no files opened yet)"
+    parts = []
+    for p in s.active_files:
+        try:
+            body = tools.read_text(p)
+        except Exception:
+            parts.append(f"### {p}\n(not created yet)")
+            continue
+        if len(body) > MAX_ARTIFACT_CHARS:
+            shown = body[: MAX_ARTIFACT_CHARS - 500] + "\n…[middle truncated]…\n" + body[-500:]
+        else:
+            shown = body
+        parts.append(f"### {p} ({len(body)} bytes — current contents)\n```\n{shown}\n```")
+    return "\n\n".join(parts)
+
+
+def build_discovery(s: Slice, retriever, query: str) -> str:
+    snippets = retriever.retrieve(query, k=DISCOVERY_K)
+    if not snippets:
+        return ""
+    return "\n\n".join(
+        f"### {sn.path} (score {sn.score:.2f})\n```\n{sn.text[:MAX_ARTIFACT_CHARS]}\n```" for sn in snippets
+    )
+
+
 def render_slice(s: Slice, artifacts: str, discovery: str = "") -> str:
-    """Build the volatile user message. The task lives in the system prompt (cacheable)."""
     err = f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{s.last_error}\n\n" if s.last_error else ""
     steps = "\n".join(
         f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(s.recent[-K:])
@@ -128,3 +156,31 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "") -> str:
         "# NOW: do the next step(s) with tools, or a one-line summary if the task is fully done and tests pass.",
     ]
     return "\n".join(parts)
+
+
+def make_build_slice(s: Slice, tools, retriever, task: str):
+    """The reconstruction seam the loop calls each step. Returns [system, user] messages.
+    System (instructions + task) is stable/cacheable; the user message is the volatile slice."""
+    system = (
+        SYSTEM_PROMPT
+        + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
+        + task
+    )
+
+    def build() -> list[dict]:
+        artifacts = build_artifacts(s, tools)
+        discovery = build_discovery(s, retriever, task)
+        user = render_slice(s, artifacts, discovery)
+        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    return build
+
+
+def slice_sink(s: Slice):
+    """Event sink that folds tool results back into the tiers (keeps the loop decoupled)."""
+    def sink(event: Event) -> None:
+        if isinstance(event, ToolResult):
+            if event.args.get("path"):
+                touch_file(s, event.args["path"])
+            record_action(s, event.name, event.args, event.output)
+    return sink

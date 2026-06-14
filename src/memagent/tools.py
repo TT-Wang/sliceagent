@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from .access import AllAccess, FileAccess
+
 
 def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
     return {
@@ -39,6 +41,19 @@ class LocalToolHost:
 
     def schemas(self) -> list[dict]:
         return TOOL_SCHEMAS
+
+    def accesses(self, name: str, args: dict) -> list:
+        """Declare what each call touches so the scheduler can safely parallelize."""
+        p = args.get("path")
+        if name == "read_file":
+            return [FileAccess("read", p)] if p else []
+        if name == "list_files":
+            return [FileAccess("search", args.get("path") or ".", recursive=True)]
+        if name in ("edit_file", "append_to_file", "str_replace"):
+            return [FileAccess("readwrite", p)] if p else [AllAccess()]
+        if name == "run_command":
+            return [AllAccess()]  # shell can do anything → globally exclusive
+        return [AllAccess()]
 
     def read_text(self, path: str) -> str:
         with open(path, encoding="utf-8") as f:

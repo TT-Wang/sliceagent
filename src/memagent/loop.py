@@ -1,116 +1,136 @@
-"""The agent loop — the moat. ONE model call per turn, no accumulated history.
+"""The agent loop — the moat. Stateless core over contracts; ONE model call per turn,
+no accumulated history. Mirrors Kimi Code's run-turn/turn-step split.
 
-Each turn: reconstruct the slice from deterministic tiers + retrieval -> one LLM call ->
-run tools -> fold results into the tiers -> repeat. The full record streams to a durable
-on-disk log (the event store), never into the model's context.
+The core depends ONLY on: build_slice (the reconstruction seam), an LLMClient, a
+ToolHost, a dispatch_event callable, and hooks. It never imports implementations and
+never touches slice internals (tool results flow back via the slice_sink on events).
 """
 from __future__ import annotations
 
-import json
-import os
+from dataclasses import dataclass
 
-from .interfaces import LLMClient, Oracle, Retriever, ToolHost
-from .slice import (
-    DISCOVERY_K,
-    MAX_ARTIFACT_CHARS,
-    SYSTEM_PROMPT,
-    Slice,
-    record_action,
-    render_slice,
-    touch_file,
+from .errors import with_retry
+from .events import (
+    AssistantText,
+    Dispatcher,
+    SliceBuilt,
+    StepBegin,
+    StepEnd,
+    ToolResult,
+    ToolStarted,
+    TurnEnd,
+    TurnInterrupted,
 )
+from .hooks import Hooks
+from .scheduler import run_scheduled
 
 
-def build_artifacts(s: Slice, tools: ToolHost) -> str:
-    """Re-read the active files FRESH (the working set) — head+tail capped to stay bounded."""
-    if not s.active_files:
-        return "(no files opened yet)"
-    parts = []
-    for p in s.active_files:
-        try:
-            body = tools.read_text(p)
-        except Exception:
-            parts.append(f"### {p}\n(not created yet)")
-            continue
-        if len(body) > MAX_ARTIFACT_CHARS:
-            shown = body[: MAX_ARTIFACT_CHARS - 500] + "\n…[middle truncated]…\n" + body[-500:]
+@dataclass
+class StepOutcome:
+    usage: dict
+    stop_reason: str
+
+
+@dataclass
+class TurnResult:
+    stop_reason: str
+    steps: int
+    usage: dict
+
+
+def _normalize_stop(resp) -> str:
+    fr = (resp.finish_reason or "").lower()
+    if fr in ("length", "max_tokens"):
+        return "max_tokens"
+    if fr in ("content_filter", "filtered"):
+        return "filtered"
+    return "tool_use" if resp.tool_calls else "end_turn"
+
+
+def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks) -> None:
+    """Authorize, schedule (safe-parallel by resource access), and report results in provider order."""
+    tasks = []
+    metas = []
+    for tc in tool_calls:
+        dispatch(ToolStarted(tc.name, tc.args))
+        decision = hooks.authorize_tool(tc.name, tc.args)
+        if not decision.allow:
+            tasks.append(([], (lambda d=decision: f"Error: blocked by policy: {d.reason or 'denied'}")))
         else:
-            shown = body
-        parts.append(f"### {p} ({len(body)} bytes — current contents)\n```\n{shown}\n```")
-    return "\n\n".join(parts)
+            tasks.append((tools.accesses(tc.name, tc.args), (lambda tc=tc: str(tools.run(tc.name, tc.args)))))
+        metas.append((tc.name, tc.args))
+
+    outputs = run_scheduled(tasks)
+    for (name, args), out in zip(metas, outputs):
+        failing = out.startswith("Error") or out.startswith("Exit code")
+        dispatch(ToolResult(name, args, out, failing))
 
 
-def build_discovery(s: Slice, retriever: Retriever, query: str) -> str:
-    snippets = retriever.retrieve(query, k=DISCOVERY_K)
-    if not snippets:
-        return ""
-    return "\n\n".join(
-        f"### {sn.path} (score {sn.score:.2f})\n```\n{sn.text[:MAX_ARTIFACT_CHARS]}\n```" for sn in snippets
+def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks) -> StepOutcome:
+    before = hooks.before_step(step_num)
+    if before and before.get("block"):
+        raise RuntimeError(before.get("reason") or f"step {step_num} blocked")
+
+    messages = build_slice()
+    dispatch(SliceBuilt(messages[-1]["content"]))
+    dispatch(StepBegin(step_num))
+
+    resp = with_retry(
+        lambda: llm.complete(messages, tools.schemas()),
+        is_retryable=getattr(llm, "is_retryable", None),
+        dispatch=dispatch,
     )
 
+    usage = resp.usage or {}
+    usage_result = hooks.record_step_usage(usage)  # recorded BEFORE tools, so aborts don't lose it
+    stop_turn = bool(usage_result and usage_result.get("stop_turn"))
 
-def _log(path: str, entry: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    stop_reason = _normalize_stop(resp)
+    if resp.content:
+        dispatch(AssistantText(resp.content))
+
+    effective = "end_turn" if (stop_turn and stop_reason == "tool_use") else stop_reason
+    if effective == "tool_use":
+        run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
+
+    dispatch(StepEnd(step_num, usage, effective))
+
+    after = hooks.after_step(step_num, usage, effective)
+    if after and after.get("stop_turn") and effective == "tool_use":
+        effective = "end_turn"
+    return StepOutcome(usage=usage, stop_reason=effective)
 
 
-def run_task(
-    task: str,
-    s: Slice,
-    llm: LLMClient,
-    tools: ToolHost,
-    retriever: Retriever,
-    oracle: Oracle | None = None,
-    *,
-    max_steps: int = 40,
-    log_path: str = "scratch/durable-log.jsonl",
-    emit=print,
-    show_slice: bool = False,
-) -> dict:
-    """Run one task to completion (or max_steps). Returns usage stats."""
-    s.reset(task)
-    system = (
-        SYSTEM_PROMPT
-        + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
-        + task
-    )
-    stats = {"calls": 0, "in": 0, "out": 0}
+def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | None = None,
+             max_steps: int = 40, signal=None) -> TurnResult:
+    hooks = hooks or Hooks()
+    total = {"prompt_tokens": 0, "completion_tokens": 0}
+    steps = 0
+    stop_reason = "end_turn"
 
-    for _ in range(max_steps):
-        artifacts = build_artifacts(s, tools)
-        discovery = build_discovery(s, retriever, task)
-        user = render_slice(s, artifacts, discovery)
-        if show_slice:
-            emit("\n  ┌─ slice ─────────────\n" + "\n".join("  │ " + ln for ln in user.splitlines()) + "\n  └─────────────")
+    while True:
+        if signal is not None and signal.is_set():
+            dispatch(TurnInterrupted("aborted"))
+            return TurnResult("aborted", steps, total)
+        if steps >= max_steps:
+            dispatch(TurnInterrupted("max_steps"))
+            stop_reason = "max_steps"
+            break
 
-        reply = llm.complete(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            tools.schemas(),
-        )
-        stats["calls"] += 1
-        if reply.usage:
-            stats["in"] += reply.usage.get("prompt_tokens", 0)
-            stats["out"] += reply.usage.get("completion_tokens", 0)
-        _log(log_path, {"role": "assistant", "content": reply.content,
-                        "tool_calls": [{"name": c.name, "args": c.args} for c in reply.tool_calls]})
+        steps += 1
+        outcome = run_step(step_num=steps, build_slice=build_slice, llm=llm, tools=tools,
+                           dispatch=dispatch, hooks=hooks)
+        total["prompt_tokens"] += outcome.usage.get("prompt_tokens", 0)
+        total["completion_tokens"] += outcome.usage.get("completion_tokens", 0)
 
-        if reply.content:
-            emit(f"\nAssistant: {reply.content}")
-        if not reply.tool_calls:
-            return stats  # done — nothing was ever appended to a history array
+        if outcome.stop_reason == "tool_use":
+            continue  # ran tools → keep going
 
-        for tc in reply.tool_calls:
-            out = str(tools.run(tc.name, tc.args))
-            emit(f"  → {tc.name}({json.dumps(tc.args, ensure_ascii=False)})")
-            emit(f"  ← {out[:120]}")
-            if tc.args.get("path"):
-                touch_file(s, tc.args["path"])
-            record_action(s, tc.name, tc.args, out)
-            _log(log_path, {"role": "tool", "name": tc.name, "args": tc.args, "full": out})
+        stop_reason = outcome.stop_reason
+        cont = hooks.should_continue_after_stop(stop_reason)  # Oracle/verification plugs in here
+        if not (cont and cont.get("continue")):
+            break
+        # else: a hook forced another turn (e.g. tests failed); the slice now carries the feedback
 
-    emit(f"\n[stopped: hit max_steps={max_steps}]")
-    return stats
+    dispatch(TurnEnd(stop_reason, steps, total))
+    return TurnResult(stop_reason, steps, total)

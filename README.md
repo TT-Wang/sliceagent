@@ -27,7 +27,14 @@ cp .env.example .env   # add OPENAI_API_KEY (gpt-5.5 recommended)
 memagent          # or: python -m memagent.cli
 ```
 
-The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the moat is testable offline. Layout under `src/memagent/`: `slice.py` (tiers + renderer), `loop.py` (the loop), `interfaces.py` (the four contracts), `tools.py` · `llm.py` · `retriever.py` · `oracle.py` (default implementations). v0.1 uses a `NullRetriever` (no discovery tier yet) and a local, un-sandboxed `ToolHost` — the deterministic working-set carries context, exactly like the validated prototype.
+The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole loop is testable offline with a fake LLM. Layout under `src/memagent/`:
+
+- **moat:** `slice.py` (typed tiers + reconstruction seam `make_build_slice` + `slice_sink`), `loop.py` (`run_turn`/`run_step` — stateless core over contracts).
+- **contracts:** `interfaces.py` (`LLMClient`/`ToolHost`/`Retriever`/`Oracle`), `events.py` (the loop's only output path), `hooks.py` (policy seam: `OracleHook`/`PermissionHook`/`BudgetHook`).
+- **engineering (borrowed):** `access.py` + `scheduler.py` (Kimi's resource-conflict model → safe parallel tools), `errors.py` (Hermes-style classify + retry/backoff).
+- **default impls:** `tools.py` (`LocalToolHost`), `llm.py` (`OpenAILLM`), `retriever.py` (`NullRetriever`), `oracle.py`, `cli.py` (event-sink host).
+
+The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). v0.1 ships `NullRetriever` (no discovery tier) and a local, un-sandboxed `ToolHost`. Opt-in via env: `AGENT_VERIFY_CMD` (run tests as the Oracle), `AGENT_MAX_TOKENS` (budget), `SHOW_SLICE=1`.
 
 ## Architecture (build / borrow / plug)
 
