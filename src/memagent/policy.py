@@ -1,0 +1,94 @@
+"""Permission policy — authorization for tool calls (borrowed pattern: Kimi permission/policies).
+
+An ordered chain of small policies. Each inspects (name, args) and returns a
+ToolDecision to DENY, or None to abstain (defer to the next policy). First denial
+wins; if every policy abstains, the call is allowed. The chain is a plain callable,
+so it drops straight into hooks.PermissionHook(policy) — the loop and the moat are
+untouched.
+
+This is AUTHORIZATION (what's allowed at all). It's distinct from SAFE EXECUTION
+(workspace path confinement + the sandbox), which lives in tools.py / sandbox.py.
+Defense in depth: the policy denies catastrophic commands early with a clear reason;
+the ToolHost still confines paths even if a policy abstains.
+"""
+from __future__ import annotations
+
+import re
+from typing import Callable, Optional
+
+from .hooks import ToolDecision
+
+ALLOW = ToolDecision(True)
+
+WRITE_TOOLS = frozenset(("edit_file", "append_to_file", "str_replace"))
+EXEC_TOOLS = frozenset(("run_command",))
+
+# Patterns that are almost never legitimate inside a coding-agent workspace.
+# Kept deliberately narrow so normal dev commands (pytest, pip, npm, git add/commit,
+# rm of a workspace file, mkdir, mv) pass untouched.
+_DANGEROUS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r":\s*\(\s*\)\s*\{.*\|.*&", re.S),        "fork bomb"),
+    (re.compile(r"\bsudo\b"),                              "privilege escalation (sudo)"),
+    (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"),  "system power control"),
+    (re.compile(r"\b(mkfs|wipefs)\b"),                     "filesystem format"),
+    (re.compile(r"\bdd\b[^\n]*\bof=/dev/"),               "raw write to a device"),
+    (re.compile(r">\s*/dev/(sd|nvme|disk|hd)"),           "raw write to a device"),
+    # rm -rf targeting / ~ $HOME /* .. (workspace-relative rm is fine)
+    (re.compile(r"\brm\b[^|;&\n]*\s-[a-z]*(?:rf|fr|r[a-z]*f|f[a-z]*r)\b[^|;&\n]*"
+                r"\s(?:/|~|\$HOME|/\*|\.\.)(?:\s|/|$)", re.IGNORECASE), "recursive delete of / ~ or parent"),
+    (re.compile(r"\bchmod\b\s+-[a-z]*\s*[0-7]{3,4}\s+/(?:\s|$)", re.IGNORECASE), "chmod on /"),
+    (re.compile(r"\bchown\b\s+-[a-z]*r[a-z]*\s+[^\n]*\s/(?:\s|$)", re.IGNORECASE), "recursive chown on /"),
+    # remote code piped straight into a shell
+    (re.compile(r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", re.IGNORECASE),
+     "remote script piped to a shell"),
+    # writes to / reads of sensitive locations
+    (re.compile(r">>?\s*/etc/"),                          "write to /etc"),
+    (re.compile(r"/etc/(passwd|shadow|sudoers)"),         "access to system credential files"),
+    (re.compile(r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc)"), "access to private keys/credentials"),
+    (re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)", re.IGNORECASE),
+     "force push"),
+]
+
+
+def read_only(name: str, args: dict) -> Optional[ToolDecision]:
+    """Deny anything that mutates state — read/list only."""
+    if name in WRITE_TOOLS or name in EXEC_TOOLS:
+        return ToolDecision(False, "read-only mode: mutation/execution disabled")
+    return None
+
+
+def no_dangerous_commands(name: str, args: dict) -> Optional[ToolDecision]:
+    """Deny shell commands matching a narrow catastrophic-pattern list."""
+    if name not in EXEC_TOOLS:
+        return None
+    cmd = str(args.get("command", ""))
+    for pat, reason in _DANGEROUS:
+        if pat.search(cmd):
+            return ToolDecision(False, f"blocked dangerous command: {reason}")
+    return None
+
+
+class PolicyChain:
+    """An ordered list of `policy(name, args) -> ToolDecision | None`. Callable so it
+    plugs directly into hooks.PermissionHook. First denial wins; all-abstain → ALLOW."""
+
+    def __init__(self, *policies: Callable[[str, dict], Optional[ToolDecision]]):
+        self.policies = policies
+
+    def __call__(self, name: str, args: dict) -> ToolDecision:
+        for p in self.policies:
+            d = p(name, args)
+            if d is not None and not d.allow:
+                return d
+        return ALLOW
+
+
+def make_policy(mode: str = "guard") -> PolicyChain:
+    """Factory: 'guard' (block catastrophic commands), 'readonly' (no writes/exec),
+    or 'allow' (permissive — the prior default)."""
+    mode = (mode or "guard").lower()
+    if mode == "allow":
+        return PolicyChain()
+    if mode == "readonly":
+        return PolicyChain(read_only)
+    return PolicyChain(no_dangerous_commands)  # guard (default)
