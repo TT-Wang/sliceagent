@@ -21,7 +21,7 @@ from .events import (
     TurnInterrupted,
     make_dispatcher,
 )
-from .hooks import ALLOW, BudgetHook, CompositeHooks, OracleHook, PermissionHook
+from .hooks import BudgetHook, CompositeHooks, OracleHook, PermissionHook
 
 
 def _load_env(path: str = ".env") -> None:
@@ -86,20 +86,23 @@ def main() -> None:
     from .loop import run_turn
     from .memory import make_memory
     from .oracle import CommandOracle
+    from .policy import make_policy
     from .slice import Slice, make_build_slice, slice_sink
     from .tools import LocalToolHost
 
+    root = os.getcwd()
+    policy_mode = os.environ.get("AGENT_POLICY", "guard")  # guard | readonly | allow
     llm = OpenAILLM()
-    tools = LocalToolHost()
-    retriever = make_code_index(os.getcwd())  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
+    tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
+    retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
     state = Slice()
 
     # sinks: update the slice from tool results, persist to disk, print to terminal
     dispatch = make_dispatcher(slice_sink(state), log_sink(), cli_sink(bool(os.environ.get("SHOW_SLICE"))))
 
-    # policy hooks (the seam is always wired; default policy is permissive — P1.5 hardens it)
-    hook_list = [PermissionHook(lambda name, args: ALLOW)]
+    # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
+    hook_list = [PermissionHook(make_policy(policy_mode))]
     if os.environ.get("AGENT_VERIFY_CMD"):
         oracle = CommandOracle(os.environ["AGENT_VERIFY_CMD"])
         hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
@@ -107,7 +110,7 @@ def main() -> None:
         hook_list.append(BudgetHook(int(os.environ["AGENT_MAX_TOKENS"])))
     hooks = CompositeHooks(*hook_list)
 
-    print(f"memagent · slice core (run_turn) · model={llm.model} · "
+    print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__}")
     print('type a task, or "exit" to quit\n')
     while True:

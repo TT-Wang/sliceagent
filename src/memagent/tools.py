@@ -1,15 +1,19 @@
-"""LocalToolHost — the default ToolHost (no sandbox yet).
+"""LocalToolHost — the default ToolHost.
 
-P1 will wrap execution in a container; this keeps the same interface so the loop
-never changes. Note: Python's str.replace is literal, so str_replace has no
-$-pattern footgun (unlike JS).
+Safe execution lives here: file ops are confined to the workspace root (no path
+traversal out of it), and shell runs through a Sandbox backend (sandbox.py) — so
+swapping in a container later never touches the loop. Authorization (which calls
+are allowed at all) is separate: policy.py via the PermissionHook.
+
+Note: Python's str.replace is literal, so str_replace has no $-pattern footgun
+(unlike JS).
 """
 from __future__ import annotations
 
 import os
-import subprocess
 
 from .access import AllAccess, FileAccess
+from .sandbox import LocalSandbox
 
 
 def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
@@ -36,8 +40,27 @@ TOOL_SCHEMAS = [
 
 
 class LocalToolHost:
-    def __init__(self, timeout: int = 30):
+    def __init__(self, root: str | None = None, *, sandbox=None, timeout: int = 30):
+        # root=None → confine to the *current* working directory, resolved per call
+        # (so the eval runner, which chdirs into a temp workdir after construction,
+        # is confined to that workdir). Pass an explicit root to pin it.
+        self._root = root
         self.timeout = timeout
+        self.sandbox = sandbox or LocalSandbox()
+
+    def root(self) -> str:
+        return os.path.realpath(self._root or os.getcwd())
+
+    def _resolve(self, path: str) -> str:
+        """Resolve a tool path under the workspace root; reject escapes."""
+        if not path:
+            raise ValueError("empty path")
+        root = self.root()
+        full = path if os.path.isabs(path) else os.path.join(root, path)
+        full = os.path.realpath(full)
+        if full != root and not full.startswith(root + os.sep):
+            raise PermissionError(f"path escapes workspace ({root}): {path}")
+        return full
 
     def schemas(self) -> list[dict]:
         return TOOL_SCHEMAS
@@ -56,7 +79,7 @@ class LocalToolHost:
         return [AllAccess()]
 
     def read_text(self, path: str) -> str:
-        with open(path, encoding="utf-8") as f:
+        with open(self._resolve(path), encoding="utf-8") as f:
             return f.read()
 
     def run(self, name: str, args: dict) -> str:
@@ -64,18 +87,22 @@ class LocalToolHost:
             if name == "read_file":
                 return self.read_text(args["path"])
             if name == "list_files":
-                return "\n".join(sorted(os.listdir(args.get("path") or "."))) or "(empty)"
+                d = self._resolve(args.get("path") or ".")
+                return "\n".join(sorted(os.listdir(d))) or "(empty)"
             if name == "edit_file":
-                self._mkparent(args["path"])
-                with open(args["path"], "w", encoding="utf-8") as f:
+                full = self._resolve(args["path"])
+                self._mkparent(full)
+                with open(full, "w", encoding="utf-8") as f:
                     f.write(args["content"])
                 return f"Wrote {len(args['content'])} bytes to {args['path']}"
             if name == "append_to_file":
-                self._mkparent(args["path"])
-                with open(args["path"], "a", encoding="utf-8") as f:
+                full = self._resolve(args["path"])
+                self._mkparent(full)
+                with open(full, "a", encoding="utf-8") as f:
                     f.write(args["content"])
                 return f"Appended {len(args['content'])} bytes to {args['path']}"
             if name == "str_replace":
+                full = self._resolve(args["path"])
                 cur = self.read_text(args["path"])
                 old = args["old_string"]
                 n = cur.count(old)
@@ -84,15 +111,15 @@ class LocalToolHost:
                 if n > 1:
                     return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
                 updated = cur.replace(old, args["new_string"], 1)
-                with open(args["path"], "w", encoding="utf-8") as f:
+                with open(full, "w", encoding="utf-8") as f:
                     f.write(updated)
                 return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
             if name == "run_command":
-                r = subprocess.run(args["command"], shell=True, capture_output=True, text=True, timeout=self.timeout)
-                out = (r.stdout or "") + (r.stderr or "")
-                if r.returncode != 0:
-                    return f"Exit code {r.returncode}\n{out.strip() or '(no output)'}"
-                return out.strip() or "(command produced no output)"
+                code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
+                out = out.strip()
+                if code != 0:
+                    return f"Exit code {code}\n{out or '(no output)'}"
+                return out or "(command produced no output)"
             return f'Error: unknown tool "{name}"'
         except Exception as e:  # errors come back as strings so the model can react
             return f"Error: {e}"
