@@ -24,6 +24,8 @@ from .events import Event, ToolResult
 K = 4
 MAX_ARTIFACT_CHARS = 1500
 DISCOVERY_K = 6
+MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
+MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active (bounded context)
 
 # literal paths the model touches via execute_code helpers — so code-as-action reads/edits
 # still populate the OPEN FILES working set (they run in the sandbox, bypassing the ToolHost)
@@ -75,6 +77,7 @@ class Slice:
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
+    active_skills: list[dict] = field(default_factory=list)  # [{name, body}] loaded SKILLs
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -82,6 +85,7 @@ class Slice:
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
+        self.active_skills = []
 
 
 def one_line(s, n: int = 80) -> str:
@@ -192,8 +196,31 @@ def render_memory(snippets) -> str:
     return "\n".join(f"- {one_line(sn.text, 160)}" for sn in snippets)
 
 
+def add_skill(s: Slice, name: str, body: str) -> None:
+    """Fold a loaded SKILL into the ACTIVE SKILL tier so it PERSISTS across turns.
+
+    This is the memagent-specific adaptation: transcript agents inject a skill body as a
+    one-shot message that lingers in history; we reconstruct the slice every turn, so a
+    skill must live in a tier or it vanishes next turn. Dedup by name, keep the most-recent,
+    cap the body."""
+    if not name or not body:
+        return
+    s.active_skills = [sk for sk in s.active_skills if sk["name"] != name]
+    s.active_skills.append({"name": name, "body": body[:MAX_SKILL_CHARS]})
+    if len(s.active_skills) > MAX_ACTIVE_SKILLS:
+        s.active_skills = s.active_skills[-MAX_ACTIVE_SKILLS:]
+
+
+def render_skills(active_skills: list[dict]) -> str:
+    if not active_skills:
+        return ""
+    return "\n\n".join(f"## SKILL: {sk['name']}\n{sk['body']}" for sk in active_skills)
+
+
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "") -> str:
     err = f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{s.last_error}\n\n" if s.last_error else ""
+    skills_body = render_skills(s.active_skills)
+    skl = f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{skills_body}\n\n" if skills_body else ""
     mem = f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{memory}\n\n" if memory else ""
     steps = "\n".join(
         f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(s.recent[-K:])
@@ -203,7 +230,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         if discovery else ""
     )
     parts = [
-        err + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        err + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
         f"# RECENT (last {K})", steps, "",
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
         disc,
@@ -237,6 +264,10 @@ def slice_sink(s: Slice):
     """Event sink that folds tool results back into the tiers (keeps the loop decoupled)."""
     def sink(event: Event) -> None:
         if isinstance(event, ToolResult):
+            if event.name == "skill" and not event.failing:
+                # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
+                # next turn (no transcript). The skill tool returns the body as its output.
+                add_skill(s, event.args.get("name", ""), event.output)
             if event.args.get("path"):
                 touch_file(s, event.args["path"])
             elif event.name == "execute_code":

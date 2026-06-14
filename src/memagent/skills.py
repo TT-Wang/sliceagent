@@ -1,0 +1,138 @@
+"""Skills — reusable procedure prompt-packs (Kimi + Hermes converge on this exact shape).
+
+A skill is a SKILL.md: frontmatter (name + description required) + a markdown body of
+instructions. Progressive disclosure: the `skill` tool's *description* carries the cheap
+catalog (name + one-line description); calling `skill(name=...)` returns the full body,
+which slice_sink folds into the slice's ACTIVE SKILL tier (slice.add_skill) where it
+PERSISTS across turns — the memagent-specific adaptation (no transcript to hold a one-shot
+injection). Skills are instructions the model then follows with its existing tools; they
+are NOT code.
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+
+from .registry import ToolEntry
+
+
+def _one_line(s: str, n: int = 140) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
+
+
+@dataclass
+class Skill:
+    name: str
+    description: str
+    body: str
+    path: str
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Minimal '---' fenced frontmatter → (meta, body). No YAML dependency: only simple
+    `key: value` lines are read (enough for name/description/when-to-use)."""
+    if not text.startswith("---"):
+        return {}, text
+    rest = text[3:]
+    end = rest.find("\n---")
+    if end == -1:
+        return {}, text
+    fm, body = rest[:end], rest[end + 4:].lstrip("\n")
+    meta: dict = {}
+    for line in fm.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        meta[k.strip().lower()] = v.strip().strip('"').strip("'")
+    return meta, body
+
+
+def _default_roots() -> list[str]:
+    # project skills win over user skills (discovery order = first-wins)
+    return [
+        os.path.join(os.getcwd(), ".memagent", "skills"),
+        os.path.join(os.path.expanduser("~"), ".memagent", "skills"),
+    ]
+
+
+class SkillManager:
+    def __init__(self, roots: list[str] | None = None):
+        self.roots = roots if roots is not None else _default_roots()
+        self._skills: dict[str, Skill] = {}
+        self.discover()
+
+    def discover(self) -> "SkillManager":
+        self._skills = {}
+        for root in self.roots:
+            if not os.path.isdir(root):
+                continue
+            for dp, _dirs, files in os.walk(root):
+                for fn in files:
+                    if fn == "SKILL.md" or (fn.endswith(".md") and dp == root):
+                        self._load(os.path.join(dp, fn))
+        return self
+
+    def _load(self, path: str) -> None:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return
+        meta, body = parse_frontmatter(text)
+        name = (meta.get("name") or "").strip().lower()
+        if not name and os.path.basename(path) != "SKILL.md":
+            name = os.path.splitext(os.path.basename(path))[0].lower()
+        desc = (meta.get("description") or meta.get("when-to-use") or "").strip()
+        if not name or not body.strip():
+            return
+        self._skills.setdefault(name, Skill(name, desc, body.strip(), path))  # first-wins
+
+    def names(self) -> list[str]:
+        return sorted(self._skills)
+
+    def catalog(self) -> list[tuple[str, str]]:
+        return [(n, self._skills[n].description) for n in self.names()]
+
+    def load(self, name: str) -> str | None:
+        s = self._skills.get((name or "").lower())
+        return s.body if s else None
+
+
+def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
+    """A ToolEntry for the `skill` tool — or None when no skills are discovered. The tool
+    description IS the catalog (progressive disclosure); the handler returns the body, which
+    slice_sink folds into the ACTIVE SKILL tier."""
+    cat = manager.catalog()
+    if not cat:
+        return None
+    names = [n for n, _ in cat]
+    listing = "\n".join(f"- {n}: {_one_line(d)}" for n, d in cat)
+    desc = (
+        "Load a SKILL: a reusable procedure whose detailed instructions are added to your "
+        "working context and PERSIST for the rest of the task. Call it BEFORE starting work "
+        "when a task matches one of these skills. Available skills:\n" + listing
+    )
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "skill", "description": desc,
+            "parameters": {"type": "object",
+                           "properties": {"name": {"type": "string", "enum": names}},
+                           "required": ["name"]},
+        },
+    }
+
+    def handler(args: dict) -> str:
+        body = manager.load(args.get("name", ""))
+        if body is None:
+            return f"Error: no skill named {args.get('name')!r}. Available: {', '.join(names)}"
+        return body  # slice_sink folds this into the ACTIVE SKILL tier (persists across turns)
+
+    return ToolEntry(name="skill", schema=schema, handler=handler,
+                     accesses=lambda _a: [], source="skill")
+
+
+def make_skill_manager(roots: list[str] | None = None) -> SkillManager:
+    return SkillManager(roots)

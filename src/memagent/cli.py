@@ -93,6 +93,7 @@ def main() -> None:
     from .mining import make_miner
     from .oracle import CommandOracle
     from .policy import make_policy
+    from .skills import make_skill_manager, make_skill_tool
     from .slice import Slice, make_build_slice, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
@@ -106,9 +107,14 @@ def main() -> None:
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
 
-    tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
+    base_tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
+    skills = make_skill_manager()     # discover SKILL.md packs (.memagent/skills, ~/.memagent/skills)
+    skill_tool = make_skill_tool(skills)
+    if skill_tool is not None:        # register the `skill` tool into the shared registry
+        base_tools.registry.register(skill_tool)
+    tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
-        tools = SubagentHost(tools, llm=llm, retriever=retriever, memory=memory,
+        tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
                              policy=policy, max_depth=sub_depth, notify=print)
     state = Slice()
 
@@ -138,7 +144,8 @@ def main() -> None:
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
-          f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'}")
+          f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
+          f"skills={len(skills.names())}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
