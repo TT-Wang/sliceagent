@@ -10,6 +10,7 @@ from typing import Callable
 
 from memagent.events import ToolResult, make_dispatcher
 from memagent.loop import run_turn
+from memagent.memory import NullMemory
 from memagent.retriever import NullRetriever
 from memagent.slice import Slice, make_build_slice, slice_sink
 from memagent.tools import LocalToolHost
@@ -49,7 +50,7 @@ def run_case(case: EvalCase, llm) -> EvalResult:
     state.reset(case.prompt)
     tools = LocalToolHost()
     dispatch = make_dispatcher(slice_sink(state), count_sink)  # silent: no terminal sink during eval
-    build = make_build_slice(state, tools, NullRetriever(), case.prompt)
+    build = make_build_slice(state, tools, NullRetriever(), NullMemory(), case.prompt)
 
     cwd = os.getcwd()
     t0 = time.time()

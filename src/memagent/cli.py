@@ -83,6 +83,7 @@ def main() -> None:
 
     from .llm import OpenAILLM
     from .loop import run_turn
+    from .memory import make_memory
     from .oracle import CommandOracle
     from .retriever import NullRetriever
     from .slice import Slice, make_build_slice, slice_sink
@@ -91,6 +92,7 @@ def main() -> None:
     llm = OpenAILLM()
     tools = LocalToolHost()
     retriever = NullRetriever()
+    memory = make_memory()  # memem if available + a vault is configured, else NullMemory
     state = Slice()
 
     # sinks: update the slice from tool results, persist to disk, print to terminal
@@ -105,7 +107,7 @@ def main() -> None:
         hook_list.append(BudgetHook(int(os.environ["AGENT_MAX_TOKENS"])))
     hooks = CompositeHooks(*hook_list)
 
-    print(f"memagent · slice core (run_turn) · model={llm.model}")
+    print(f"memagent · slice core (run_turn) · model={llm.model} · memory={type(memory).__name__}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
@@ -117,7 +119,7 @@ def main() -> None:
             break
         if line:
             state.reset(line)
-            build = make_build_slice(state, tools, retriever, line)
+            build = make_build_slice(state, tools, retriever, memory, line)
             run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
 
 

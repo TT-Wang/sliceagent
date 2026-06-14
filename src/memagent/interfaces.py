@@ -50,8 +50,16 @@ class ToolHost(Protocol):
 
 @runtime_checkable
 class Retriever(Protocol):
-    """Per-turn retrieval (+ cross-session memory). (plug: memem)"""
+    """Code discovery for the RELATED CODE tier (repo search). (build: ripgrep + tree-sitter)"""
     def retrieve(self, query: str, k: int = 6) -> list[Snippet]: ...
+
+
+@runtime_checkable
+class Memory(Protocol):
+    """Cross-session memory for the RELEVANT MEMORY tier — durable lessons. (plug: memem)
+    NOTE: distinct from Retriever. memem indexes a curated lesson vault, NOT source code."""
+    def recall(self, query: str, k: int = 6) -> list[Snippet]: ...
+    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None: ...
 
 
 @runtime_checkable
