@@ -461,6 +461,59 @@ TEXTKIT = EvalCase(
 )
 
 
+# ---- 9. WIDE: sweep the same fix across many files (stresses the K=4 working-set bound) ----
+
+_WIDE_N = 6
+
+
+def _wide_test() -> str:
+    lines = ["import os, sys",
+             "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))"]
+    for i in range(_WIDE_N):
+        lines.append(f"from pkg.seg_{i} import value as v{i}; assert v{i}() == {i}0, f'seg_{i}={{v{i}()}}'")
+    lines.append("print('ALL TESTS PASSED')")
+    return "\n".join(lines) + "\n"
+
+
+def _setup_wide(w: str) -> None:
+    d = os.path.join(w, "pkg")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "__init__.py"), "w") as f:
+        f.write("")
+    for i in range(_WIDE_N):
+        with open(os.path.join(d, f"seg_{i}.py"), "w") as f:
+            f.write(f"def value():\n    return {i}0 + 1  # BUG: should be {i}0\n")
+    td = os.path.join(w, "tests")
+    os.makedirs(td, exist_ok=True)
+    with open(os.path.join(td, "test_segs.py"), "w") as f:
+        f.write(_wide_test())
+
+
+def _verify_wide(w: str):
+    if open(os.path.join(w, "tests", "test_segs.py")).read() != _wide_test():
+        return (False, "test file was modified (integrity fail)")
+    checks = "import sys; sys.path.insert(0,'.')\n"
+    for i in range(_WIDE_N):
+        checks += f"from pkg.seg_{i} import value as v{i}; assert v{i}() == {i}0, 'seg_{i}'\n"
+    checks += "print('OK')"
+    p = _py(w, checks)
+    return ("OK" in p.stdout, _tail(p))
+
+
+WIDE = EvalCase(
+    name="wide_fix",
+    prompt=(
+        "Every module pkg/seg_0.py .. pkg/seg_5.py has the SAME kind of bug (an off-by-one in "
+        "value()), making `python3 tests/test_segs.py` fail. Fix the bug in ALL of them so the "
+        "test prints ALL TESTS PASSED. Do not edit anything under tests/."
+    ),
+    setup=_setup_wide,
+    verify=_verify_wide,
+    max_steps=20,
+    use_code_index=True,
+)
+
+
 CASES = [STRUTILS, MATHLIB, CALC, LEDGER]
-STRESS_CASES = [BIGMOD, SHOP, JSFIX, TEXTKIT]
+STRESS_CASES = [BIGMOD, SHOP, JSFIX, TEXTKIT, WIDE]
 ALL_CASES = CASES + STRESS_CASES
