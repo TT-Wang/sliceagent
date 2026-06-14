@@ -25,6 +25,16 @@ K = 4
 MAX_ARTIFACT_CHARS = 1500
 DISCOVERY_K = 6
 
+# literal paths the model touches via execute_code helpers — so code-as-action reads/edits
+# still populate the OPEN FILES working set (they run in the sandbox, bypassing the ToolHost)
+_CODE_PATH_RE = re.compile(
+    r"\b(?:read_file|write_file|append_file|str_replace)\(\s*['\"]([^'\"]+)['\"]"
+)
+
+
+def paths_in_code(code: str) -> list[str]:
+    return _CODE_PATH_RE.findall(code or "")
+
 SYSTEM_PROMPT = (
     "You are a coding agent driven by an ACTIVE MEMORY SLICE (reconstructed state, not chat history). "
     "Each turn, advance the TASK. OPEN FILES = the live file contents and your GROUND TRUTH; base edits on it, "
@@ -205,5 +215,8 @@ def slice_sink(s: Slice):
         if isinstance(event, ToolResult):
             if event.args.get("path"):
                 touch_file(s, event.args["path"])
+            elif event.name == "execute_code":
+                for p in paths_in_code(event.args.get("code", "")):
+                    touch_file(s, p)  # code-as-action reads/edits enter the working set too
             record_action(s, event.name, event.args, event.output)
     return sink
