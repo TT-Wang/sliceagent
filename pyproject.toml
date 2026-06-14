@@ -6,6 +6,11 @@ requires-python = ">=3.11"
 dependencies = [
     "openai>=1.40",
     "httpx>=0.27",
+    # memem is the cross-session memory backbone (in-process, behind the Memory interface).
+    # numpy is required because memem.retrieve imports it but doesn't pin it in its base deps.
+    # (No torch: we use memem's BM25/FTS path, not the heavy `embedding` extra.)
+    "numpy>=1.24",
+    "memem @ git+https://github.com/TT-Wang/memem",
 ]
 
 [project.scripts]
@@ -14,6 +19,10 @@ memagent = "memagent.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# memem is declared as a git direct-reference dependency (see project.dependencies).
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/memagent"]
