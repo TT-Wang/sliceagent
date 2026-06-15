@@ -103,7 +103,7 @@ def main() -> None:
 
     cfg = load_config()  # memagent.toml (user → project), with ENV overriding for one-offs
     root = os.getcwd()
-    policy_mode = cfg.policy        # guard | readonly | allow
+    policy_mode = cfg.policy        # guard | readonly | ask | allow
     mine_mode = cfg.mine           # deterministic | llm | off
     sub_depth = cfg.subagent_depth  # 0 disables delegation
     policy = make_policy(policy_mode)
@@ -149,7 +149,14 @@ def main() -> None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
-    hook_list = [PermissionHook(policy)]
+    def _ask(name, args, reason):  # interactive resolver for AGENT_POLICY=ask
+        if not sys.stdin.isatty():
+            return "no"
+        detail = args.get("command") or args.get("path") or args.get("code", "")
+        ans = input(f"  ⚠ allow {name} {str(detail)[:60]!r}? ({reason}) [y]es/[n]o/[a]lways: ").strip().lower()
+        return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
+
+    hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None)]
     if cfg.verify_cmd:
         oracle = CommandOracle(cfg.verify_cmd)
         hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
