@@ -89,6 +89,7 @@ def main() -> None:
     from .code_index import make_code_index
     from .config import load_config
     from .llm import OpenAILLM
+    from .mcp_client import connect_mcp_servers
     from .loop import run_turn
     from .memory import make_memory
     from .mining import make_miner
@@ -114,6 +115,10 @@ def main() -> None:
     skill_tool = make_skill_tool(skills)
     if skill_tool is not None:        # register the `skill` tool into the shared registry
         base_tools.registry.register(skill_tool)
+    # MCP: connect declared servers; their tools register into the SAME registry (namespaced)
+    mcp_servers, mcp_runtime = connect_mcp_servers(
+        base_tools.registry, cfg.mcp_servers, on_log=lambda m: print(f"  · {m}"))
+    mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
     tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
@@ -147,7 +152,7 @@ def main() -> None:
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
           f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
-          f"skills={len(skills.names())}")
+          f"skills={len(skills.names())} · mcp_tools={mcp_tool_count}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
