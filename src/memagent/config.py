@@ -89,6 +89,19 @@ class Config:
     def show_slice(self) -> bool:
         return _truthy(self._get("agent", "show_slice", "SHOW_SLICE", False))
 
+    # --- sandbox ---
+    @property
+    def sandbox_backend(self) -> str:
+        return self._get("sandbox", "backend", "AGENT_SANDBOX", "local")  # local | docker
+
+    @property
+    def sandbox_image(self) -> str:
+        return self._get("sandbox", "image", None, "python:3.12-slim")
+
+    @property
+    def sandbox_network(self) -> str:
+        return self._get("sandbox", "network", None, "none")
+
     # --- oracle / budget ---
     @property
     def verify_cmd(self) -> str | None:

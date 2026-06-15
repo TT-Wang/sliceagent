@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import sys
 import tempfile
 
 from .access import AllAccess, FileAccess
@@ -208,16 +207,18 @@ class LocalToolHost:
         return self._execute_code(args["code"])
 
     def _execute_code(self, code: str) -> str:
-        """Code-as-action: run the model's script (prelude + code) in the sandbox, with the
-        workspace as cwd. Only stdout returns. The script file lives OUTSIDE the workspace so
-        it isn't mistaken for an artifact; cwd is added to sys.path so workspace imports work."""
+        """Code-as-action: run the model's script (prelude + code) in the sandbox, cwd=workspace.
+        Only stdout returns. The script is written INSIDE the workspace as a hidden temp file
+        (so it's mounted/available in every backend) and deleted right after; cwd is on sys.path
+        so workspace imports resolve. `sandbox.python_cmd` keeps it backend-portable."""
         script = _CODE_PRELUDE + "\n# --- agent code ---\n" + code
-        fd, path = tempfile.mkstemp(suffix=".py", prefix="memagent-exec-")
+        root = self.root()
+        fd, path = tempfile.mkstemp(suffix=".py", prefix=".memagent-exec-", dir=root)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(script)
-            cmd = f"{shlex.quote(sys.executable)} {shlex.quote(path)}"
-            code_n, out = self.sandbox.run(cmd, cwd=self.root(), timeout=self.timeout)
+            cmd = f"{shlex.quote(self.sandbox.python_cmd)} {shlex.quote(os.path.basename(path))}"
+            code_n, out = self.sandbox.run(cmd, cwd=root, timeout=self.timeout)
             out = out.strip()
             if code_n != 0:
                 return f"Exit code {code_n}\n{out or '(no output)'}"

@@ -96,6 +96,7 @@ def main() -> None:
     from .oracle import CommandOracle
     from .plugins import load_plugins
     from .policy import make_policy
+    from .sandbox import make_sandbox
     from .skills import make_skill_manager, make_skill_tool
     from .slice import Slice, make_build_slice, slice_sink
     from .subagent import SubagentHost
@@ -111,7 +112,8 @@ def main() -> None:
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
 
-    base_tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
+    sandbox = make_sandbox(cfg.sandbox_backend, image=cfg.sandbox_image, network=cfg.sandbox_network)
+    base_tools = LocalToolHost(root, sandbox=sandbox)  # file ops confined to launch dir; shell via sandbox
     skills = make_skill_manager(cfg.skills_roots)  # SKILL.md packs (config dirs or defaults)
     # plugins: feed the SAME registry/skills, and contribute MCP servers + hooks (loaded first
     # so plugin skills enter the catalog and plugin MCP servers get connected below)
@@ -166,6 +168,7 @@ def main() -> None:
     hooks = CompositeHooks(*hook_list)
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
+          f"sandbox={cfg.sandbox_backend} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
           f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
           f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")

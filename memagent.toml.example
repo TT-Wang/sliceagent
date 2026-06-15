@@ -9,6 +9,11 @@ mine = "deterministic"      # AGENT_MINE: deterministic | llm | off  (memem writ
 subagent_depth = 1          # AGENT_SUBAGENT_DEPTH: 0 disables spawn_subagent
 show_slice = false          # SHOW_SLICE: print the reconstructed slice each turn
 
+[sandbox]
+backend = "local"           # AGENT_SANDBOX: local (subprocess) | docker (container)
+# image = "python:3.12-slim"   # docker backend: the image to run commands in
+# network = "none"             # docker backend: container network ("none" = offline)
+
 [oracle]
 # verify_cmd = "python3 -m pytest -q"   # AGENT_VERIFY_CMD: run before "done"; failures force another turn
 
