@@ -35,3 +35,26 @@ At equal capability the slice is **~3× cheaper** and its per-turn cost is **fla
 transcript's **grows unbounded** — the predicted advantage, and it compounds on longer tasks.
 Pass-rate is model/instance-bound (and these instances are underdetermined); the *efficiency*
 delta is the thesis, and it holds.
+
+---
+
+# Trustworthy pass-rate: SWE-bench Verified (official pinned images)
+
+The Lite-on-local-images runs above gave noisy 0/N (underspecified instances + local dep drift,
+e.g. werkzeug deprecation cascades). To get a *trustworthy* resolution number we ran on **SWE-bench
+Verified** (human-validated for solvable issues + fair tests) and scored with the **official pinned
+images** (`--namespace swebench`), which fixes the dep-drift contamination.
+
+memagent (slice), gpt-5.5, 3 Verified instances:
+
+| instance | result | steps | tokens |
+|---|---|---|---|
+| **pallets__flask-5014** | **✅ RESOLVED** | 7 | 41k |
+| pytest-dev__pytest-10356 | ✖ unresolved (converged, wrong fix) | 13 | 212k |
+| pytest-dev__pytest-10051 | ✖ unresolved (hit max_steps; large repo) | 40 | 175k |
+
+**1/3 resolved**, 0 errors, 0 empty patches — memagent's first *trustworthy* benchmark resolution,
+and the win was efficient (7 steps / 41k tokens). n=3 is tiny, but this is a real, fair data point:
+on the credible benchmark with the correct env, the slice agent **does** resolve real issues. Next:
+larger Verified N for a leaderboard-comparable rate, and the slice-vs-transcript head-to-head on the
+same Verified set.
