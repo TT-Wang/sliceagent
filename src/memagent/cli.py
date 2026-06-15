@@ -94,6 +94,7 @@ def main() -> None:
     from .memory import make_memory
     from .mining import make_miner
     from .oracle import CommandOracle
+    from .plugins import load_plugins
     from .policy import make_policy
     from .skills import make_skill_manager, make_skill_tool
     from .slice import Slice, make_build_slice, slice_sink
@@ -112,13 +113,20 @@ def main() -> None:
 
     base_tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
     skills = make_skill_manager(cfg.skills_roots)  # SKILL.md packs (config dirs or defaults)
+    # plugins: feed the SAME registry/skills, and contribute MCP servers + hooks (loaded first
+    # so plugin skills enter the catalog and plugin MCP servers get connected below)
+    plugin_mcp, plugin_hooks = load_plugins(
+        base_tools.registry, skills, cfg.plugin_dirs, root=root, config=cfg,
+        on_log=lambda m: print(f"  · {m}"))
     skill_tool = make_skill_tool(skills)
     if skill_tool is not None:        # register the `skill` tool into the shared registry
         base_tools.registry.register(skill_tool)
-    # MCP: connect declared servers; their tools register into the SAME registry (namespaced)
+    # MCP: connect config + plugin-declared servers; tools register into the SAME registry
     mcp_servers, mcp_runtime = connect_mcp_servers(
-        base_tools.registry, cfg.mcp_servers, on_log=lambda m: print(f"  · {m}"))
+        base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"))
     mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
+    plugin_tool_count = sum(1 for e in base_tools.registry._tools.values()
+                            if e.source.startswith("plugin:"))
     tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
@@ -147,12 +155,13 @@ def main() -> None:
         hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
     if cfg.max_tokens:
         hook_list.append(BudgetHook(cfg.max_tokens))
+    hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
     hooks = CompositeHooks(*hook_list)
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
           f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
-          f"skills={len(skills.names())} · mcp_tools={mcp_tool_count}")
+          f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
     print('type a task, or "exit" to quit\n')
     while True:
         try:
