@@ -1,0 +1,30 @@
+# memagent.toml — persistent settings (copy to ./memagent.toml or ~/.memagent/config.toml).
+# Precedence: ENV var > project memagent.toml > user ~/.memagent/config.toml > default.
+# So an env var (e.g. AGENT_POLICY=allow) still overrides this file for one-off runs.
+
+[agent]
+model = "gpt-5.5"            # AGENT_MODEL
+policy = "guard"             # AGENT_POLICY: guard (blocks catastrophic cmds) | readonly | allow
+mine = "deterministic"      # AGENT_MINE: deterministic | llm | off  (memem write loop)
+subagent_depth = 1          # AGENT_SUBAGENT_DEPTH: 0 disables spawn_subagent
+show_slice = false          # SHOW_SLICE: print the reconstructed slice each turn
+
+[oracle]
+# verify_cmd = "python3 -m pytest -q"   # AGENT_VERIFY_CMD: run before "done"; failures force another turn
+
+[budget]
+# max_tokens = 200000         # AGENT_MAX_TOKENS: stop the turn past this ceiling
+
+[skills]
+# dirs = ["~/.memagent/skills", "./.memagent/skills"]   # SKILL.md packs (omit → built-in defaults)
+
+# --- extension surfaces (consumed as those sub-phases land) ---
+# [mcp_servers.github]                 # ③.3: external MCP servers, surfaced as mcp__github__* tools
+#   command = "npx"
+#   args = ["-y", "@modelcontextprotocol/server-github"]
+#   env = { GITHUB_TOKEN = "..." }
+# [mcp_servers.remote]
+#   url = "https://mcp.example.com"    # http/sse transport
+
+# [plugins]                            # ③.4: extra plugin directories
+#   dirs = ["./.memagent/plugins"]
