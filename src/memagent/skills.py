@@ -89,6 +89,13 @@ class SkillManager:
             return
         self._skills.setdefault(name, Skill(name, desc, body.strip(), path))  # first-wins
 
+    def add(self, name: str, body: str, description: str = "") -> None:
+        """Register an in-memory skill (e.g. contributed by a plugin). First-wins, so a
+        disk skill of the same name takes precedence."""
+        name = (name or "").strip().lower()
+        if name and body and body.strip():
+            self._skills.setdefault(name, Skill(name, description.strip(), body.strip(), "<plugin>"))
+
     def names(self) -> list[str]:
         return sorted(self._skills)
 
