@@ -62,6 +62,9 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks) -> Non
 
     outputs = run_scheduled(tasks)
     for (name, args), out in zip(metas, outputs):
+        transformed = hooks.transform_tool_result(name, args, out)  # mutating seam (plugins/redaction)
+        if transformed is not None:
+            out = transformed
         failing = out.startswith("Error") or out.startswith("Exit code")
         dispatch(ToolResult(name, args, out, failing))
 
@@ -72,6 +75,9 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
         raise RuntimeError(before.get("reason") or f"step {step_num} blocked")
 
     messages = build_slice()
+    prepared = hooks.prepare_messages(messages)  # pre-LLM-call seam (inject context, prompt-cache-safe)
+    if prepared is not None:
+        messages = prepared
     dispatch(SliceBuilt(messages[-1]["content"]))
     dispatch(StepBegin(step_num))
 

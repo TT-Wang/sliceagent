@@ -19,6 +19,7 @@ from dataclasses import dataclass
 class ToolDecision:
     allow: bool
     reason: str = ""
+    ask: bool = False   # policy abstains to an interactive prompt (resolved by PermissionHook)
 
 
 ALLOW = ToolDecision(True)
@@ -39,6 +40,17 @@ class Hooks:
 
     def authorize_tool(self, name: str, args: dict) -> ToolDecision:
         return ALLOW
+
+    # --- mutating seams (events can't mutate; these can) ---
+    def prepare_messages(self, messages: list[dict]):
+        """Last chance to transform the model-visible messages before the LLM call
+        (e.g. inject context). Return new messages, or None to leave unchanged."""
+        return None
+
+    def transform_tool_result(self, name: str, args: dict, output: str):
+        """Rewrite a tool result before it enters the slice (e.g. redaction, formatting).
+        Return new output, or None to leave unchanged."""
+        return None
 
 
 class CompositeHooks(Hooks):
@@ -76,6 +88,22 @@ class CompositeHooks(Hooks):
                 return d
         return ALLOW
 
+    def prepare_messages(self, messages):
+        changed = False
+        for h in self.hooks:
+            r = h.prepare_messages(messages)
+            if r is not None:
+                messages, changed = r, True
+        return messages if changed else None
+
+    def transform_tool_result(self, name, args, output):
+        changed = False
+        for h in self.hooks:
+            r = h.transform_tool_result(name, args, output)
+            if r is not None:
+                output, changed = r, True
+        return output if changed else None
+
 
 # --- concrete hooks ---
 
@@ -98,13 +126,31 @@ class OracleHook(Hooks):
 
 
 class PermissionHook(Hooks):
-    """Gate tool execution. `policy(name, args) -> ToolDecision`."""
+    """Gate tool execution. `policy(name, args) -> ToolDecision`.
 
-    def __init__(self, policy):
+    When a policy returns `ask`, resolve it interactively via `on_ask(name, args, reason)
+    -> 'yes'|'no'|'always'` (the host supplies a TTY prompt). 'always' memorizes the tool
+    for the session so it isn't re-asked (Kimi-style session-approval). Non-interactive
+    hosts (on_ask=None) deny an `ask` — safe by default."""
+
+    def __init__(self, policy, on_ask=None):
         self.policy = policy
+        self.on_ask = on_ask
+        self._approved: set[str] = set()  # session-approved tool names
 
     def authorize_tool(self, name, args):
-        return self.policy(name, args)
+        d = self.policy(name, args)
+        if not d.ask:
+            return d
+        if name in self._approved:
+            return ALLOW
+        if self.on_ask is None:
+            return ToolDecision(False, "permission required but no prompt available")
+        verdict = (self.on_ask(name, args, d.reason) or "no").lower()
+        if verdict == "always":
+            self._approved.add(name)
+            return ALLOW
+        return ALLOW if verdict == "yes" else ToolDecision(False, "denied by user")
 
 
 class BudgetHook(Hooks):

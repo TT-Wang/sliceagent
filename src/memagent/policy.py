@@ -57,6 +57,13 @@ def read_only(name: str, args: dict) -> Optional[ToolDecision]:
     return None
 
 
+def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
+    """Defer write/exec tools to an interactive prompt (PermissionHook resolves the ask)."""
+    if name in WRITE_TOOLS or name in EXEC_TOOLS:
+        return ToolDecision(False, f"{name} will modify state or run code", ask=True)
+    return None
+
+
 def no_dangerous_commands(name: str, args: dict) -> Optional[ToolDecision]:
     """Deny shell commands (or execute_code bodies) matching a narrow catastrophic list.
     Scanning arbitrary Python is best-effort — it catches obvious run('rm -rf /')-style
@@ -80,17 +87,19 @@ class PolicyChain:
     def __call__(self, name: str, args: dict) -> ToolDecision:
         for p in self.policies:
             d = p(name, args)
-            if d is not None and not d.allow:
+            if d is not None and (not d.allow or d.ask):  # deny OR ask short-circuits
                 return d
         return ALLOW
 
 
 def make_policy(mode: str = "guard") -> PolicyChain:
     """Factory: 'guard' (block catastrophic commands), 'readonly' (no writes/exec),
-    or 'allow' (permissive — the prior default)."""
+    'ask' (block catastrophic + confirm every write/exec), or 'allow' (permissive)."""
     mode = (mode or "guard").lower()
     if mode == "allow":
         return PolicyChain()
     if mode == "readonly":
         return PolicyChain(read_only)
+    if mode == "ask":
+        return PolicyChain(no_dangerous_commands, ask_mutations)  # dangerous→deny, rest→ask
     return PolicyChain(no_dangerous_commands)  # guard (default)
