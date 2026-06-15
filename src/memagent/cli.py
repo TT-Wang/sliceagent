@@ -87,6 +87,7 @@ def main() -> None:
         sys.exit(1)
 
     from .code_index import make_code_index
+    from .config import load_config
     from .llm import OpenAILLM
     from .loop import run_turn
     from .memory import make_memory
@@ -98,17 +99,18 @@ def main() -> None:
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
+    cfg = load_config()  # memagent.toml (user → project), with ENV overriding for one-offs
     root = os.getcwd()
-    policy_mode = os.environ.get("AGENT_POLICY", "guard")  # guard | readonly | allow
-    mine_mode = os.environ.get("AGENT_MINE", "deterministic")  # deterministic | llm | off
-    sub_depth = int(os.environ.get("AGENT_SUBAGENT_DEPTH", "1"))  # 0 disables delegation
+    policy_mode = cfg.policy        # guard | readonly | allow
+    mine_mode = cfg.mine           # deterministic | llm | off
+    sub_depth = cfg.subagent_depth  # 0 disables delegation
     policy = make_policy(policy_mode)
-    llm = OpenAILLM()
+    llm = OpenAILLM(model=cfg.model)
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
 
     base_tools = LocalToolHost(root)  # file ops confined to the launch dir; shell via LocalSandbox
-    skills = make_skill_manager()     # discover SKILL.md packs (.memagent/skills, ~/.memagent/skills)
+    skills = make_skill_manager(cfg.skills_roots)  # SKILL.md packs (config dirs or defaults)
     skill_tool = make_skill_tool(skills)
     if skill_tool is not None:        # register the `skill` tool into the shared registry
         base_tools.registry.register(skill_tool)
@@ -128,18 +130,18 @@ def main() -> None:
     sinks = [slice_sink(state)]
     if miner is not None:
         sinks.append(miner)
-    sinks += [log_sink(), cli_sink(bool(os.environ.get("SHOW_SLICE")))]
+    sinks += [log_sink(), cli_sink(cfg.show_slice)]
     dispatch = make_dispatcher(*sinks)
     if miner is not None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     hook_list = [PermissionHook(policy)]
-    if os.environ.get("AGENT_VERIFY_CMD"):
-        oracle = CommandOracle(os.environ["AGENT_VERIFY_CMD"])
+    if cfg.verify_cmd:
+        oracle = CommandOracle(cfg.verify_cmd)
         hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
-    if os.environ.get("AGENT_MAX_TOKENS"):
-        hook_list.append(BudgetHook(int(os.environ["AGENT_MAX_TOKENS"])))
+    if cfg.max_tokens:
+        hook_list.append(BudgetHook(cfg.max_tokens))
     hooks = CompositeHooks(*hook_list)
 
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "

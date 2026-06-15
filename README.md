@@ -50,7 +50,7 @@ The loop dispatches events; the host composes sinks (slice-updater, durable log,
 - *Read:* each task recalls relevant lessons via memem's hybrid retrieval into the slice.
 - *Write (`mining.py`):* after a task **succeeds**, the miner distills a durable lesson from what happened and `remember()`s it — so a future similar task recalls it. This is what makes memagent memory-*native*. It's an event sink, signal-dense by construction: it mines **only a validated episode** (a successful turn in which an error was hit and then cleared — no error / no success / no lesson), dedups within a session, and prints `💡 learned: …`. `AGENT_MINE=deterministic` (default — cheap, no extra LLM call) | `llm` (one-shot distillation for a crisper lesson) | `off`.
 
-Opt-in via env: `AGENT_POLICY` (`guard`/`readonly`/`allow`), `MEMEM_VAULT` (enable memem), `AGENT_VERIFY_CMD` (run tests as the Oracle), `AGENT_MAX_TOKENS` (budget), `SHOW_SLICE=1`.
+Configure via **`memagent.toml`** (persistent; see [`memagent.toml.example`](memagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `memagent.toml` > user `~/.memagent/config.toml` > default. Keys: `AGENT_POLICY` (`guard`/`readonly`/`allow`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `MEMEM_VAULT` (enable memem), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
 
 ## Architecture (build / borrow / plug)
 
