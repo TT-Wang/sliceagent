@@ -71,3 +71,24 @@ Retrieval is not 100%. The loop — not the retriever — is the recovery mechan
 ## Positioning vs incumbents
 
 OpenClaw and Hermes are both **transcript + LLM-summarization-compaction** (verified by source inspection): accumulate, then summarize near the window. memagent is **deterministic bounded reconstruction** — genuinely distinct. Edge is largest at scale / long-horizon / cost-sensitive / auditability-critical work. Borrow their periphery (sandbox backends, TUI, code-as-action); do not adopt their loop.
+
+## Refined thesis: *relevant* bounded context
+
+Validation on real repos (SWE-bench) sharpened the thesis. Bounded context is the moat **only if it is *relevant* bounded context** — "remember less" wins only if you remember the *right* less, dynamically, around what the agent is doing **now**. Every context bug we hit was one disease: *the slice omitted what the agent needed this turn, and (no transcript) the omission was unrecoverable* — it couldn't scroll back to what it saw last turn.
+
+**Failure that taught it:** a 12.7k-char `config.py`; OPEN FILES used a static head+tail truncation (first 1KB + last 0.5KB), so the method to edit (mid-file) was invisible. The agent flailed ~30 steps re-reading and guessing an edit it couldn't see. Toy evals never exposed this — their files fit entirely in the slice. *Lesson: evals must stress the design's load-bearing axis (file/repo size), or "all green" is a false signal.*
+
+**Two universal rules (apply to every tier):**
+1. **Compact by relevance to the current focus, not by position/recency/static rule.** Head+tail is position-blind and will, by construction, drop exactly what matters.
+2. **Capture every ephemeral signal back into a tier.** No transcript ⇒ tool results, reads, operations, and the *current focus* vanish unless explicitly folded into state.
+
+**Refined by studying Kimi** (transcript+compaction, mostly recency-based — *no* active-file/focus object). It dodges the large-file flail not via smart retention but via **tool contracts**: `Read` returns a *faithful contiguous window* (never head+tail; the model pages to the region via grep+offset); `Edit` matches against **disk** and says *"re-Read if stale"* on mismatch (decoupling *can-I-edit* from *is-it-in-context*); bounding clears stale tool-result *payloads* while keeping a *reference*. So:
+
+- **Faithful over lossy for action targets** — never head+tail a file the agent might edit; lossy caps are only for incidental output (logs/searches).
+- **Relevance-*default* region + model navigation** — the reconstructor windows around the focus by default, *and* the model can re-aim (`read_region`/offset). Don't bet everything on the heuristic.
+- **Decouple action from context** — edit against disk; a mismatch drives a *targeted re-read* next turn (deterministic 1-step recovery, not a flail).
+- **Evict to a reference, not to nothing** — keep a pointer (`path:lines, re-read to view`) so recovery is one step away.
+
+**memagent's edge over Kimi:** relevance-driven retention (keep the active edit region at full fidelity, reference-only the rest) is strictly better than Kimi's recency-only clearing. Our bug was being *recency/position-dumb* in the one place the design is meant to be smart.
+
+*In one line:* **relevant bounded context = faithful, focus-targeted views of what you're acting on + cheap references to the rest + actions that recover via re-read, not retention.**

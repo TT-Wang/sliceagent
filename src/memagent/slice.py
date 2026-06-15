@@ -22,10 +22,17 @@ from dataclasses import dataclass, field
 from .events import Event, ToolResult
 
 K = 4
-MAX_ARTIFACT_CHARS = 1500
+MAX_ARTIFACT_CHARS = 1500  # cap for INCIDENTAL output only (discovery snippets) — never for the working set
 DISCOVERY_K = 6
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
-MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active (bounded context)
+MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
+# OPEN FILES is NOT size-capped (Markov bounds GROWTH over time; relevance bounds CONTENT).
+# A working-set file is shown IN FULL — it's the current relevant state — up to FULL_FILE_LINES,
+# which is generous (a ~1000-line file is ~10k tokens, fine in a modern context window). Only a
+# PATHOLOGICALLY huge file falls back to its RELEVANT REGION (the agent's focus): a safety valve
+# for the context window, never a routine head+tail truncation.
+FULL_FILE_LINES = 1200
+REGION_LINES = 400
 
 # literal paths the model touches via execute_code helpers — so code-as-action reads/edits
 # still populate the OPEN FILES working set (they run in the sandbox, bypassing the ToolHost)
@@ -60,13 +67,18 @@ SYSTEM_PROMPT = (
     "never on remembered contents. "
     "Editing: edit_file overwrites a whole file (new files only); append_to_file adds; str_replace replaces an "
     "exact snippet copied from OPEN FILES. Test files must import what they test. "
+    "OPEN FILES shows each file's current contents (a very large file shows the region relevant to your task); "
+    "always base edits on what is shown there. "
     "If an action is REPEATEDLY FAILING, stop repeating it — read the file, fix the root cause, then re-run. "
     "Work in as FEW turns as possible: each turn make ALL edits you can already determine (batch many tool calls), "
     "then run once to verify. For multi-step work, prefer ONE execute_code call (write several files AND run the "
     "test in a single Python script, printing a short result) over many separate tool calls. "
+    "Verify with the CHEAPEST sufficient check — compile/import the changed module (e.g. python -c 'import pkg') "
+    "or run the smallest relevant test. If the environment can't run the tests after ONE attempt (missing deps, "
+    "setup errors), do NOT keep installing/retrying — make the minimal correct edit and finish. "
     "Never write commentary, explanation, or reasoning as text while working — call tools SILENTLY with empty "
     "message content. Output text ONLY once, as a one-line final summary, and only after the TASK is fully done "
-    "and tests pass (then make no tool call)."
+    "and verified as well as the environment allows (then make no tool call)."
 )
 
 
@@ -78,6 +90,7 @@ class Slice:
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
     active_skills: list[dict] = field(default_factory=list)  # [{name, body}] loaded SKILLs
+    edit_anchor: dict[str, str] = field(default_factory=dict)  # path -> last edit-target text (huge-file focus)
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -86,6 +99,7 @@ class Slice:
         self.active_files = []
         self.last_error = ""
         self.active_skills = []
+        self.edit_anchor = {}
 
 
 def one_line(s, n: int = 80) -> str:
@@ -98,7 +112,10 @@ def touch_file(s: Slice, path: str) -> None:
     s.active_files = [p for p in s.active_files if p != path]
     s.active_files.append(path)
     if len(s.active_files) > K:
+        evicted = s.active_files[:-K]
         s.active_files = s.active_files[-K:]
+        for p in evicted:
+            s.edit_anchor.pop(p, None)
 
 
 def action_sig(name: str, args: dict) -> str:
@@ -152,8 +169,33 @@ def render_action_history(action_log: dict) -> str:
     return "\n".join(lines)
 
 
+def _focus_line(s: Slice, path: str, lines: list[str]) -> int:
+    """For a huge file, the line to center the relevant region on: the agent's last edit
+    target if present, else the best relevance match against the task + current error,
+    else the top. Relevance selection — not a position guess."""
+    anchor = s.edit_anchor.get(path)
+    if anchor:
+        for i, ln in enumerate(lines, 1):
+            if anchor in ln:
+                return i
+    terms = {t.lower() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", f"{s.goal} {s.last_error}")}
+    if terms:
+        best, best_score = 1, 0
+        for i, ln in enumerate(lines, 1):
+            low = ln.lower()
+            score = sum(1 for t in terms if t in low)
+            if score > best_score:
+                best, best_score = i, score
+        if best_score:
+            return best
+    return 1
+
+
 def build_artifacts(s: Slice, tools) -> str:
-    """Re-read the active files FRESH (the working set) — head+tail capped to stay bounded."""
+    """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap.
+    A file is shown IN FULL up to FULL_FILE_LINES; a genuinely huge file is shown as its
+    RELEVANT REGION (around the agent's focus) in full — never head+tail. Markov bounds
+    growth over time; relevance bounds what's included. No artificial token ceiling."""
     if not s.active_files:
         return "(no files opened yet)"
     parts = []
@@ -163,11 +205,20 @@ def build_artifacts(s: Slice, tools) -> str:
         except Exception:
             parts.append(f"### {p}\n(not created yet)")
             continue
-        if len(body) > MAX_ARTIFACT_CHARS:
-            shown = body[: MAX_ARTIFACT_CHARS - 500] + "\n…[middle truncated]…\n" + body[-500:]
+        lines = body.splitlines()
+        total = len(lines)
+        if total <= FULL_FILE_LINES:
+            parts.append(f"### {p} ({total} lines — full)\n```\n{body}\n```")
         else:
-            shown = body
-        parts.append(f"### {p} ({len(body)} bytes — current contents)\n```\n{shown}\n```")
+            focus = _focus_line(s, p, lines)
+            half = REGION_LINES // 2
+            a = max(1, focus - half)
+            b = min(total, a + REGION_LINES - 1)
+            a = max(1, b - REGION_LINES + 1)
+            region = "\n".join(lines[a - 1:b])
+            hdr = (f"### {p} ({total} lines — showing the relevant region, lines {a}-{b}; "
+                   f"grep to locate other parts, then edit — a failed str_replace re-aims this region)")
+            parts.append(f"{hdr}\n```\n{region}\n```")
     return "\n\n".join(parts)
 
 
@@ -270,6 +321,12 @@ def slice_sink(s: Slice):
                 add_skill(s, event.args.get("name", ""), event.output)
             if event.args.get("path"):
                 touch_file(s, event.args["path"])
+                # remember the agent's edit target so a HUGE file's region follows it (and a
+                # failed str_replace re-aims the region to where the agent meant to edit)
+                if event.name == "str_replace" and event.args.get("old_string"):
+                    anchor = next((ln.strip() for ln in event.args["old_string"].splitlines() if ln.strip()), "")
+                    if anchor:
+                        s.edit_anchor[event.args["path"]] = anchor[:80]
             elif event.name == "execute_code":
                 for p in paths_in_code(event.args.get("code", "")):
                     touch_file(s, p)  # code-as-action reads/edits enter the working set too
