@@ -45,6 +45,7 @@ MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-deriva
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
+MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
 # OPEN FILES is NOT size-capped (Markov bounds GROWTH over time; relevance bounds CONTENT).
 # A working-set file is shown IN FULL — it's the current relevant state — up to FULL_FILE_LINES,
 # which is generous (a ~1000-line file is ~10k tokens, fine in a modern context window). Only a
@@ -143,6 +144,7 @@ class Slice:
     findings: list[str] = field(default_factory=list)  # distilled conclusions carried across turns
     edited_files: set = field(default_factory=set)  # the change set — protected from eviction
     since_edit: int = 0  # tool calls since the last successful edit — drives the convergence check
+    reviewed: list[str] = field(default_factory=list)  # history lookbacks done — the recall_history ratchet
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -155,6 +157,7 @@ class Slice:
         self.findings = []
         self.edited_files = set()
         self.since_edit = 0
+        self.reviewed = []
 
 
 def one_line(s, n: int = 80) -> str:
@@ -252,6 +255,26 @@ def render_findings(findings: list[str]) -> str:
     if not findings:
         return ""
     return "\n".join(f"- {f}" for f in findings)
+
+
+def _history_mark(args: dict) -> str:
+    """A short label for a recall_history lookback, so the slice records WHAT was already reviewed."""
+    if not isinstance(args, dict):
+        return ""
+    if args.get("turns"):
+        return f"turns={sorted(int(t) for t in args['turns'])}" + ("·full" if args.get("full") else "")
+    if args.get("last"):
+        return f"last={int(args['last'])}" + ("·full" if args.get("full") else "")
+    return "index"
+
+
+def render_reviewed(s: Slice) -> str:
+    """The recall_history RATCHET tier — lookbacks already done this task, so the model sees the
+    lookback advanced the state (and doesn't re-fetch). Only rendered when something's been reviewed."""
+    if not s.reviewed:
+        return ""
+    return ("# HISTORY REVIEWED (you ALREADY looked these up from the cache this task — do NOT re-fetch "
+            f"them; act on what you have, or fetch a DIFFERENT turn)\n{', '.join(s.reviewed[-MAX_REVIEWED:])}\n\n")
 
 
 STOP_NUDGE_AFTER = 2  # non-edit tool calls since the last edit (with no error) before nudging to converge
@@ -445,6 +468,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     skills_body = render_skills(s.active_skills)
     skl = f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{skills_body}\n\n" if skills_body else ""
     mem = f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{memory}\n\n" if memory else ""
+    rev = render_reviewed(s)
     thr = (
         "# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into "
         f"the current task)\n{threads}\n\n"
@@ -458,7 +482,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     )
     conv = render_convergence(s)
     parts = [
-        conv + err + fnd + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        conv + err + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
         f"# RECENT (last {K})", steps, "",
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
         disc,
@@ -529,6 +553,14 @@ def slice_sink(state):
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
                 # next turn (no transcript). The skill tool returns the body as its output.
                 add_skill(s, event.args.get("name", ""), event.output)
+            if event.name == "recall_history" and not event.failing:
+                # RATCHET: a history lookback must advance the slice (like a file read advances OPEN
+                # FILES), or the model can't tell it already looked → it re-looks. Record what was
+                # reviewed so the next reconstruction shows it (see render_reviewed).
+                mark = _history_mark(event.args)
+                if mark and mark not in s.reviewed:
+                    s.reviewed.append(mark)
+                    del s.reviewed[:-MAX_REVIEWED]
             # list_files' "path" is a DIRECTORY to browse, not a working-set file — don't track it
             if event.args.get("path") and event.name != "list_files":
                 did_edit = event.name in ("edit_file", "append_to_file", "str_replace") and not event.failing

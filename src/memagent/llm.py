@@ -1,4 +1,6 @@
-"""OpenAILLM — the default LLMClient (OpenAI-compatible: OpenAI, Moonshot, …).
+"""OpenAILLM — the default LLMClient over any OpenAI-COMPATIBLE endpoint (OpenAI, Moonshot,
+DeepSeek, …). Configured by provider-AGNOSTIC env: LLM_API_KEY + LLM_BASE_URL (+ AGENT_MODEL);
+OPENAI_*/MOONSHOT_* are accepted only as a back-compat fallback.
 
 Proxy-aware (mirrors the prototype: defaults to a local ClashX proxy; set AGENT_PROXY=none
 to go direct). The only module that imports the openai SDK — the core stays openai-free.
@@ -22,15 +24,21 @@ class OpenAILLM:
         use_proxy = bool(proxy) and proxy != "none"
         http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
 
-        kwargs: dict = {"api_key": api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")}
-        if base_url:
-            kwargs["base_url"] = base_url
-        elif os.environ.get("MOONSHOT_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        # Provider-AGNOSTIC env: LLM_API_KEY / LLM_BASE_URL are canonical. OPENAI_*/MOONSHOT_* are
+        # kept ONLY as a back-compat fallback (the SDK is OpenAI-compatible and many shells already
+        # export OPENAI_API_KEY) — the surface the user configures says "LLM", not a provider name.
+        kwargs: dict = {"api_key": api_key or os.environ.get("LLM_API_KEY")
+                        or os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")}
+        resolved_base = base_url or os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        if resolved_base:
+            kwargs["base_url"] = resolved_base
+        elif os.environ.get("MOONSHOT_API_KEY") and not (
+                os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")):
             kwargs["base_url"] = "https://api.moonshot.cn/v1"
 
         self.client = OpenAI(http_client=http_client, max_retries=2, **kwargs)
         self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
-        self._base_url = kwargs.get("base_url") or os.environ.get("OPENAI_BASE_URL") or ""
+        self._base_url = kwargs.get("base_url") or ""
         # Provider-AGNOSTIC reasoning intent: "full" (default) keeps the model's reasoning; "fast"
         # minimizes it (wall-clock tracks reasoning tokens, and the slice reconstructs ground-truth
         # STATE each turn, which can substitute for per-step re-derivation). The core/agent never

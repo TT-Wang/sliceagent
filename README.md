@@ -23,7 +23,7 @@ Early. The **core idea is validated** in a ~250-line JS prototype (see [`prototy
 
 ```bash
 uv sync           # or: pip install -e .
-cp .env.example .env   # add OPENAI_API_KEY (gpt-5.5 recommended)
+cp .env.example .env   # add LLM_API_KEY (+ LLM_BASE_URL for non-OpenAI providers)
 memagent          # or: python -m memagent.cli
 ```
 

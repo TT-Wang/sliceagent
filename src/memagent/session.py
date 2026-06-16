@@ -87,6 +87,7 @@ class Session:
         s.last_error = ""
         s.action_log = {}
         s.since_edit = 0
+        s.reviewed = []          # new directive → the history ratchet resets (re-allow fresh lookbacks)
         return s
 
 
