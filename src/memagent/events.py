@@ -30,6 +30,7 @@ class StepEnd(Event):
 @dataclass
 class SliceBuilt(Event):
     rendered: str  # the volatile user message this turn (for debugging/inspection)
+    messages: list | None = None  # the FULL model-visible messages [system, user] (monitor/inspection)
 
 
 @dataclass

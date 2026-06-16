@@ -81,6 +81,49 @@ class RipgrepCodeIndex:
 
     # --- Retriever contract -------------------------------------------------
     def retrieve(self, query: str, k: int = 6) -> list[Snippet]:
+        """The RELATED CODE tier: a relevance-RANKED repo MAP — which files matter for this query,
+        shown as definition SIGNATURES, not code excerpts. Why a map and not snippets: an A/B on a
+        lexical-trap task (bug in a neutral-vocabulary file the term search never ranks) showed the
+        map ties-or-beats injected snippets AND stays robust when the lexical signal points at the
+        WRONG file — the model reads real code on demand instead of anchoring on a guessed excerpt.
+        Lexical overlap is still used, but only to ORDER the map and annotate which files matched."""
+        text = self.scoped_map(query)
+        if not text:
+            return []
+        return [Snippet(path="(repo map)", text=text, score=float(text.count("(matches:")))]
+
+    def scoped_map(self, query: str, max_files: int = 200, max_chars: int = 4000) -> str:
+        """Definition skeleton of the repo, ranked by lexical relevance to the query. Matched files
+        come first (so truncation keeps the relevant ones) and are annotated with the terms they hit;
+        zero-match files follow (cheap, and they catch neutral-vocabulary targets the term search
+        would miss — the lexical-trap case). Bounded by max_chars: the same discipline as every tier."""
+        files = self._code_files(max_files)
+        if not files:
+            return ""
+        matched: dict[str, set] = {}
+        terms = _terms(query)
+        if terms:
+            for path, info in self._search(terms).items():
+                matched[os.path.relpath(path, self.root)] = info["terms"]
+        files.sort(key=lambda rel: len(matched.get(rel, ())), reverse=True)  # stable → ties stay sorted
+        blocks: list[str] = []
+        used = 0
+        for rel in files:
+            defs = self._defs_in(os.path.join(self.root, rel), 12)
+            if not defs:
+                continue
+            hit = matched.get(rel)
+            head = rel + (f"   (matches: {', '.join(sorted(hit))})" if hit else "")
+            block = head + "\n" + "\n".join("  " + d for d in defs)
+            if used + len(block) + 1 > max_chars:
+                break
+            blocks.append(block)
+            used += len(block) + 1
+        return "\n".join(blocks)
+
+    def snippets(self, query: str, k: int = 6) -> list[Snippet]:
+        """Code-context windows around term hits (the earlier default). Kept for ON-DEMAND use —
+        e.g. a future 'show me the code around X' tool — but no longer the standing discovery tier."""
         terms = _terms(query)
         if not terms:
             return []

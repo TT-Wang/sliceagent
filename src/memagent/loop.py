@@ -78,7 +78,7 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
     prepared = hooks.prepare_messages(messages)  # pre-LLM-call seam (inject context, prompt-cache-safe)
     if prepared is not None:
         messages = prepared
-    dispatch(SliceBuilt(messages[-1]["content"]))
+    dispatch(SliceBuilt(messages[-1]["content"], messages))
     dispatch(StepBegin(step_num))
 
     resp = with_retry(
