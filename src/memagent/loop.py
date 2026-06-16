@@ -23,15 +23,23 @@ from .events import (
     TurnEnd,
     TurnInterrupted,
 )
-from .guidance import BUDGET_EXHAUSTED
+from .guidance import BUDGET_EXHAUSTED, STUCK
 from .hooks import Hooks
 from .scheduler import run_scheduled
+
+
+# Anti-spin floor: after this many guardrail BLOCKS in one turn the loop stops and hands control back
+# to the user (TurnInterrupted "stuck") instead of letting a weak model keep generating variants
+# against the guard. The proactive path is the ask_user tool; this is the harness backstop. Each block
+# already represents a 3-4x repeat caught by the guardrail, so a few blocks = genuinely stuck.
+STUCK_BLOCK_BUDGET = 3
 
 
 @dataclass
 class StepOutcome:
     usage: dict
     stop_reason: str
+    blocked: int = 0
 
 
 @dataclass
@@ -50,14 +58,17 @@ def _normalize_stop(resp) -> str:
     return "tool_use" if resp.tool_calls else "end_turn"
 
 
-def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks) -> None:
-    """Authorize, schedule (safe-parallel by resource access), and report results in provider order."""
+def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks) -> int:
+    """Authorize, schedule (safe-parallel by resource access), and report results in provider order.
+    Returns the number of calls BLOCKED by a hook (the anti-spin floor counts these per turn)."""
     tasks = []
     metas = []
+    blocked = 0
     for tc in tool_calls:
         dispatch(ToolStarted(tc.name, tc.args))
         decision = hooks.authorize_tool(tc.name, tc.args)
         if not decision.allow:
+            blocked += 1
             tasks.append(([], (lambda d=decision: f"Error: blocked by policy: {d.reason or 'denied'}")))
         else:
             tasks.append((tools.accesses(tc.name, tc.args), (lambda tc=tc: str(tools.run(tc.name, tc.args)))))
@@ -70,6 +81,7 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks) -> Non
             out = transformed
         failing = out.startswith("Error") or out.startswith("Exit code")
         dispatch(ToolResult(name, args, out, failing))
+    return blocked
 
 
 def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks) -> StepOutcome:
@@ -116,15 +128,16 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
         dispatch(AssistantText(resp.content))
 
     effective = "end_turn" if (stop_turn and stop_reason == "tool_use") else stop_reason
+    blocked = 0
     if effective == "tool_use":
-        run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
+        blocked = run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
 
     dispatch(StepEnd(step_num, usage, effective))
 
     after = hooks.after_step(step_num, usage, effective)
     if after and after.get("stop_turn") and effective == "tool_use":
         effective = "end_turn"
-    return StepOutcome(usage=usage, stop_reason=effective)
+    return StepOutcome(usage=usage, stop_reason=effective, blocked=blocked)
 
 
 def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | None = None,
@@ -133,6 +146,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     hooks.reset_for_turn()  # ITEM 1: clear per-turn guards ONCE per user task (not per step)
     total = {"prompt_tokens": 0, "completion_tokens": 0}
     steps = 0
+    total_blocked = 0
     stop_reason = "end_turn"
 
     while True:
@@ -145,10 +159,25 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             break
 
         steps += 1
-        outcome = run_step(step_num=steps, build_slice=build_slice, llm=llm, tools=tools,
-                           dispatch=dispatch, hooks=hooks)
+        try:
+            outcome = run_step(step_num=steps, build_slice=build_slice, llm=llm, tools=tools,
+                               dispatch=dispatch, hooks=hooks)
+        except KeyboardInterrupt:
+            # ctrl-c MID-STEP (incl. while the LLM is "thinking" — the blocking llm.complete call):
+            # the only way to interrupt a blocking request is to let SIGINT raise, then abort cleanly
+            # here. (signal= covers programmatic/between-step aborts; this covers the interactive one.)
+            dispatch(TurnInterrupted("aborted"))
+            return TurnResult("aborted", steps, total)
         total["prompt_tokens"] += outcome.usage.get("prompt_tokens", 0)
         total["completion_tokens"] += outcome.usage.get("completion_tokens", 0)
+
+        # anti-spin floor: repeated guardrail blocks this turn → stop and hand control back to the user
+        # (the model should have called ask_user; this is the backstop so a weak model can't spin forever).
+        total_blocked += outcome.blocked
+        if total_blocked >= STUCK_BLOCK_BUDGET:
+            dispatch(TurnInterrupted("stuck", message=STUCK))
+            stop_reason = "stuck"
+            break
 
         if outcome.stop_reason == "tool_use":
             continue  # ran tools → keep going

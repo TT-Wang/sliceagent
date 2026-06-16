@@ -130,7 +130,21 @@ TOOL_SCHEMAS = [
         "run(shell_cmd). The workspace is the cwd and on sys.path. ONLY what you print() is "
         "returned. Prefer this to fire several edits AND a test in a single turn.",
         {"code": {"type": "string"}}, ["code"]),
+    _fn("ask_user",
+        "Ask the user a concise follow-up question and WAIT for their answer (returned to you). Use "
+        "this whenever you are UNSURE or the request is AMBIGUOUS, or when you have FAILED / been "
+        "blocked and don't know how to proceed — instead of guessing or repeating a failing action. "
+        "Give up to ~4 short 'options' for a multiple-choice question, or omit them for open-ended. "
+        "Asking is better than spinning.",
+        {"question": {"type": "string"},
+         "options": {"type": "array", "items": {"type": "string"}}}, ["question"]),
 ]
+
+
+def _default_ask_user(question: str, options) -> str:
+    """Fallback when no interactive user is wired (headless/eval) — never hangs."""
+    return ("(no interactive user is available to answer; proceed with your best assumption and "
+            "STATE it explicitly, or stop with a clear summary of what you need)")
 
 
 class LocalToolHost:
@@ -150,6 +164,10 @@ class LocalToolHost:
         # bounded — never a blanket '/'; the workspace stays the default and only the launch
         # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
         self._extra_roots: list[str] = []
+        # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
+        # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
+        # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
+        self.on_ask_user = _default_ask_user
         # The registry is the single source of tools; MCP/plugin/skill tools register
         # into this same object later (Step ③). The host just projects from it.
         self.registry = registry or ToolRegistry()
@@ -160,7 +178,7 @@ class LocalToolHost:
             "read_file": self._t_read_file, "list_files": self._t_list_files,
             "edit_file": self._t_edit_file, "append_to_file": self._t_append,
             "str_replace": self._t_str_replace, "run_command": self._t_run_command,
-            "execute_code": self._t_execute_code,
+            "execute_code": self._t_execute_code, "ask_user": self._t_ask_user,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -334,6 +352,18 @@ class LocalToolHost:
         return (f"Error: old_string not found in {args['path']} — your snippet does not match "
                 f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
                 f"the whole file with edit_file. Do NOT retry the same str_replace.")
+
+    def _t_ask_user(self, args: dict) -> str:
+        q = (args.get("question") or "").strip()
+        if not q:
+            return "Error: ask_user requires a non-empty 'question'."
+        opts = args.get("options")
+        opts = [str(o) for o in opts] if isinstance(opts, list) and opts else None
+        try:
+            ans = (self.on_ask_user or _default_ask_user)(q, opts)
+        except (EOFError, KeyboardInterrupt):
+            ans = "(no answer)"
+        return f"User answered: {str(ans).strip()}"
 
     def _t_run_command(self, args: dict) -> str:
         code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)

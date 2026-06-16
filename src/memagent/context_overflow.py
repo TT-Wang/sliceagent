@@ -34,7 +34,6 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     "context window",
     "prompt is too long",
     "prompt exceeds max length",
-    "max_tokens",
     "maximum number of tokens",
     # vLLM / local inference server patterns
     "exceeds the max_model_len",
@@ -71,6 +70,20 @@ _PAYLOAD_TOO_LARGE_PATTERNS = (
     "request entity too large",
     "payload too large",
     "error code: 413",
+)
+
+
+# A parameter / validation error (e.g. "unsupported parameter 'max_tokens'") is NOT a context
+# overflow even though it may name a token param — reading it as overflow would wrongly trigger the
+# slice-tighten/rebuild loop. Root-cause guard: exclude param errors regardless of which param.
+# (Kept SPECIFIC: a real OpenAI overflow is type invalid_request_error / code context_length_exceeded,
+# so we must NOT exclude on those — only on explicit "unsupported/invalid parameter" wording.)
+_NOT_OVERFLOW_MARKERS = (
+    "unsupported parameter",
+    "unsupported_parameter",
+    "is not supported with this model",
+    "unknown parameter",
+    "invalid parameter",
 )
 
 
@@ -143,6 +156,8 @@ def is_context_overflow(error: Exception) -> bool:
     drops Hermes' session-size proxy (we always have a slice to tighten).
     """
     msg = _error_text(error)
+    if any(m in msg for m in _NOT_OVERFLOW_MARKERS):
+        return False  # a parameter/validation error is never a context overflow
     if any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS):
         return True
     if any(p in msg for p in _PAYLOAD_TOO_LARGE_PATTERNS):
