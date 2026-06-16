@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .guardrails import ToolCallGuardrail
+from .guidance import DENIAL_NO_PROMPT, DENIAL_USER
+
 
 @dataclass
 class ToolDecision:
@@ -40,6 +43,12 @@ class Hooks:
 
     def authorize_tool(self, name: str, args: dict) -> ToolDecision:
         return ALLOW
+
+    def reset_for_turn(self):
+        """Reset any per-turn state at the start of a user task (fires ONCE per turn,
+        not per step). Used by the guardrail to clear cross-step loop counters so they
+        do not bleed across tasks. No-op by default."""
+        return None
 
     # --- mutating seams (events can't mutate; these can) ---
     def prepare_messages(self, messages: list[dict]):
@@ -104,6 +113,10 @@ class CompositeHooks(Hooks):
                 output, changed = r, True
         return output if changed else None
 
+    def reset_for_turn(self):
+        for h in self.hooks:
+            h.reset_for_turn()
+
 
 # --- concrete hooks ---
 
@@ -145,12 +158,12 @@ class PermissionHook(Hooks):
         if name in self._approved:
             return ALLOW
         if self.on_ask is None:
-            return ToolDecision(False, "permission required but no prompt available")
+            return ToolDecision(False, DENIAL_NO_PROMPT)
         verdict = (self.on_ask(name, args, d.reason) or "no").lower()
         if verdict == "always":
             self._approved.add(name)
             return ALLOW
-        return ALLOW if verdict == "yes" else ToolDecision(False, "denied by user")
+        return ALLOW if verdict == "yes" else ToolDecision(False, DENIAL_USER)
 
 
 class BudgetHook(Hooks):
@@ -163,3 +176,23 @@ class BudgetHook(Hooks):
     def record_step_usage(self, usage):
         self.spent += int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
         return {"stop_turn": True} if self.spent >= self.max else None
+
+
+class GuardrailHook(Hooks):
+    """Cross-step loop guard: block a tool call that repeats an identical failing call,
+    or an idempotent call that keeps making no progress. State is per-turn (cleared by
+    `reset_for_turn`), so counters never bleed across user tasks."""
+
+    def __init__(self, config=None):
+        self.guard = ToolCallGuardrail(config)
+
+    def reset_for_turn(self):
+        self.guard.reset_for_turn()
+
+    def authorize_tool(self, name, args):
+        d = self.guard.before_call(name, args)
+        return ToolDecision(False, d.message) if d.block else ALLOW
+
+    def transform_tool_result(self, name, args, output):
+        self.guard.after_call(name, args, output)
+        return None

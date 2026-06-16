@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from .code_index import _terms   # reuse the query-term extractor (drops stopwords/short tokens)
 from .interfaces import Snippet, TaskRef, TaskState
+from .safety import scan_for_threats, redact_text   # persist-guards: block-on-write + redact-on-persist
 
 _MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one pathological output)
 
@@ -195,6 +196,10 @@ class NullMemory:
     def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
         return []
 
+    def search_episodes(self, query: str, *, limit: int = 5,
+                        exclude_session: str | None = None) -> list[dict]:
+        return []
+
     def checkpoint_task(self, task: TaskState) -> None:
         return None
 
@@ -245,6 +250,12 @@ class MememMemory:
         return out
 
     def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None:
+        # (a) BLOCK on WRITE: a poisoned lesson would re-inject into the slice every turn forever.
+        if scan_for_threats(f"{title}\n{content}", scope="strict"):
+            return
+        # (c) REDACT on PERSIST: never durably store a leaked secret that then re-surfaces.
+        content = redact_text(content)
+        title = redact_text(title)
         from memem.operations import memory_save
         try:
             memory_save(content, title=title, scope_id=scope, tags=tags)
@@ -255,7 +266,9 @@ class MememMemory:
     def _clamp(self, v):
         if isinstance(v, str) and len(v.encode("utf-8")) > _MAX_RECORD_VALUE_BYTES:
             h = _MAX_RECORD_VALUE_BYTES // 2
-            return v[:h] + f"\n…[truncated {len(v)} chars]…\n" + v[-h:]
+            return redact_text(v[:h] + f"\n…[truncated {len(v)} chars]…\n" + v[-h:])
+        if isinstance(v, str):
+            return redact_text(v)  # (c) redact every persisted episodic string on its way to the cache
         return v
 
     def _clamp_record(self, rec: dict) -> dict:
@@ -271,12 +284,56 @@ class MememMemory:
         try:
             d = os.path.join(self._vault, "episodic")
             os.makedirs(d, exist_ok=True)
+            ts = _now_iso()
+            clamped = self._clamp_record(record)
             line = {"v": 1, "session_id": session_id, "task_id": task_id, "turn": turn,
-                    "ts": _now_iso(), "record": self._clamp_record(record)}
+                    "ts": ts, "record": clamped}
             with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
         except Exception:
-            pass  # a cache write must never break a session
+            return  # a cache write must never break a session
+        self._index_episode(session_id, task_id, turn, ts, clamped)  # additive FTS5 mirror (item 12)
+
+    # --- cross-session FTS5 episode index (item 12; additive, degrades to no-op) ---
+    def _episode_index(self):
+        """Lazily open the FTS5 episode index (cached). Returns None if FTS5 is
+        unavailable — every caller treats None as 'index off' and falls back."""
+        idx = getattr(self, "_idx", "unset")
+        if idx == "unset":
+            try:
+                from .search_index import make_episode_index
+                idx = make_episode_index()
+                if not idx.is_active:
+                    idx = None
+            except Exception:
+                idx = None
+            self._idx = idx
+        return idx
+
+    def _index_episode(self, session_id, task_id, turn, ts, record) -> None:
+        idx = self._episode_index()
+        if idx is None:
+            return
+        try:
+            from .search_index import episode_searchable_text
+            idx.index_episode(session_id=session_id, task_id=task_id, turn=turn, ts=ts,
+                              title=record.get("title", ""), note=record.get("note", ""),
+                              text=episode_searchable_text(record))
+        except Exception:
+            pass
+
+    def search_episodes(self, query: str, *, limit: int = 5,
+                        exclude_session: str | None = None) -> list[dict]:
+        """Cross-session episode discovery (FTS5). Returns bounded hit dicts (see
+        search_index.EpisodeIndex.search) or [] when the index is unavailable. This is the
+        ACROSS-sessions counterpart to read_episodes (single-session). Never raises."""
+        idx = self._episode_index()
+        if idx is None:
+            return []
+        try:
+            return idx.search(query, limit=limit, exclude_session=exclude_session)
+        except Exception:
+            return []
 
     def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
         """Read the session's episodic cache (the read side of the recall_history tool). Returns the
@@ -346,10 +403,14 @@ class MememMemory:
             skills_dir = _skills_dir()
             for proc in promote_procedures(records):                 # procedures → skill packs
                 try:
+                    body = render_skill(proc)
+                    # (a) BLOCK on WRITE: a poisoned SKILL.md re-injects unscanned every session.
+                    if scan_for_threats(body, scope="strict"):
+                        continue
                     d = os.path.join(skills_dir, proc["name"])
                     os.makedirs(d, exist_ok=True)
                     with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
-                        f.write(render_skill(proc))
+                        f.write(redact_text(body))   # (c) redact any secret before it lands on disk
                 except Exception:
                     pass
         except Exception:

@@ -13,6 +13,7 @@ just a feature. Registered only when memory is durable (NullMemory/eval path nev
 from __future__ import annotations
 
 import json
+import re
 
 INDEX_LIMIT = 40       # breadcrumbs shown by the bare index
 TRACE_MAX = 4000       # total chars for a compact-trace fetch
@@ -56,20 +57,27 @@ def _arg_hint(args: dict) -> str:
 
 
 def render_index(lines: list[dict]) -> str:
+    from .finding_types import badge, classify_finding   # item 14a: typed note badge in the index
     out = ["# CACHED HISTORY (index — fetch a turn with recall_history(turns=[N]) or last=N)"]
     for ln in lines:
         rec = ln.get("record", {})
         meta = rec.get("meta", {})
-        flag = " FAIL" if meta.get("failing") else ""
+        failing = bool(meta.get("failing"))
+        flag = " FAIL" if failing else ""
         nsteps = len(rec.get("steps", []))
         title = rec.get("title") or "(no title)"
         note = rec.get("note") or ""
+        # type the breadcrumb's note so the model scans by KIND (decision / ruled-out / …)
+        edited = bool(meta.get("files"))
+        tag = badge(classify_finding(note, edited=edited, had_error=failing,
+                                     resolved=not failing and meta.get("stop_reason") == "end_turn"))
         out.append(f"- turn {ln.get('turn')} · {_short_ts(ln.get('ts',''))} · [{ln.get('task_id','')}] "
-                   f"{title[:60]} · {nsteps}st{flag}" + (f" — {note[:80]}" if note else ""))
+                   f"{title[:60]} · {nsteps}st{flag}" + (f" — {tag}{note[:80]}" if note else ""))
     return "\n".join(out)
 
 
 def render_trace(lines: list[dict], cap: int = TRACE_MAX) -> str:
+    from .tool_summary import summarize_tool_result   # item 14b: '[tool] action -> outcome, N lines'
     out, used = [], 0
     for ln in lines:
         rec = ln.get("record", {})
@@ -77,8 +85,10 @@ def render_trace(lines: list[dict], cap: int = TRACE_MAX) -> str:
         block = [head]
         for st in rec.get("steps", []):
             for a, o in zip(st.get("action", []), st.get("observation", [])):
-                fail = " ✗" if a.get("failing") else ""
-                block.append(f"  • {a.get('name')}({_arg_hint(a.get('args', {}))}){fail} → {_tail(o, OBS_TAIL)}")
+                # informative deterministic one-liner (replaces the raw head+tail dump)
+                summary = summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
+                                                failing=bool(a.get("failing")))
+                block.append(f"  • {summary} → {_tail(o, OBS_TAIL)}")
         if rec.get("note"):
             block.append(f"  ↳ note: {rec['note'][:200]}")
         chunk = "\n".join(block)
@@ -105,6 +115,24 @@ def render_full(lines: list[dict], cap: int = FULL_MAX) -> str:
     return "\n".join(out).strip() or "(no slice stored)"
 
 
+def render_cross_session(hits: list[dict]) -> str:
+    """Render cross-session FTS5 episode hits (item 12) — a bounded discovery listing the
+    model can scan, then drill into a session's own cache. NOT this session's turns: these
+    come from PAST sessions, so there's no in-session turn to fetch — the snippet + note +
+    title are the recall payload (Hermes' discovery shape, bookend-free for our grain)."""
+    out = ["# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)"]
+    for h in hits:
+        snip = re.sub(r"\s+", " ", h.get("snippet") or "").strip()
+        note = (h.get("note") or "").strip()
+        out.append(f"- [{h.get('session_id', '')[:14]} · turn {h.get('turn')}] "
+                   f"{_short_ts(h.get('ts', ''))} · {(h.get('title') or '(no title)')[:60]}"
+                   + (f"\n    note: {note[:160]}" if note else "")
+                   + (f"\n    match: {snip[:200]}" if snip else ""))
+    if len(out) == 1:
+        return "No matching past sessions found."
+    return "\n".join(out)
+
+
 def make_history_tool(memory, session_id: str):
     """ToolEntry for recall_history, reading `memory`'s episodic cache for this session.
 
@@ -119,6 +147,16 @@ def make_history_tool(memory, session_id: str):
     guard = {"seen": -1, "served": set(), "distinct": 0}   # episode count, fetches served, drills
 
     def _handler(args: dict) -> str:
+        # cross-session shape (item 12): search=... runs FTS5 across PAST sessions. Distinct
+        # from the index/turns/last shapes (this session's cache) — checked first, no rein
+        # (each query is a real search returning new info, like the distinct-fetch path).
+        q = args.get("search")
+        if isinstance(q, str) and q.strip():
+            hits = memory.search_episodes(q.strip(), limit=6, exclude_session=session_id)
+            if not hits:
+                return ("No matching PAST sessions. (This searches other sessions; for THIS "
+                        "session's turns call recall_history() with no args.)")
+            return render_cross_session(hits) + CAPTURE_BACK
         lines = memory.read_episodes(session_id)
         if len(lines) != guard["seen"]:          # cache grew (or first call) → new turn → reset rein
             guard["seen"] = len(lines)
@@ -153,15 +191,18 @@ def make_history_tool(memory, session_id: str):
     schema = {"type": "function", "function": {
         "name": "recall_history",
         "description": (
-            "Look back into THIS session's cached history (turns older than what RECENT shows). Call "
-            "with NO args for a timestamped, titled INDEX of past turns; then fetch specifics with "
-            "{\"turns\":[N,...]} or {\"last\":N} to get their compact trace (actions/observations/"
-            "notes), or add {\"full\":true} for a turn's full slice. Use it to recover context you no "
+            "Look back into cached history. THIS session: call with NO args for a timestamped, titled "
+            "INDEX of past turns; then fetch specifics with {\"turns\":[N,...]} or {\"last\":N} for "
+            "their compact trace (actions/observations/notes), or add {\"full\":true} for a turn's full "
+            "slice. PAST sessions: pass {\"search\":\"keywords\"} to find relevant turns from OTHER "
+            "sessions (FTS5 — supports AND/OR/quoted phrases/prefix*). Use it to recover context you no "
             "longer have — then record what you learned with a note so you don't have to re-read."),
         "parameters": {"type": "object", "properties": {
-            "last": {"type": "integer", "description": "fetch the most recent N turns"},
+            "last": {"type": "integer", "description": "fetch the most recent N turns (this session)"},
             "turns": {"type": "array", "items": {"type": "integer"},
-                      "description": "fetch these specific turn numbers (from the index)"},
+                      "description": "fetch these specific turn numbers (from the index, this session)"},
             "full": {"type": "boolean", "description": "return the full stored slice instead of the compact trace"},
+            "search": {"type": "string",
+                       "description": "FTS5 query across PAST sessions (not this one); returns matching turns"},
         }}}}
     return ToolEntry(name="recall_history", schema=schema, handler=_handler, source="builtin")

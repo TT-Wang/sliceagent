@@ -18,6 +18,7 @@ import os
 import re
 from collections import Counter
 
+from .finding_types import badge, classify_finding
 from .slice import one_line
 
 PROC_MIN_ACTIONS = 3     # a workflow worth a skill = at least this many meaningful actions
@@ -88,9 +89,12 @@ def promote_episodes(records: list[dict]) -> list[dict]:
         content = (f"Pitfall: {one_line(c['pitfall'], 200)}{recurring}\n"
                    f"Resolution: {one_line(c['note'], 200) or 'resolved'} "
                    f"(files: {', '.join(c['files']) or 'n/a'})")
-        title = "Lesson: " + (one_line(c["note"], 60) or one_line(c["pitfall"], 60))
+        # typed finding (item 14a): a corrective-and-cleared episode is a RESOLVED question by
+        # construction; a note that reads as a dead end / decision overrides via classify_finding.
+        ftype = classify_finding(c["note"], edited=bool(c["files"]), had_error=True, resolved=True)
+        title = badge(ftype) + "Lesson: " + (one_line(c["note"], 60) or one_line(c["pitfall"], 60))
         out.append({"title": title, "content": content, "tags": _tags(c["files"]),
-                    "kind": "fact", "freq": n})
+                    "kind": "fact", "freq": n, "finding_type": ftype})
     return out
 
 
@@ -149,12 +153,15 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
 def render_skill(proc: dict) -> str:
     """A procedure → a SKILL.md (Kimi format: name/description frontmatter + When-to-use/Process).
     Deterministic = a RECORDED procedure; the LLM-distill upgrade (generalizing the steps) slots in
-    here without changing callers."""
+    here without changing callers. Stamps a `provenance:` frontmatter field (item 13) marking the
+    skill consolidation-AUTHORED, so a future curator prunes ONLY auto skills, never user skills."""
+    from .skill_provenance import AUTO, frontmatter_line
     steps = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(proc.get("steps", []))) or "(no steps)"
     n = proc.get("freq", 1)
     prov = f"Auto-distilled from {n} successful run(s) this session." if n > 1 else \
         "Auto-distilled from a successful run."
-    return (f"---\nname: {proc['name']}\ndescription: {proc['description']}\n---\n\n"
+    return (f"---\nname: {proc['name']}\ndescription: {proc['description']}\n"
+            f"{frontmatter_line(AUTO)}\n---\n\n"
             f"# {proc['description']}\n\n{prov}\n\n"
             f"## When to use\n{proc['description']}\n\n"
             f"## Process (observed)\n{steps}\n\n"

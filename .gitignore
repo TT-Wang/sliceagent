@@ -19,3 +19,7 @@ venv/
 scratch/
 *.jsonl
 .DS_Store
+
+# local memagent state / monitor runtime (personal; not part of the repo)
+.memagent/
+monitor/

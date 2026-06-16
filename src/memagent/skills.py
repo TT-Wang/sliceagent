@@ -27,6 +27,8 @@ class Skill:
     description: str
     body: str
     path: str
+    provenance: str = "user"   # "user" | "consolidation" (item 13); from `provenance:` frontmatter
+    root: str = ""             # the discovery root this skill came from (where its .usage.json lives)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -71,10 +73,10 @@ class SkillManager:
             for dp, _dirs, files in os.walk(root):
                 for fn in files:
                     if fn == "SKILL.md" or (fn.endswith(".md") and dp == root):
-                        self._load(os.path.join(dp, fn))
+                        self._load(os.path.join(dp, fn), root)
         return self
 
-    def _load(self, path: str) -> None:
+    def _load(self, path: str, root: str = "") -> None:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -87,7 +89,9 @@ class SkillManager:
         desc = (meta.get("description") or meta.get("when-to-use") or "").strip()
         if not name or not body.strip():
             return
-        self._skills.setdefault(name, Skill(name, desc, body.strip(), path))  # first-wins
+        prov = (meta.get("provenance") or "user").strip().lower() or "user"
+        self._skills.setdefault(name, Skill(name, desc, body.strip(), path,
+                                            provenance=prov, root=root))  # first-wins
 
     def add(self, name: str, body: str, description: str = "") -> None:
         """Register an in-memory skill (e.g. contributed by a plugin). First-wins, so a
@@ -104,7 +108,21 @@ class SkillManager:
 
     def load(self, name: str) -> str | None:
         s = self._skills.get((name or "").lower())
-        return s.body if s else None
+        if s is None:
+            return None
+        self._bump_usage(s)   # item 13: last-used sidecar feeds consolidate's frequency weight
+        return s.body
+
+    def _bump_usage(self, s: "Skill") -> None:
+        """Bump the .usage.json sidecar in the skill's discovery root. Best-effort: a sidecar
+        hiccup, or a plugin/in-memory skill with no root, never breaks the skill load."""
+        if not s.root or not os.path.isdir(s.root):
+            return
+        try:
+            from .skill_usage import bump_use
+            bump_use(s.root, s.name)
+        except Exception:
+            pass
 
 
 def make_skill_tool(manager: SkillManager) -> ToolEntry | None:

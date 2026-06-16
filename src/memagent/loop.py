@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .context_overflow import ContextOverflow
 from .errors import with_retry
 from .events import (
     AssistantText,
     Dispatcher,
     SliceBuilt,
+    SliceTightened,
     StepBegin,
     StepEnd,
     ToolResult,
@@ -21,6 +23,7 @@ from .events import (
     TurnEnd,
     TurnInterrupted,
 )
+from .guidance import BUDGET_EXHAUSTED
 from .hooks import Hooks
 from .scheduler import run_scheduled
 
@@ -74,18 +77,35 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
     if before and before.get("block"):
         raise RuntimeError(before.get("reason") or f"step {step_num} blocked")
 
-    messages = build_slice()
-    prepared = hooks.prepare_messages(messages)  # pre-LLM-call seam (inject context, prompt-cache-safe)
-    if prepared is not None:
-        messages = prepared
+    def _prepare(msgs):
+        prepared = hooks.prepare_messages(msgs)  # pre-LLM-call seam (inject context, prompt-cache-safe)
+        return prepared if prepared is not None else msgs
+
+    messages = _prepare(build_slice())
     dispatch(SliceBuilt(messages[-1]["content"], messages))
     dispatch(StepBegin(step_num))
 
-    resp = with_retry(
-        lambda: llm.complete(messages, tools.schemas()),
-        is_retryable=getattr(llm, "is_retryable", None),
-        dispatch=dispatch,
-    )
+    # ITEM 3: context-overflow rebuild loop. On overflow, ask the slice builder to
+    # tighten its tier caps and rebuild — NEVER grow a transcript. Bounded so an
+    # unfixable overflow re-raises at the tier floor instead of spinning forever.
+    # step_num is unchanged across tightenings; messages stay [system, user] (length 2).
+    overflow_tries = 0
+    while True:
+        try:
+            resp = with_retry(
+                lambda: llm.complete(messages, tools.schemas()),
+                is_retryable=getattr(llm, "is_retryable", None),
+                dispatch=dispatch,
+            )
+            break
+        except ContextOverflow:
+            tightened = getattr(build_slice, "rebuild_tighter", lambda: False)()
+            if not tightened or overflow_tries >= 3:
+                raise
+            overflow_tries += 1
+            dispatch(SliceTightened(level=overflow_tries))
+            messages = _prepare(build_slice())
+            dispatch(SliceBuilt(messages[-1]["content"], messages))
 
     usage = resp.usage or {}
     usage_result = hooks.record_step_usage(usage)  # recorded BEFORE tools, so aborts don't lose it
@@ -110,6 +130,7 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
 def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | None = None,
              max_steps: int = 40, signal=None) -> TurnResult:
     hooks = hooks or Hooks()
+    hooks.reset_for_turn()  # ITEM 1: clear per-turn guards ONCE per user task (not per step)
     total = {"prompt_tokens": 0, "completion_tokens": 0}
     steps = 0
     stop_reason = "end_turn"
@@ -119,7 +140,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             dispatch(TurnInterrupted("aborted"))
             return TurnResult("aborted", steps, total)
         if steps >= max_steps:
-            dispatch(TurnInterrupted("max_steps"))
+            dispatch(TurnInterrupted("max_steps", message=BUDGET_EXHAUSTED("max_steps")))
             stop_reason = "max_steps"
             break
 
