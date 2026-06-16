@@ -1,4 +1,4 @@
-"""CodeIndex tests — the ranked repo-MAP discovery tier (and on-demand snippets). Needs `rg`.
+"""CodeIndex tests — the ranked repo-MAP discovery tier. Needs `rg`.
 Run: python tests/test_code_index.py
 """
 import os
@@ -46,7 +46,7 @@ def map_ranks_matches_first_but_keeps_neutral_files():
     root = _repo()
     idx = RipgrepCodeIndex(root=root)
     q = "checkout discount member amount summary"
-    m = idx.scoped_map(q)
+    m = idx.graph_map(q)
     # the loud match is annotated and appears BEFORE the neutral bug file
     assert "reporting.py" in m and "(matches:" in m
     # the KEY robustness property: the neutral-vocabulary bug file is STILL in the map
@@ -72,7 +72,7 @@ def map_is_bounded():
     if _skip_no_rg():
         print("  (skip: no rg)"); return
     idx = RipgrepCodeIndex(root=_repo())
-    m = idx.scoped_map("checkout", max_chars=120)
+    m = idx.graph_map("checkout", max_chars=120)
     assert len(m) <= 130            # honored the cap (small slack for the final block boundary)
 
 
@@ -82,19 +82,8 @@ def empty_query_still_maps_repo():
     if _skip_no_rg():
         print("  (skip: no rg)"); return
     idx = RipgrepCodeIndex(root=_repo())
-    m = idx.scoped_map("the and for")    # all stopwords → no terms
+    m = idx.graph_map("the and for")    # all stopwords → no terms
     assert "services/billing.py" in m and "reporting.py" in m
-
-
-@check
-def snippets_still_available_on_demand():
-    if _skip_no_rg():
-        print("  (skip: no rg)"); return
-    idx = RipgrepCodeIndex(root=_repo())
-    sn = idx.snippets("checkout summary", k=6)
-    assert sn and any("reporting.py" in s.path for s in sn)
-    # snippets carry actual code lines (line-numbered), not just signatures
-    assert any("checkout_summary" in s.text for s in sn)
 
 
 @check
@@ -105,7 +94,7 @@ def no_code_returns_empty():
     with open(os.path.join(root, "notes.txt"), "w") as f:
         f.write("just prose, no code files\n")
     idx = RipgrepCodeIndex(root=root)
-    assert idx.retrieve("anything") == [] and idx.scoped_map("anything") == ""
+    assert idx.retrieve("anything") == [] and idx.graph_map("anything") == ""
 
 
 def _graph_repo():
@@ -133,10 +122,8 @@ def graph_surfaces_neutral_callee_that_lexical_truncates():
     idx = RipgrepCodeIndex(root=_graph_repo())
     q = "checkout discount member"
     # tight budget: the neutral bug file has ZERO query overlap and sorts after 40 filler files,
-    # so lexical ranking truncates it — but PageRank flows rank cart->billing and keeps it.
-    lex = idx.scoped_map(q, max_chars=400)
+    # so a purely-lexical ranking would truncate it — but PageRank flows rank cart->billing and keeps it.
     graph = idx.graph_map(q, max_chars=400)
-    assert "svc/billing.py" not in lex, "expected lexical map to truncate the neutral file"
     assert "svc/billing.py" in graph, "PageRank should surface the called neutral file"
     # and it ranks ABOVE the filler (appears before any aaa_filler line)
     assert graph.index("svc/billing.py") < graph.index("aaa_filler/")

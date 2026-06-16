@@ -22,7 +22,7 @@ from .events import (
     TurnInterrupted,
     make_dispatcher,
 )
-from .hooks import BudgetHook, CompositeHooks, OracleHook, PermissionHook
+from .hooks import BudgetHook, CompositeHooks, GuardrailHook, OracleHook, PermissionHook
 
 
 def _load_env(path: str = ".env") -> None:
@@ -126,6 +126,8 @@ def main() -> None:
     skill_tool = make_skill_tool(skills)
     if skill_tool is not None:        # register the `skill` tool into the shared registry
         base_tools.registry.register(skill_tool)
+    from .code_grep import make_grep_tool  # guarded ripgrep: the single discovery-on-demand seam
+    base_tools.registry.register(make_grep_tool(base_tools))
     # MCP: connect config + plugin-declared servers; tools register into the SAME registry
     mcp_servers, mcp_runtime = connect_mcp_servers(
         base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"))
@@ -148,6 +150,12 @@ def main() -> None:
     if mine_mode not in ("0", "off", "none"):
         miner = make_miner(memory, session, llm=llm, mode=mine_mode,
                            scope=os.path.basename(root) or "default")
+    # OPT-IN async background-review fork (item 16; OFF unless AGENT_BACKGROUND_REVIEW set).
+    # Reads the durable episodic cache off-thread and consolidates incrementally — never
+    # touches the slice/loop/prompt. None when disabled, so the default path is unchanged.
+    from .background_review import make_background_reviewer
+    reviewer = make_background_reviewer(memory, scope=os.path.basename(root) or "default",
+                                        on_log=lambda m: print(f"  · {m}"))
     # episodic cache: lossless turn log (None for NullMemory → eval path untouched)
     episodic = make_episode_sink(memory, session_id=session.session_id,
                                  task_id_fn=lambda: session.active_id or "t-none",
@@ -160,15 +168,17 @@ def main() -> None:
     if episodic is not None:
         sinks.append(episodic)
     sinks += [log_sink(), cli_sink(cfg.show_slice)]
-    # optional: live web view of the active memory slice (AGENT_MONITOR=1) — eval path untouched
+    # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
+    # snapshots to the shared monitor dir; view them in the STANDING server (python -m memagent.monitor),
+    # which stays up across sessions and goes idle when none is running.
     if os.environ.get("AGENT_MONITOR"):
-        from .monitor import start_monitor
-        _mon, _mon_sink, _mon_url = start_monitor(
+        from .monitor import _monitor_dir, make_file_monitor_sink
+        sinks.append(make_file_monitor_sink(
+            session.session_id,
             context_fn=lambda: {"goal": session.active().goal if session.active_id else "",
-                                "topic": session.active_id or ""},
-            port=int(os.environ.get("AGENT_MONITOR_PORT", "7654")))
-        sinks.append(_mon_sink)
-        print(f"  · slice monitor: {_mon_url}")
+                                "topic": session.active_id or ""}))
+        print(f"  · slice monitor: writing to {_monitor_dir()} — view at the persistent server "
+              "(run: python -m memagent.monitor)")
     dispatch = make_dispatcher(*sinks)
     if miner is not None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
@@ -182,9 +192,10 @@ def main() -> None:
         return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
 
     hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None)]
+    hook_list.append(GuardrailHook())  # cross-step loop guard (per-turn counters, reset each task)
     if cfg.verify_cmd:
         oracle = CommandOracle(cfg.verify_cmd)
-        hook_list.append(OracleHook(oracle, lambda out: setattr(state, "last_error", f"Verification failed:\n{out[:600]}")))
+        hook_list.append(OracleHook(oracle, lambda out: setattr(session.active(), "last_error", f"Verification failed:\n{out[:600]}")))
     if cfg.max_tokens:
         hook_list.append(BudgetHook(cfg.max_tokens))
     hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
@@ -225,6 +236,8 @@ def main() -> None:
                 memory.checkpoint_task(slice_to_task_state(
                     session.active(), session.active_id, session_id=session.session_id,
                     status="done" if result.stop_reason == "end_turn" else "parked"))
+            if reviewer is not None:                        # OPT-IN: critique the turn off-thread
+                reviewer.review(session.session_id)
 
     # session end: consolidate the episodic cache into long-term memory (the cache→memory loop)
     if getattr(memory, "is_durable", False):

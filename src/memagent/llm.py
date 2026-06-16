@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 
+from .context_overflow import ContextOverflow, is_context_overflow
 from .interfaces import AssistantMessage, ToolCall
 
 
@@ -68,12 +69,53 @@ class OpenAILLM:
             return {"reasoning_effort": "low"}                          # OpenAI reasoning models
         return {}  # unknown / non-reasoning provider → leave at provider default (graceful)
 
+    def _cache_kwargs(self, messages: list[dict]) -> dict:
+        """Map prompt-caching intent to the ACTIVE provider's knob; no-op for providers without
+        one. Modeled on `_reasoning_kwargs` — the quirk stays isolated to this adapter.
+
+        Only Claude/Anthropic-compatible endpoints support an explicit prompt-cache breakpoint;
+        every other provider (the default gpt-5.5 / OpenAI-compatible path) returns {} so the
+        request is byte-stable and untouched. For an Anthropic-compatible endpoint we return a
+        TODO-stubbed {} for now: the exact `extra_body` cache_control shape is DEFERRED until a
+        real Anthropic base_url is wired (the safe half — a byte-stable prefix + cached_tokens
+        read-back — is already in place and provider-agnostic).
+        """
+        model, base = self.model.lower(), self._base_url.lower()
+        if "claude" not in model and "anthropic" not in base:
+            return {}  # non-Claude provider → no explicit cache breakpoint
+        # Anthropic-compatible endpoint: DEFER the real cache_control extra_body shape (see
+        # adopt_plan.md sec 6 defer). Stubbed {} keeps the request byte-stable until wired.
+        # TODO(anthropic): set extra_body cache_control on the system/stable prefix against a
+        #   live Anthropic base_url; MERGE with _reasoning_kwargs' extra_body, do not overwrite.
+        return {}
+
+    def _merge_kwargs(self, kwargs: dict, extra: dict) -> None:
+        """Fold `extra` into `kwargs`, MERGING `extra_body` instead of overwriting it.
+
+        Both `_reasoning_kwargs` and `_cache_kwargs` may set `extra_body`; a plain
+        `kwargs.update(...)` would clobber whichever ran first. Merge the nested dict so both
+        provider quirks survive.
+        """
+        for key, value in extra.items():
+            if key == "extra_body" and isinstance(kwargs.get("extra_body"), dict) and isinstance(value, dict):
+                kwargs["extra_body"] = {**kwargs["extra_body"], **value}
+            else:
+                kwargs[key] = value
+
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
         kwargs: dict = dict(model=self.model, messages=messages, tools=tools, tool_choice="auto")
         if self.max_tokens:
             kwargs["max_tokens"] = self.max_tokens
-        kwargs.update(self._reasoning_kwargs())
-        resp = self.client.chat.completions.create(**kwargs)
+        self._merge_kwargs(kwargs, self._reasoning_kwargs())
+        self._merge_kwargs(kwargs, self._cache_kwargs(messages))
+        try:
+            resp = self.client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # Context overflow is NOT a backoff case (is_retryable stays unchanged): signal the
+            # rebuild loop to TIGHTEN the slice rather than re-send the identical oversized request.
+            if is_context_overflow(e):
+                raise ContextOverflow(e, status_code=getattr(e, "status_code", None)) from e
+            raise
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []
@@ -86,6 +128,11 @@ class OpenAILLM:
         usage = None
         if resp.usage:
             usage = {"prompt_tokens": resp.usage.prompt_tokens, "completion_tokens": resp.usage.completion_tokens}
+            # Cache read-back: provider-agnostic, key omitted when absent (no crash on providers
+            # that don't report a cache hit). OpenAI/Anthropic-compatible both nest it here.
+            cached = getattr(getattr(resp.usage, "prompt_tokens_details", None), "cached_tokens", None)
+            if cached is not None:
+                usage["cached_tokens"] = cached
         return AssistantMessage(
             content=msg.content, tool_calls=calls, usage=usage, finish_reason=choice.finish_reason
         )

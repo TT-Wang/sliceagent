@@ -59,10 +59,14 @@ class LessonMiner:
 
     # --- mining ----------------------------------------------------------
     def _on_turn_end(self, event: TurnEnd) -> None:
-        # validated episode only: success + an error that was hit AND finally cleared
+        # validated CORRECTIVE episode only: success + an error hit AND cleared AND an actual FIX made.
+        # The edit requirement is the key gate: an error with NO edit (e.g. read_file on a directory,
+        # or any incidental/self-inflicted failure) is not a lesson — without it we mine junk like
+        # "Lesson: <the user's query>" from a turn that changed nothing.
         if event.stop_reason != "end_turn":
             return
-        if not self._errors or _active(self.state).last_error:
+        s = _active(self.state)
+        if not self._errors or s.last_error or not s.edited_files:
             return
         pitfall = self._errors[-1]
         key = _err_key(pitfall)
@@ -83,7 +87,7 @@ class LessonMiner:
     def _build(self, pitfall: str):
         s = _active(self.state)
         task = (s.goal or "").strip()
-        files = list(s.active_files)
+        files = sorted(s.edited_files) or list(s.active_files)   # the CHANGE set (what the fix touched)
         tags = self._tags(files)
         if self.mode == "llm" and self.llm is not None:
             content = self._distill(task, pitfall, files)

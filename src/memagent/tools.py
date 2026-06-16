@@ -15,6 +15,8 @@ import shlex
 import tempfile
 
 from .access import AllAccess, FileAccess
+from .binsniff import looks_binary
+from .fuzzy import fuzzy_find_unique
 from .registry import ToolEntry, ToolRegistry
 from .sandbox import LocalSandbox
 
@@ -174,8 +176,17 @@ class LocalToolHost:
         return self.registry.run(name, args)  # registry wraps the handler in try/except
 
     def read_text(self, path: str) -> str:
-        with open(self._resolve(path), encoding="utf-8") as f:
-            return f.read()
+        # Read bytes first so the binary gate runs BEFORE we trust the file as text.
+        # A NUL byte / mostly-control-char head means "not text" — feeding it through
+        # OPEN FILES would corrupt the slice and burn tokens. ValueError flows through
+        # the registry try/except so both read_file and str_replace degrade gracefully.
+        full = self._resolve(path)
+        with open(full, "rb") as f:
+            raw = f.read()
+        sample = raw[:8192].decode("utf-8", errors="replace")
+        if looks_binary(path, sample):
+            raise ValueError(f"{path} appears to be binary; not shown")
+        return raw.decode("utf-8")
 
     def _builtin_accesses(self, name: str, args: dict) -> list:
         """Declare what each builtin call touches so the scheduler can safely parallelize."""
@@ -201,8 +212,7 @@ class LocalToolHost:
     def _t_edit_file(self, args: dict) -> str:
         full = self._resolve(args["path"])
         self._mkparent(full)
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(args["content"])
+        self._atomic_write(full, args["content"])
         return f"Wrote {len(args['content'])} bytes to {args['path']}"
 
     def _t_append(self, args: dict) -> str:
@@ -216,17 +226,27 @@ class LocalToolHost:
         full = self._resolve(args["path"])
         cur = self.read_text(args["path"])
         old = args["old_string"]
+        new = args["new_string"]
         n = cur.count(old)
-        if n == 0:
-            return (f"Error: old_string not found in {args['path']} — your snippet does not match "
-                    f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
-                    f"the whole file with edit_file. Do NOT retry the same str_replace.")
+        if n == 1:
+            # Exact match stays the PRIMARY path — unchanged behavior.
+            updated = cur.replace(old, new, 1)
+            self._atomic_write(full, updated)
+            return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
         if n > 1:
             return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
-        updated = cur.replace(old, args["new_string"], 1)
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(updated)
-        return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
+        # n == 0: exact match failed. Try a whitespace-tolerant UNIQUE fuzzy span before
+        # giving up. fuzzy_find_unique returns None on 0/>1 candidates, so uniqueness is
+        # preserved — we never replace an ambiguous match.
+        span = fuzzy_find_unique(cur, old)
+        if span is not None:
+            updated = cur[:span[0]] + new + cur[span[1]:]
+            self._atomic_write(full, updated)
+            return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
+                    f"({len(cur)} → {len(updated)} bytes)")
+        return (f"Error: old_string not found in {args['path']} — your snippet does not match "
+                f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
+                f"the whole file with edit_file. Do NOT retry the same str_replace.")
 
     def _t_run_command(self, args: dict) -> str:
         code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
@@ -265,3 +285,23 @@ class LocalToolHost:
     def _mkparent(path: str) -> None:
         parent = os.path.dirname(os.path.abspath(path))
         os.makedirs(parent, exist_ok=True)
+
+    @staticmethod
+    def _atomic_write(full: str, content: str) -> None:
+        """Write `content` to `full` atomically: write a temp file in the SAME directory,
+        then os.replace() it over the target. A crash/error mid-write leaves the original
+        intact (the rename is atomic on POSIX); the temp is unlinked on any failure. The
+        temp must share the target's filesystem for os.replace to be atomic, hence
+        dir=os.path.dirname(full) (full is already _resolve()'d)."""
+        d = os.path.dirname(full)
+        fd, tmp = tempfile.mkstemp(prefix=".memagent-tmp-", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp, full)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise

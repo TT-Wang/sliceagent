@@ -59,6 +59,12 @@ class ApiRetry(Event):
 
 
 @dataclass
+class SliceTightened(Event):
+    level: int
+    reason: str = "context_overflow"
+
+
+@dataclass
 class TurnEnd(Event):
     stop_reason: str
     steps: int

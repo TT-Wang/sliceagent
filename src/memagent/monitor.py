@@ -17,8 +17,11 @@ The store is task- and llm-agnostic: it shows whatever the slice is, for whateve
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from .events import (
     AssistantText,
@@ -172,6 +175,112 @@ def start_monitor(context_fn=None, host: str = "127.0.0.1", port: int = 7654):
     return monitor, monitor.sink, url
 
 
+# --- persistent monitor: a STANDING server decoupled from agent sessions --------------------
+# A session writes its snapshot to <dir>/<session>.json each event; the standing server reads the
+# dir and serves it, going idle when nothing's written recently. So the monitor survives sessions
+# (it's a separate process) and shows whichever session is active — or idles — instead of dying.
+IDLE_SECONDS = 12
+
+
+def _monitor_dir(d: str | None = None) -> str:
+    d = d or os.environ.get("MEMAGENT_MONITOR_DIR") or \
+        os.path.join(os.path.expanduser("~"), ".memagent", "monitor")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def make_file_monitor_sink(session_id: str, context_fn=None, dir: str | None = None):
+    """A monitor sink that PERSISTS the snapshot to <dir>/<session>.json each event, so a standing
+    server (python -m memagent.monitor) can show it — decoupled from this process. Writes are atomic
+    and failure-contained (a monitor write must never break the loop)."""
+    monitor = SliceMonitor(context_fn=context_fn)
+    path = os.path.join(_monitor_dir(dir), f"{session_id}.json")
+    inner = monitor.sink
+
+    def sink(event: Event) -> None:
+        inner(event)
+        try:
+            snap = monitor.snapshot()
+            snap["session"] = session_id
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+    return sink
+
+
+def _session_files(d: str):
+    out = []
+    try:
+        for fn in os.listdir(d):
+            if fn.endswith(".json"):
+                out.append((fn[:-5], os.path.getmtime(os.path.join(d, fn))))
+    except OSError:
+        pass
+    return sorted(out, key=lambda x: x[1], reverse=True)   # most-recently-active first
+
+
+class _PersistentHandler(_Handler):
+    """Serves the page + /api/state read from the monitor dir (freshest or ?session=), with an idle
+    flag and a session list — so one standing server reflects whatever session is running, or idles."""
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        if u.path in ("/", "/index.html"):
+            self._send(PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        elif u.path == "/api/state":
+            sel = (parse_qs(u.query).get("session") or [None])[0]
+            self._send(json.dumps(self._state(sel), ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _state(self, sel):
+        d = self.server.monitor_dir
+        files = _session_files(d)
+        base = {"version": -1, "turns": 0, "steps_total": 0, "tokens": 0, "steps": []}
+        if not files:
+            return {**base, "idle": True, "session": None, "sessions": []}
+        sessions = [s for s, _ in files]
+        chosen = sel if sel in sessions else sessions[0]   # default = most-recently-active
+        path = os.path.join(d, f"{chosen}.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                snap = json.load(fh)
+            age = time.time() - os.path.getmtime(path)
+        except Exception:
+            snap, age = dict(base), IDLE_SECONDS + 1
+        snap["idle"] = age > IDLE_SECONDS
+        snap["age"] = round(age, 1)
+        snap["session"] = chosen
+        snap["sessions"] = sessions
+        return snap
+
+
+def main():
+    """`python -m memagent.monitor` — the standing, persistent monitor server. Stays up across
+    agent sessions; idle when none is running; populated when a session runs with AGENT_MONITOR=1."""
+    d = _monitor_dir()
+    host = "127.0.0.1"
+    port = int(os.environ.get("AGENT_MONITOR_PORT", "7654"))
+    last = None
+    for p in range(port, port + 10):
+        try:
+            srv = ThreadingHTTPServer((host, p), _PersistentHandler)
+            srv.monitor_dir = d
+            srv.daemon_threads = True
+            print(f"memagent monitor (persistent) → http://{host}:{p}   ·   watching {d}", flush=True)
+            print("idle until a session runs with AGENT_MONITOR=1; Ctrl-C to stop.", flush=True)
+            srv.serve_forever()
+            return
+        except OSError as exc:
+            last = exc
+    raise RuntimeError(f"no free port in {port}..{port + 9}: {last}")
+
+
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>memagent · active memory slice monitor</title>
@@ -189,6 +298,7 @@ PAGE = r"""<!doctype html>
   header .dot{width:8px;height:8px;border-radius:50%;background:var(--green);
     box-shadow:0 0 6px var(--green);display:inline-block;margin-right:6px}
   header .dot.stale{background:var(--muted);box-shadow:none}
+  header .dot.idle{background:var(--amber);box-shadow:0 0 6px var(--amber)}
   .stats{display:flex;gap:14px;color:var(--muted);font-size:12px;margin-left:auto;align-items:center}
   .stats b{color:var(--fg);font-weight:600}
   label.follow{display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--muted)}
@@ -235,7 +345,9 @@ PAGE = r"""<!doctype html>
 <body>
 <header>
   <h1><span class="dot" id="dot"></span>memagent · active memory slice</h1>
+  <span id="status" style="font-size:11px;color:var(--muted)">connecting…</span>
   <div class="stats">
+    <select id="sess" title="session" style="background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:2px 6px;font:11px var(--mono)"></select>
     <span>turns <b id="s-turns">0</b></span>
     <span>steps <b id="s-steps">0</b></span>
     <span>tokens <b id="s-tok">0</b></span>
@@ -247,7 +359,8 @@ PAGE = r"""<!doctype html>
   <section class="detail" id="detail"><div class="empty">waiting for the first turn…<br>run a task in the agent.</div></section>
 </main>
 <script>
-let STATE={steps:[],version:-1}, SEL=null, LASTVER=-1;
+let STATE={steps:[],version:-1}, SEL=null, LASTVER=-1, PICK="";
+document.addEventListener("change",e=>{ if(e.target.id==="sess"){ PICK=e.target.value; LASTVER=-1; SEL=null; } });
 const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
@@ -329,21 +442,38 @@ function renderNav(){
     el.onclick=()=>{ SEL=+el.dataset.i; renderNav(); renderDetail(STATE.steps[SEL]); };
   }
 }
+function syncSessions(d){
+  const sel=$("sess"); if(!sel) return;
+  const list=d.sessions||[];
+  sel.style.display = list.length>1 ? "" : "none";
+  const cur=list.join("|");
+  if(sel.dataset.list!==cur){ sel.dataset.list=cur; sel.innerHTML=list.map(s=>`<option value="${s}">${s}</option>`).join(""); }
+  if(d.session) sel.value=d.session;
+}
 async function poll(){
   try{
-    const r=await fetch("/api/state"); const d=await r.json();
-    $("dot").classList.remove("stale");
+    const url="/api/state"+(PICK?("?session="+encodeURIComponent(PICK)):"");
+    const d=await(await fetch(url)).json();
+    const dot=$("dot"); dot.classList.remove("stale","idle");
+    if(d.session===null){ dot.classList.add("idle"); $("status").textContent="idle — no sessions yet (run with AGENT_MONITOR=1)"; }
+    else if(d.idle){ dot.classList.add("idle"); $("status").textContent=`idle · ${d.session} (last activity ${d.age}s ago)`; }
+    else { $("status").textContent=`live · ${d.session}`; }
+    syncSessions(d);
     $("s-turns").textContent=d.turns; $("s-steps").textContent=d.steps_total;
-    $("s-tok").textContent=d.tokens.toLocaleString();
+    $("s-tok").textContent=(d.tokens||0).toLocaleString();
     if(d.version!==LASTVER){
       LASTVER=d.version; STATE=d;
       if($("follow").checked && d.steps.length) SEL=d.steps[d.steps.length-1].i;
       renderNav();
-      renderDetail(SEL!=null?STATE.steps[SEL]:null);
+      renderDetail(SEL!=null && STATE.steps[SEL]?STATE.steps[SEL]:null);
     }
-  }catch(e){ $("dot").classList.add("stale"); }
+  }catch(e){ $("dot").classList.add("stale"); $("status").textContent="disconnected"; }
 }
 setInterval(poll,1000); poll();
 </script>
 </body></html>
 """
+
+
+if __name__ == "__main__":
+    main()

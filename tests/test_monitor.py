@@ -151,6 +151,52 @@ def live_server_smoke():
         srv.shutdown()
 
 
+@check
+def file_sink_persists_snapshot():
+    import os
+    import tempfile
+    from memagent.monitor import _session_files, make_file_monitor_sink
+    d = tempfile.mkdtemp()
+    sink = make_file_monitor_sink("sess-A", dir=d)
+    sink(sb("SYS", "USER-SLICE"))
+    sink(StepEnd(1, {"prompt_tokens": 10, "completion_tokens": 5}, "end_turn"))
+    p = os.path.join(d, "sess-A.json")
+    assert os.path.exists(p)
+    snap = json.load(open(p))
+    assert snap["session"] == "sess-A" and snap["steps"][0]["user"] == "USER-SLICE"
+    assert [s for s, _ in _session_files(d)] == ["sess-A"]
+
+
+@check
+def persistent_server_idle_and_sessions():
+    import os
+    import tempfile
+    import threading
+    import time
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from memagent.monitor import IDLE_SECONDS, _PersistentHandler, make_file_monitor_sink
+    d = tempfile.mkdtemp()
+    srv = ThreadingHTTPServer(("127.0.0.1", 7793), _PersistentHandler)
+    srv.monitor_dir = d
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # empty dir → idle, no session
+        st = json.loads(urllib.request.urlopen("http://127.0.0.1:7793/api/state", timeout=3).read())
+        assert st["idle"] is True and st["session"] is None and st["sessions"] == []
+        # a fresh session → live (not idle), shows up
+        make_file_monitor_sink("live-1", dir=d)(sb("S", "U"))
+        st = json.loads(urllib.request.urlopen("http://127.0.0.1:7793/api/state", timeout=3).read())
+        assert st["session"] == "live-1" and st["idle"] is False and "live-1" in st["sessions"]
+        # a stale file → idle (age past threshold), but still served (doesn't die)
+        old = time.time() - IDLE_SECONDS - 50
+        os.utime(os.path.join(d, "live-1.json"), (old, old))
+        st = json.loads(urllib.request.urlopen("http://127.0.0.1:7793/api/state", timeout=3).read())
+        assert st["idle"] is True and st["session"] == "live-1" and st["steps"][0]["user"] == "U"
+    finally:
+        srv.shutdown()
+
+
 def main():
     failed = 0
     for fn in CHECKS:

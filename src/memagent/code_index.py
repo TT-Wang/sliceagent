@@ -145,60 +145,6 @@ class RipgrepCodeIndex:
             return []
         return [Snippet(path="(repo map)", text=text, score=float(text.count("(matches:")))]
 
-    def scoped_map(self, query: str, max_files: int = 200, max_chars: int = 4000) -> str:
-        """Definition skeleton of the repo, ranked by lexical relevance to the query. Matched files
-        come first (so truncation keeps the relevant ones) and are annotated with the terms they hit;
-        zero-match files follow (cheap, and they catch neutral-vocabulary targets the term search
-        would miss — the lexical-trap case). Bounded by max_chars: the same discipline as every tier."""
-        files = self._code_files(max_files)
-        if not files:
-            return ""
-        matched: dict[str, set] = {}
-        terms = _terms(query)
-        if terms:
-            for path, info in self._search(terms).items():
-                matched[os.path.relpath(path, self.root)] = info["terms"]
-        files.sort(key=lambda rel: len(matched.get(rel, ())), reverse=True)  # stable → ties stay sorted
-        blocks: list[str] = []
-        used = 0
-        for rel in files:
-            defs = self._defs_in(os.path.join(self.root, rel), 12)
-            if not defs:
-                continue
-            hit = matched.get(rel)
-            head = rel + (f"   (matches: {', '.join(sorted(hit))})" if hit else "")
-            block = head + "\n" + "\n".join("  " + d for d in defs)
-            if used + len(block) + 1 > max_chars:
-                break
-            blocks.append(block)
-            used += len(block) + 1
-        return "\n".join(blocks)
-
-    def snippets(self, query: str, k: int = 6) -> list[Snippet]:
-        """Code-context windows around term hits (the earlier default). Kept for ON-DEMAND use —
-        e.g. a future 'show me the code around X' tool — but no longer the standing discovery tier."""
-        terms = _terms(query)
-        if not terms:
-            return []
-        hits = self._search(terms)
-        if not hits:
-            return []
-        # rank: more distinct terms in a file beats more raw hits of one term
-        ranked = sorted(
-            hits.items(),
-            key=lambda kv: (len(kv[1]["terms"]), kv[1]["count"]),
-            reverse=True,
-        )[:k]
-        out: list[Snippet] = []
-        for path, info in ranked:
-            text = self._context(path, info["lines"])
-            if not text:
-                continue
-            rel = os.path.relpath(path, self.root)
-            score = len(info["terms"]) + min(info["count"], 99) / 100.0
-            out.append(Snippet(path=rel, text=text, score=score))
-        return out
-
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
     def graph_map(self, query: str, max_files: int = 400, max_chars: int = 4000) -> str:
         """Repo map ranked by PERSONALIZED PAGERANK over the symbol def/ref graph, seeded on the
@@ -347,25 +293,6 @@ class RipgrepCodeIndex:
             r = nr
         return r
 
-    # --- repo map (orientation skeleton; not auto-injected per turn) ---------
-    def repo_map(self, max_files: int = 40, max_defs_per_file: int = 10,
-                 max_chars: int = 2500) -> str:
-        """A compact tree of code files → their top-level definitions.
-
-        Cheap orientation for turn-0 / a subagent briefing. NOT folded into every
-        slice (that would add constant tokens and break the bounded-context invariant);
-        the host decides when to surface it.
-        """
-        files = self._code_files(max_files)
-        if not files:
-            return ""
-        blocks: list[str] = []
-        for rel in files:
-            defs = self._defs_in(os.path.join(self.root, rel), max_defs_per_file)
-            if defs:
-                blocks.append(rel + "\n" + "\n".join("  " + d for d in defs))
-        return "\n".join(blocks)[:max_chars]
-
     # --- internals ----------------------------------------------------------
     def _search(self, terms: list[str]) -> dict[str, dict]:
         """One ripgrep pass over all terms; group matches by file."""
@@ -402,37 +329,6 @@ class RipgrepCodeIndex:
                     f["terms"].add(mt)
         return files
 
-    def _context(self, path: str, lines: list[int]) -> str:
-        """Line-numbered context windows around the matched-line clusters in one file."""
-        try:
-            with open(path, "r", errors="replace") as fh:
-                src = fh.read().splitlines()
-        except OSError:
-            return ""
-        if not src:
-            return ""
-        pts = sorted(set(lines))
-        clusters: list[list[int]] = []
-        for ln in pts:
-            if clusters and ln - clusters[-1][-1] <= self.ctx * 2:
-                clusters[-1].append(ln)
-            else:
-                clusters.append([ln])
-        chunks: list[str] = []
-        used = 0
-        for cl in clusters:
-            lo = max(1, cl[0] - self.ctx)
-            hi = min(len(src), cl[-1] + self.ctx)
-            chunk = "\n".join(f"{i:>5} {src[i - 1]}" for i in range(lo, hi + 1))
-            if used + len(chunk) > self.max_chars:
-                chunk = chunk[: max(0, self.max_chars - used)]
-            if chunk:
-                chunks.append(chunk)
-                used += len(chunk)
-            if used >= self.max_chars:
-                break
-        return "\n   …\n".join(chunks)
-
     def _code_files(self, max_files: int) -> list[str]:
         try:
             proc = subprocess.run([self.rg, "--files", self.root],
@@ -446,20 +342,6 @@ class RipgrepCodeIndex:
         rels.sort()
         return rels[:max_files]
 
-    def _defs_in(self, path: str, limit: int) -> list[str]:
-        try:
-            with open(path, "r", errors="replace") as fh:
-                src = fh.read().splitlines()
-        except OSError:
-            return []
-        out: list[str] = []
-        for line in src:
-            if _DEF_RE.match(line):
-                out.append(line.strip()[:120])
-                if len(out) >= limit:
-                    break
-        return out
-
 
 def make_code_index(root: str = ".", *, prefer_ripgrep: bool = True):
     """Factory mirroring make_memory(): a real CodeIndex if ripgrep is on PATH,
@@ -468,3 +350,11 @@ def make_code_index(root: str = ".", *, prefer_ripgrep: bool = True):
         return RipgrepCodeIndex(root=root)
     from .retriever import NullRetriever
     return NullRetriever()
+
+
+def make_subdir_hints(root: str):
+    """Factory for the SUBDIRECTORY CONTEXT tier (ITEM 17 sourcing seam): a per-turn
+    lookup that surfaces project conventions for the subtree the agent is working in.
+    The logic lives in subdir_hints.py; this is the seam slice.py imports."""
+    from . import subdir_hints
+    return subdir_hints.SubdirHints(root)
