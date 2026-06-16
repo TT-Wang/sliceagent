@@ -82,8 +82,9 @@ def cli_sink(show_slice: bool = False):
 
 def main() -> None:
     _load_env()
-    if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")):
-        print("Set OPENAI_API_KEY (or MOONSHOT_API_KEY) — e.g. in a .env file.")
+    if not (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("MOONSHOT_API_KEY")):
+        print("Set LLM_API_KEY (and optionally LLM_BASE_URL) — e.g. in a .env file.")
         sys.exit(1)
 
     from .code_index import make_code_index
@@ -100,7 +101,7 @@ def main() -> None:
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route_topic
     from .skills import make_skill_manager, make_skill_tool
-    from .slice import make_build_slice, slice_sink
+    from .slice import make_build_slice, one_line, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
@@ -138,6 +139,9 @@ def main() -> None:
     session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
+    if getattr(memory, "is_durable", False):   # model's bounded valve into the cold episodic cache
+        from .history import make_history_tool
+        base_tools.registry.register(make_history_tool(memory, session.session_id))
 
     # write side of the memory loop: mine a lesson per successful, error-resolving turn
     miner = None
@@ -146,7 +150,8 @@ def main() -> None:
                            scope=os.path.basename(root) or "default")
     # episodic cache: lossless turn log (None for NullMemory → eval path untouched)
     episodic = make_episode_sink(memory, session_id=session.session_id,
-                                 task_id_fn=lambda: session.active_id or "t-none")
+                                 task_id_fn=lambda: session.active_id or "t-none",
+                                 title_fn=lambda: one_line(session.active().goal, 80) if session.active_id else "")
 
     # sinks: update the active slice from tool results, mine lessons, cache the turn, persist, print
     sinks = [slice_sink(session)]

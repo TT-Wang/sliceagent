@@ -24,10 +24,11 @@ def _files_of(event: ToolResult) -> list[str]:
 class EpisodeSink:
     """Buffers a turn's events; flushes one lossless record on TurnEnd OR TurnInterrupted."""
 
-    def __init__(self, memory, *, session_id: str, task_id_fn):
+    def __init__(self, memory, *, session_id: str, task_id_fn, title_fn=lambda: ""):
         self.memory = memory
         self.session_id = session_id
         self.task_id_fn = task_id_fn   # () -> current task_id (host supplies; Step 3 seam)
+        self.title_fn = title_fn       # () -> human title (goal one-liner) for cheap trace-back
         self._turn = 0
         self._reset()
 
@@ -68,7 +69,12 @@ class EpisodeSink:
             return  # nothing buffered (e.g. the empty TurnEnd right after a TurnInterrupted)
         self._turn += 1
         try:
+            try:
+                title = self.title_fn() or ""
+            except Exception:   # noqa: BLE001 — a title hiccup must not lose the record
+                title = ""
             record = {
+                "title": title,            # human breadcrumb for cheap trace-back (topic is task_id)
                 "steps": self._steps,
                 "note": self._note,
                 "meta": {**self._meta, "stop_reason": stop_reason,
@@ -81,8 +87,8 @@ class EpisodeSink:
             self._reset()  # reset regardless, so a turn can never bleed into the next
 
 
-def make_episode_sink(memory, *, session_id: str, task_id_fn):
+def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: ""):
     """None for non-durable memory (NullMemory) → host skips it → evals untouched."""
     if not getattr(memory, "is_durable", False):
         return None
-    return EpisodeSink(memory, session_id=session_id, task_id_fn=task_id_fn)
+    return EpisodeSink(memory, session_id=session_id, task_id_fn=task_id_fn, title_fn=title_fn)

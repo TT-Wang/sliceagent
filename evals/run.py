@@ -36,8 +36,9 @@ def main() -> None:
 
     from memagent.cli import _load_env
     _load_env()
-    if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")):
-        print("Set OPENAI_API_KEY (or MOONSHOT_API_KEY).")
+    if not (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("MOONSHOT_API_KEY")):
+        print("Set LLM_API_KEY (and optionally LLM_BASE_URL).")
         sys.exit(1)
 
     os.environ["AGENT_MODEL"] = args.model

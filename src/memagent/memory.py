@@ -172,6 +172,9 @@ class NullMemory:
     def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
         return None
 
+    def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
+        return []
+
     def checkpoint_task(self, task: TaskState) -> None:
         return None
 
@@ -244,6 +247,26 @@ class MememMemory:
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
         except Exception:
             pass  # a cache write must never break a session
+
+    def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
+        """Read the session's episodic cache (the read side of the recall_history tool). Returns the
+        raw line dicts in turn order; `limit` keeps only the most recent N. Never raises."""
+        try:
+            path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
+            if not os.path.exists(path):
+                return []
+            out = []
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln:
+                        try:
+                            out.append(json.loads(ln))
+                        except ValueError:
+                            continue
+            return out[-limit:] if limit else out
+        except Exception:
+            return []
 
     # --- task state / resume ---
     def checkpoint_task(self, task: TaskState) -> None:

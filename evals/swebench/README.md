@@ -16,7 +16,7 @@ clean of heavy benchmark deps), with `predictions.jsonl` as the interface:
 /tmp/sweb-venv/bin/python evals/swebench/dump_instances.py --repos marshmallow,requests --limit 2
 
 # 2) run memagent → predictions.jsonl  (uses the issue text only; never the gold/test patch)
-OPENAI_API_KEY=... AGENT_MODEL=gpt-5.5 \
+LLM_API_KEY=... AGENT_MODEL=gpt-5.5 \
   ./.venv/bin/python evals/swebench/run_agent.py
 
 # 3) score with the official harness (builds per-instance Docker images, applies the patch,
