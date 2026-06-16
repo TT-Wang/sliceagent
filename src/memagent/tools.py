@@ -66,6 +66,36 @@ def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
     }
 
 
+# The FINDINGS-capture seam. Every tool call carries a 'note' — the model's distilled conclusion
+# for this turn. It rides on the call the model is ALREADY making (no extra round-trip, unlike a
+# dedicated note tool) and is folded into the slice's FINDINGS tier. This is how a Markov/slice
+# agent gives a REASONING model its own prior conclusions back: the slice has no transcript, so
+# without it the model re-derives the situation each turn (big reasoning bursts → slow). Reasoning
+# models (e.g. deepseek) emit empty message content while tool-calling, so a tool ARG — not message
+# text — is the only reliable capture point.
+NOTE_PROP = {
+    "note": {
+        "type": "string",
+        "description": ("Optional. A durable FACT you established this turn — root cause, a confirmed fix, a "
+                        "ruled-out hypothesis, or 'task done' — in <=15 words. A conclusion, NOT the action "
+                        "you're taking. Saved across turns so you never re-derive it. Empty if nothing new."),
+    }
+}
+
+
+def with_note(schema: dict) -> dict:
+    """Inject the 'note' arg (first, OPTIONAL) into a tool schema — the FINDINGS capture seam.
+    Applied to EVERY tool the model sees, regardless of source (builtin/MCP/plugin/skill).
+    Optional, not required: the model writes it only when it has a genuine durable fact, so the
+    tier fills with conclusions — not the action-narration that forcing a note on every call
+    produces (and which can self-reinforce loops)."""
+    fn = schema.get("function") or {}
+    params = fn.get("parameters") or {"type": "object", "properties": {}, "required": []}
+    props = {**NOTE_PROP, **(params.get("properties") or {})}
+    req = [r for r in (params.get("required") or []) if r != "note"]
+    return {**schema, "function": {**fn, "parameters": {**params, "properties": props, "required": req}}}
+
+
 TOOL_SCHEMAS = [
     _fn("read_file", "Read a file and return its contents.", {"path": {"type": "string"}}, ["path"]),
     _fn("list_files", "List files in a directory (defaults to current directory).", {"path": {"type": "string"}}, []),
@@ -133,7 +163,9 @@ class LocalToolHost:
 
     # --- ToolHost projection: everything comes from the registry now ---
     def schemas(self) -> list[dict]:
-        return self.registry.schemas()
+        # inject the 'note' arg into every tool so the model's per-turn conclusion rides on the
+        # call it already makes and lands in the slice's FINDINGS tier (anti-re-derivation)
+        return [with_note(s) for s in self.registry.schemas()]
 
     def accesses(self, name: str, args: dict) -> list:
         return self.registry.accesses(name, args)

@@ -88,6 +88,7 @@ def main() -> None:
 
     from .code_index import make_code_index
     from .config import load_config
+    from .episode import make_episode_sink
     from .llm import OpenAILLM
     from .mcp_client import connect_mcp_servers
     from .loop import run_turn
@@ -97,8 +98,9 @@ def main() -> None:
     from .plugins import load_plugins
     from .policy import make_policy
     from .sandbox import make_sandbox
+    from .session import Session, make_topic_tools, route_topic
     from .skills import make_skill_manager, make_skill_tool
-    from .slice import Slice, make_build_slice, slice_sink
+    from .slice import make_build_slice, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
@@ -133,19 +135,35 @@ def main() -> None:
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
                              policy=policy, max_depth=sub_depth, notify=print)
-    state = Slice()
+    session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
+    for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
+        base_tools.registry.register(t)
 
     # write side of the memory loop: mine a lesson per successful, error-resolving turn
     miner = None
     if mine_mode not in ("0", "off", "none"):
-        miner = make_miner(memory, state, llm=llm, mode=mine_mode,
+        miner = make_miner(memory, session, llm=llm, mode=mine_mode,
                            scope=os.path.basename(root) or "default")
+    # episodic cache: lossless turn log (None for NullMemory → eval path untouched)
+    episodic = make_episode_sink(memory, session_id=session.session_id,
+                                 task_id_fn=lambda: session.active_id or "t-none")
 
-    # sinks: update the slice from tool results, mine lessons, persist to disk, print
-    sinks = [slice_sink(state)]
+    # sinks: update the active slice from tool results, mine lessons, cache the turn, persist, print
+    sinks = [slice_sink(session)]
     if miner is not None:
         sinks.append(miner)
+    if episodic is not None:
+        sinks.append(episodic)
     sinks += [log_sink(), cli_sink(cfg.show_slice)]
+    # optional: live web view of the active memory slice (AGENT_MONITOR=1) — eval path untouched
+    if os.environ.get("AGENT_MONITOR"):
+        from .monitor import start_monitor
+        _mon, _mon_sink, _mon_url = start_monitor(
+            context_fn=lambda: {"goal": session.active().goal if session.active_id else "",
+                                "topic": session.active_id or ""},
+            port=int(os.environ.get("AGENT_MONITOR_PORT", "7654")))
+        sinks.append(_mon_sink)
+        print(f"  · slice monitor: {_mon_url}")
     dispatch = make_dispatcher(*sinks)
     if miner is not None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
@@ -170,6 +188,7 @@ def main() -> None:
     print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
           f"sandbox={cfg.sandbox_backend} · "
           f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
+          f"episodic={'on' if episodic is not None else 'off'} · "
           f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
           f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
     print('type a task, or "exit" to quit\n')
@@ -182,9 +201,30 @@ def main() -> None:
         if line in ("exit", "quit"):
             break
         if line:
-            state.reset(line)
-            build = make_build_slice(state, tools, retriever, memory, line)
-            run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
+            if session.active_id is None:                  # first message bootstraps the first topic
+                session.new_topic(line)
+            else:                                          # route: continue / new / resume (no junk topic)
+                action, tid = route_topic(llm, line, session)
+                if action == "new":
+                    session.new_topic(line)
+                elif action == "resume":
+                    session.switch_topic(tid)
+                    session.continue_topic(line)
+                else:
+                    session.continue_topic(line)
+                print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
+            build = make_build_slice(session, tools, retriever, memory, line)
+            result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
+            if getattr(memory, "is_durable", False):       # durable checkpoint (no-op under NullMemory)
+                from .taskstate import slice_to_task_state
+                memory.checkpoint_task(slice_to_task_state(
+                    session.active(), session.active_id, session_id=session.session_id,
+                    status="done" if result.stop_reason == "end_turn" else "parked"))
+
+    # session end: consolidate the episodic cache into long-term memory (the cache→memory loop)
+    if getattr(memory, "is_durable", False):
+        memory.consolidate(session.session_id)
+        print("  · consolidated session memory")
 
 
 if __name__ == "__main__":

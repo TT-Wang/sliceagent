@@ -32,6 +32,36 @@ class Snippet:
     score: float = 0.0
 
 
+@dataclass
+class TaskRef:
+    """A bounded index row for the OTHER OPEN THREADS tier (Step 3)."""
+    task_id: str
+    title: str
+    status: str            # active | parked | done | abandoned
+    updated: str = ""
+
+
+@dataclass
+class TaskState:
+    """Resumable, distilled state for one task = the serializable Slice fields. Stores REFS
+    (file paths + anchors), never file contents — ground truth is re-read from disk on resume.
+    Transient tiers (recent, action_log, active_skills) are intentionally NOT serialized."""
+    task_id: str
+    session_id: str = ""
+    title: str = ""
+    status: str = "active"
+    goal: str = ""
+    findings: list[str] = field(default_factory=list)
+    active_files: list[str] = field(default_factory=list)
+    edited_files: list[str] = field(default_factory=list)   # list on the wire; a set in the Slice
+    edit_anchor: dict[str, str] = field(default_factory=dict)
+    last_error: str = ""
+    since_edit: int = 0
+    links: list[str] = field(default_factory=list)          # task-graph edges (Step 3)
+    tags: str = ""                                          # comma-joined (matches remember()/_tags)
+    resolution: str = ""
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Provider-agnostic completion + tool-calling. (borrow: official SDKs / LiteLLM)
@@ -56,10 +86,25 @@ class Retriever(Protocol):
 
 @runtime_checkable
 class Memory(Protocol):
-    """Cross-session memory for the RELEVANT MEMORY tier — durable lessons. (plug: memem)
-    NOTE: distinct from Retriever. memem indexes a curated lesson vault, NOT source code."""
+    """Cross-session memory + the durable STATE VAULT (episodic cache, task-state, lessons).
+    Distinct from Retriever (memem indexes a curated vault, NOT source code). `is_durable` is the
+    structural no-op marker: NullMemory sets it False so hosts skip cache/checkpoint wiring (keeps
+    evals deterministic). The full surface is frozen here; implementations land incrementally.
+    NOTE: @runtime_checkable isinstance() verifies method-NAME presence only — not signatures or
+    return types; behavioral fidelity is enforced by the round-trip tests."""
+    is_durable: bool
+    # --- long-term lessons (exists) ---
     def recall(self, query: str, k: int = 6) -> list[Snippet]: ...
     def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None: ...
+    # --- episodic cache (lossless; never recalled into the LLM context) ---
+    def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None: ...
+    # --- task state / resume ---
+    def checkpoint_task(self, task: TaskState) -> None: ...
+    def load_task(self, task_id: str) -> TaskState | None: ...
+    def list_session_tasks(self, session_id: str) -> list[TaskRef]: ...
+    # --- consolidation / retrieval-feedback (declared now; implemented in later steps) ---
+    def mark_used(self, memory_id: str) -> None: ...
+    def consolidate(self, session_id: str) -> None: ...
 
 
 @runtime_checkable

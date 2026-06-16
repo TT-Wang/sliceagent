@@ -30,15 +30,42 @@ class OpenAILLM:
 
         self.client = OpenAI(http_client=http_client, max_retries=2, **kwargs)
         self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
+        self._base_url = kwargs.get("base_url") or os.environ.get("OPENAI_BASE_URL") or ""
+        # Provider-AGNOSTIC reasoning intent: "full" (default) keeps the model's reasoning; "fast"
+        # minimizes it (wall-clock tracks reasoning tokens, and the slice reconstructs ground-truth
+        # STATE each turn, which can substitute for per-step re-derivation). The core/agent never
+        # sees this — _reasoning_kwargs() maps it to each provider's own param, here in the adapter
+        # (the one place permitted to know provider specifics). AGENT_THINKING=off kept as an alias.
+        self.reasoning = (os.environ.get("AGENT_REASONING")
+                          or ("fast" if (os.environ.get("AGENT_THINKING") or "").lower() == "off"
+                              else "full")).lower()
+        # Cap the completion generously. Providers default low (deepseek ~4096); a response that
+        # exceeds it truncates mid-edit → the agent retries the broken edit → step/time blowup. A
+        # generous explicit cap avoids that. Standard param (provider-agnostic). 0 → leave default.
+        self.max_tokens = int(os.environ.get("AGENT_MAX_TOKENS") or 8192)
 
     def is_retryable(self, error: Exception) -> bool:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
         return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError))
 
+    def _reasoning_kwargs(self) -> dict:
+        """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never
+        error) for providers that have none. Keeps the quirk isolated to this adapter."""
+        if self.reasoning != "fast":
+            return {}
+        model, base = self.model.lower(), self._base_url.lower()
+        if "deepseek" in model or "deepseek" in base:
+            return {"extra_body": {"thinking": {"type": "disabled"}}}  # deepseek: disable thinking
+        if model.startswith(("o1", "o3", "o4", "gpt-5")):
+            return {"reasoning_effort": "low"}                          # OpenAI reasoning models
+        return {}  # unknown / non-reasoning provider → leave at provider default (graceful)
+
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
-        resp = self.client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, tool_choice="auto",
-        )
+        kwargs: dict = dict(model=self.model, messages=messages, tools=tools, tool_choice="auto")
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
+        kwargs.update(self._reasoning_kwargs())
+        resp = self.client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []

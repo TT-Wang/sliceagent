@@ -14,7 +14,7 @@ error, no success, no lesson. An optional one-shot LLM pass distills a crisper l
 from __future__ import annotations
 
 from .events import Event, LessonSaved, ToolResult, TurnEnd
-from .slice import one_line
+from .slice import _active, one_line
 
 # touched-file extensions → coarse tags (helps recall group lessons by stack)
 _EXT_TAG = {
@@ -62,7 +62,7 @@ class LessonMiner:
         # validated episode only: success + an error that was hit AND finally cleared
         if event.stop_reason != "end_turn":
             return
-        if not self._errors or self.state.last_error:
+        if not self._errors or _active(self.state).last_error:
             return
         pitfall = self._errors[-1]
         key = _err_key(pitfall)
@@ -81,8 +81,9 @@ class LessonMiner:
             self.dispatch(LessonSaved(title, content))
 
     def _build(self, pitfall: str):
-        task = (self.state.goal or "").strip()
-        files = list(self.state.active_files)
+        s = _active(self.state)
+        task = (s.goal or "").strip()
+        files = list(s.active_files)
         tags = self._tags(files)
         if self.mode == "llm" and self.llm is not None:
             content = self._distill(task, pitfall, files)
@@ -100,8 +101,12 @@ class LessonMiner:
     def _distill(self, task: str, pitfall: str, files: list[str]) -> str:
         sys_msg = (
             "You distill ONE durable, generalizable engineering lesson from a coding "
-            "episode, for a future agent. Output 1-3 sentences: the pitfall and how to "
-            "avoid/fix it. No preamble, no markdown."
+            "episode, for a future agent. Output 1-3 sentences. Phrase it as a declarative "
+            "FACT about the code/problem (what was wrong, why, and what the correct approach "
+            "is) — NOT as an imperative to your future self: e.g. 'str_replace no-ops unless "
+            "its snippet is unique' ✓, 'Always add context to str_replace' ✗. Imperatives get "
+            "re-read as directives in later sessions and cause wrong or repeated work. "
+            "No preamble, no markdown."
         )
         user = (
             f"Task: {task}\nError that was hit and then resolved:\n{one_line(pitfall, 400)}\n"
