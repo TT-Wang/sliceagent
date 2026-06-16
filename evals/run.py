@@ -23,6 +23,10 @@ def _ensure_importable() -> None:
 
 
 def main() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # stream progress even when piped (no | tail blind spot)
+    except Exception:
+        pass
     _ensure_importable()
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("AGENT_MODEL", "gpt-5.5"))
@@ -40,7 +44,7 @@ def main() -> None:
     from memagent.llm import OpenAILLM
 
     from .cases import ALL_CASES, CASES, STRESS_CASES
-    from .runner import print_scorecard, run_eval
+    from .runner import print_footer, print_header, print_result_row, run_eval
 
     if args.case is not None:
         cases = [c for c in ALL_CASES if c.name == args.case]
@@ -52,8 +56,9 @@ def main() -> None:
 
     llm = OpenAILLM(model=args.model)
     print(f"running {len(cases)} eval case(s) on {args.model} …")
-    results = run_eval(cases, llm)
-    print_scorecard(results)
+    print_header()
+    results = run_eval(cases, llm, on_result=print_result_row)  # stream each row as the case finishes
+    print_footer(results)
     sys.exit(0 if all(r.passed for r in results) else 1)
 
 

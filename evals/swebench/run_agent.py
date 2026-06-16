@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from memagent.cli import _load_env  # noqa: E402
 from memagent.code_index import make_code_index  # noqa: E402
-from memagent.events import ToolResult, make_dispatcher  # noqa: E402
+from memagent.events import StepEnd, ToolResult, make_dispatcher  # noqa: E402
 from memagent.hooks import BudgetHook, CompositeHooks, PermissionHook  # noqa: E402
 from memagent.llm import OpenAILLM  # noqa: E402
 from memagent.memory import NullMemory  # noqa: E402
@@ -41,6 +41,8 @@ def clone_at(repo: str, base_commit: str, dest: str) -> None:
 
 
 def run_instance(inst: dict, *, model: str, max_steps: int, max_tokens: int) -> dict:
+    # start marker streams immediately (id visible during the slow clone); a dot per step follows
+    print(f"  {inst['instance_id']}: ", end="", flush=True)
     repo_dir = os.path.join("/tmp/swebench-repos", inst["instance_id"])
     if os.path.isdir(repo_dir):
         subprocess.run(["rm", "-rf", repo_dir])
@@ -56,8 +58,11 @@ def run_instance(inst: dict, *, model: str, max_steps: int, max_tokens: int) -> 
     retriever = make_code_index(repo_dir)
     build = make_build_slice(state, tools, retriever, NullMemory(), task)
     counter = {"n": 0}
-    dispatch = make_dispatcher(slice_sink(state),
-                               lambda e: counter.__setitem__("n", counter["n"] + 1) if isinstance(e, ToolResult) else None)
+    dispatch = make_dispatcher(
+        slice_sink(state),
+        lambda e: counter.__setitem__("n", counter["n"] + 1) if isinstance(e, ToolResult) else None,
+        lambda e: print(".", end="", flush=True) if isinstance(e, StepEnd) else None,  # live heartbeat
+    )
     hooks = CompositeHooks(PermissionHook(make_policy("guard")), BudgetHook(max_tokens))
 
     detail, steps, tokens = "", 0, 0
@@ -71,12 +76,17 @@ def run_instance(inst: dict, *, model: str, max_steps: int, max_tokens: int) -> 
         detail = f"run error: {e}"
 
     diff = _git("diff", cwd=repo_dir).stdout
-    print(f"  {inst['instance_id']}: {detail} · {steps} steps · {tokens} tok · "
-          f"{counter['n']} tools · {len(diff)} diff-chars · {time.time() - t0:.0f}s")
+    # completes the line the start marker + heartbeat dots opened
+    print(f" {detail} · {steps} steps · {tokens} tok · "
+          f"{counter['n']} tools · {len(diff)} diff-chars · {time.time() - t0:.0f}s", flush=True)
     return {"instance_id": inst["instance_id"], "model_name_or_path": "memagent", "model_patch": diff}
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # stream progress even when piped (no | tail blind spot)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", default="/tmp/swebench-instances.json")
     ap.add_argument("--out", default="/tmp/swebench-predictions.jsonl")

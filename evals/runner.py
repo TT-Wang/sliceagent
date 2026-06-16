@@ -79,18 +79,43 @@ def run_case(case: EvalCase, llm) -> EvalResult:
     return EvalResult(case.name, passed, detail, steps, tokens, time.time() - t0, counter["n"])
 
 
-def run_eval(cases: list[EvalCase], llm) -> list[EvalResult]:
-    return [run_case(c, llm) for c in cases]
+def run_eval(cases: list[EvalCase], llm, on_result=None) -> list[EvalResult]:
+    """Run each case; if on_result is given it's called as each case COMPLETES (live progress —
+    the suite can stream a row per case instead of going dark until the final scorecard)."""
+    results = []
+    for c in cases:
+        r = run_case(c, llm)
+        if on_result is not None:
+            on_result(r)
+        results.append(r)
+    return results
+
+
+def _row(r: EvalResult) -> str:
+    return (f"{r.name:22} {'PASS' if r.passed else 'FAIL':4} {r.steps:>5} {r.tokens:>7} "
+            f"{r.wall_s:>6.1f} {r.tool_calls:>5}  {r.detail[:30]}")
+
+
+def print_header() -> None:
+    print(f"\n{'case':22} {'pass':4} {'steps':>5} {'tokens':>7} {'wall':>6} {'tools':>5}  detail", flush=True)
+    print("-" * 88, flush=True)
+
+
+def print_result_row(r: EvalResult) -> None:
+    print(_row(r), flush=True)  # the live per-case callback for run_eval(on_result=...)
+
+
+def print_footer(results: list[EvalResult]) -> None:
+    n = len(results)
+    p = sum(1 for r in results if r.passed)
+    print("-" * 88, flush=True)
+    print(f"PASS {p}/{n}  ·  total tokens {sum(r.tokens for r in results)}  ·  "
+          f"total wall {sum(r.wall_s for r in results):.1f}s", flush=True)
 
 
 def print_scorecard(results: list[EvalResult]) -> None:
-    print(f"\n{'case':22} {'pass':4} {'steps':>5} {'tokens':>7} {'wall':>6} {'tools':>5}  detail")
-    print("-" * 88)
+    """Full card (header + rows + footer) — for callers that already have the results."""
+    print_header()
     for r in results:
-        print(f"{r.name:22} {'PASS' if r.passed else 'FAIL':4} {r.steps:>5} {r.tokens:>7} "
-              f"{r.wall_s:>6.1f} {r.tool_calls:>5}  {r.detail[:30]}")
-    n = len(results)
-    p = sum(1 for r in results if r.passed)
-    print("-" * 88)
-    print(f"PASS {p}/{n}  ·  total tokens {sum(r.tokens for r in results)}  ·  "
-          f"total wall {sum(r.wall_s for r in results):.1f}s")
+        print(_row(r))
+    print_footer(results)
