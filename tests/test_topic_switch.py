@@ -157,12 +157,16 @@ def continue_topic_preserves_context():
     sess.new_topic("implement add()")
     s = sess.active()
     s.findings = ["added add()"]; s.active_files = ["calc.py"]; s.edited_files = {"calc.py"}
-    s.last_error = "boom"; s.since_edit = 5; s.action_log = {"sig": {"count": 3}}
+    s.last_error = "boom"; s.since_edit = 5
+    s.action_log = {"sig": {"count": 3, "failing": True, "last": "boom"}}
     sess.continue_topic("now add a docstring")
     s2 = sess.active()
     assert s2.goal == "now add a docstring"                # new directive
     assert s2.findings == ["added add()"] and s2.active_files == ["calc.py"] and s2.edited_files == {"calc.py"}
-    assert s2.last_error == "" and s2.since_edit == 0 and s2.action_log == {}   # fresh action epoch
+    assert s2.last_error == "" and s2.since_edit == 0     # fresh error/convergence epoch
+    # I3 WS2 — the anti-loop epoch is DEMOTED, not cleared: counts survive (a genuinely repeated
+    # command still trips REPEATED-with-no-progress) but the stale failing flag is dropped.
+    assert s2.action_log == {"sig": {"count": 3, "failing": False, "last": "boom"}}
 
 
 @check

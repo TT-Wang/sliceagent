@@ -145,13 +145,16 @@ def idempotent_is_known_set():
 # --- mutating tools never trip the no-progress path ----------------------------
 
 @check
-def mutating_tool_repeated_success_never_blocks():
+def mutating_tool_repeated_success_never_blocks_idempotent_path():
+    # A mutating tool's repeated SUCCESS never trips the IDEMPOTENT no-progress path (that path is
+    # for read-only tools only). I3 NOTE: it CAN now trip the tool-agnostic RESULT axis if the result
+    # is byte-identical — so use realistic DISTINCT results here (a real edit changes the file and
+    # returns a different summary). Distinct results = genuine progress = never blocked.
     g = ToolCallGuardrail()
-    args = {"path": "a.py", "old": "x", "new": "y"}
-    # a mutating tool returning the SAME success many times is NOT a no-progress loop
     for i in range(10):
+        args = {"path": f"f{i}.py", "old": "x", "new": f"y{i}"}
         assert g.before_call("edit_file", args).block is False, f"mutating success blocked at {i}"
-        g.after_call("edit_file", args, "edited a.py")
+        g.after_call("edit_file", args, f"edited f{i}.py ({i} lines changed)")
     assert "edit_file" in MUTATING_TOOL_NAMES
 
 
@@ -168,15 +171,18 @@ def mutating_tool_still_blocks_on_repeated_failure():
 
 @check
 def unknown_tool_non_idempotent():
-    # a tool in neither set is treated as non-idempotent → repeated identical SUCCESS never blocks
+    # a tool in neither set is treated as non-idempotent → never trips the IDEMPOTENT no-progress
+    # path. I3 NOTE: distinct results = progress (the tool-agnostic RESULT axis keys on the output),
+    # so changing-result calls never block even for an unknown tool.
     g = ToolCallGuardrail()
-    args = {"q": "hi"}
     assert "mystery_tool" not in IDEMPOTENT_TOOL_NAMES
     assert "mystery_tool" not in MUTATING_TOOL_NAMES
     for i in range(8):
+        args = {"q": f"hi {i}"}
         assert g.before_call("mystery_tool", args).block is False, f"unknown tool blocked at {i}"
-        g.after_call("mystery_tool", args, "same result")
+        g.after_call("mystery_tool", args, f"result {i}")
     # but unknown tools still hit the exact-failure floor
+    args = {"q": "hi"}
     _fail_n(g, "mystery_tool", args, 3)
     assert g.before_call("mystery_tool", args).block is True
 

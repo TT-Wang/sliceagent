@@ -18,7 +18,7 @@ import re
 import uuid
 
 from .interfaces import TaskRef
-from .slice import Slice, one_line
+from .slice import Slice, capture_user_report, one_line
 from .taskstate import slice_to_task_state, task_state_to_slice
 
 
@@ -80,14 +80,27 @@ class Session:
 
     def continue_topic(self, message: str) -> Slice:
         """Continue the active topic with a NEW directive: set the goal, start a fresh action epoch
-        (clear error / anti-loop tally / convergence counter) but KEEP the durable context — findings
-        and the working set — so the follow-up builds on what's already done."""
+        but KEEP the durable context — findings and the working set — so the follow-up builds on
+        what's already done.
+
+        I3 WS2 — DEMOTE the anti-loop epoch, don't wipe it. Clearing action_log every directive let a
+        completed sub-step re-run with no REPEATED warning (turn 14 ran the same command twice). Instead
+        we mark prior entries non-failing (a NEW directive shouldn't carry a stale failure) but KEEP
+        their counts, so a genuinely-repeated command still trips REPEATED-with-no-progress. since_edit
+        is still cleared (a fresh convergence epoch).
+
+        I3 OPEN USER REPORT — if this follow-up looks like a FAILURE REPORT, capture it as a blocker;
+        it is NOT cleared by continue_topic (a new directive does not mean the user retracted the
+        report — only verifying the fix, or a real topic change, clears it)."""
         s = self.active()
         s.goal = message
         s.last_error = ""
-        s.action_log = {}
+        # demote (don't clear): keep counts, drop the failing flag — see WS2 above
+        for sig, a in s.action_log.items():
+            a["failing"] = False
         s.since_edit = 0
         s.reviewed = []          # new directive → the history ratchet resets (re-allow fresh lookbacks)
+        capture_user_report(s, message)   # a failure report rides forward as an OPEN USER REPORT blocker
         return s
 
 
