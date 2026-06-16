@@ -1,0 +1,21 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="memagent">
+  <title>memagent</title>
+  <desc>Square logo: stacked memory tiers with one highlighted active slice above the memagent wordmark.</desc>
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#152038"/>
+      <stop offset="1" stop-color="#0A0F1A"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="488" height="488" rx="108" fill="url(#ink)" stroke="#2A3A5A" stroke-width="2"/>
+
+  <rect x="152" y="167" width="208" height="34" rx="12" fill="#F5A623" opacity="0.14"/>
+  <rect x="176" y="120" width="96" height="16" rx="8" fill="#3A4A6A"/>
+  <rect x="176" y="148" width="72" height="16" rx="8" fill="#3A4A6A"/>
+  <rect x="168" y="176" width="176" height="16" rx="8" fill="#F5A623"/>
+  <rect x="168" y="176" width="176" height="6" rx="3" fill="#FFD089"/>
+  <rect x="176" y="204" width="104" height="16" rx="8" fill="#3A4A6A"/>
+  <rect x="176" y="232" width="68" height="16" rx="8" fill="#3A4A6A"/>
+
+  <text x="256" y="362" text-anchor="middle" font-family="'Inter','SF Pro Display',-apple-system,'Segoe UI',Roboto,sans-serif" font-size="76" font-weight="600" letter-spacing="-2"><tspan fill="#F0B24A">mem</tspan><tspan fill="#EAF0F8">agent</tspan></text>
+</svg>

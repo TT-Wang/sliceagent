@@ -1,0 +1,18 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="memagent logo mark">
+  <title>memagent</title>
+  <desc>Stacked memory tiers with one highlighted active slice.</desc>
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#152038"/>
+      <stop offset="1" stop-color="#0A0F1A"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="108" height="108" rx="28" fill="url(#ink)" stroke="#2A3A5A" stroke-width="1.5"/>
+  <rect x="24" y="55" width="80" height="18" rx="6" fill="#F5A623" opacity="0.14"/>
+  <rect x="32" y="37" width="40" height="6" rx="3" fill="#3A4A6A"/>
+  <rect x="32" y="49" width="30" height="6" rx="3" fill="#3A4A6A"/>
+  <rect x="30" y="61" width="66" height="6" rx="3" fill="#F5A623"/>
+  <rect x="30" y="61" width="66" height="2.4" rx="1.2" fill="#FFD089"/>
+  <rect x="32" y="73" width="44" height="6" rx="3" fill="#3A4A6A"/>
+  <rect x="32" y="85" width="28" height="6" rx="3" fill="#3A4A6A"/>
+</svg>
