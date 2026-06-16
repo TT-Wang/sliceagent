@@ -141,9 +141,14 @@ class RipgrepCodeIndex:
         matches), so a relevant file surfaces even with zero query-word overlap when a matched file
         calls it — the case a purely-lexical ranking truncates on a large repo (see graph_map)."""
         text = self.graph_map(query)
-        if not text:
+        matches = text.count("(matches:") if text else 0
+        if matches == 0:
+            # No lexical SEED matched this query, so the map would be generic centrality (the biggest
+            # files), NOT code related to the query — pure noise on a greeting/chat/non-code turn. The
+            # graph map is only meaningful when seeded by ≥1 lexical match (it then expands structurally),
+            # so with zero seeds we render NOTHING rather than dump a 0-score repo map. (Fixes "hi" -> map.)
             return []
-        return [Snippet(path="(repo map)", text=text, score=float(text.count("(matches:")))]
+        return [Snippet(path="(repo map)", text=text, score=float(matches))]
 
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
     def graph_map(self, query: str, max_files: int = 400, max_chars: int = 4000) -> str:

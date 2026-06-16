@@ -101,7 +101,7 @@ def main() -> None:
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route_topic
     from .skills import make_skill_manager, make_skill_tool
-    from .slice import make_build_slice, one_line, slice_sink
+    from .slice import make_build_slice, one_line, record_user, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
@@ -164,13 +164,44 @@ def main() -> None:
                                  task_id_fn=lambda: session.active_id or "t-none",
                                  title_fn=lambda: one_line(session.active().goal, 80) if session.active_id else "")
 
+    # optional rich TUI (the `tui` extra). Output via Rich, input via prompt_toolkit — temporally
+    # separate from the synchronous run_turn, so no patch_stdout/threading. Off when piped (eval).
+    _tui = None
+    _stats = {"model": llm.model, "policy": policy_mode, "topic": "", "tokens": 0}
+    try:
+        from . import tui as _tuimod
+        if _tuimod.tui_enabled():
+            _tui = _tuimod
+    except Exception:
+        _tui = None
+    _console = _tui.Console() if _tui else None
+
+    # wire the ask_user capability to a real prompt when interactive (TUI rich prompt, or plain
+    # input); headless/eval keeps the non-interactive default so it never hangs.
+    if _tui or sys.stdin.isatty():
+        def _ask_user(question, options):
+            if _tui:
+                return _tui.ask_user(_console, question, options)
+            print(f"\n  ❓ {question}")
+            for i, o in enumerate(options or [], 1):
+                print(f"     {i}. {o}")
+            try:
+                a = input("  your answer ▸ ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return "(no answer)"
+            if options and a.isdigit() and 1 <= int(a) <= len(options):
+                return options[int(a) - 1]
+            return a or "(no answer)"
+        base_tools.on_ask_user = _ask_user
+
     # sinks: update the active slice from tool results, mine lessons, cache the turn, persist, print
     sinks = [slice_sink(session)]
     if miner is not None:
         sinks.append(miner)
     if episodic is not None:
         sinks.append(episodic)
-    sinks += [log_sink(), cli_sink(cfg.show_slice)]
+    sinks.append(log_sink())
+    sinks.append(_tui.make_rich_sink(_console, _stats) if _tui else cli_sink(cfg.show_slice))
     # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
     # snapshots to the shared monitor dir; view them in the STANDING server (python -m memagent.monitor),
     # which stays up across sessions and goes idle when none is running.
@@ -188,11 +219,36 @@ def main() -> None:
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     def _ask(name, args, reason):  # interactive resolver for AGENT_POLICY=ask
+        detail = args.get("command") or args.get("path") or args.get("code", "")
+        if _tui:  # synchronous mid-run (no pt app live) → a Rich confirm is safe
+            return _tui.confirm(_console, name, str(detail), reason)
         if not sys.stdin.isatty():
             return "no"
-        detail = args.get("command") or args.get("path") or args.get("code", "")
         ans = input(f"  ⚠ allow {name} {str(detail)[:60]!r}? ({reason}) [y]es/[n]o/[a]lways: ").strip().lower()
         return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
+
+    def _handle_slash(line):  # TUI navigation palette — wired to existing session ops
+        parts = line.split(maxsplit=1)
+        cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
+        if cmd == "/help":
+            _console.print("commands: /threads · /switch <id> · /resume <id> · /help · /exit")
+        elif cmd == "/threads":
+            ts = session.open_threads(include_active=True)
+            _console.print("  (no topics yet)" if not ts else
+                           "\n".join(f"  [{t.task_id}] {t.title} ({t.status})" for t in ts))
+        elif cmd in ("/switch", "/resume"):
+            if not arg:
+                _console.print(f"  usage: {cmd} <task_id>")
+            else:
+                try:
+                    session.switch_topic(arg)
+                    _stats["topic"] = one_line(session.active().goal, 40)
+                    _console.print(f"  switched to {arg}")
+                except Exception:
+                    _console.print(f"  no such topic: {arg}")
+        else:
+            _console.print(f"  unknown command {cmd} (/help)")
+        return True
 
     hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None)]
     hook_list.append(GuardrailHook())  # cross-step loop guard (per-turn counters, reset each task)
@@ -204,43 +260,62 @@ def main() -> None:
     hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
     hooks = CompositeHooks(*hook_list)
 
-    print(f"memagent · slice core (run_turn) · model={llm.model} · policy={policy_mode} · "
-          f"sandbox={cfg.sandbox_backend} · "
-          f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
-          f"episodic={'on' if episodic is not None else 'off'} · "
-          f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
-          f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
-    print('type a task, or "exit" to quit\n')
+    info = (f"model={llm.model} · policy={policy_mode} · sandbox={cfg.sandbox_backend} · "
+            f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
+            f"episodic={'on' if episodic is not None else 'off'} · "
+            f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
+            f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
+    _input = _tui.TuiInput(_stats) if _tui else None
+    if _tui:
+        _tui.banner(_console, info)
+    else:
+        print("memagent · slice core (run_turn) · " + info)
+        print('type a task, or "exit" to quit\n')
     while True:
-        try:
-            line = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+        if _input is not None:
+            line = _input.prompt()
+            if line is None:                               # ctrl-d / EOF
+                break
+            line = line.strip()
+        else:
+            try:
+                line = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+        if line in ("exit", "quit", "/exit"):
             break
-        if line in ("exit", "quit"):
-            break
-        if line:
-            if session.active_id is None:                  # first message bootstraps the first topic
+        if not line:
+            continue
+        if _tui and line.startswith("/"):                  # navigation palette (no turn)
+            _handle_slash(line)
+            continue
+        if session.active_id is None:                      # first message bootstraps the first topic
+            session.new_topic(line)
+        else:                                              # route: continue / new / resume (no junk topic)
+            action, tid = route_topic(llm, line, session)
+            if action == "new":
                 session.new_topic(line)
-            else:                                          # route: continue / new / resume (no junk topic)
-                action, tid = route_topic(llm, line, session)
-                if action == "new":
-                    session.new_topic(line)
-                elif action == "resume":
-                    session.switch_topic(tid)
-                    session.continue_topic(line)
-                else:
-                    session.continue_topic(line)
+            elif action == "resume":
+                session.switch_topic(tid)
+                session.continue_topic(line)
+            else:
+                session.continue_topic(line)
+            if not _tui:                                   # TUI shows the topic in the status bar, not as noise
                 print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
-            build = make_build_slice(session, tools, retriever, memory, line)
-            result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
-            if getattr(memory, "is_durable", False):       # durable checkpoint (no-op under NullMemory)
-                from .taskstate import slice_to_task_state
-                memory.checkpoint_task(slice_to_task_state(
-                    session.active(), session.active_id, session_id=session.session_id,
-                    status="done" if result.stop_reason == "end_turn" else "parked"))
-            if reviewer is not None:                        # OPT-IN: critique the turn off-thread
-                reviewer.review(session.session_id)
+        _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
+        record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
+        build = make_build_slice(session, tools, retriever, memory, line)
+        # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
+        # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
+        result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
+        if getattr(memory, "is_durable", False):           # durable checkpoint (no-op under NullMemory)
+            from .taskstate import slice_to_task_state
+            memory.checkpoint_task(slice_to_task_state(
+                session.active(), session.active_id, session_id=session.session_id,
+                status="done" if result.stop_reason == "end_turn" else "parked"))
+        if reviewer is not None:                            # OPT-IN: critique the turn off-thread
+            reviewer.review(session.session_id)
 
     # session end: consolidate the episodic cache into long-term memory (the cache→memory loop)
     if getattr(memory, "is_durable", False):

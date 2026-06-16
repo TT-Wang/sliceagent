@@ -13,6 +13,20 @@ import os
 from .context_overflow import ContextOverflow, is_context_overflow
 from .interfaces import AssistantMessage, ToolCall
 
+_CLASHX = "http://127.0.0.1:7890"  # local ClashX default for foreign endpoints (OpenAI) behind the GFW
+
+
+def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
+    """Pick the HTTP proxy for the active provider. An EXPLICIT setting (arg or AGENT_PROXY/HTTPS_PROXY/
+    HTTP_PROXY) ALWAYS wins. Otherwise: foreign endpoints (OpenAI/gpt) route through the local ClashX
+    proxy, CN-direct providers (deepseek/moonshot) go DIRECT — so picking a model 'just works' without
+    juggling AGENT_PROXY. Returns a proxy URL or 'none'. (Environment/provider quirk, isolated here.)"""
+    if explicit:
+        return explicit
+    base_l = (resolved_base or "").lower()
+    direct = any(d in base_l for d in ("deepseek", "moonshot", "127.0.0.1", "localhost"))
+    return "none" if direct else _CLASHX
+
 
 class OpenAILLM:
     def __init__(self, model: str | None = None, api_key: str | None = None,
@@ -20,22 +34,27 @@ class OpenAILLM:
         import httpx
         from openai import OpenAI
 
-        proxy = proxy or os.environ.get("AGENT_PROXY") or os.environ.get("HTTPS_PROXY") \
-            or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:7890"
-        use_proxy = bool(proxy) and proxy != "none"
-        http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
-
         # Provider-AGNOSTIC env: LLM_API_KEY / LLM_BASE_URL are canonical. OPENAI_*/MOONSHOT_* are
         # kept ONLY as a back-compat fallback (the SDK is OpenAI-compatible and many shells already
         # export OPENAI_API_KEY) — the surface the user configures says "LLM", not a provider name.
+        # Resolve the ENDPOINT first: the proxy choice below depends on which provider it is.
         kwargs: dict = {"api_key": api_key or os.environ.get("LLM_API_KEY")
                         or os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")}
         resolved_base = base_url or os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        if not resolved_base and os.environ.get("MOONSHOT_API_KEY") and not (
+                os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+            resolved_base = "https://api.moonshot.cn/v1"
         if resolved_base:
             kwargs["base_url"] = resolved_base
-        elif os.environ.get("MOONSHOT_API_KEY") and not (
-                os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")):
-            kwargs["base_url"] = "https://api.moonshot.cn/v1"
+
+        # Proxy: an EXPLICIT setting (the arg, or AGENT_PROXY/HTTPS_PROXY/HTTP_PROXY) ALWAYS wins.
+        # Otherwise choose per-provider so a model "just works": foreign endpoints (OpenAI/gpt) route
+        # through the local ClashX proxy; CN-direct providers (deepseek/moonshot) go DIRECT. This is an
+        # environment/provider quirk, isolated to this adapter (llm-agnostic) and overridable.
+        proxy = _choose_proxy(resolved_base, proxy or os.environ.get("AGENT_PROXY")
+                              or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"))
+        use_proxy = bool(proxy) and proxy != "none"
+        http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
 
         self.client = OpenAI(http_client=http_client, max_retries=2, **kwargs)
         self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
@@ -105,7 +124,12 @@ class OpenAILLM:
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
         kwargs: dict = dict(model=self.model, messages=messages, tools=tools, tool_choice="auto")
         if self.max_tokens:
-            kwargs["max_tokens"] = self.max_tokens
+            # Provider quirk (isolated here per llm-agnostic): OpenAI gpt-5/o-series renamed this
+            # param to max_completion_tokens and REJECT max_tokens with a 400. Pick the right key.
+            key = ("max_completion_tokens"
+                   if self.model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+                   else "max_tokens")
+            kwargs[key] = self.max_tokens
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:

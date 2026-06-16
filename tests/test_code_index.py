@@ -193,6 +193,22 @@ def graph_cache_output_matches_uncached():
     assert a == b
 
 
+@check
+def nonmatch_query_renders_no_related_code():
+    # G4 fix: a query with NO lexical seed (greeting / chat / non-code turn) must NOT dump a
+    # 0-score generic repo map — retrieve returns []. A matching query still returns the seeded map.
+    if _skip_no_rg():
+        print("  (skip: no rg)"); return
+    root = _repo()
+    try:
+        idx = RipgrepCodeIndex(root=root)
+        assert idx.retrieve("hi there how are you") == [], "non-matching query must return NO repo map"
+        hits = idx.retrieve("checkout discount member amount")  # matches the repo vocabulary
+        assert hits and hits[0].score >= 1, f"a matching query must still return the seeded map: {hits}"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     failed = 0
     for fn in CHECKS:

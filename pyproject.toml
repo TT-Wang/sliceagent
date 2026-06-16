@@ -19,6 +19,11 @@ dependencies = [
 # false-positives). OPTIONAL: code_index._ts_def_names falls back to a regex when absent, so the
 # graph map works without it. `pip install -e .[treesitter]`.
 treesitter = ["tree-sitter>=0.21", "tree-sitter-python>=0.21"]
+# Rich terminal UI: tool-call cards, inline diffs, status footer, slash palette, prompt_toolkit
+# input (history/completion/ctrl-c-abort). OPTIONAL: the CLI falls back to plain print()+input()
+# when absent (and when piped/headless, e.g. the eval). `pip install -e .[tui]`. Borrowed from
+# Hermes' rich+prompt_toolkit stack; plugs into the event-sink seam, never touches the moat.
+tui = ["rich>=13", "prompt_toolkit>=3.0"]
 
 [project.scripts]
 memagent = "memagent.cli:main"

@@ -36,6 +36,8 @@ class EvalResult:
     tokens: int
     wall_s: float
     tool_calls: int
+    re_reads: int = 0   # reconstruction-MISS signal: files re-read soon after (slice didn't carry them)
+    recalls: int = 0    # recall_history calls (recovery from the cold cache)
 
 
 def run_case(case: EvalCase, llm) -> EvalResult:
@@ -48,11 +50,14 @@ def run_case(case: EvalCase, llm) -> EvalResult:
         if isinstance(e, ToolResult):
             counter["n"] += 1
 
+    from memagent.telemetry import make_telemetry_sink
+    tel = make_telemetry_sink()  # reconstruction-quality telemetry (re-reads / recalls), off the moat
+
     state = Slice()
     state.reset(case.prompt)
     tools = LocalToolHost()
     retriever = make_code_index(workdir) if case.use_code_index else NullRetriever()
-    dispatch = make_dispatcher(slice_sink(state), count_sink)  # silent: no terminal sink during eval
+    dispatch = make_dispatcher(slice_sink(state), count_sink, tel)  # silent: no terminal sink during eval
     build = make_build_slice(state, tools, retriever, NullMemory(), case.prompt)
 
     cwd = os.getcwd()
@@ -76,7 +81,9 @@ def run_case(case: EvalCase, llm) -> EvalResult:
         except Exception as e:  # noqa: BLE001
             detail = f"verify error: {e}"
 
-    return EvalResult(case.name, passed, detail, steps, tokens, time.time() - t0, counter["n"])
+    tm = tel.summary()
+    return EvalResult(case.name, passed, detail, steps, tokens, time.time() - t0, counter["n"],
+                      re_reads=tm["re_reads"], recalls=tm["recalls"])
 
 
 def run_eval(cases: list[EvalCase], llm, on_result=None) -> list[EvalResult]:
@@ -93,12 +100,13 @@ def run_eval(cases: list[EvalCase], llm, on_result=None) -> list[EvalResult]:
 
 def _row(r: EvalResult) -> str:
     return (f"{r.name:22} {'PASS' if r.passed else 'FAIL':4} {r.steps:>5} {r.tokens:>7} "
-            f"{r.wall_s:>6.1f} {r.tool_calls:>5}  {r.detail[:30]}")
+            f"{r.wall_s:>6.1f} {r.tool_calls:>5} {r.re_reads:>4} {r.recalls:>4}  {r.detail[:26]}")
 
 
 def print_header() -> None:
-    print(f"\n{'case':22} {'pass':4} {'steps':>5} {'tokens':>7} {'wall':>6} {'tools':>5}  detail", flush=True)
-    print("-" * 88, flush=True)
+    print(f"\n{'case':22} {'pass':4} {'steps':>5} {'tokens':>7} {'wall':>6} {'tools':>5} {'rrd':>4} {'rcl':>4}  detail",
+          flush=True)
+    print("-" * 96, flush=True)
 
 
 def print_result_row(r: EvalResult) -> None:

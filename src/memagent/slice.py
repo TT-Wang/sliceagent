@@ -60,6 +60,9 @@ MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
 MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
+MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — last N user<->assistant exchanges (short-range continuity)
+CONVO_MSG_CHARS = 300    # per-message cap in the conversation tier (bounded; the cache holds the full text)
+MAX_GHOSTS = 6           # GHOST INDEX ring — references to recently paged-out files/skills (recovery pointers)
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
 MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-signal first)
@@ -145,22 +148,45 @@ SYSTEM_PROMPT = (
     "asks you to DO something to the code or workspace (implement, fix, refactor, run, investigate a file), "
     "carry it out with tools and make the real change — do not merely describe it. Act when it is a task; "
     "converse when it is conversation.\n\n"
-    "# YOUR CONTEXT — the ACTIVE MEMORY SLICE\n"
-    "You have NO chat history. Each turn you get a freshly reconstructed slice of state, in tiers. Trust them in "
-    "this order of AUTHORITY (highest first):\n"
-    "1. OPEN FILES — live contents re-read from disk: your GROUND TRUTH. Base every edit on what is shown there, "
-    "never on memory. If anything conflicts with OPEN FILES, the file wins. (A huge file shows the region around "
-    "your focus; grep to see more.)\n"
+    "<ask>\n"
+    "If a request is AMBIGUOUS, or you have FAILED or been blocked and are unsure how to proceed, call the "
+    "ask_user tool with ONE concise question (optionally up to ~4 short options) and wait for the answer — "
+    "do NOT guess, and do NOT repeat a failing action hoping it changes. Asking the user a follow-up is a "
+    "normal, expected move, not a failure.\n"
+    "</ask>\n\n"
+    "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
+    "You have NO raw chat transcript. Instead, every turn the host RECONSTRUCTS a bounded, relevant "
+    "'slice' of state for you — your working set — and that slice is the context below. The FULL history "
+    "of this session (every message, tool call, and result, verbatim) is preserved in a durable CACHE on "
+    "disk; the slice is only the part you need right now. Mental model: the slice is RAM, the cache is "
+    "disk, and you stay fast no matter how long the conversation gets because the slice never grows "
+    "without bound.\n"
+    "CONSEQUENCES, internalize them:\n"
+    "- Something not in the slice is NOT gone — it's paged out. If you need an earlier decision, an exact "
+    "prior message, or what you tried many turns ago, PAGE IT IN: call recall_history (an index of every "
+    "turn this session, which you can drill into) — or search the cache for cross-session history. Never "
+    "assume context is lost; recall it.\n"
+    "- The slice can be an imperfect projection. If a tier looks stale or contradicts what you observe, "
+    "trust the WORLD (OPEN FILES / a fresh tool result) over the slice, and recall_history to check what "
+    "actually happened rather than guessing.\n"
+    "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
+    "The slice is organized into TIERS. Trust them in this order of AUTHORITY (highest first):\n"
+    "1. OPEN FILES — live contents re-read from disk: your GROUND TRUTH. Base every edit on what is shown "
+    "there, never on memory. If anything conflicts with OPEN FILES, the file wins. (A huge file shows the "
+    "region around your focus; grep to see more.)\n"
     "2. CURRENT ERROR / OPEN USER REPORT — the unresolved failure to fix. If the user REPORTS the work is "
     "broken, treat it as an open blocker: VERIFY any fix against the real artifact (run/open it and observe "
     "success) before claiming it is done — your own note saying 'done' does NOT clear a user report.\n"
-    "3. YOUR NOTES FROM PRIOR TOOL CALLS — facts you recorded on earlier turns. Reuse them to avoid re-deriving, "
-    "but they are YOUR notes, not ground truth: VERIFY against OPEN FILES before relying on one, and a note that "
-    "says the work is 'done' is NOT proof — confirm it on the real artifact (OPEN FILES / a tool result) first.\n"
-    "4. REPEATED/FAILING + RECENT — your recent actions. If an action is REPEATEDLY FAILING, stop repeating it; "
-    "read the file and fix the root cause.\n"
-    "5. RELATED CODE / RELEVANT MEMORY — fuzzy search candidates and past-session lessons; may be incomplete or "
-    "stale — verify against OPEN FILES before relying on them.\n\n"
+    "3. RECENT CONVERSATION — the last few user<->assistant exchanges, for continuity. Older turns are NOT "
+    "shown here; if the user refers to something earlier in the conversation, recall_history to see it "
+    "BEFORE answering, instead of assuming.\n"
+    "4. YOUR NOTES FROM PRIOR TOOL CALLS — facts you recorded on earlier turns. Reuse them to avoid "
+    "re-deriving, but they are YOUR notes, not ground truth: VERIFY against OPEN FILES before relying on "
+    "one, and a note that says the work is 'done' is NOT proof — confirm it on the real artifact first.\n"
+    "5. REPEATED/FAILING + RECENT STEPS — your recent actions this turn. If an action is REPEATEDLY "
+    "FAILING, stop repeating it; read the file and fix the root cause (or recall_history / ask_user).\n"
+    "6. RELATED CODE / RELEVANT MEMORY — fuzzy search candidates and past-session lessons; may be "
+    "incomplete or stale — verify against OPEN FILES before relying on them.\n\n"
     "<work>\n"
     "When it IS a task: make the SMALLEST change that resolves it — only what is necessary, reusing the codebase's existing "
     "helpers and idioms; add no special-cases or defensive logic the task did not ask for. Work in as FEW turns as "
@@ -217,6 +243,17 @@ class Slice:
     # directive does NOT mean the user retracted the report); cleared only by a real topic reset or a
     # NEWER report. NOT a transcript: a single most-recent line, capped.
     open_report: str = ""
+    # CONTINUITY (short-range): a bounded ring of the last few user<->assistant exchanges so the slice
+    # carries the immediate conversational thread (a snapshot agent otherwise loses "what we just said").
+    # Older turns are NOT here — they live in the durable episodic cache, paged in ON DEMAND via
+    # recall_history (the decompression path). `turns` counts user turns this topic (for the "+N older"
+    # pointer). Bounded => growth stays decoupled from conversation length (the moat).
+    conversation: list[dict] = field(default_factory=list)  # [{user, assistant}], last MAX_CONVERSATION
+    turns: int = 0
+    # GHOST INDEX: bounded recovery POINTERS (references, not content) to things recently paged OUT of
+    # the slice — an evicted read, a dropped skill. Turns "omission is unrecoverable" into a one-call
+    # fetch. [{kind, ref}], bounded by MAX_GHOSTS; an item leaves the moment it's back in the slice.
+    ghosts: list[dict] = field(default_factory=list)
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -232,6 +269,9 @@ class Slice:
         self.since_edit = 0
         self.reviewed = []
         self.open_report = ""
+        self.conversation = []
+        self.turns = 0
+        self.ghosts = []
 
 
 def one_line(s, n: int = 80) -> str:
@@ -250,6 +290,22 @@ def observe(out, n: int = 260) -> str:
     return o[:head] + " … " + o[-(n - head - 3):]
 
 
+def _ghost_add(s: Slice, kind: str, ref: str) -> None:
+    """Record something just PAGED OUT of the slice (an evicted read / dropped skill) as a bounded
+    recovery POINTER — reference only, ~0 tokens — so the model can bring it back in ONE call instead
+    of blind re-exploration. Dedup by (kind, ref); most-recent kept; bounded by MAX_GHOSTS."""
+    if not ref:
+        return
+    s.ghosts = [g for g in s.ghosts if not (g["kind"] == kind and g["ref"] == ref)]
+    s.ghosts.append({"kind": kind, "ref": ref})
+    s.ghosts = s.ghosts[-MAX_GHOSTS:]
+
+
+def _ghost_drop(s: Slice, kind: str, ref: str) -> None:
+    """A paged-out item is back IN the slice → it is no longer a ghost."""
+    s.ghosts = [g for g in s.ghosts if not (g["kind"] == kind and g["ref"] == ref)]
+
+
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:
     """Add/refresh a file in the working set. Membership is by RELEVANCE, not a fixed last-K:
     edited files (the change set) are protected; recent reads are kept up to READ_BUDGET (residue).
@@ -258,6 +314,7 @@ def touch_file(s: Slice, path: str, edited: bool = False) -> None:
         return
     s.active_files = [p for p in s.active_files if p != path]
     s.active_files.append(path)
+    _ghost_drop(s, "file", path)   # it's back in the working set → no longer a ghost
     if edited:
         s.edited_files.add(path)
     _prune_working_set(s)
@@ -274,6 +331,7 @@ def _prune_working_set(s: Slice) -> None:
         if p not in keep:
             s.edit_anchor.pop(p, None)
             s.edited_files.discard(p)
+            _ghost_add(s, "file", p)   # paged out of OPEN FILES → leave a one-call recovery pointer
     s.active_files = [p for p in s.active_files if p in keep]
 
 
@@ -367,6 +425,17 @@ _USER_REPORT_RE = re.compile(
     r"|\b(?:no such file|command not found|traceback|exception|permission denied|"
     r"syntaxerror|nameerror|typeerror|modulenotfound|exit code|segmentation fault)\b"
     r"|:\s*no such file or directory\b"
+    # phrasings the first pass missed (Kimi-review #1): hangs / no-output, red|failing tests/build,
+    # "didn't fix it", "same error still", HTTP 4xx/5xx in a failure context, ModuleNotFoundError.
+    r"|\b(?:hang(?:s|ing|ed)?|frozen|freeze(?:s|ing)?|stuck)\b"
+    r"|\bnothing (?:happen(?:s|ed)?|shows?|showed|loads?|loaded|renders?|rendered)\b"
+    r"|\b(?:tests?|the build|build|ci|pipeline)\b(?:\s+\w+){0,2}?\s+(?:are|is|still|now)?\s*(?:red|failing|fail|broken)\b"
+    r"|\b(?:failing|red|broken)\s+(?:tests?|build|ci)\b"
+    r"|\bdid(?:n'?t|\s+not)\b(?:\s+\w+){0,2}?\s*fix\b"
+    r"|\b(?:still|same)\b(?:\s+\w+){0,3}?\s+(?:error|issue|problem|bug|failure|failing|broken)\b"
+    r"|\bhttp\s*[45]\d\d\b|\b[45]\d\d\s+(?:error|status|response|not found|internal server)\b"
+    r"|\b(?:return(?:s|ed|ing)?|get(?:s|ting)?|got|throw(?:s|n|ing)?|give[sn]?)\s+(?:an?\s+)?(?:http\s*)?[45]\d\d\b"
+    r"|\bmodulenotfounderror\b"
     r")",
     re.I,
 )
@@ -390,8 +459,10 @@ def capture_user_report(s: Slice, message: str) -> bool:
     return True
 
 
-def record_note(s: Slice, text: str, source: str = "tool-note") -> None:
+def record_note(s: Slice, text: str, source: str = "tool-note") -> bool:
     """Fold the model's per-turn note (a distilled FACT it established) into the FINDINGS tier.
+    Returns True iff a GENUINELY NEW finding was added (not narration, not a dedup refresh) — the
+    convergence check uses this so 'actively learning' doesn't count as 'spinning' (review #5).
 
     The slice carries no transcript, so a reasoning model would otherwise re-derive the
     situation each turn (costly reasoning bursts). This lets it carry its OWN conclusions
@@ -404,12 +475,13 @@ def record_note(s: Slice, text: str, source: str = "tool-note") -> None:
     an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call."""
     note = one_line(text, MAX_FINDING_CHARS)
     if not note:
-        return
+        return False
     if _NARRATION_RE.match(note):   # pure intent/narration — carries no durable fact
-        return
+        return False
     # a "done" claim is durable only if an observation backed it; otherwise it's a hypothesis
     if source != "observed" and is_done_claim(note):
         source = "claim"
+    is_new = note not in s.findings  # genuinely new knowledge vs a refresh of an existing finding
     if note in s.findings:          # already established — refresh its recency, don't duplicate
         s.findings.remove(note)
     s.findings.append(note)
@@ -419,6 +491,7 @@ def record_note(s: Slice, text: str, source: str = "tool-note") -> None:
     live = set(s.findings)
     for k in [k for k in s.finding_source if k not in live]:
         del s.finding_source[k]
+    return is_new
 
 
 # I1 PROVENANCE — per-source trust framing. The slice's #1 ground truth is OPEN FILES (disk);
@@ -663,7 +736,10 @@ def add_skill(s: Slice, name: str, body: str) -> None:
         return
     s.active_skills = [sk for sk in s.active_skills if sk["name"] != name]
     s.active_skills.append({"name": name, "body": body[:MAX_SKILL_CHARS]})
+    _ghost_drop(s, "skill", name)   # freshly loaded → not a ghost
     if len(s.active_skills) > MAX_ACTIVE_SKILLS:
+        for sk in s.active_skills[:-MAX_ACTIVE_SKILLS]:
+            _ghost_add(s, "skill", sk["name"])   # evicted skill → recovery pointer
         s.active_skills = s.active_skills[-MAX_ACTIVE_SKILLS:]
 
 
@@ -706,6 +782,45 @@ def render_threads(refs) -> str:
     return "\n".join(lines)
 
 
+def record_user(s: Slice, message: str) -> None:
+    """Append the user's message to the short-range CONVERSATION ring and count the turn. The host
+    calls this once per user message; slice_sink fills the assistant side as the turn produces text.
+    Bounded ring — older exchanges live in the durable cache, paged in on demand (not kept here)."""
+    s.turns += 1
+    s.conversation.append({"user": one_line(message, CONVO_MSG_CHARS), "assistant": ""})
+    s.conversation = s.conversation[-MAX_CONVERSATION:]
+
+
+def render_conversation(s: Slice) -> str:
+    """The RECENT CONVERSATION tier: the last few COMPLETED user<->assistant exchanges (the in-progress
+    one is excluded — its user message is the current task). Ends with a pointer to recall the rest."""
+    prior = [e for e in s.conversation[:-1] if e.get("user")]
+    if not prior:
+        return ""
+    lines = []
+    for e in prior:
+        lines.append(f"- user: {e['user']}")
+        if e.get("assistant"):
+            lines.append(f"  you:  {e['assistant']}")
+    older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
+    tail = (f"\n(+{older} earlier turn(s) this session not shown — use recall_history to view the full "
+            "conversation)") if older > 0 else ""
+    return "\n".join(lines) + tail
+
+
+def render_ghosts(s: Slice) -> str:
+    """GHOST INDEX body: one-line recovery pointers to recently paged-out files/skills (refs only)."""
+    if not s.ghosts:
+        return ""
+    lines = []
+    for g in s.ghosts[-MAX_GHOSTS:]:
+        if g["kind"] == "file":
+            lines.append(f"- {g['ref']} — was open; `read_file {g['ref']}` to bring it back")
+        elif g["kind"] == "skill":
+            lines.append(f"- skill '{g['ref']}' — was loaded; `skill {g['ref']}` to reload")
+    return "\n".join(lines)
+
+
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                  subdir_hints: str = "", *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
     err = f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{s.last_error}\n\n" if s.last_error else ""
@@ -741,13 +856,23 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{discovery}\n"
         if discovery else ""
     )
+    ghosts_body = render_ghosts(s)
+    gi = (
+        "\n# GHOST INDEX (recently paged OUT of this slice — bring any back with ONE call; references only)\n"
+        f"{ghosts_body}\n" if ghosts_body else ""
+    )
     hints = render_subdir_hints(subdir_hints)
     conv = render_convergence(s)
+    convo_body = render_conversation(s)
+    convo = (
+        "# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are in "
+        f"the durable cache: use recall_history to view them)\n{convo_body}\n\n"
+    ) if convo_body else ""
     parts = [
-        conv + rep + err + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        conv + rep + err + convo + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
         f"# RECENT (last {window})", steps, "",
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
-        disc,
+        disc + gi,
         hints + "# NOW: do the next step(s) with tools, or — if your change is complete and verified as well as the "
         "environment allows — write the one-line final summary and make NO tool call.",
     ]
@@ -847,6 +972,10 @@ def slice_sink(state):
         # and OPEN FILES stays the only ground truth. (The episode cache keeps assistant text losslessly.)
         if isinstance(event, AssistantText):
             record_note(s, event.content, source="claim")
+            if s.conversation and (event.content or "").strip():
+                # fill the assistant side of the in-progress exchange — the LAST AssistantText of the
+                # turn wins, so this ends up holding the final reply shown to the user (continuity).
+                s.conversation[-1]["assistant"] = one_line(event.content, CONVO_MSG_CHARS)
             return
         if isinstance(event, ToolResult):
             # the model's distilled conclusion rides on the tool call (the note arg) — fold it into
@@ -854,8 +983,8 @@ def slice_sink(state):
             # on a NON-FAILING call is backed by a real tool result (source "tool-note"); a note on a
             # FAILING call has no observation behind it → "claim" (rendered as unverified). record_note
             # further downgrades any "done"-style note to "claim" unless an observation backs it.
-            record_note(s, event.args.get("note", ""),
-                        source="tool-note" if not event.failing else "claim")
+            new_finding = record_note(s, event.args.get("note", ""),
+                                      source="tool-note" if not event.failing else "claim")
             did_edit = False
             if event.name == "skill" and not event.failing:
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
@@ -891,6 +1020,8 @@ def slice_sink(state):
                 for p in paths_in_code(code):
                     touch_file(s, p, edited=(p in mutated))  # code-as-action edits join the change set
             record_action(s, event.name, event.args, event.output)
-            # convergence tracking: a real edit resets the spin counter; anything else increments it
-            s.since_edit = 0 if did_edit else s.since_edit + 1
+            # convergence tracking: a real edit OR a genuinely-new finding resets the spin counter —
+            # actively LEARNING (recording new facts) is progress, not spinning (review #5). Only a call
+            # that neither edits nor learns advances the convergence/no-progress counter.
+            s.since_edit = 0 if (did_edit or new_finding) else s.since_edit + 1
     return sink

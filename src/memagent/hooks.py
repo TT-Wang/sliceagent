@@ -173,6 +173,12 @@ class BudgetHook(Hooks):
         self.max = max_total_tokens
         self.spent = 0
 
+    def reset_for_turn(self):
+        # PER-TURN budget: reset the tally at the start of each user task (run_turn calls this). Without
+        # this, the cap silently became a whole-SESSION budget across the REPL (Kimi-review #2). A true
+        # session-wide cap, if ever wanted, should be a separate named hook — not this one.
+        self.spent = 0
+
     def record_step_usage(self, usage):
         self.spent += int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
         return {"stop_turn": True} if self.spent >= self.max else None
