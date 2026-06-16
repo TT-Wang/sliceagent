@@ -14,6 +14,12 @@ dependencies = [
     "mcp>=1.0",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
 ]
 
+[project.optional-dependencies]
+# Precision upgrade for the RELATED CODE map's symbol graph (precise defs/refs, no regex
+# false-positives). OPTIONAL: code_index._ts_def_names falls back to a regex when absent, so the
+# graph map works without it. `pip install -e .[treesitter]`.
+treesitter = ["tree-sitter>=0.21", "tree-sitter-python>=0.21"]
+
 [project.scripts]
 memagent = "memagent.cli:main"
 
