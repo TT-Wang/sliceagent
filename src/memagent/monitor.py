@@ -36,6 +36,9 @@ from .events import (
 _MAX_OUTPUT = 6000   # cap a single tool output in the snapshot (the page stays snappy)
 _MAX_ARGS = 4000     # cap a single tool-args blob
 
+# Invariant 0 — bound the observer. The slice is bounded; its monitor must be too.
+_RING_CAP = 40       # serve only the last N steps; counters stay accurate from full tallies (MON1)
+
 
 def _clip(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n] + f"\n…[+{len(text) - n} chars]"
@@ -43,14 +46,22 @@ def _clip(text: str, n: int) -> str:
 
 class SliceMonitor:
     """Thread-safe capture of the per-step slice timeline. The loop (one thread) writes via the
-    sink; the HTTP server (another thread) reads via snapshot — both under one lock."""
+    sink; the HTTP server (another thread) reads via snapshot — both under one lock.
 
-    def __init__(self, context_fn=None):
+    BOUNDED (Invariant 0 / MON1): the in-memory step ring is capped at `cap` (last N steps); cumulative
+    turn/step/token COUNTERS are kept from full tallies so the snapshot stays truthful while memory and
+    serialized size stay O(N). `i` is a monotonic step id (not a list index) so it remains stable across
+    trims and the UI can still select a step uniquely."""
+
+    def __init__(self, context_fn=None, cap: int = _RING_CAP):
         self._ctx_fn = context_fn
+        self._cap = max(1, cap)
         self._lock = threading.Lock()
         self._steps: list[dict] = []
         self._turn = 0
         self._step_in_turn = 0
+        self._steps_total = 0       # full tally — survives ring trimming (MON1 counter)
+        self._tokens = 0            # full token tally — survives ring trimming (MON1 counter)
         self._open = False          # is a turn currently in progress?
         self._cur: dict | None = None
         self._version = 0           # bumps on ANY mutation, so the page re-renders live detail
@@ -71,18 +82,23 @@ class SliceMonitor:
                     self._open = True
                     self._step_in_turn = 0
                 self._step_in_turn += 1
+                self._steps_total += 1             # monotonic full tally (survives ring trim)
                 msgs = e.messages or []
                 system = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
                 user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"),
                             e.rendered)
                 ctx = self._ctx()
                 self._cur = {
-                    "i": len(self._steps), "turn": self._turn, "step": self._step_in_turn,
+                    "i": self._steps_total - 1, "turn": self._turn, "step": self._step_in_turn,
                     "goal": ctx.get("goal", ""), "topic": ctx.get("topic", ""),
                     "system": system, "user": user, "assistant": "", "tools": [],
                     "usage": {}, "stop_reason": "", "interrupted": "",
                 }
                 self._steps.append(self._cur)
+                # MON1: trim past the high-water mark — keep only the last `cap` steps. The live step
+                # is always the last element, so trimming the front never drops `self._cur`.
+                if len(self._steps) > self._cap:
+                    del self._steps[:len(self._steps) - self._cap]
             elif isinstance(e, AssistantText):
                 if self._cur is not None:
                     self._cur["assistant"] += e.content
@@ -95,6 +111,8 @@ class SliceMonitor:
                 if self._cur is not None:
                     self._cur["usage"] = e.usage or {}
                     self._cur["stop_reason"] = e.stop_reason
+                    u = e.usage or {}
+                    self._tokens += u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
             elif isinstance(e, TurnEnd):
                 self._open = False
                 self._cur = None
@@ -109,15 +127,15 @@ class SliceMonitor:
 
     def snapshot(self) -> dict:
         with self._lock:
-            tok = sum(s["usage"].get("prompt_tokens", 0) + s["usage"].get("completion_tokens", 0)
-                      for s in self._steps)
+            # MON1: tokens/turns/steps_total come from the FULL tallies, NOT the trimmed ring — so the
+            # counters stay accurate even though only the last `cap` steps are served.
             # deep-copy nested MUTABLES (tools list, usage dict): json.dumps runs outside the lock,
             # and the loop thread mutates the live step's tools list in place — a shallow dict(s) would
             # share it and risk "list changed size during iteration" mid-poll.
             steps = [{**s, "tools": [dict(t) for t in s["tools"]], "usage": dict(s["usage"])}
                      for s in self._steps]
-            return {"version": self._version, "turns": self._turn, "steps_total": len(self._steps),
-                    "tokens": tok, "steps": steps}
+            return {"version": self._version, "turns": self._turn, "steps_total": self._steps_total,
+                    "tokens": self._tokens, "steps": steps}
 
 
 def make_monitor_sink(monitor: SliceMonitor):
@@ -181,6 +199,11 @@ def start_monitor(context_fn=None, host: str = "127.0.0.1", port: int = 7654):
 # (it's a separate process) and shows whichever session is active — or idles — instead of dying.
 IDLE_SECONDS = 12
 
+# Invariant 0 — bound the observer on disk too.
+_DEBOUNCE_MS = 250        # MON2: write at most this often on the hot path; settle points flush now
+_SESSION_TTL_SECONDS = 24 * 3600   # MON3: prune session files older than this by mtime
+_MAX_SESSION_FILES = 20            # MON3: and/or keep only the most-recent M (never the active one)
+
 
 def _monitor_dir(d: str | None = None) -> str:
     d = d or os.environ.get("MEMAGENT_MONITOR_DIR") or \
@@ -189,25 +212,103 @@ def _monitor_dir(d: str | None = None) -> str:
     return d
 
 
+class _SnapshotWriter:
+    """MON2: decouple json.dump+os.replace from the loop hot path.
+
+    A single background daemon thread owns ALL disk I/O. The sink (loop thread) only publishes the
+    latest snapshot into a single-slot coalescing ref and signals an Event — it never blocks on disk.
+    The writer coalesces: if 5 events arrive while one write is in flight, only the LAST snapshot is
+    written (no per-event O(N) writes). Debounced to at most one write per `_DEBOUNCE_MS`, except a
+    `flush` (StepEnd/TurnEnd) forces an immediate write so settle points land promptly. Atomic
+    (tmp + os.replace) and fully failure-contained — a monitor write can never break the loop."""
+
+    def __init__(self, path: str, debounce_ms: int = _DEBOUNCE_MS):
+        self._path = path
+        self._debounce = debounce_ms / 1000.0
+        self._lock = threading.Lock()
+        self._pending: dict | None = None   # single-slot: only the freshest snapshot survives
+        self._flush = False                 # the pending snapshot must be written immediately
+        self._busy = False                  # a write is currently in flight on the writer thread
+        self._wake = threading.Event()
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(self, snap: dict, *, flush: bool = False) -> None:
+        with self._lock:
+            self._pending = snap            # coalesce — drop any older un-written snapshot
+            if flush:
+                self._flush = True
+        self._wake.set()
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            if self._stop and self._pending is None:
+                return
+            with self._lock:
+                snap, flush = self._pending, self._flush
+                self._pending, self._flush = None, False
+                self._busy = snap is not None
+                self._wake.clear()
+            if snap is not None:
+                self._write(snap)
+                with self._lock:
+                    self._busy = False
+            # debounce: pause so a burst of hot-path events coalesces into the NEXT single write.
+            # A flush skips the pause so settle points (StepEnd/TurnEnd) land without added latency.
+            if not flush and not self._stop:
+                time.sleep(self._debounce)
+
+    def _write(self, snap: dict) -> None:
+        try:
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False)
+            os.replace(tmp, self._path)
+        except Exception:
+            pass
+
+    def drain(self, timeout: float = 2.0) -> bool:
+        """Block until the single pending slot has been written (best-effort, for tests/shutdown).
+        Returns True if drained within `timeout`. Never used on the loop hot path."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if self._pending is None and not self._busy:
+                    return True
+            time.sleep(0.005)
+        with self._lock:
+            return self._pending is None and not self._busy
+
+    def close(self) -> None:
+        with self._lock:
+            self._stop = True
+        self._wake.set()
+
+
 def make_file_monitor_sink(session_id: str, context_fn=None, dir: str | None = None):
-    """A monitor sink that PERSISTS the snapshot to <dir>/<session>.json each event, so a standing
-    server (python -m memagent.monitor) can show it — decoupled from this process. Writes are atomic
-    and failure-contained (a monitor write must never break the loop)."""
+    """A monitor sink that PERSISTS the snapshot to <dir>/<session>.json, so a standing server
+    (python -m memagent.monitor) can show it — decoupled from this process.
+
+    MON2: disk I/O runs on a background daemon thread, never on the loop hot path; per-event writes
+    coalesce and debounce, with an immediate flush on StepEnd/TurnEnd. MON1 keeps the snapshot O(N).
+    Writes are atomic and failure-contained (a monitor write must never break the loop)."""
     monitor = SliceMonitor(context_fn=context_fn)
     path = os.path.join(_monitor_dir(dir), f"{session_id}.json")
     inner = monitor.sink
+    writer = _SnapshotWriter(path)
+    _settle = (StepEnd, TurnEnd, TurnInterrupted)   # the points worth a guaranteed prompt write
 
     def sink(event: Event) -> None:
         inner(event)
         try:
             snap = monitor.snapshot()
             snap["session"] = session_id
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False)
-            os.replace(tmp, path)
+            writer.submit(snap, flush=isinstance(event, _settle))
         except Exception:
             pass
+    sink.writer = writer       # expose for explicit close()/inspection; never required for correctness
     return sink
 
 
@@ -220,6 +321,29 @@ def _session_files(d: str):
     except OSError:
         pass
     return sorted(out, key=lambda x: x[1], reverse=True)   # most-recently-active first
+
+
+def _prune_sessions(d: str, ttl: float = _SESSION_TTL_SECONDS, keep: int = _MAX_SESSION_FILES):
+    """MON3: drop stale session files (older than `ttl` by mtime) and/or all but the most-recent
+    `keep`, then return the surviving list (most-recently-active first). NEVER deletes the freshest
+    file — even if it's stale and over the cap — so the active/most-recent session is always served.
+    Failure-contained: a delete error just leaves the file in place."""
+    files = _session_files(d)
+    if not files:
+        return files
+    now = time.time()
+    survivors = []
+    for idx, (sid, mtime) in enumerate(files):
+        too_old = (now - mtime) > ttl
+        over_cap = idx >= keep
+        if idx > 0 and (too_old or over_cap):   # idx 0 is the freshest/active — always keep it
+            try:
+                os.remove(os.path.join(d, f"{sid}.json"))
+                continue
+            except OSError:
+                pass                            # couldn't delete → keep serving it
+        survivors.append((sid, mtime))
+    return survivors
 
 
 class _PersistentHandler(_Handler):
@@ -240,7 +364,7 @@ class _PersistentHandler(_Handler):
 
     def _state(self, sel):
         d = self.server.monitor_dir
-        files = _session_files(d)
+        files = _prune_sessions(d)   # MON3: drop stale/over-cap files here (never the freshest/active)
         base = {"version": -1, "turns": 0, "steps_total": 0, "tokens": 0, "steps": []}
         if not files:
             return {**base, "idle": True, "session": None, "sessions": []}
@@ -264,6 +388,7 @@ def main():
     """`python -m memagent.monitor` — the standing, persistent monitor server. Stays up across
     agent sessions; idle when none is running; populated when a session runs with AGENT_MONITOR=1."""
     d = _monitor_dir()
+    _prune_sessions(d)   # MON3: clear stale/over-cap session files on startup (keeps the freshest)
     host = "127.0.0.1"
     port = int(os.environ.get("AGENT_MONITOR_PORT", "7654"))
     last = None
@@ -368,7 +493,7 @@ function tierClass(h){
   h=h.toUpperCase();
   if(h.includes("CURRENT ERROR"))return"err";
   if(h.includes("OTHER OPEN THREADS"))return"thr";
-  if(h.includes("ESTABLISHED")||h.includes("ACTIVE SKILL"))return"est";
+  if(h.includes("YOUR NOTES")||h.includes("ESTABLISHED")||h.includes("ACTIVE SKILL"))return"est";
   if(h.includes("MEMORY"))return"mem";
   if(h.startsWith("# NOW"))return"now";
   return"";
@@ -439,9 +564,11 @@ function renderNav(){
   }
   $("nav").innerHTML=h;
   for(const el of document.querySelectorAll(".step")){
-    el.onclick=()=>{ SEL=+el.dataset.i; renderNav(); renderDetail(STATE.steps[SEL]); };
+    el.onclick=()=>{ SEL=+el.dataset.i; renderNav(); renderDetail(stepById(SEL)); };
   }
 }
+// `i` is a MONOTONIC step id (stable across the capped ring), NOT an array index — look it up.
+function stepById(id){ return (STATE.steps||[]).find(s=>s.i===id) || null; }
 function syncSessions(d){
   const sel=$("sess"); if(!sel) return;
   const list=d.sessions||[];
@@ -465,7 +592,7 @@ async function poll(){
       LASTVER=d.version; STATE=d;
       if($("follow").checked && d.steps.length) SEL=d.steps[d.steps.length-1].i;
       renderNav();
-      renderDetail(SEL!=null && STATE.steps[SEL]?STATE.steps[SEL]:null);
+      renderDetail(SEL!=null?stepById(SEL):null);
     }
   }catch(e){ $("dot").classList.add("stale"); $("status").textContent="disconnected"; }
 }

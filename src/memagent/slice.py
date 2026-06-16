@@ -16,21 +16,31 @@ Tiers, each with its own compaction policy:
 
 The FINDINGS tier closes the reasoning-model gap in a Markov agent: the slice drops the
 transcript, so a reasoning model would RE-DERIVE the situation from scratch every turn
-(big completion/reasoning bursts -> slow). We let the model emit ONE short note per turn
-(its conclusion + intent) and fold that into a bounded, deduped tier — distilled prior
-reasoning it can REUSE, not an unbounded history. Captured for FREE from the assistant
-message content (no extra LLM call, which would defeat the latency win).
+(big completion/reasoning bursts -> slow). We let the model record ONE short FACT per turn
+(via the `note` arg on a real tool call) and fold that into a bounded, deduped tier —
+distilled prior reasoning it can REUSE, not an unbounded history. No extra LLM call.
+
+PROVENANCE (Invariant 1): a finding is tagged by where it came from, and model prose is never an
+established FACT. Each finding carries a `source` (observed > tool-note > claim): a tool result is
+"observed"; the `note` arg on a non-failing call is "tool-note"; the model's free reasoning and any
+"done"-style claim are "claim". ALL are folded forward so a reasoning model reuses them instead of
+re-deriving (the costly Markov trap) — but rendered as the model's OWN notes to VERIFY against OPEN
+FILES, never as "do not re-derive". Pure intent/narration ("Let me…") is dropped. This keeps the
+"already done" ratchet dead (a claim is not a fact) WITHOUT starving carry-forward — dropping prose
+entirely ~2x'd steps on normal tasks.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 from . import code_index
 from .events import AssistantText, Event, ToolResult
 from .safety import wrap_untrusted
-from .workspace import build_workspace_snapshot
+from .workspace import build_workspace_snapshot, git_branch_status
 
 K = 4  # sliding window for the RECENT (action→observation) tier
 # WORKING SET sizing — Markov/north-star: the slice keeps the CHANGE SET (every edited file) plus a
@@ -50,6 +60,9 @@ MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
 MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
+MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
+MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
+MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-signal first)
 # OPEN FILES is NOT size-capped (Markov bounds GROWTH over time; relevance bounds CONTENT).
 # A working-set file is shown IN FULL — it's the current relevant state — up to FULL_FILE_LINES,
 # which is generous (a ~1000-line file is ~10k tokens, fine in a modern context window). Only a
@@ -138,9 +151,12 @@ SYSTEM_PROMPT = (
     "1. OPEN FILES — live contents re-read from disk: your GROUND TRUTH. Base every edit on what is shown there, "
     "never on memory. If anything conflicts with OPEN FILES, the file wins. (A huge file shows the region around "
     "your focus; grep to see more.)\n"
-    "2. CURRENT ERROR — the unresolved failure to fix.\n"
-    "3. WHAT YOU'VE ESTABLISHED — durable facts you concluded on earlier turns. TRUST and build on them; do NOT "
-    "re-derive or re-verify them (OPEN FILES still outranks them if they disagree).\n"
+    "2. CURRENT ERROR / OPEN USER REPORT — the unresolved failure to fix. If the user REPORTS the work is "
+    "broken, treat it as an open blocker: VERIFY any fix against the real artifact (run/open it and observe "
+    "success) before claiming it is done — your own note saying 'done' does NOT clear a user report.\n"
+    "3. YOUR NOTES FROM PRIOR TOOL CALLS — facts you recorded on earlier turns. Reuse them to avoid re-deriving, "
+    "but they are YOUR notes, not ground truth: VERIFY against OPEN FILES before relying on one, and a note that "
+    "says the work is 'done' is NOT proof — confirm it on the real artifact (OPEN FILES / a tool result) first.\n"
     "4. REPEATED/FAILING + RECENT — your recent actions. If an action is REPEATEDLY FAILING, stop repeating it; "
     "read the file and fix the root cause.\n"
     "5. RELATED CODE / RELEVANT MEMORY — fuzzy search candidates and past-session lessons; may be incomplete or "
@@ -161,7 +177,8 @@ SYSTEM_PROMPT = (
     "<notes>\n"
     "Tool calls take an optional 'note': record a durable FACT you just established (root cause, a confirmed fix, "
     "a ruled-out hypothesis, or that the task is done) — a fact, NOT the action and NOT narration; leave it empty "
-    "if nothing new was settled. Notes accumulate into WHAT YOU'VE ESTABLISHED.\n"
+    "if nothing new was settled. Notes accumulate into YOUR NOTES FROM PRIOR TOOL CALLS — facts to "
+    "verify against OPEN FILES, never established truth.\n"
     "</notes>\n\n"
     "<stop>\n"
     "When the change is complete and verified as well as the environment allows, write the one-line summary and "
@@ -186,9 +203,20 @@ class Slice:
     active_skills: list[dict] = field(default_factory=list)  # [{name, body}] loaded SKILLs
     edit_anchor: dict[str, str] = field(default_factory=dict)  # path -> last edit-target text (huge-file focus)
     findings: list[str] = field(default_factory=list)  # distilled conclusions carried across turns
+    # I1 PROVENANCE — source tag per finding (text -> "observed" | "tool-note" | "claim"). Parallel
+    # to `findings` (kept a plain list[str] so it stays JSON-serializable for taskstate/memory and
+    # readable by discovery_query). Bounded with the findings ring; pruned to live keys only.
+    finding_source: dict = field(default_factory=dict)
     edited_files: set = field(default_factory=set)  # the change set — protected from eviction
     since_edit: int = 0  # tool calls since the last successful edit — drives the convergence check
     reviewed: list[str] = field(default_factory=list)  # history lookbacks done — the recall_history ratchet
+    # I3 — OPEN USER REPORT. The user's most-recent FAILURE REPORT ("it can't play", "cd: no such
+    # file"), captured verbatim as a BLOCKER the model must verify against the real artifact before
+    # claiming done. A snapshot agent loses the dialectic — the user pushing back on a "done" claim —
+    # so the report is a durable tier. ONE string (inherently bounded); survives continue_topic (a new
+    # directive does NOT mean the user retracted the report); cleared only by a real topic reset or a
+    # NEWER report. NOT a transcript: a single most-recent line, capped.
+    open_report: str = ""
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -199,9 +227,11 @@ class Slice:
         self.active_skills = []
         self.edit_anchor = {}
         self.findings = []
+        self.finding_source = {}
         self.edited_files = set()
         self.since_edit = 0
         self.reviewed = []
+        self.open_report = ""
 
 
 def one_line(s, n: int = 80) -> str:
@@ -270,6 +300,15 @@ def record_action(s: Slice, name: str, args: dict, out: str) -> None:
     sig = action_sig(name, args)
     prev = s.action_log.get(sig, {"count": 0})
     s.action_log[sig] = {"count": prev["count"] + 1, "failing": failing, "last": observe(out, 100)}
+    if len(s.action_log) > MAX_ACTION_LOG:
+        # bounded like every tier (no-transcript): evict lowest-signal first — oldest one-shot,
+        # non-failing entries — so failing/repeated ones (the anti-loop signal) survive longest.
+        for k in [k for k, a in s.action_log.items() if a["count"] < 2 and not a["failing"]]:
+            if len(s.action_log) <= MAX_ACTION_LOG:
+                break
+            del s.action_log[k]
+        while len(s.action_log) > MAX_ACTION_LOG:
+            del s.action_log[next(iter(s.action_log))]
     display = {k: v for k, v in args.items() if k != "note"} if isinstance(args, dict) else args
     try:
         astr = json.dumps(display, ensure_ascii=False)
@@ -279,26 +318,124 @@ def record_action(s: Slice, name: str, args: dict, out: str) -> None:
     s.recent = s.recent[-K:]
 
 
-def record_note(s: Slice, text: str) -> None:
-    """Fold the model's per-turn note (its distilled conclusion) into the FINDINGS tier.
+# I1 PROVENANCE — narration filter. A FINDING must be a durable FACT, never the model's running
+# narration. Notes that merely announce intent ("Let me run it", "I'll check the file", "Now I'll
+# edit X", "Next, …") carry no established fact: folding them made FINDINGS read like a transcript
+# and let "**Done — built it**" ratchet as an ESTABLISHED truth (F1/C3/G5). Task-agnostic + cheap:
+# pure lexical, no LLM. Matched at the START of the note (the leading clause sets its kind).
+_NARRATION_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?[,. ]+)?(?:"
+    r"(?:let'?s|let me|let us|i['’]?ll|i will|i['’]?m going to|i am going to|now i|now let|"
+    r"then i|i need to|i should|going to|gonna|i plan to)\b"
+    r"|(?:next|first|then)\b[,. ]"  # leading sequencing adverbs ("Next, …", "First …")
+    r")",
+    re.I,
+)
+# A note that ASSERTS completion ("done", "all set", "task complete", "finished") is a CLAIM, not an
+# observation — durable ONLY if a real tool RESULT backed it (see slice_sink). Detected so the source
+# can be DOWNGRADED to "claim" (rendered "unverified — confirm against OPEN FILES"), never silently
+# promoted to an established truth. Task-agnostic lexical signal; no LLM.
+_DONE_CLAIM_RE = re.compile(
+    r"\b(?:done|all set|all done|complete(?:d|ly)?|finished|it works|works now|ready to use|"
+    r"task (?:is )?(?:done|complete)|already (?:done|complete|built|implemented)|"
+    r"successfully (?:built|created|implemented|added|completed))\b",
+    re.I,
+)
+
+
+def is_done_claim(text: str) -> bool:
+    """True when `text` asserts the work is finished — a claim that needs an observation to be durable."""
+    return bool(_DONE_CLAIM_RE.search(text or ""))
+
+
+# I3 — OPEN USER REPORT capture heuristic. A user follow-up that looks like a FAILURE REPORT ("it
+# can't play", "it doesn't work", "still broken", "cd: no such file") is the user pushing back on a
+# (possibly false) "done" — the dialectic a Markov snapshot loses. We carry it as a blocker the model
+# must verify against the REAL artifact before re-claiming done (it drove the "already done" ratchet:
+# F1's user-pushback half). Task-agnostic + LLM-agnostic: pure lexical, no command/tool parsing, no
+# model call. Two signals: (a) negation/failure phrasing about the work, (b) a literal error/diagnostic
+# pasted from a terminal (a shell/runtime error string the user is reporting back).
+_USER_REPORT_RE = re.compile(
+    r"(?:"
+    # explicit failure/negation about the artifact
+    r"\b(?:doesn'?t|does not|don'?t|do not|won'?t|will not|can'?t|cannot|can ?not)\b\s*"
+    r"(?:\w+\s+){0,3}?(?:work|works|run|runs|play|plays|load|loads|open|opens|start|starts|build|builds|compile|compiles)\b"
+    r"|\b(?:not|isn'?t|aren'?t|wasn'?t)\s+(?:\w+\s+){0,2}?(?:work|working|run|running|play|playing|load|loading|right|correct)\b"
+    r"|\b(?:still\s+)?(?:broken|failing|fails|failed|crash(?:es|ed|ing)?|error(?:s|ed)?|bug(?:gy|ged)?|not working)\b"
+    r"|\b(?:it|this|that)\s+(?:still\s+)?(?:doesn'?t|does not|won'?t|can'?t|cannot)\b"
+    # a pasted terminal/runtime diagnostic the user is reporting
+    r"|\b(?:no such file|command not found|traceback|exception|permission denied|"
+    r"syntaxerror|nameerror|typeerror|modulenotfound|exit code|segmentation fault)\b"
+    r"|:\s*no such file or directory\b"
+    r")",
+    re.I,
+)
+
+
+def is_user_report(text: str) -> bool:
+    """True when a user message looks like a FAILURE REPORT about prior work — captured as an OPEN
+    USER REPORT blocker. Conservative + task-agnostic (pure lexical); a normal directive that merely
+    contains 'add'/'fix' is NOT a report unless it carries an explicit failure/negation signal."""
+    return bool(_USER_REPORT_RE.search(text or ""))
+
+
+def capture_user_report(s: Slice, message: str) -> bool:
+    """If `message` looks like a failure report, store it (verbatim, bounded) as the OPEN USER REPORT
+    blocker on the slice and return True. A NEWER report replaces an older one (most-recent wins,
+    inherently bounded). Returns False (and leaves any prior report intact) for a non-report message —
+    so a benign follow-up does NOT clear a still-open report."""
+    if not is_user_report(message):
+        return False
+    s.open_report = one_line(message, MAX_REPORT_CHARS)
+    return True
+
+
+def record_note(s: Slice, text: str, source: str = "tool-note") -> None:
+    """Fold the model's per-turn note (a distilled FACT it established) into the FINDINGS tier.
 
     The slice carries no transcript, so a reasoning model would otherwise re-derive the
     situation each turn (costly reasoning bursts). This lets it carry its OWN conclusions
     forward — bounded (ring of MAX_FINDINGS) and deduped so it stays distilled, not a log.
-    Captured free from assistant content; no extra LLM call."""
+
+    I1 PROVENANCE: a finding is a FACT FROM THE WORLD, never raw narration. Notes that announce
+    intent ("Let me…", "I'll…") are dropped — they're transcript, not established state. `source`
+    tags where the fact came from ("observed" > "tool-note" > "claim"); a completion ("done") note
+    is downgraded to "claim" unless the caller passed an observed source, so it can't ratchet into
+    an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call."""
     note = one_line(text, MAX_FINDING_CHARS)
     if not note:
         return
+    if _NARRATION_RE.match(note):   # pure intent/narration — carries no durable fact
+        return
+    # a "done" claim is durable only if an observation backed it; otherwise it's a hypothesis
+    if source != "observed" and is_done_claim(note):
+        source = "claim"
     if note in s.findings:          # already established — refresh its recency, don't duplicate
         s.findings.remove(note)
     s.findings.append(note)
     s.findings = s.findings[-MAX_FINDINGS:]
+    s.finding_source[note] = source
+    # keep the source map bounded to the live ring (no unbounded growth across turns)
+    live = set(s.findings)
+    for k in [k for k in s.finding_source if k not in live]:
+        del s.finding_source[k]
 
 
-def render_findings(findings: list[str]) -> str:
+# I1 PROVENANCE — per-source trust framing. The slice's #1 ground truth is OPEN FILES (disk);
+# FINDINGS are the model's own prior notes, which must be VERIFIED, never blindly reused. We never
+# render model-sourced text as "do not re-derive" (that authored the "already done" ratchet).
+_SOURCE_TAG = {
+    "observed": "",                          # backed by a tool result — trust, but OPEN FILES still wins
+    "tool-note": " (your note — verify against OPEN FILES)",
+    "claim": " (UNVERIFIED claim — confirm against OPEN FILES/a tool result before relying on it)",
+}
+
+
+def render_findings(findings: list[str], sources: dict | None = None) -> str:
     if not findings:
         return ""
-    return "\n".join(f"- {f}" for f in findings)
+    sources = sources or {}
+    return "\n".join(f"- {f}{_SOURCE_TAG.get(sources.get(f, 'tool-note'), '')}" for f in findings)
 
 
 def _history_mark(args: dict) -> str:
@@ -368,6 +505,9 @@ def render_action_history(action_log: dict) -> str:
     entries = [(sig, a) for sig, a in action_log.items() if a["count"] >= 2 or a["failing"]]
     if not entries:
         return "- (nothing repeated or failing)"
+    entries.sort(key=lambda e: (e[1]["failing"], e[1]["count"]), reverse=True)  # highest-signal first
+    extra = max(0, len(entries) - MAX_ACTION_SHOWN)
+    entries = entries[:MAX_ACTION_SHOWN]
     lines = []
     for sig, a in entries:
         last_low = (a.get("last") or "").lower()
@@ -390,6 +530,8 @@ def render_action_history(action_log: dict) -> str:
         else:
             warn = ""
         lines.append(f"- {sig} ×{a['count']}{warn} → {a['last']}")
+    if extra:
+        lines.append(f"- …and {extra} more repeated/failing (omitted)")
     return "\n".join(lines)
 
 
@@ -443,8 +585,21 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     for p in shown:
         try:
             body = tools.read_text(p)
-        except Exception:
+        except FileNotFoundError:
+            # genuinely absent from disk — the only case that means "not yet written"
             parts.append(f"### {p}\n(not created yet)")
+            continue
+        except PermissionError:
+            # I2/OF1 — exists on disk but outside file-tool reach (a shell-written file beyond
+            # allowed_roots). NOT a lie: tell the model where to look instead of "(not created
+            # yet)", which contradicted its own `ls` and drove the read-blindness loop (LOOP1).
+            parts.append(f"### {p}\n(exists on disk; outside file-tool reach — "
+                         "inspect via run_command/execute_code)")
+            continue
+        except Exception as ex:
+            # binary (ValueError from read_text) or any other read failure — exists but not
+            # renderable here; name the reason so the model can act instead of re-reading.
+            parts.append(f"### {p}\n(exists but not shown: {one_line(ex, 120)})")
             continue
         lines = body.splitlines()
         total = len(lines)
@@ -554,9 +709,21 @@ def render_threads(refs) -> str:
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                  subdir_hints: str = "", *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
     err = f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{s.last_error}\n\n" if s.last_error else ""
-    fnd_body = render_findings(s.findings[-max_findings:])
+    # I3 — OPEN USER REPORT. The user reported the work is BROKEN; a snapshot loses that pushback, so
+    # it rides as a high-authority BLOCKER. Rendered ABOVE findings so a stale "done" note can't
+    # outrank it: the model must VERIFY against the real artifact (run/open it) before re-claiming done.
+    rep = (
+        "# OPEN USER REPORT (the user reports this is BROKEN — treat it as an UNRESOLVED blocker; do "
+        "NOT claim it is done or already working until you have VERIFIED the fix against the real "
+        f"artifact, e.g. run/open it and observe success)\n{s.open_report}\n\n"
+    ) if s.open_report else ""
+    fnd_body = render_findings(s.findings[-max_findings:], s.finding_source)
     fnd = (
-        "# WHAT YOU'VE ESTABLISHED (your notes from prior turns — BUILD ON these; do NOT re-derive)\n"
+        # I1 PROVENANCE — NOT "do NOT re-derive". These are the model's OWN notes from prior tool
+        # calls, not ground truth; OPEN FILES (disk) is the only authority. Reuse them to avoid
+        # re-reasoning, but VERIFY against OPEN FILES — a "done" claim here is not proof it is done.
+        "# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground "
+        "truth — verify against it before trusting; a note is NOT proof the work is done)\n"
         f"{fnd_body}\n\n"
     ) if fnd_body else ""
     skills_body = render_skills(s.active_skills)
@@ -577,7 +744,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     hints = render_subdir_hints(subdir_hints)
     conv = render_convergence(s)
     parts = [
-        conv + err + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        conv + rep + err + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
         f"# RECENT (last {window})", steps, "",
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
         disc,
@@ -613,6 +780,21 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     workspace_block = (
         "\n\n# WORKSPACE (snapshot at session start — re-check with git before acting)\n" + snapshot
     ) if snapshot else ""
+    # I2 — RE-OBSERVED ENVIRONMENT tier. The agent must OBSERVE its world, not REMEMBER it: a fresh
+    # slice that defaults to a generic Linux sandbox hallucinates /home/user on macOS (G2). These are
+    # deterministic ground-truth facts (platform, real HOME, cwd, git branch/status) computed ONCE per
+    # session — so the system tier stays byte-stable (prompt-cache warm), never re-probed per turn.
+    # Reuses workspace.git_branch_status (the same git probe as the snapshot, collapsed to one line).
+    env_facts = [f"- Platform: {sys.platform}", f"- HOME: {os.path.expanduser('~')}"]
+    if cwd:
+        env_facts.append(f"- Working directory (cwd): {cwd}")
+    gbs = git_branch_status(cwd) if cwd else ""
+    if gbs:
+        env_facts.append(f"- Git: {gbs}")
+    environment_block = (
+        "\n\n# ENVIRONMENT (OBSERVED ground truth at session start — use THESE real values; do NOT "
+        "assume a generic sandbox/OS or path)\n" + "\n".join(env_facts)
+    )
     recall_cache: dict[str, str] = {}
     # ITEM 17 — construct the subdirectory-hint tracker ONCE (closure-scoped, like recall_cache);
     # instance state is a DURABLE store (each subtree surfaces once per task), NOT a transcript.
@@ -623,7 +805,7 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     _level = {"n": 0}
 
     def _system(goal: str) -> str:
-        return (SYSTEM_PROMPT + env_line + workspace_block
+        return (SYSTEM_PROMPT + env_line + environment_block + workspace_block
                 + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
                 + goal)
 
@@ -656,16 +838,24 @@ def slice_sink(state):
     subsequent folding)."""
     def sink(event: Event) -> None:
         s = _active(state)
+        # I1 PROVENANCE (root-cause revision) — fold the model's reasoning forward as an UNVERIFIED
+        # CLAIM, never as an established fact. Dropping assistant text ENTIRELY (the first I1 cut)
+        # starved the anti-re-derivation tier and ~2x'd steps on normal tasks; the defect was narration
+        # becoming FACT, not carry-forward itself. record_note drops pure narration (_NARRATION_RE),
+        # downgrades "done"-style claims, and bounds+dedups the ring — so this restores reasoning-reuse
+        # WITHOUT reviving the "already done" ratchet: a claim renders as "verify against OPEN FILES",
+        # and OPEN FILES stays the only ground truth. (The episode cache keeps assistant text losslessly.)
         if isinstance(event, AssistantText):
-            # fallback path: models that DO emit message content while working (deepseek and other
-            # reasoning models emit empty content during tool calls, so for them this is a no-op —
-            # the note arg below is the real capture point)
-            record_note(s, event.content)
+            record_note(s, event.content, source="claim")
             return
         if isinstance(event, ToolResult):
             # the model's distilled conclusion rides on the tool call (the note arg) — fold it into
-            # the FINDINGS tier so a reasoning model reuses it instead of re-deriving next turn
-            record_note(s, event.args.get("note", ""))
+            # the FINDINGS tier so a reasoning model reuses it instead of re-deriving next turn. A note
+            # on a NON-FAILING call is backed by a real tool result (source "tool-note"); a note on a
+            # FAILING call has no observation behind it → "claim" (rendered as unverified). record_note
+            # further downgrades any "done"-style note to "claim" unless an observation backs it.
+            record_note(s, event.args.get("note", ""),
+                        source="tool-note" if not event.failing else "claim")
             did_edit = False
             if event.name == "skill" and not event.failing:
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
@@ -682,7 +872,12 @@ def slice_sink(state):
             # list_files' "path" is a DIRECTORY to browse, not a working-set file — don't track it
             if event.args.get("path") and event.name != "list_files":
                 did_edit = event.name in ("edit_file", "append_to_file", "str_replace") and not event.failing
-                touch_file(s, event.args["path"], edited=did_edit)
+                # WS1 — gate membership on SUCCESS. A read/edit that FAILED (e.g. _resolve raised
+                # "path escapes workspace") must NOT be pinned into the working set, or OPEN FILES
+                # re-renders the unreachable/missing path every rebuild and poisons the slice
+                # (the read-blindness loop). Successful reads and edits still join the set.
+                if not event.failing:
+                    touch_file(s, event.args["path"], edited=did_edit)
                 # remember the agent's edit target so a HUGE file's region follows it (and a
                 # failed str_replace re-aims the region to where the agent meant to edit)
                 if event.name == "str_replace" and event.args.get("old_string"):

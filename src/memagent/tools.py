@@ -11,6 +11,7 @@ Note: Python's str.replace is literal, so str_replace has no $-pattern footgun
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import tempfile
 
@@ -19,6 +20,18 @@ from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
 from .registry import ToolEntry, ToolRegistry
 from .sandbox import LocalSandbox
+
+# I1 PROVENANCE — host SELF-INFLICTED error sentinels. These name failures caused by the HOST's own
+# guard rails (file-tool confinement, permission denial), NOT by a real bug in the user's code. Lesson
+# mining filters pitfalls whose signature contains one of these so a turn whose only error was the
+# agent hitting its OWN sandbox mines nothing (D2). Lower-cased substrings, matched task-agnostically;
+# defined HERE (the source of these strings) so the denylist tracks the actual error messages.
+HOST_ERROR_SENTINELS = (
+    "path escapes workspace",
+    "file tools are confined",
+    "permission denied",
+    "operation not permitted",
+)
 
 # Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action,
 # Hermes pattern). No imports needed by the model. The workspace is cwd and on sys.path,
@@ -129,6 +142,14 @@ class LocalToolHost:
         self._root = root
         self.timeout = timeout
         self.sandbox = sandbox or LocalSandbox()
+        # I2 — RE-OBSERVATION REACH = ACTION REACH. File tools and shell must reach the
+        # SAME places, or the agent writes (via shell, unconfined) files its file tools can
+        # never read back, and OPEN FILES lies "(not created yet)" about real on-disk files.
+        # `_extra_roots` holds dirs the goal/user EXPLICITLY targets (added via add_root):
+        # _resolve accepts a path under the workspace root OR any extra root. Explicit and
+        # bounded — never a blanket '/'; the workspace stays the default and only the launch
+        # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
+        self._extra_roots: list[str] = []
         # The registry is the single source of tools; MCP/plugin/skill tools register
         # into this same object later (Step ③). The host just projects from it.
         self.registry = registry or ToolRegistry()
@@ -152,16 +173,82 @@ class LocalToolHost:
     def root(self) -> str:
         return os.path.realpath(self._root or os.getcwd())
 
+    def add_root(self, path: str) -> str | None:
+        """Mark a directory the goal/user EXPLICITLY targets as in-reach for file tools.
+
+        The minimal, safe, task-agnostic mechanism for "explicitly-targeted dir" (I2): a
+        SETTABLE root, not goal-parsing heuristics. After this, read_file/edit_file/list_files
+        resolve paths under `path` exactly as the shell already does (shell is unconfined),
+        so a shell-written file is always readable back through OPEN FILES — reach matches.
+        Refuses a blanket root ('/' or '~') so the workspace boundary is never erased.
+        Returns the realpath added (idempotent), or None if rejected/unusable."""
+        if not path:
+            return None
+        full = os.path.realpath(os.path.expanduser(path))
+        # never widen reach to the whole filesystem or the bare home dir
+        if full == os.sep or full == os.path.realpath(os.path.expanduser("~")):
+            return None
+        if full == self.root() or full in self._extra_roots:
+            return full
+        self._extra_roots.append(full)
+        return full
+
+    def allowed_roots(self) -> list[str]:
+        """The set of dirs file tools may reach: the workspace root ∪ explicitly-targeted dirs.
+        Honored by `_resolve`; matches where the shell already acts (I2: reach = action reach)."""
+        roots = [self.root()]
+        for r in self._extra_roots:
+            if r not in roots:
+                roots.append(r)
+        return roots
+
+    def _grant_shell_paths(self, text: str) -> None:
+        """I2 — reach FOLLOWS action. When the shell acts on a path outside the allowed roots,
+        grant file-tool reach to its directory so a shell-written file is ALWAYS readable back via
+        OPEN FILES. No NEW capability — the shell already reaches there; this only lets the file
+        tools observe it (the original split-brain: writes it could never read back). Restricted to
+        the user's HOME subtree, never HOME itself or an ancestor of the workspace (add_root also
+        refuses '/' and '~'). Pure path detection — task/LLM-agnostic, no command parsing."""
+        if not text:
+            return
+        home = os.path.realpath(os.path.expanduser("~"))
+        root = self.root()
+        # quoted paths (may contain spaces) OR bare ~/-rooted tokens up to a shell metachar/space
+        for q, uq in re.findall(
+                r"""['"]([^'"]*/[^'"]*)['"]|(?<![\w'"])((?:~|/)[^\s'"|&;<>()]+)""", text):
+            cand = (q or uq).strip()
+            if not (cand.startswith("/") or cand.startswith("~")):
+                continue
+            full = os.path.realpath(os.path.expanduser(cand))
+            d = full if os.path.isdir(full) else os.path.dirname(full)
+            if not d or not os.path.isdir(d):
+                continue
+            if not d.startswith(home + os.sep):          # only the user's own subtree (excludes HOME itself)
+                continue
+            if d == root or root.startswith(d + os.sep):  # never an ancestor of the workspace
+                continue
+            self.add_root(d)
+
     def _resolve(self, path: str) -> str:
-        """Resolve a tool path under the workspace root; reject escapes."""
+        """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
+        reject escapes. expanduser FIRST so '~' behaves like the shell (P2) instead of
+        silently creating a literal '~' dir inside the workspace."""
         if not path:
             raise ValueError("empty path")
-        root = self.root()
-        full = path if os.path.isabs(path) else os.path.join(root, path)
+        path = os.path.expanduser(path)  # P2 — '~' → $HOME before any join/realpath
+        roots = self.allowed_roots()
+        primary = roots[0]
+        full = path if os.path.isabs(path) else os.path.join(primary, path)
         full = os.path.realpath(full)
-        if full != root and not full.startswith(root + os.sep):
-            raise PermissionError(f"path escapes workspace ({root}): {path}")
-        return full
+        for root in roots:
+            if full == root or full.startswith(root + os.sep):
+                return full
+        # P3 — prescriptive error: name the boundary AND the escape hatch so a no-transcript
+        # model recovers instead of re-deriving the dead end (and looping into shell fallback).
+        raise PermissionError(
+            f"path escapes workspace ({primary}): {path} — File tools are confined to the "
+            "workspace. To act on paths outside it, use run_command/execute_code (shell is "
+            "unconfined), or re-run memagent with the workspace set to that directory.")
 
     # --- ToolHost projection: everything comes from the registry now ---
     def schemas(self) -> list[dict]:
@@ -250,13 +337,16 @@ class LocalToolHost:
 
     def _t_run_command(self, args: dict) -> str:
         code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
+        self._grant_shell_paths(args.get("command", ""))  # I2 reach=action: dirs the shell touched
         out = out.strip()
         if code != 0:
             return f"Exit code {code}\n{out or '(no output)'}"
         return out or "(command produced no output)"
 
     def _t_execute_code(self, args: dict) -> str:
-        return self._execute_code(args["code"])
+        out = self._execute_code(args["code"])
+        self._grant_shell_paths(args.get("code", ""))  # I2 reach=action: dirs code-as-action touched
+        return out
 
     def _execute_code(self, code: str) -> str:
         """Code-as-action: run the model's script (prelude + code) in the sandbox, cwd=workspace.

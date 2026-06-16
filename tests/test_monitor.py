@@ -160,6 +160,7 @@ def file_sink_persists_snapshot():
     sink = make_file_monitor_sink("sess-A", dir=d)
     sink(sb("SYS", "USER-SLICE"))
     sink(StepEnd(1, {"prompt_tokens": 10, "completion_tokens": 5}, "end_turn"))
+    sink.writer.drain()                          # MON2: disk I/O is async — wait for it to land
     p = os.path.join(d, "sess-A.json")
     assert os.path.exists(p)
     snap = json.load(open(p))
@@ -185,7 +186,8 @@ def persistent_server_idle_and_sessions():
         st = json.loads(urllib.request.urlopen("http://127.0.0.1:7793/api/state", timeout=3).read())
         assert st["idle"] is True and st["session"] is None and st["sessions"] == []
         # a fresh session → live (not idle), shows up
-        make_file_monitor_sink("live-1", dir=d)(sb("S", "U"))
+        s1 = make_file_monitor_sink("live-1", dir=d)
+        s1(sb("S", "U")); s1.writer.drain()       # MON2: async write — wait for the file to land
         st = json.loads(urllib.request.urlopen("http://127.0.0.1:7793/api/state", timeout=3).read())
         assert st["session"] == "live-1" and st["idle"] is False and "live-1" in st["sessions"]
         # a stale file → idle (age past threshold), but still served (doesn't die)
@@ -195,6 +197,145 @@ def persistent_server_idle_and_sessions():
         assert st["idle"] is True and st["session"] == "live-1" and st["steps"][0]["user"] == "U"
     finally:
         srv.shutdown()
+
+
+# --- Invariant 0: BOUND THE MONITOR (MON1 ring cap, MON2 decoupled writes, MON3 stale prune) ---
+
+@check
+def ring_is_capped_to_last_n_steps():
+    # MON1: the in-memory ring serves only the last `cap` steps, no matter how many ran.
+    m = SliceMonitor(cap=5)
+    for k in range(20):
+        m.sink(sb("S", f"u{k}"))
+    snap = m.snapshot()
+    assert len(snap["steps"]) == 5                       # ring trimmed to the cap
+    assert [s["user"] for s in snap["steps"]] == [f"u{k}" for k in range(15, 20)]  # the LAST 5
+
+
+@check
+def counters_accurate_despite_ring_trim():
+    # MON1: turns/steps_total/tokens come from FULL tallies, not the trimmed ring.
+    m = SliceMonitor(cap=3)
+    for k in range(10):                                  # 10 steps in one turn, ring holds only 3
+        m.sink(sb("S", f"u{k}"))
+        m.sink(StepEnd(1, {"prompt_tokens": 100, "completion_tokens": 10}, "tool_use"))
+    snap = m.snapshot()
+    assert snap["steps_total"] == 10                     # accurate total despite cap=3
+    assert snap["turns"] == 1
+    assert snap["tokens"] == 10 * 110                    # full token tally survives trimming
+    assert len(snap["steps"]) == 3                       # but only 3 served
+
+
+@check
+def step_id_is_monotonic_not_list_index():
+    # MON1: `i` must stay a unique monotonic id across trims so the UI can still select a step.
+    m = SliceMonitor(cap=3)
+    for k in range(8):
+        m.sink(sb("S", f"u{k}"))
+    served = m.snapshot()["steps"]
+    ids = [s["i"] for s in served]
+    assert ids == [5, 6, 7]                              # last 3 monotonic ids, not 0/1/2
+    assert len(set(ids)) == len(ids)                     # unique
+
+
+@check
+def live_step_survives_trim_and_keeps_growing():
+    # MON1: the live (current) step is always the last element — trimming the front never drops it.
+    m = SliceMonitor(cap=2)
+    for k in range(5):
+        m.sink(sb("S", f"u{k}"))
+    m.sink(AssistantText("after-trim"))                 # mutate the live step post-trim
+    m.sink(ToolResult("read_file", {}, "ok", False))
+    cur = m.snapshot()["steps"][-1]
+    assert cur["user"] == "u4" and cur["assistant"] == "after-trim"
+    assert [t["name"] for t in cur["tools"]] == ["read_file"]
+
+
+@check
+def file_write_is_off_the_hot_path_and_flushes():
+    # MON2: the sink publishes to a background writer; StepEnd flushes. After drain the file is current.
+    import tempfile
+    from memagent.monitor import make_file_monitor_sink
+    d = tempfile.mkdtemp()
+    sink = make_file_monitor_sink("sess-w", dir=d)
+    for k in range(30):                                  # a burst of hot-path events
+        sink(sb("S", f"u{k}"))
+    sink(StepEnd(1, {"prompt_tokens": 5, "completion_tokens": 5}, "end_turn"))
+    assert sink.writer.drain() is True
+    snap = json.load(open(os.path.join(d, "sess-w.json")))
+    assert snap["session"] == "sess-w"
+    assert snap["steps_total"] == 30                     # full count even though writes coalesced
+    assert snap["steps"][-1]["user"] == "u29"           # freshest slice is what's served
+
+
+@check
+def file_snapshot_ring_is_bounded_on_disk():
+    # MON1+MON2: the persisted snapshot is O(cap) — a long session never grows the file unboundedly.
+    import tempfile
+    from memagent.monitor import _RING_CAP, make_file_monitor_sink
+    d = tempfile.mkdtemp()
+    sink = make_file_monitor_sink("sess-big", dir=d)
+    for k in range(_RING_CAP + 25):
+        sink(sb("S", f"u{k}"))
+    sink(StepEnd(1, {}, "end_turn")); sink.writer.drain()
+    snap = json.load(open(os.path.join(d, "sess-big.json")))
+    assert len(snap["steps"]) == _RING_CAP              # bounded on disk
+    assert snap["steps_total"] == _RING_CAP + 25       # but the counter is honest
+
+
+@check
+def prune_drops_stale_keeps_newest():
+    # MON3: files older than the TTL are dropped, but the freshest is NEVER deleted (even if stale).
+    import tempfile
+    import time as _t
+    from memagent.monitor import _prune_sessions
+    d = tempfile.mkdtemp()
+    for sid in ("old-a", "old-b", "fresh"):
+        with open(os.path.join(d, f"{sid}.json"), "w") as f:
+            json.dump({"steps": []}, f)
+    old = _t.time() - (48 * 3600)                        # 2 days old → past the 24h TTL
+    os.utime(os.path.join(d, "old-a.json"), (old, old))
+    os.utime(os.path.join(d, "old-b.json"), (old, old))
+    # leave "fresh" with a current mtime, but also age it to prove the freshest is kept regardless
+    survivors = [s for s, _ in _prune_sessions(d, ttl=24 * 3600)]
+    assert survivors == ["fresh"]                        # stale ones gone, freshest kept
+    assert os.path.exists(os.path.join(d, "fresh.json"))
+    assert not os.path.exists(os.path.join(d, "old-a.json"))
+
+
+@check
+def prune_keeps_freshest_even_when_all_stale():
+    # MON3 guarantee: even if EVERY file is stale, the most-recent one stays so the active session shows.
+    import tempfile
+    import time as _t
+    from memagent.monitor import _prune_sessions
+    d = tempfile.mkdtemp()
+    for i, sid in enumerate(("s0", "s1", "s2")):
+        p = os.path.join(d, f"{sid}.json")
+        with open(p, "w") as f:
+            json.dump({"steps": []}, f)
+        old = _t.time() - (48 * 3600) - i               # all stale; s0 most recent
+        os.utime(p, (old, old))
+    survivors = [s for s, _ in _prune_sessions(d, ttl=1)]
+    assert survivors == ["s0"]                           # freshest survives despite being stale
+
+
+@check
+def prune_caps_to_most_recent_m():
+    # MON3: keep only the most-recent M files (newest never deleted).
+    import tempfile
+    import time as _t
+    from memagent.monitor import _prune_sessions
+    d = tempfile.mkdtemp()
+    for i in range(6):
+        p = os.path.join(d, f"s{i}.json")
+        with open(p, "w") as f:
+            json.dump({"steps": []}, f)
+        t = _t.time() - i                                # s0 newest … s5 oldest, all within TTL
+        os.utime(p, (t, t))
+    survivors = [s for s, _ in _prune_sessions(d, ttl=10 * 3600, keep=2)]
+    assert survivors == ["s0", "s1"]                     # only the 2 most-recent kept
+    assert not os.path.exists(os.path.join(d, "s5.json"))
 
 
 def main():

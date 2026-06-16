@@ -117,6 +117,9 @@ def main() -> None:
 
     sandbox = make_sandbox(cfg.sandbox_backend, image=cfg.sandbox_image, network=cfg.sandbox_network)
     base_tools = LocalToolHost(root, sandbox=sandbox)  # file ops confined to launch dir; shell via sandbox
+    for _r in os.environ.get("AGENT_ROOT", "").split(os.pathsep):  # I2: extra dirs the user puts in reach
+        if _r.strip():
+            base_tools.add_root(_r.strip())
     skills = make_skill_manager(cfg.skills_roots)  # SKILL.md packs (config dirs or defaults)
     # plugins: feed the SAME registry/skills, and contribute MCP servers + hooks (loaded first
     # so plugin skills enter the catalog and plugin MCP servers get connected below)

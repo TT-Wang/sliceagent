@@ -227,6 +227,35 @@ def _project_facts(root: Path) -> list[str]:
     return facts
 
 
+def git_branch_status(cwd: str) -> str:
+    """A compact one-line 'branch (status)' summary for the RE-OBSERVED ENVIRONMENT tier (I2).
+
+    Reuses the same git probe as the snapshot, but collapsed to ONE line: e.g.
+    "main (3 modified, 1 untracked)" or "main (clean)". Returns "" outside a repo / on any
+    error. Deterministic per cwd within a session (intended to be computed ONCE per session and
+    baked into the cache-stable system tier), never raises.
+    """
+    resolved = _resolve_cwd(cwd)
+    if resolved is None:
+        return ""
+    git_root = _git_root(resolved)
+    if git_root is None:
+        return ""
+    head, counts = _parse_status(_git(git_root, "status", "--porcelain=2", "--branch"))
+    if not head:
+        return ""
+    branch = "(detached HEAD)" if head == "(detached)" else head
+    dirty = [
+        f"{n} {label}" for label, n in (
+            ("staged", counts["staged"]),
+            ("modified", counts["modified"]),
+            ("untracked", counts["untracked"]),
+            ("conflicts", counts["conflicts"]),
+        ) if n
+    ]
+    return f"{branch} ({', '.join(dirty) if dirty else 'clean'})"
+
+
 def build_workspace_snapshot(cwd: str) -> str:
     """Workspace snapshot body for the system prompt (``""`` outside a workspace).
 
