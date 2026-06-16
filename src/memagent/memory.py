@@ -14,11 +14,24 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 
+from .code_index import _terms   # reuse the query-term extractor (drops stopwords/short tokens)
 from .interfaces import Snippet, TaskRef, TaskState
 
 _MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one pathological output)
+
+
+def _memory_relevant(text: str, terms: list[str]) -> bool:
+    """Relevance gate for the RELEVANT MEMORY tier: keep a recalled lesson only if it shares a
+    discriminating term with the goal (whole-word, so 'add' doesn't match 'address'). With no terms
+    (un-discriminating query) keep it — we can't gate. This makes the tier relevant-or-nothing
+    instead of memem's blind top-k, the same relevance discipline the RELATED CODE map uses."""
+    if not terms:
+        return True
+    blob = (text or "").lower()
+    return any(re.search(r"\b" + re.escape(t.lower()) + r"\b", blob) for t in terms)
 
 
 def _now_iso() -> str:
@@ -34,6 +47,13 @@ def _vault_root() -> str:
         if v:
             return os.path.expanduser(v)
     return os.path.join(os.path.expanduser("~"), ".memagent", "vault")
+
+
+def _skills_dir() -> str:
+    """Where consolidation writes promoted-procedure SKILL.md packs — a dir the SkillManager scans
+    (default ~/.memagent/skills, so skills are discovered next session). MEMAGENT_SKILLS_DIR overrides."""
+    return os.path.expanduser(os.environ.get("MEMAGENT_SKILLS_DIR")
+                              or os.path.join("~", ".memagent", "skills"))
 
 
 # --- task-state markdown (de)serialization — pure module fns (no memem) -------------------
@@ -200,17 +220,27 @@ class MememMemory:
     def __init__(self) -> None:
         import memem.retrieve  # noqa: F401  — fail fast if memem is absent
         self._vault = _vault_root()
+        self._scope = os.path.basename(os.getcwd()) or "default"   # same-project soft bonus on recall
 
-    # --- lessons (unchanged) ---
+    # --- lessons ---
     def recall(self, query: str, k: int = 6) -> list[Snippet]:
+        """Recall cross-session lessons, then GATE by relevance: drop hits that share no term with
+        the goal (memem returns top-k with no floor → cross-domain noise). Pass scope_id so same-
+        project lessons get memem's soft bonus, and REINFORCE the surfaced (relevant) ones via
+        mark_used — so retrieval feedback tracks what we actually show, not raw top-k. Decay of the
+        unreinforced is memem's own job (compute_decay_factor over access_count)."""
         from memem.retrieve import retrieve
         try:
-            hits = retrieve(query, k=k, log_call_type=None, writeback=False)
+            hits = retrieve(query, k=k, log_call_type=None, writeback=False, scope_id=self._scope)
         except Exception:
             return []
+        terms = _terms(query)
         out: list[Snippet] = []
         for h in hits:
             text = h.get("body") or h.get("title") or ""
+            if not _memory_relevant(f"{h.get('title', '')} {text}", terms):
+                continue                       # relevance gate: relevant-or-nothing, no noise
+            self.mark_used(h.get("id", ""))    # reinforce what we surface (feeds memem's decay)
             out.append(Snippet(path=h.get("path", ""), text=text, score=float(h.get("score", 0.0))))
         return out
 
@@ -301,31 +331,42 @@ class MememMemory:
             return []
 
     def consolidate(self, session_id: str) -> None:
-        """Session-end sweep: promote durable lessons from the episodic cache into long-term memory
-        (the cache→memory loop). Reads the session's JSONL, promotes corrective episodes, remembers
-        them. Never raises (a consolidation failure must not break the session)."""
+        """Session-end sweep: promote durable knowledge from the episodic cache, ROUTED BY TYPE —
+        FACTS (corrective lessons) → long-term memory (memem remember); PROCEDURES (repeated smooth
+        workflows) → reusable SKILL.md files the SkillManager discovers next session. Both are
+        frequency-weighted. Never raises (a consolidation failure must not break the session)."""
         try:
-            from .consolidate import promote_episodes
-            path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
-            if not os.path.exists(path):
+            from .consolidate import promote_episodes, promote_procedures, render_skill
+            records = self.read_episodes(session_id)
+            if not records:
                 return
-            records = []
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            records.append(json.loads(line))
-                        except Exception:
-                            pass
-            for lesson in promote_episodes(records):
-                self.remember(lesson["content"], title=lesson["title"], tags=lesson["tags"])
+            for lesson in promote_episodes(records):                 # facts → memem
+                self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
+                              tags=lesson["tags"])
+            skills_dir = _skills_dir()
+            for proc in promote_procedures(records):                 # procedures → skill packs
+                try:
+                    d = os.path.join(skills_dir, proc["name"])
+                    os.makedirs(d, exist_ok=True)
+                    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+                        f.write(render_skill(proc))
+                except Exception:
+                    pass
         except Exception:
             pass
 
     # --- declared now; implemented in step 5 (loud-but-safe so a premature wire is caught) ---
     def mark_used(self, memory_id: str) -> None:
-        raise NotImplementedError("mark_used lands in MEMORY-SPEC step 5")
+        """Retrieval feedback: reinforce a memory that proved relevant (bumps its access count, which
+        feeds memem's decay/ranking). Delegates to memem's primitive — we don't reinvent the decay
+        machinery memem already has (obsidian_store.bump_access + decay.compute_decay_factor)."""
+        if not memory_id:
+            return
+        try:
+            from memem.obsidian_store import bump_access
+            bump_access(memory_id)
+        except Exception:
+            pass   # feedback is best-effort; must never break a recall
 
 
 def make_memory(prefer_memem: bool = True):
