@@ -150,6 +150,30 @@ class RipgrepCodeIndex:
             return []
         return [Snippet(path="(repo map)", text=text, score=float(matches))]
 
+    def deps(self, path: str, limit: int = 6) -> list[str]:
+        """Files structurally COUPLED to `path`, from the cached def/ref graph: forward deps (files
+        `path` references — the contracts it must satisfy) ranked first, then reverse deps (files that
+        reference `path` — its callers). Used to keep an edited file's dependencies co-resident in the
+        working set (you cannot correctly edit a file whose contracts have been paged out). Returns []
+        when `path` isn't in the graph, so callers degrade gracefully. Query-INDEPENDENT (reuses the
+        cached graph; no per-call ripgrep)."""
+        try:
+            g = self._graph(400)
+        except Exception:
+            return []
+        edges = g["edges"]
+        if path not in g["fileset"]:
+            return []
+        fwd = edges.get(path, {})                                  # files `path` references (contracts)
+        rev = {f: e[path] for f, e in edges.items() if path in e}  # files that reference `path` (callers)
+        ranked = sorted(fwd, key=lambda f: -fwd[f]) + sorted(rev, key=lambda f: -rev[f])
+        seen, out = set(), []
+        for f in ranked:
+            if f != path and f not in seen:
+                seen.add(f)
+                out.append(f)
+        return out[:limit]
+
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
     def graph_map(self, query: str, max_files: int = 400, max_chars: int = 4000) -> str:
         """Repo map ranked by PERSONALIZED PAGERANK over the symbol def/ref graph, seeded on the
