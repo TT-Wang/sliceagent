@@ -260,6 +260,7 @@ def action_sig(name: str, args: dict) -> str:
 
 def record_action(s, name: str, args: dict, out: str) -> None:
     """Fold one tool result into the tiers (deterministic — no LLM)."""
+    s.turn_actions = getattr(s, "turn_actions", 0) + 1   # per-turn exploration counter (finding-independent)
     failing = out.startswith("Error") or out.startswith("Exit code")
     if failing:
         s.last_error = out if len(out) <= 800 else out[:120] + "\n…[trace truncated]…\n" + out[-680:]
@@ -331,6 +332,8 @@ def render_action_history(action_log: dict) -> str:
 # ── CONVERGENCE ───────────────────────────────────────────────────────────────
 STOP_NUDGE_AFTER = 2  # non-edit tool calls since the last edit (with no error) before nudging to converge
 READONLY_NUDGE_AFTER = 4  # read-only tool calls with NO edit at all before nudging to answer/act
+EXPLORE_NUDGE_AFTER = 5  # tool calls in ONE turn with no edit before nudging to ANSWER or ask_user — keyed on
+# turn_actions (finding-INDEPENDENT), so a read-heavy Q&A that records a note each step still converges
 
 
 def render_convergence(s) -> str:
@@ -345,12 +348,15 @@ def render_convergence(s) -> str:
         # so a trivial/answer-only task (greeting, "show the path", "summarize") over-explores. Nudge
         # it to answer/act. General + Markov (edits vs non-edits, no task-type); dormant once anything
         # is edited (→ the post-edit path below), so real edit-tasks are unaffected.
-        if not s.last_error and s.since_edit >= READONLY_NUDGE_AFTER:
+        ta = getattr(s, "turn_actions", 0)
+        if not s.last_error and ta >= EXPLORE_NUDGE_AFTER:
+            strong = "STOP exploring NOW — " if ta >= EXPLORE_NUDGE_AFTER + 3 else ""
             return (
-                f"# CONVERGENCE CHECK\nyou've made {s.since_edit} read-only tool calls and changed "
-                f"nothing. If this task only needs an answer or a decision, give it NOW and make NO tool "
-                f"call. Gather more ONLY for a SPECIFIC next action — do NOT re-list or re-read what "
-                f"you've already seen.\n\n")
+                f"# CONVERGENCE CHECK\n{strong}you've made {ta} tool calls this turn and edited nothing. You "
+                f"almost certainly have enough: ANSWER the user NOW with what you have (cite OPEN FILES) and "
+                f"make NO tool call. If the request is ambiguous or under-specified, call ask_user with ONE "
+                f"concise question INSTEAD of exploring further. Do NOT re-read or re-list what you've already "
+                f"seen.\n\n")
         return ""
     if s.last_error or s.since_edit < STOP_NUDGE_AFTER:
         return ""

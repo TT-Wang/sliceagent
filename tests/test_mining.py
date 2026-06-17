@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.events import ToolResult, TurnEnd          # noqa: E402
 from memagent.mining import LessonMiner                  # noqa: E402
-from memagent.slice import Slice, render_convergence     # noqa: E402
+from memagent.slice import EXPLORE_NUDGE_AFTER, Slice, render_convergence  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -62,18 +62,18 @@ def no_error_no_lesson():
 @check
 def readonly_spin_nudges_to_answer():
     s = Slice(); s.reset("show me the path")                       # no edits ever
-    s.since_edit = 4
+    s.turn_actions = EXPLORE_NUDGE_AFTER                            # explored this turn without answering
     out = render_convergence(s)
-    assert "read-only" in out and "answer" in out.lower()
+    assert "answer" in out.lower() and ("ask_user" in out or "tool calls this turn" in out)
 
 
 @check
 def readonly_nudge_quiet_below_threshold_and_on_error():
     s = Slice(); s.reset("t")
-    s.since_edit = 2
-    assert render_convergence(s) == ""                            # not enough spin yet
-    s.since_edit = 9; s.last_error = "boom"
-    assert render_convergence(s) == ""                            # an error → keep working, don't nudge
+    s.turn_actions = 2                                            # below EXPLORE_NUDGE_AFTER → no nudge yet
+    assert render_convergence(s) == ""
+    s.turn_actions = 9; s.last_error = "boom"                     # an error gates the nudge even when explored a lot
+    assert render_convergence(s) == ""
 
 
 @check

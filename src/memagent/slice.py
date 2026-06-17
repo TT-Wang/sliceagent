@@ -64,6 +64,7 @@ from .regions import (  # noqa: F401 — re-export shims
     MAX_FINDINGS,
     MAX_OPEN_THREADS,
     MAX_REPORT_CHARS,
+    EXPLORE_NUDGE_AFTER,
     READONLY_NUDGE_AFTER,
     REGION_LINES,
     REGION_ORDER,
@@ -223,7 +224,9 @@ class Slice:
     # readable by discovery_query). Bounded with the findings ring; pruned to live keys only.
     finding_source: dict = field(default_factory=dict)
     edited_files: set = field(default_factory=set)  # the change set — protected from eviction
-    since_edit: int = 0  # tool calls since the last successful edit — drives the convergence check
+    since_edit: int = 0  # tool calls since the last successful edit — drives the EDIT convergence check
+    turn_actions: int = 0  # tool calls THIS user turn — finding-INDEPENDENT (unlike since_edit, which resets
+    # on every new finding); drives the explore-nudge so a read-heavy Q&A that records notes still converges
     reviewed: list[str] = field(default_factory=list)  # history lookbacks done — the recall_history ratchet
     # I3 — OPEN USER REPORT. The user's most-recent FAILURE REPORT ("it can't play", "cd: no such
     # file"), captured verbatim as a BLOCKER the model must verify against the real artifact before
@@ -273,6 +276,7 @@ class Slice:
         self.finding_source = {}
         self.edited_files = set()
         self.since_edit = 0
+        self.turn_actions = 0
         self.reviewed = []
         self.open_report = ""
         self.conversation = []
@@ -458,6 +462,7 @@ def record_user(s: Slice, message: str) -> None:
     calls this once per user message; slice_sink fills the assistant side as the turn produces text.
     Bounded ring — older exchanges live in the durable cache, paged in on demand (not kept here)."""
     s.turns += 1
+    s.turn_actions = 0   # new user turn → reset the per-turn exploration budget (drives the explore-nudge)
     s.conversation.append({"user": one_line(message, CONVO_MSG_CHARS), "assistant": ""})
     s.conversation = s.conversation[-MAX_CONVERSATION:]
 
