@@ -8,7 +8,7 @@ MCP, plugins, and skills all register into the SAME registry the loop already dr
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .access import AllAccess

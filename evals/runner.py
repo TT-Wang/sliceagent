@@ -119,11 +119,3 @@ def print_footer(results: list[EvalResult]) -> None:
     print("-" * 88, flush=True)
     print(f"PASS {p}/{n}  ·  total tokens {sum(r.tokens for r in results)}  ·  "
           f"total wall {sum(r.wall_s for r in results):.1f}s", flush=True)
-
-
-def print_scorecard(results: list[EvalResult]) -> None:
-    """Full card (header + rows + footer) — for callers that already have the results."""
-    print_header()
-    for r in results:
-        print(_row(r))
-    print_footer(results)
