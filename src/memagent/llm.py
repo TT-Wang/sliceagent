@@ -56,7 +56,16 @@ class OpenAILLM:
         use_proxy = bool(proxy) and proxy != "none"
         http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
 
-        self.client = OpenAI(http_client=http_client, max_retries=2, **kwargs)
+        # Enforce the request timeout at the SDK layer too. The openai SDK applies its OWN per-request
+        # timeout (default ~600s) which OVERRIDES the httpx client's, so without passing it here a
+        # stalled/half-open connection hangs ~10 min before max_retries ever fires (observed: a wedged
+        # direct connection, timeout never tripping). Passing `timeout` makes a wedged call abort
+        # promptly so the retry recovers on a fresh connection — task-agnostic reliability (→ wall time).
+        self.client = OpenAI(http_client=http_client, timeout=timeout, max_retries=2, **kwargs)
+        # HARD wall-clock backstop for _create() (SIGALRM): a few seconds above the SDK read-timeout so
+        # the SDK's own (cleaner) timeout fires first when it can, and SIGALRM only catches the stalls
+        # the read-timeout misses (silent mid-response connections).
+        self._hard_timeout = max(int(timeout) + 15, 30)
         self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
         self._base_url = kwargs.get("base_url") or ""
         # Provider-AGNOSTIC reasoning intent: "full" (default) keeps the model's reasoning; "fast"
@@ -75,6 +84,34 @@ class OpenAILLM:
     def is_retryable(self, error: Exception) -> bool:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
         return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError))
+
+    def _on_alarm(self, signum, frame):
+        """SIGALRM handler: a request blew the HARD wall-clock deadline → raise a retryable timeout."""
+        import httpx
+        from openai import APITimeoutError
+        raise APITimeoutError(request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+
+    def _create(self, kwargs: dict):
+        """Call the SDK with a HARD wall-clock deadline that ALWAYS fires. The httpx/SDK read-timeout
+        only bounds the gap BETWEEN bytes, so a connection that goes silent mid-response can hang far
+        past `timeout` (observed: a stalled Moonshot read wedging the loop for 10+ min). A SIGALRM
+        deadline guarantees the call returns control to the retry path. POSIX + main-thread only;
+        falls back to a plain call elsewhere (Windows / worker thread), where the SDK timeout still
+        applies. Task-agnostic, provider-agnostic reliability — the backstop the timeout param promised."""
+        import signal as _signal
+        armed = False
+        try:
+            prev = _signal.signal(_signal.SIGALRM, self._on_alarm)
+            _signal.alarm(self._hard_timeout)
+            armed = True
+        except (ValueError, AttributeError, OSError):
+            armed = False  # not main thread / no SIGALRM → rely on the SDK timeout
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        finally:
+            if armed:
+                _signal.alarm(0)
+                _signal.signal(_signal.SIGALRM, prev)
 
     def _reasoning_kwargs(self) -> dict:
         """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never
@@ -133,7 +170,7 @@ class OpenAILLM:
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:
-            resp = self.client.chat.completions.create(**kwargs)
+            resp = self._create(kwargs)
         except Exception as e:
             # Context overflow is NOT a backoff case (is_retryable stays unchanged): signal the
             # rebuild loop to TIGHTEN the slice rather than re-send the identical oversized request.

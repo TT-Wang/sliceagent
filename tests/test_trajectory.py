@@ -219,8 +219,12 @@ def open_user_report_renders_as_blocker():
     out = render_slice(s, "(no files opened yet)")
     assert "OPEN USER REPORT" in out
     assert "it can't play at all" in out
-    # the blocker is rendered ABOVE the (stale) findings so a 'done' note can't outrank it
-    assert out.index("OPEN USER REPORT") < out.index("**Done")
+    # The blocker must OUTRANK the stale 'done' finding. Tier order is now cache-first (stable bulk
+    # leads; volatile tiers in the tail), so authority is carried by RECENCY-SALIENCE: the report
+    # renders AFTER the stale findings, in the most-salient tail right before NOW — so a 'done' note
+    # can't outrank it. (Empirical no-regression validated by the head-to-head re-run.)
+    assert out.index("OPEN USER REPORT") > out.index("**Done")
+    assert out.index("OPEN USER REPORT") > out.index("# RECENT"), "report must be in the salient tail"
 
 
 @check

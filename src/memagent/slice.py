@@ -51,6 +51,7 @@ K = 4  # sliding window for the RECENT (action→observation) tier
 # ceiling as a context-window safety valve — not a per-work cap.
 READ_BUDGET = 4    # recent exploratory reads kept (residue)
 EDIT_CEILING = 8   # max files in the change set (generous safety valve, not a per-work cap)
+DEP_CEILING = 4    # max read-only DEPENDENCIES of the change set kept co-resident (bounded contract view)
 MAX_ARTIFACT_CHARS = 1500  # cap for INCIDENTAL output only (discovery snippets) — never for the working set
 DISCOVERY_K = 6
 DISCOVERY_CHARS = 4000     # cap for the RELATED CODE map (signatures are compact; bounded like every tier)
@@ -254,6 +255,11 @@ class Slice:
     # the slice — an evicted read, a dropped skill. Turns "omission is unrecoverable" into a one-call
     # fetch. [{kind, ref}], bounded by MAX_GHOSTS; an item leaves the moment it's back in the slice.
     ghosts: list[dict] = field(default_factory=list)
+    # CO-RESIDENCY: read-only files that are DEPENDENCIES (contracts/callers) of the change set,
+    # recomputed each turn from the code graph (make_build_slice). Protected from eviction so the
+    # files an edit must stay consistent with don't page out from under it. Bounded (DEP_CEILING);
+    # a plain set of relpaths (serializable, like edited_files). Empty without a dep graph.
+    protected_deps: set = field(default_factory=set)
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -272,6 +278,7 @@ class Slice:
         self.conversation = []
         self.turns = 0
         self.ghosts = []
+        self.protected_deps = set()
 
 
 def one_line(s, n: int = 80) -> str:
@@ -321,12 +328,21 @@ def touch_file(s: Slice, path: str, edited: bool = False) -> None:
 
 
 def _prune_working_set(s: Slice) -> None:
-    """Keep the change set (every edited file, up to EDIT_CEILING) plus the most-recent READ_BUDGET
-    reads. Edited files are NEVER evicted to make room for a read — they're the relevant state of
-    the task; reads are residue (re-read on demand)."""
+    """Keep the change set (every edited file, up to EDIT_CEILING), its read-only DEPENDENCIES
+    (contracts/callers — up to DEP_CEILING), plus the most-recent READ_BUDGET other reads. Edited
+    files and their dependencies are NEVER evicted to make room for a plain read: to edit a file
+    correctly you must keep the files it must stay consistent with observable (re-observation reach
+    must cover the change set's deps — the s3 multi-file failure was context.py paging out from under
+    a dispatcher edit). Other reads are residue (re-read on demand). Deps come from the code graph
+    via make_build_slice; with no graph protected_deps is empty and this reduces to the old rule."""
     edited = [p for p in s.active_files if p in s.edited_files][-EDIT_CEILING:]
-    reads = [p for p in s.active_files if p not in s.edited_files][-READ_BUDGET:]
-    keep = set(edited) | set(reads)
+    edited_set = set(edited)
+    deps = [p for p in s.active_files
+            if p in s.protected_deps and p not in edited_set][-DEP_CEILING:]
+    deps_set = set(deps)
+    reads = [p for p in s.active_files
+             if p not in s.edited_files and p not in deps_set][-READ_BUDGET:]
+    keep = edited_set | deps_set | set(reads)
     for p in s.active_files:
         if p not in keep:
             s.edit_anchor.pop(p, None)
@@ -654,6 +670,12 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
         shown = [p for p in s.active_files if p in s.edited_files or p in keep_reads]
     else:
         shown = s.active_files
+    # STABLE render order (edited files first, then reads; each sorted by path) so an UNCHANGED
+    # working set renders byte-identically across steps → the prompt-cache prefix stays warm (a
+    # re-read used to reorder active_files and bust the cache). Recency still governs EVICTION
+    # (active_files order, _prune_working_set); only the on-the-wire ORDER is stabilized here.
+    shown = sorted([p for p in shown if p in s.edited_files]) + \
+        sorted([p for p in shown if p not in s.edited_files])
     parts = []
     for p in shown:
         try:
@@ -868,13 +890,24 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are in "
         f"the durable cache: use recall_history to view them)\n{convo_body}\n\n"
     ) if convo_body else ""
+    # TIER ORDER is chosen for PROMPT-CACHE locality: a prefix cache matches only up to the first byte
+    # that differs from the previous request, so the STABLE BULK (OPEN FILES, RELATED CODE, skills,
+    # memory, conversation — byte-identical across the common read-only / reasoning steps) leads, and
+    # the VOLATILE tiers (findings, action tally, RECENT, error, convergence — change most steps) go in
+    # the TAIL. The tail is also the most recency-salient region, so the immediate state and the
+    # high-authority blocker/error sit right above NOW — salience preserved, cache prefix maximized.
     parts = [
-        conv + rep + err + convo + fnd + rev + thr + skl + mem + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
-        f"# RECENT (last {window})", steps, "",
+        # ── STABLE BULK (cacheable prefix) ──
         "# OPEN FILES (live — your ground truth; edit based on this)", artifacts,
-        disc + gi,
-        hints + "# NOW: do the next step(s) with tools, or — if your change is complete and verified as well as the "
-        "environment allows — write the one-line final summary and make NO tool call.",
+        disc,                                    # RELATED CODE (semi-stable: changes only as focus shifts)
+        skl + mem + convo,                       # active skills / memory / recent conversation (stable within a turn)
+        # ── VOLATILE TAIL (recency-salient) ──
+        fnd + rev + thr + gi + "# REPEATED/FAILING ACTIONS", render_action_history(s.action_log), "",
+        f"# RECENT (last {window})", steps, "",
+        rep + err + conv,                        # OPEN USER REPORT / CURRENT ERROR / CONVERGENCE — highest authority, freshest
+        hints + "# NOW: do the next step(s) with tools (edit based on OPEN FILES above), or — if your "
+        "change is complete and verified as well as the environment allows — write the one-line final "
+        "summary and make NO tool call.",
     ]
     return "\n".join(parts)
 
@@ -936,6 +969,17 @@ def make_build_slice(state, tools, retriever, memory, task: str):
 
     def build() -> list[dict]:
         s = _active(state)
+        # CO-RESIDENCY: refresh the change set's protected DEPENDENCIES from the code graph (cheap —
+        # the graph is cached). Keeps the contracts/callers of an edited file from paging out under
+        # READ_BUDGET so a multi-file change stays internally consistent. No-op when the retriever has
+        # no dep graph (NullRetriever) → protected_deps stays empty and pruning is unchanged.
+        if hasattr(retriever, "deps") and s.edited_files:
+            deps: set = set()
+            for e in list(s.edited_files)[:EDIT_CEILING]:
+                deps.update(retriever.deps(e, limit=DEP_CEILING))
+            s.protected_deps = deps - s.edited_files
+        elif not s.edited_files:
+            s.protected_deps = set()
         goal = s.goal or task
         if goal not in recall_cache:
             recall_cache[goal] = render_memory(memory.recall(goal)) if memory is not None else ""

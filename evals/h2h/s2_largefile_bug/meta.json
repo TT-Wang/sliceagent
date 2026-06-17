@@ -1,0 +1,9 @@
+{
+  "name": "s2_largefile_bug",
+  "stressor": "large-file edit / head+tail truncation failure: a subtle behavioral bug planted deep in the middle of a real >2600-line stdlib module (argparse copied as cliparse.py)",
+  "turns": 1,
+  "max_steps_per_turn": 18,
+  "use_code_index": true,
+  "source_note": "cliparse.py is the unmodified CPython 3.13 argparse.py (~2690 lines) copied from the running stdlib at setup time, with exactly ONE single-character edit planted at the nargs-pattern method (~line 2459): the regex fragment for an optional with nargs='*' was changed from '(A*)' to '(A?)', so a '*'/'+' multi-value option silently keeps only its FIRST following token and misroutes the rest. Reference fix reverts that one edit.",
+  "discriminator": "The bug lives ~line 2459 of a 2690-line file, far below any head window and above any tail window, and is invisible to head-only or head+tail truncation; a growing-transcript agent that reads the whole file pays a large token cost and risks the buggy region scrolling out of attention, whereas a bounded-slice agent with grep/code-index can localize the nargs/pattern logic and edit only that region."
+}

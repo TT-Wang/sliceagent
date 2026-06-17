@@ -1,0 +1,4 @@
+results*.json
+*.log
+artifacts/
+__pycache__/
