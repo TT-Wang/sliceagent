@@ -21,7 +21,15 @@ class AllAccess:
     """An un-representable side effect (shell, network). Globally exclusive."""
 
 
-Access = FileAccess | AllAccess
+@dataclass(frozen=True)
+class ReadAllAccess:
+    """A workspace-WIDE READ with no side effect (a read-only explorer subagent: it may read/list/grep/
+    recall anywhere, but cannot write/run). Conflicts with any WRITER (AllAccess or a write FileAccess)
+    but NEVER with another ReadAllAccess or a plain read — so N explorers fan out concurrently while any
+    writing child still serializes. This is what turns the dormant one-at-a-time swarm into a real swarm."""
+
+
+Access = FileAccess | AllAccess | ReadAllAccess
 Accesses = list[Access]
 
 
@@ -70,6 +78,12 @@ def _overlap(left: FileAccess, right: FileAccess) -> bool:
 def _pair_conflict(left: Access, right: Access) -> bool:
     if isinstance(left, AllAccess) or isinstance(right, AllAccess):
         return True
+    ra_left, ra_right = isinstance(left, ReadAllAccess), isinstance(right, ReadAllAccess)
+    if ra_left or ra_right:
+        if ra_left and ra_right:
+            return False                                   # two workspace-wide reads never conflict
+        other = right if ra_left else left                 # the other side is a FileAccess (AllAccess handled above)
+        return _writes(other.operation)                    # read-all conflicts ONLY with a write, never with a read
     if not (_writes(left.operation) or _writes(right.operation)):
         return False  # read/read, read/search never conflict
     return _overlap(left, right)

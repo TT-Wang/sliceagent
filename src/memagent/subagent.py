@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from .access import AllAccess
+from .access import AllAccess, ReadAllAccess
 from .events import AssistantText, ToolStarted
 from .slice import one_line
 
@@ -25,10 +25,12 @@ _SUBAGENT_SCHEMA = {
     "function": {
         "name": "spawn_subagent",
         "description": (
-            "Delegate a self-contained SUB-TASK to a child agent. It works in the SAME "
-            "workspace and returns only a SHORT summary (not its full transcript), so your "
-            "own context stays small. Use for large decomposable work; give a clear, "
-            "complete, standalone sub-task description (the child sees none of your context)."
+            "Delegate a self-contained WRITABLE sub-task to a child agent (full tools). It works in "
+            "the SAME workspace and returns only a SHORT summary (not its full transcript), so your own "
+            "context stays small. Use for a large, decomposable piece of work you want carried out "
+            "end-to-end; give a complete, standalone description (the child sees none of your context). "
+            "For pure investigation prefer spawn_explore; for one tightly-coupled change you are "
+            "actively editing yourself, stay single-agent."
         ),
         "parameters": {
             "type": "object",
@@ -43,11 +45,13 @@ _EXPLORE_SCHEMA = {
     "function": {
         "name": "spawn_explore",
         "description": (
-            "Delegate a READ-ONLY investigation to a child agent — it can read, list, "
-            "search (grep/glob), and recall, but CANNOT edit files, run commands, or spawn "
-            "its own children. It works in the SAME workspace and returns only a SHORT "
-            "summary, so your context stays small. Use to answer 'where/what/how is X' "
-            "questions without spending your own context; give a clear, standalone task."
+            "Delegate a READ-ONLY investigation to a child agent that reads/lists/searches (grep/glob)/"
+            "recalls in the SAME workspace and returns only a SHORT summary — its file reads never enter "
+            "your context. USE PROACTIVELY FOR BREADTH: whenever answering would require reading more "
+            "than a couple of files, or the task spans several areas (e.g. 'review the repo', 'where/how "
+            "is X handled', 'find the bug'), emit SEVERAL spawn_explore calls in ONE response (one per "
+            "area or question) — they run in PARALLEL — instead of reading everything yourself, then "
+            "synthesize their summaries. The child cannot edit, run commands, or spawn its own children."
         ),
         "parameters": {
             "type": "object",
@@ -177,8 +181,12 @@ class SubagentHost:
         return s
 
     def accesses(self, name: str, args: dict) -> list:
-        if name in ("spawn_subagent", "spawn_explore"):
-            return [AllAccess()]  # arbitrary nested work → globally exclusive
+        if name == "spawn_explore":
+            # read-only child (no edit/shell/spawn): parallelizes with OTHER explorers, serializes vs any
+            # writer — so a broad task can fan out N explorers concurrently (the real swarm).
+            return [ReadAllAccess()]
+        if name == "spawn_subagent":
+            return [AllAccess()]  # WRITABLE nested work → globally exclusive (two writers in one workspace serialize)
         return self.inner.accesses(name, args)
 
     def read_text(self, path: str) -> str:

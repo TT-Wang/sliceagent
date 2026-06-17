@@ -3,11 +3,20 @@ leaves the slice THROUGH here. The memory plane of a DEMAND-PAGED SNAPSHOT MACHI
 so eviction is always safe (a re-fault re-reads from the durable store). DUCK-TYPED: imports nothing from slice.py
 (reverse import circular — slice re-imports the bounds, re-exported there for callers/tests); only prefetch() reaches
 self.retriever. SELF-TUNING (automatic, no model): a re-read of a file still in the recency ring (a REFAULT) proves
-the budget was momentarily too tight, so the kernel grants ITSELF a brief reclaim-protection — Linux mm/workingset
-refault detection, scaled down. hit/miss/refault/evict are counted (s.io) so the moat is MEASURED, not asserted."""
+the budget was momentarily too tight, so the kernel grants ITSELF a brief reclaim-protection (Linux mm/workingset
+refault detection, scaled down) AND widens its OWN read budget one notch (s.read_budget, bounded by s.read_ceiling)
+— so the working set grows to TASK need, not to a fixed ceiling. hit/miss/refault/evict are counted (s.io) so the
+moat is MEASURED, not asserted."""
 from __future__ import annotations
 
-READ_BUDGET = 4    # recent exploratory reads kept (residue) — SINGLE owner; slice.py re-exports all bounds below
+READ_BUDGET = 4    # FLOOR for the exploratory-read residue — the lean DEFAULT, NOT a hard cap. The kernel GROWS the
+                   # live budget (s.read_budget) on refault thrash up to READ_BUDGET_MAX, bidirectionally with the
+                   # overflow tighten ladder. "Bounded" = no PASSIVE/history-proportional growth (Markov current-state),
+                   # never a fixed size ceiling. SINGLE owner; slice.py re-exports all bounds below.
+READ_BUDGET_MAX = 16  # per-slice DISASTER CEILING for refault-driven growth. A single COHERENT task rarely needs more
+                      # resident reads than this; genuine BREADTH ("review the repo") is delegated to the subagent SWARM
+                      # (each child a fresh lean slice), NOT served by inflating one slice toward the context window
+                      # (that invites context-rot / lost-in-the-middle — see auto-memory: kernel-architecture).
 EDIT_CEILING = 8   # max files in the change set
 DEP_CEILING = 4    # max read-only DEPENDENCIES of the change set kept co-resident
 MAX_GHOSTS = 6     # GHOST INDEX ring — pointers to recently paged-out files/skills (also the refault recency window)
@@ -35,6 +44,7 @@ class SwapManager:
             if io is not None:
                 io["refault"] += 1
             self._promote(s, path)                       # budget was too tight → kernel grants a brief soft-pin
+            self._grow(s)                                # …and widens its OWN read budget one notch (bidirectional ladder)
         elif io is not None:                             # first sight — a cold MISS
             io["miss"] += 1
         s.active_files = [p for p in s.active_files if p != path]
@@ -73,8 +83,9 @@ class SwapManager:
         deps = [p for p in s.active_files
                 if p in s.protected_deps and p not in protect][-DEP_CEILING:]
         deps_set = set(deps)
+        read_budget = getattr(s, "read_budget", READ_BUDGET)   # LIVE adaptive budget (grows on refault); floor = READ_BUDGET
         reads = [p for p in s.active_files
-                 if p not in s.edited_files and p not in deps_set and p not in protect][-READ_BUDGET:]
+                 if p not in s.edited_files and p not in deps_set and p not in protect][-read_budget:]
         keep = protect | deps_set | set(reads)
         io = getattr(s, "io", None)
         for p in s.active_files:
@@ -132,6 +143,20 @@ class SwapManager:
         hot[path] = HOT_TTL
         while len(hot) > HOT_CEILING:        # drop the oldest soft-pin (insertion-ordered) past the ceiling
             hot.pop(next(iter(hot)))
+
+    def _grow(self, s) -> None:
+        """A REFAULT proves the resident read budget was momentarily too tight for THIS task (thrash).
+        The kernel widens its OWN live budget one notch — the BIDIRECTIONAL counterpart to the overflow
+        tighten ladder (which shrinks it). Bounded by the per-slice disaster ceiling (s.read_ceiling);
+        kernel-driven from MEASURED thrash (s.io refault), NO model involvement. Monotone within a
+        session (a task that needed N reads keeps needing ~N); never history-proportional, so the moat
+        holds — growth is TASK/refault-driven and window-bounded, and the kernel can always say no at
+        the ceiling. Same signal + same place as _promote: extend self-tuning from a per-file soft-pin
+        to the budget itself (Linux mm/workingset, scaled up)."""
+        cur = getattr(s, "read_budget", READ_BUDGET)
+        ceiling = getattr(s, "read_ceiling", READ_BUDGET_MAX)
+        if cur < ceiling:
+            s.read_budget = cur + 1
 
     def _ghost_add(self, s, kind: str, ref: str) -> None:  # paged-out item → bounded recovery POINTER (~0 tokens)
         if not ref:

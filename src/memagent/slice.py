@@ -91,7 +91,7 @@ from .regions import (  # noqa: F401 — re-export shims
 )
 from .safety import wrap_untrusted
 from .subdir_hints import SubdirHints
-from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
+from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, READ_BUDGET_MAX, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
 from .workspace import build_workspace_snapshot, git_branch_status
 
 # K (RECENT window) + anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
@@ -180,10 +180,11 @@ SYSTEM_PROMPT = (
     "<work>\n"
     "When it IS a task: make the SMALLEST change that resolves it — only what is necessary, reusing the codebase's existing "
     "helpers and idioms; add no special-cases or defensive logic the task did not ask for. Work in as FEW turns as "
-    "possible: emit INDEPENDENT tool calls in ONE response (read several files, grep several terms, and batch every "
-    "edit you can already determine) — they run in parallel — instead of one tool per turn; for multi-step work prefer "
-    "ONE execute_code script. Do NOT re-read or re-list what OPEN FILES / RECENT already show; once you have enough, "
-    "act or answer — don't keep exploring.\n"
+    "possible: emit INDEPENDENT tool calls in ONE response (read the specific files you need, grep several terms, and "
+    "batch every edit you can already determine) — they run in parallel — instead of one tool per turn; for multi-step "
+    "work prefer ONE execute_code script. Do NOT re-read or re-list what OPEN FILES / RECENT already show; once you have "
+    "enough, act or answer — don't keep exploring. When a task would require reading a WHOLE REPO's worth of files to "
+    "understand it, do NOT pull them all into your own context — narrow with grep/RELATED CODE, or delegate the breadth.\n"
     "</work>\n\n"
     "<verification>\n"
     "Verify with the CHEAPEST sufficient check (import/compile/build/lint, or the smallest relevant test). If a "
@@ -206,6 +207,27 @@ SYSTEM_PROMPT = (
     "Any WORKSPACE snapshot below is from session start — re-run git (status/branch) before relying on it.\n"
     "Be concise: lead with the change or the answer, not a preamble.\n"
     "</safety>"
+)
+
+
+# Appended to the system message ONLY when spawn_* tools are actually present (sub_depth>0 and not a read-only
+# child) — so we never tell the model to use a tool it doesn't have, and the block stays byte-stable per session
+# (schemas don't change mid-session → prompt-cache warm). Delegation is the SWARM realization of the moat:
+# breadth is paid for in CHILDREN's isolated slices (each returns only a bounded summary), so the parent's slice
+# never accumulates a whole repo's worth of reads — "present precisely what's needed, no passive history" at the
+# PROCESS level. Description-driven + effort-scaled fan-out, mirroring Claude Code / Anthropic-Research. The
+# single-vs-swarm line (fan out for decomposable breadth, stay single for tightly-coupled edits) is task-agnostic.
+DELEGATION_BLOCK = (
+    "\n\n<delegation>\n"
+    "For work that spans MANY files or several independent areas — 'review/understand the repo', 'find the bug', "
+    "auditing or comparing multiple modules — do NOT read the whole repo into your own context. DELEGATE in "
+    "PARALLEL: emit several spawn_explore calls in ONE response (one per area, module, or question; each a clear "
+    "standalone task), then synthesize the SHORT summaries they return. Scale the fan-out to the work: a single "
+    "fact needs no child (read the one file or just answer); a 2–4 file comparison → 2–4 explorers; a broad review "
+    "→ one explorer per major area. Use spawn_subagent (writable) for a large self-contained sub-task you want "
+    "carried out end-to-end. Stay SINGLE-AGENT for one tightly-coupled change you are actively editing — don't fan "
+    "out work you must keep consistent yourself.\n"
+    "</delegation>"
 )
 
 
@@ -263,6 +285,14 @@ class Slice:
     # automatic self-tuning loop (no model involvement), the validated automatic-beats-active-asker path.
     io: dict = field(default_factory=lambda: {"hit": 0, "miss": 0, "refault": 0, "evict": 0})
     hot: dict = field(default_factory=dict)
+    # ADAPTIVE working-set budget (the "bounded = Markov current-state, not a fixed ceiling" reframe). The
+    # resident exploratory-read budget is no longer the constant READ_BUDGET: it starts at that FLOOR and the
+    # kernel GROWS it on refault thrash (SwapManager._grow) up to read_ceiling. Transient session state (like
+    # io/hot) — NOT serialized, reset per task. Growth is task/refault-driven + window-bounded, never history-
+    # proportional, so the moat holds. read_ceiling is the per-slice disaster ceiling (genuine breadth goes to
+    # the swarm, not to inflating this one slice).
+    read_budget: int = READ_BUDGET
+    read_ceiling: int = READ_BUDGET_MAX
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -286,6 +316,8 @@ class Slice:
         self.pinned = []
         self.io = {"hit": 0, "miss": 0, "refault": 0, "evict": 0}
         self.hot = {}
+        self.read_budget = READ_BUDGET   # back to the lean floor each task; grows on refault within the task
+        self.read_ceiling = READ_BUDGET_MAX
 
 
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:
@@ -344,20 +376,18 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     `full_file_lines`/`region_only`/`read_budget` are tightening knobs (ITEM 3): at the floor
     every file collapses to its relevant region only (region_only=True) and only `read_budget`
     recent reads are SHOWN (edited files — the change set — are always shown), shrinking the
-    slice for an overflow rebuild WITHOUT mutating the durable working set. Defaults reproduce
-    the level-0 behavior byte-for-byte (read_budget==READ_BUDGET, the pruning cap)."""
+    slice for an overflow rebuild WITHOUT mutating the durable working set. At level 0 build()
+    passes the LIVE adaptive budget (s.read_budget, grown on refault) so the view tracks what
+    SwapManager.evict kept; the READ_BUDGET default just serves direct callers (the lean floor)."""
     if not s.active_files:
         return "(no files opened yet)"
-    # Render-time view cap: drop the oldest exploratory reads beyond read_budget; never drop an
-    # edited file (the change set is the relevant task state). Pure presentation — s.active_files
-    # is untouched (no transcript / durable-state mutation). At level 0 this is a no-op because
-    # SwapManager.evict (swap.py) already bounds reads to READ_BUDGET.
-    if read_budget < READ_BUDGET:
-        reads = [p for p in s.active_files if p not in s.edited_files]
-        keep_reads = set(reads[-read_budget:]) if read_budget > 0 else set()
-        shown = [p for p in s.active_files if p in s.edited_files or p in keep_reads]
-    else:
-        shown = s.active_files
+    # Render-time view cap: SHOW the most-recent read_budget exploratory reads; the change set (edited
+    # files) is ALWAYS shown. At level 0 read_budget IS the live budget SwapManager.evict already enforces,
+    # so this keeps every resident read (a no-op); an overflow tighten passes a smaller read_budget to
+    # shrink the view. Pure presentation — s.active_files (the durable working set) is untouched.
+    reads = [p for p in s.active_files if p not in s.edited_files]
+    keep_reads = set(reads[-read_budget:]) if read_budget > 0 else set()
+    shown = [p for p in s.active_files if p in s.edited_files or p in keep_reads]
     # STABLE render order (edited files first, then reads; each sorted by path) so an UNCHANGED
     # working set renders byte-identically across steps → the prompt-cache prefix stays warm (a
     # re-read used to reorder active_files and bust the cache). Recency still governs EVICTION
@@ -542,9 +572,17 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     # transcript); each level reshapes the volatile tiers smaller. Level 0 is byte-identical.
     _level = {"n": 0}
     swap = SwapManager(retriever)   # owns the working-set page lifecycle for this session
+    # DELEGATION (swarm) guidance — included ONLY when spawn_* tools are actually offered (sub_depth>0 and not a
+    # read-only child). Computed ONCE: schemas are stable per session, so the system message stays byte-stable
+    # (prompt-cache warm). Without spawn tools the block is empty (we never advertise a tool the model lacks).
+    try:
+        _names = {sc.get("function", {}).get("name") for sc in tools.schemas()} if hasattr(tools, "schemas") else set()
+    except Exception:
+        _names = set()
+    delegation_block = DELEGATION_BLOCK if "spawn_explore" in _names else ""
 
     def _system(goal: str) -> str:
-        return (SYSTEM_PROMPT + env_line + environment_block + workspace_block
+        return (SYSTEM_PROMPT + delegation_block + env_line + environment_block + workspace_block
                 + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
                 + goal)
 
@@ -555,8 +593,11 @@ def make_build_slice(state, tools, retriever, memory, task: str):
         if goal not in recall_cache:
             recall_cache[goal] = render_memory(memory.recall(goal)) if memory is not None else ""
         caps = TIER_CAPS[_level["n"]]
+        # BIDIRECTIONAL ladder: at level 0 the render budget tracks the LIVE adaptive budget (s.read_budget,
+        # grown on refault); an overflow tighten (level>0) caps it back down to the level's fixed small value.
+        read_budget = s.read_budget if _level["n"] == 0 else min(s.read_budget, caps["read_budget"])
         artifacts = build_artifacts(s, tools, full_file_lines=caps["full_file_lines"],
-                                    region_only=caps["region_only"], read_budget=caps["read_budget"])
+                                    region_only=caps["region_only"], read_budget=read_budget)
         # PageTable.lookup is the single read path. discovery_query builds the code focus (Markov:
         # latest finding + current error + task); discovery_k=0 at the floor => the backend skips it.
         code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=caps["discovery_k"])
@@ -603,6 +644,11 @@ def slice_sink(state):
             # further downgrades any "done"-style note to "claim" unless an observation backs it.
             new_finding = record_note(s, event.args.get("note", ""),
                                       source="tool-note" if not event.failing else "claim")
+            # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
+            # distilled summary into the bounded FINDINGS tier (observed) so it survives RECENT's K-window —
+            # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
+            if event.name in ("spawn_subagent", "spawn_explore") and not event.failing and event.output:
+                new_finding = record_note(s, event.output, source="observed") or new_finding
             did_edit = False
             if event.name == "skill" and not event.failing:
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
