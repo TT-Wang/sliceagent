@@ -17,6 +17,10 @@ from memagent.subagent import (                       # noqa: E402
     read_only_schemas,
     run_subagent,
 )
+from memagent.tools import LocalToolHost              # noqa: E402
+from memagent.slice import Slice, make_build_slice    # noqa: E402
+from memagent.memory import NullMemory                # noqa: E402
+from memagent.retriever import NullRetriever          # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -38,6 +42,23 @@ _ALL_SCHEMAS = [_fn_schema(n) for n in _KEEP + _DROP]
 
 def _names(schemas):
     return [s.get("function", {}).get("name") for s in schemas]
+
+
+@check
+def subagent_host_faithfully_projects_the_wrapped_host():
+    # REGRESSION (the "agent can't see its own folder" bug): SubagentHost must delegate every
+    # non-overridden host attr to the wrapped host. If root() is dropped, make_build_slice gets
+    # cwd="" and the WORKING DIRECTORY / cwd / WORKSPACE / git ENVIRONMENT tier silently vanishes
+    # whenever subagents are enabled.
+    import tempfile
+    wd = LocalToolHost(tempfile.mkdtemp(prefix="subhost-"))
+    sh = SubagentHost(wd, llm=None, retriever=NullRetriever(), memory=NullMemory(),
+                      policy=None, max_depth=1)
+    assert sh.root() == wd.root(), "SubagentHost must forward root() to the wrapped host"
+    s = Slice(); s.reset("hi")
+    sysmsg = make_build_slice(s, sh, NullRetriever(), NullMemory(), "hi")()[0]["content"]
+    assert "# WORKING DIRECTORY" in sysmsg, "cwd/env tier must survive the SubagentHost wrapper"
+    assert f"Working directory (cwd): {sh.root()}" in sysmsg, "the real cwd must reach the slice"
 
 
 class _InnerHost:
