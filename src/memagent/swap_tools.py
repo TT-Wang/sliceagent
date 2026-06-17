@@ -81,11 +81,14 @@ def make_view_tool(get_slice) -> ToolEntry:
             if s.active_skills:
                 out.append("ACTIVE SKILLS: " + ", ".join(sk["name"] for sk in s.active_skills))
             return "\n".join(out)
+        io = getattr(s, "io", {}) or {}
         return ("# KERNEL VIEW: mem/usage — working-set headroom\n"
                 f"reads {len(reads)}/{READ_BUDGET} · edited {len(edited)}/{EDIT_CEILING} · "
                 f"deps {len(deps)}/{DEP_CEILING} · pinned {len(pinned)}/{PIN_CEILING}\n"
                 f"ghosts {len(s.ghosts)}/{MAX_GHOSTS} · skills {len(s.active_skills)}/{MAX_ACTIVE_SKILLS} · "
                 f"findings {len(s.findings)}\n"
+                f"io: hit {io.get('hit', 0)} · miss {io.get('miss', 0)} · refault {io.get('refault', 0)} · "
+                f"evict {io.get('evict', 0)} · self-pinned(hot) {len(getattr(s, 'hot', {}))}\n"
                 "Exploratory reads beyond the budget page out to the GHOST INDEX (one call to recover). "
                 "pin a file to keep it resident for a multi-file change; view(kind=\"maps\") lists what's resident.")
 

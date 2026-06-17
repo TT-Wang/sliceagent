@@ -1,5 +1,16 @@
 """The Active Memory Slice — the moat.
 
+NORTH STAR — the slice is a CACHE, not a log. Every model call is a pure function
+f(selector, store): the durable stores (disk, code graph, episode cache) are the only
+authority; the slice is a small typed SELECTOR over them, reconstructed each step — so the
+fast tier can be flushed and rebuilt every step because a re-fault is always safe. This is a
+DEMAND-PAGED SNAPSHOT MACHINE: build() = a context switch that faults in exactly the regions
+this step references; the Slice = an MVCC-style snapshot descriptor / a PCB. The single
+invariant "cache not log" IMPLIES the moat (a cache keeps no history), task-agnosticism (a
+cache doesn't know what it caches), and LLM-agnosticism (the cache contract sits below the
+model). Borrowed + validated against CPU/MMU/out-of-order/microkernel/dataflow/DB designs
+(see auto-memory: kernel-architecture).
+
 No chat history. The host builds the model-visible messages fresh each step via
 `make_build_slice` (the reconstruction seam the loop calls). Tool results flow back
 into the tiers through `slice_sink` (an event sink) — so the loop stays decoupled
@@ -79,7 +90,7 @@ from .regions import (  # noqa: F401 — re-export shims
 )
 from .safety import wrap_untrusted
 from .subdir_hints import SubdirHints
-from .swap import DEP_CEILING, EDIT_CEILING, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
+from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
 from .workspace import build_workspace_snapshot, git_branch_status
 
 # K (RECENT window) + anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
@@ -241,6 +252,14 @@ class Slice:
     # protected from plain-read eviction like the change set, but TASK-driven not edit-driven. Bounded
     # by PIN_CEILING (force-compacted past it). Transient: re-derived per session, never serialized.
     pinned: list = field(default_factory=list)
+    # KERNEL-INTERNAL self-tuning state — NOT rendered into the slice the model sees, NOT serialized
+    # (taskstate ignores it), transient. Pure mechanism, like Linux vmstat + mm/workingset refault
+    # tracking. `io` = per-session page hit/miss/refault/evict counters (makes the moat MEASURED, not
+    # asserted; the only legit input to any future budget auto-sizing). `hot` = files the kernel granted
+    # ITSELF a brief reclaim-protection on a refault (path -> TTL steps), bounded by HOT_CEILING — the
+    # automatic self-tuning loop (no model involvement), the validated automatic-beats-active-asker path.
+    io: dict = field(default_factory=lambda: {"hit": 0, "miss": 0, "refault": 0, "evict": 0})
+    hot: dict = field(default_factory=dict)
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -261,6 +280,8 @@ class Slice:
         self.ghosts = []
         self.protected_deps = set()
         self.pinned = []
+        self.io = {"hit": 0, "miss": 0, "refault": 0, "evict": 0}
+        self.hot = {}
 
 
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:
