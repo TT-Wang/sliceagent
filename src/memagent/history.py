@@ -13,7 +13,6 @@ just a feature. Registered only when memory is durable (NullMemory/eval path nev
 from __future__ import annotations
 
 import json
-import re
 
 INDEX_LIMIT = 40       # breadcrumbs shown by the bare index
 TRACE_MAX = 4000       # total chars for a compact-trace fetch
@@ -115,19 +114,14 @@ def render_full(lines: list[dict], cap: int = FULL_MAX) -> str:
     return "\n".join(out).strip() or "(no slice stored)"
 
 
-def render_cross_session(hits: list[dict]) -> str:
-    """Render cross-session FTS5 episode hits (item 12) — a bounded discovery listing the
-    model can scan, then drill into a session's own cache. NOT this session's turns: these
-    come from PAST sessions, so there's no in-session turn to fetch — the snippet + note +
-    title are the recall payload (Hermes' discovery shape, bookend-free for our grain)."""
+def render_cross_session(refs) -> str:
+    """Render cross-session episode PageRefs (from PageTable.lookup(kind='episode-xsession')) — a
+    bounded discovery listing the model can scan, then drill into a session's own cache. NOT this
+    session's turns: these come from PAST sessions, so there's no in-session turn to fetch — the
+    locator (handle) + packed preview (ts/title/note/match) is the recall payload."""
     out = ["# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)"]
-    for h in hits:
-        snip = re.sub(r"\s+", " ", h.get("snippet") or "").strip()
-        note = (h.get("note") or "").strip()
-        out.append(f"- [{h.get('session_id', '')[:14]} · turn {h.get('turn')}] "
-                   f"{_short_ts(h.get('ts', ''))} · {(h.get('title') or '(no title)')[:60]}"
-                   + (f"\n    note: {note[:160]}" if note else "")
-                   + (f"\n    match: {snip[:200]}" if snip else ""))
+    for r in refs:
+        out.append(f"- [{r.handle}] {r.preview}")
     if len(out) == 1:
         return "No matching past sessions found."
     return "\n".join(out)
@@ -143,8 +137,12 @@ def make_history_tool(memory, session_id: str):
     rather than hard-blocking. Turn boundaries need no plumbing: the cache grows one record per turn,
     so a change in episode count resets the rein. The index fetch is free (the locator); only data
     drills (turns=/last=) count toward the backstop. Each served result carries a capture-back nudge."""
+    from .pagetable import PageTable
     from .registry import ToolEntry
     guard = {"seen": -1, "served": set(), "distinct": 0}   # episode count, fetches served, drills
+    # The ONE cross-session read path: PageTable's episode-xsession backend wraps
+    # memory.search_episodes (the this-session read_episodes drill stays in this handler).
+    pages = PageTable(memory=memory, exclude_session=session_id)
 
     def _handler(args: dict) -> str:
         # cross-session shape (item 12): search=... runs FTS5 across PAST sessions. Distinct
@@ -152,11 +150,11 @@ def make_history_tool(memory, session_id: str):
         # (each query is a real search returning new info, like the distinct-fetch path).
         q = args.get("search")
         if isinstance(q, str) and q.strip():
-            hits = memory.search_episodes(q.strip(), limit=6, exclude_session=session_id)
-            if not hits:
+            refs = pages.lookup(q.strip(), kind="episode-xsession", k=6)
+            if not refs:
                 return ("No matching PAST sessions. (This searches other sessions; for THIS "
                         "session's turns call recall_history() with no args.)")
-            return render_cross_session(hits) + CAPTURE_BACK
+            return render_cross_session(refs) + CAPTURE_BACK
         lines = memory.read_episodes(session_id)
         if len(lines) != guard["seen"]:          # cache grew (or first call) → new turn → reset rein
             guard["seen"] = len(lines)
