@@ -379,11 +379,3 @@ def make_code_index(root: str = ".", *, prefer_ripgrep: bool = True):
         return RipgrepCodeIndex(root=root)
     from .retriever import NullRetriever
     return NullRetriever()
-
-
-def make_subdir_hints(root: str):
-    """Factory for the SUBDIRECTORY CONTEXT tier (ITEM 17 sourcing seam): a per-turn
-    lookup that surfaces project conventions for the subtree the agent is working in.
-    The logic lives in subdir_hints.py; this is the seam slice.py imports."""
-    from . import subdir_hints
-    return subdir_hints.SubdirHints(root)

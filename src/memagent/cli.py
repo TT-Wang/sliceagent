@@ -147,6 +147,15 @@ def main() -> None:
     if getattr(memory, "is_durable", False):   # model's bounded valve into the cold episodic cache
         from .history import make_history_tool
         base_tools.registry.register(make_history_tool(memory, session.session_id))
+    # active-asker MM syscalls: pin (deliberate working-set growth) + view (/proc introspection),
+    # bound to the CURRENT active slice so a topic switch retargets them; mechanism is the SwapManager.
+    from .slice import _active
+    from .swap_tools import make_pin_tool, make_view_tool
+
+    def _get_slice():
+        return _active(session)
+    base_tools.registry.register(make_pin_tool(_get_slice))
+    base_tools.registry.register(make_view_tool(_get_slice))
 
     # write side of the memory loop: mine a lesson per successful, error-resolving turn
     miner = None

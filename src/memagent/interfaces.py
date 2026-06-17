@@ -33,6 +33,20 @@ class Snippet:
 
 
 @dataclass
+class PageRef:
+    """A bounded reference to one PAGE the PageTable can surface into the slice — the unified shape
+    every read/retrieval backend (code map, project-notes, cross-session episodes) returns from
+    PageTable.lookup(). Carries RAW text (`preview`); the renderer fences it (wrap_untrusted) so
+    injection-fencing stays at ONE layer. `handle` locates the page (a repo-map marker, a subtree
+    path, a session·turn locator); `untrusted` flags re-injected external content (default True)."""
+    handle: str
+    kind: str
+    preview: str
+    score: float = 0.0
+    untrusted: bool = True
+
+
+@dataclass
 class TaskRef:
     """A bounded index row for the OTHER OPEN THREADS tier (Step 3)."""
     task_id: str
