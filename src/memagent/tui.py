@@ -203,13 +203,14 @@ class TuiInput:
         )
 
     def prompt(self) -> str | None:
-        """Return the next line, or None to quit (ctrl-d / EOF)."""
+        """Return the next line, or None to QUIT. Both ctrl-d (EOF) and ctrl-c (SIGINT) exit cleanly —
+        matching the plain-input path (cli.py) so the program is never un-quittable. (Ctrl-c DURING a
+        turn is caught earlier by run_turn, which aborts just the turn and returns here; this handles
+        ctrl-c at the idle prompt, where the only sensible action is to leave.)"""
         try:
             return self.session.prompt(HTML("<ansicyan><b>You ▸ </b></ansicyan>"))
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):   # ctrl-d OR ctrl-c at the prompt → quit
             return None
-        except KeyboardInterrupt:   # ctrl-c at an empty prompt → just re-prompt
-            return ""
 
 
 def confirm(console: Console, name: str, detail: str, reason: str) -> str:
