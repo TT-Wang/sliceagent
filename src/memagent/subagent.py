@@ -154,6 +154,17 @@ class SubagentHost:
         self.notify = notify
         self.read_only = read_only
 
+    def __getattr__(self, name):
+        # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
+        # (root, add_root, registry, on_ask_user, …) delegates to the wrapped host, so parent and
+        # child share ONE host surface. Without this, root() was silently missing → make_build_slice
+        # got cwd="" → the slice's WORKING DIRECTORY / cwd / WORKSPACE / git ENVIRONMENT tier vanished
+        # whenever subagents were enabled (the agent then can't see its own folder). Kills the whole
+        # "wrapper forgot to forward a host method" class, not just root().
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "inner"), name)
+
     def schemas(self) -> list[dict]:
         s = list(self.inner.schemas())
         if self.read_only:
