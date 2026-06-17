@@ -149,11 +149,34 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     total_blocked = 0
     stop_reason = "end_turn"
 
+    def _closeout(guidance: str) -> None:
+        # NEVER end a turn silently. On a hard stop (max_steps / stuck) make ONE tool-less call so the
+        # model delivers its best answer/summary (or a clarifying question) from what it already has —
+        # instead of leaving the user a bare status line. tools=[] structurally forbids further tool
+        # calls; fully guarded so a close-out failure can't crash the turn.
+        try:
+            msgs = build_slice()
+            prepared = hooks.prepare_messages(msgs)
+            if prepared is not None:
+                msgs = prepared
+            if not msgs:
+                return
+            msgs = msgs[:-1] + [{"role": msgs[-1]["role"], "content": msgs[-1]["content"]
+                                 + "\n\n# TURN IS ENDING — " + guidance + " Give the user your best answer or "
+                                 "summary NOW from what you already have; make NO tool call. If the request was "
+                                 "ambiguous, ask ONE concise clarifying question instead."}]
+            resp = llm.complete(msgs, [])
+            if getattr(resp, "content", None):
+                dispatch(AssistantText(resp.content))
+        except Exception:
+            pass
+
     while True:
         if signal is not None and signal.is_set():
             dispatch(TurnInterrupted("aborted"))
             return TurnResult("aborted", steps, total)
         if steps >= max_steps:
+            _closeout(BUDGET_EXHAUSTED("max_steps"))
             dispatch(TurnInterrupted("max_steps", message=BUDGET_EXHAUSTED("max_steps")))
             stop_reason = "max_steps"
             break
@@ -175,6 +198,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         # (the model should have called ask_user; this is the backstop so a weak model can't spin forever).
         total_blocked += outcome.blocked
         if total_blocked >= STUCK_BLOCK_BUDGET:
+            _closeout(STUCK)
             dispatch(TurnInterrupted("stuck", message=STUCK))
             stop_reason = "stuck"
             break
