@@ -199,6 +199,48 @@ def run_subagent_writable_label_distinct_from_explore():
     assert out.startswith("[subagent "), out
 
 
+@check
+def explorer_keeps_reads_resident_no_eviction_churn():
+    # 'explore stuck' fix: a read-only explorer must keep its WHOLE exploration resident. With the
+    # default READ_BUDGET the early reads evict → the model re-reads the paged-out files → the anti-loop
+    # guard flags the re-reads as no-progress → the child goes "stuck" before it can summarize. The
+    # explorer budget (EXPLORER_READ_BUDGET) holds the exploration, so there is no eviction churn.
+    from memagent.subagent import EXPLORER_READ_BUDGET
+    from memagent.slice import Slice, touch_file
+    from memagent.swap import READ_BUDGET
+    assert EXPLORER_READ_BUDGET > READ_BUDGET
+    # explorer budget: 10 distinct reads ALL stay resident (no eviction → no re-read churn)
+    s = Slice(); s.reset("explore"); s.read_budget = s.read_ceiling = EXPLORER_READ_BUDGET
+    for i in range(10):
+        touch_file(s, f"pkg/f{i}.py")
+    assert len(s.active_files) == 10, f"explorer evicted reads (churn): {len(s.active_files)} resident"
+    # default budget: the SAME 10 reads churn down to READ_BUDGET (the bug condition)
+    d = Slice(); d.reset("task")
+    for i in range(10):
+        touch_file(d, f"pkg/g{i}.py")
+    assert len(d.active_files) == READ_BUDGET, f"default kept {len(d.active_files)}, expected {READ_BUDGET}"
+
+
+@check
+def explorer_guard_does_not_stuck_on_repeated_reads():
+    # the explorer guard relaxes the READ axes: a repeated idempotent read (same result) must NOT be
+    # hard-blocked (which is what drove review children to "stuck"); the DEFAULT guard still blocks it.
+    from memagent.guardrails import ToolCallGuardrailConfig
+    from memagent.hooks import GuardrailHook
+    relaxed = GuardrailHook(ToolCallGuardrailConfig(no_progress_block_after=10**6, result_repeat_block_after=10**6))
+    for _ in range(8):                                  # same read, same result, many times
+        assert relaxed.authorize_tool("read_file", {"path": "a.py"}).allow, "explorer guard blocked a re-read"
+        relaxed.transform_tool_result("read_file", {"path": "a.py"}, "same content")
+    default = GuardrailHook()
+    blocked = False
+    for _ in range(8):
+        if not default.authorize_tool("read_file", {"path": "a.py"}).allow:
+            blocked = True
+            break
+        default.transform_tool_result("read_file", {"path": "a.py"}, "same content")
+    assert blocked, "default guard should block a repeated no-progress read (explorer must differ)"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

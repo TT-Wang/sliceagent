@@ -344,6 +344,12 @@ def render_convergence(s) -> str:
     is broken, so it never cuts off active fixing (a failing check keeps last_error set → no nudge).
     This SHRINKS wasted steps/tokens/time; the model still decides (it may continue for a real edit)."""
     if not s.edited_files:
+        # EXPLORER children are SUPPOSED to do many read-only calls (their deliverable is the
+        # investigation); the read-only nudge below is for the TOP-LEVEL agent over-exploring instead
+        # of answering the user, and it was cutting delegated reviews short BEFORE the key (large) files
+        # were read. max_steps bounds an explorer, not this nudge.
+        if getattr(s, "explore_mode", False):
+            return ""
         # READ-ONLY spin: many tool calls, nothing changed. Edit-gated convergence never fires here,
         # so a trivial/answer-only task (greeting, "show the path", "summarize") over-explores. Nudge
         # it to answer/act. General + Markov (edits vs non-edits, no task-type); dormant once anything
