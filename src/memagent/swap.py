@@ -116,8 +116,9 @@ class SwapManager:
                 if p not in s.edited_files and p not in s.pre_defs:
                     s.pre_defs[p] = r.def_names(p)
         if hasattr(r, "deps") and s.edited_files:
+            edited = list(s.edited_files)[:EDIT_CEILING]   # materialize ONCE (reused below)
             deps: set = set()
-            for e in list(s.edited_files)[:EDIT_CEILING]:
+            for e in edited:
                 deps.update(r.deps(e, limit=DEP_CEILING))
             s.protected_deps = deps - s.edited_files
             # CHANGE-SET CLOSURE (symbol-aware): names the edits removed/moved, then the dependents whose
@@ -126,7 +127,7 @@ class SwapManager:
             # the UNOPENED ones (self-extinguishing once the model opens the site to fix/confirm).
             if hasattr(r, "def_names") and hasattr(r, "ref_tokens") and hasattr(s, "stale_deps"):
                 removed: set = set()
-                for e in list(s.edited_files)[:EDIT_CEILING]:
+                for e in edited:
                     removed |= (s.pre_defs.get(e, set()) - r.def_names(e))
                 s.stale_deps = ({d for d in s.protected_deps if r.ref_tokens(d) & removed}
                                 if removed else set())

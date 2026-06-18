@@ -48,18 +48,6 @@ def _tail(s: str, n: int) -> str:
     return s if len(s) <= n else "…" + s[-n:]
 
 
-def _arg_hint(args: dict) -> str:
-    if not isinstance(args, dict):
-        return ""
-    for k in ("path", "command", "task_id", "goal", "query"):
-        if args.get(k):
-            return f"{k}={str(args[k])[:60]}"
-    if args.get("code"):
-        return "code=" + (str(args["code"]).strip().splitlines() or [""])[0][:60]
-    extra = {k: v for k, v in args.items() if k != "note"}
-    return (json.dumps(extra, ensure_ascii=False)[:60]) if extra else ""
-
-
 def render_index(lines: list[dict]) -> str:
     from .finding_types import badge, classify_finding   # item 14a: typed note badge in the index
     out = ["# CACHED HISTORY (index — fetch a turn with recall_history(turns=[N]) or last=N)"]

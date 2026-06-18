@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 
 from .safety import wrap_untrusted
-from .swap import DEP_CEILING, MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
+from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
@@ -209,7 +209,7 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
     if source != "observed" and is_done_claim(note):
         source = "claim"
     is_new = note not in s.findings  # genuinely new knowledge vs a refresh of an existing finding
-    if note in s.findings:          # already established — refresh its recency, don't duplicate
+    if not is_new:                   # already established — refresh its recency, don't duplicate
         s.findings.remove(note)
     s.findings.append(note)
     s.findings = s.findings[-MAX_FINDINGS:]
@@ -267,7 +267,8 @@ def observe(out, n: int = 260) -> str:
     if len(o) <= n:
         return o
     head = n // 4
-    return o[:head] + " … " + o[-(n - head - 3):]
+    tail = n - head - 3                  # 3 = len(" … "); head + sep + tail == n
+    return o[:head] + " … " + o[-tail:]
 
 
 def action_sig(name: str, args: dict) -> str:
