@@ -1,9 +1,17 @@
-"""The agent loop — the moat. Stateless core over contracts; ONE model call per turn,
-no accumulated history. Mirrors Kimi Code's run-turn/turn-step split.
+"""The agent loop — the moat. Stateless core over contracts; mirrors Kimi Code's run-turn/turn-step split.
 
-The core depends ONLY on: build_slice (the reconstruction seam), an LLMClient, a
-ToolHost, a dispatch_event callable, and hooks. It never imports implementations and
-never touches slice internals (tool results flow back via the slice_sink on events).
+Two loop modes (AGENT_LOOP_MODE; the mode= arg overrides):
+  - "accumulate" (DEFAULT): one while(true) = one "thought" = one memory slice. The slice is the SEED
+    (built once); working memory ACCUMULATES within the loop as native assistant/tool messages and is
+    folded to the durable cache at the boundary. Markov ACROSS loops (no transcript), continuous WITHIN —
+    validated to hold accuracy + multi-turn continuity while lifting cache% / cutting cost and removing
+    the per-step eviction churn. (run_turn_accumulate)
+  - "rebuild" (fallback): the slice is reconstructed every step from durable state — strictly [system,
+    user], no within-loop accumulation (the prior validated core). (run_turn body)
+
+The core depends ONLY on: build_slice (the reconstruction seam), an LLMClient, a ToolHost, a
+dispatch_event callable, and hooks. It never imports implementations and never touches slice internals
+(tool results flow back via the slice_sink on events).
 """
 from __future__ import annotations
 
@@ -77,7 +85,9 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
             tasks.append(([], (lambda d=decision: f"Error: blocked by policy: {d.reason or 'denied'}")))
         else:
             tasks.append((tools.accesses(tc.name, tc.args), (lambda tc=tc: str(tools.run(tc.name, tc.args)))))
-        metas.append((getattr(tc, "id", None), tc.name, tc.args))
+        # real OpenAI tool_calls carry an id; synthesize a stable index-based one if absent (e.g. test
+        # fakes / a provider that omits it) so accumulate's assistant.tool_calls ↔ tool messages still match.
+        metas.append((getattr(tc, "id", None) or f"call_{len(metas)}", tc.name, tc.args))
 
     outputs = run_scheduled(tasks)
     results = []
@@ -92,13 +102,15 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
 
 
 def _assistant_message(resp) -> dict:
-    """Reconstruct the OpenAI assistant message (with native tool_calls) for the ACCUMULATE transcript."""
+    """Reconstruct the OpenAI assistant message (with native tool_calls) for the ACCUMULATE transcript.
+    ids are synthesized index-based when absent (matching run_tool_batch's scheme) so the assistant's
+    tool_calls and the following tool messages reference the SAME ids."""
     msg: dict = {"role": "assistant", "content": resp.content or ""}
     if resp.tool_calls:
         msg["tool_calls"] = [
-            {"id": tc.id, "type": "function",
+            {"id": getattr(tc, "id", None) or f"call_{i}", "type": "function",
              "function": {"name": tc.name, "arguments": json.dumps(tc.args, ensure_ascii=False)}}
-            for tc in resp.tool_calls
+            for i, tc in enumerate(resp.tool_calls)
         ]
     return msg
 
@@ -163,10 +175,11 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
              max_steps: int = 40, signal=None, mode: str | None = None) -> TurnResult:
     hooks = hooks or Hooks()
     hooks.reset_for_turn()  # ITEM 1: clear per-turn guards ONCE per user task (not per step)
-    # PROTOTYPE fork (3-layer redesign under test): loop_mode="accumulate" runs the per-LOOP
-    # working-memory loop; default "rebuild" is the validated per-step reconstruction below, UNCHANGED.
-    # Env-driven so the A/B toggles every harness without code changes. (mode arg overrides the env.)
-    if (mode or os.environ.get("AGENT_LOOP_MODE", "rebuild")) == "accumulate":
+    # Loop mode. DEFAULT is now "accumulate" — the per-LOOP working-memory loop (3-layer redesign),
+    # validated to hold coding accuracy + multi-turn continuity while lifting cache% / cutting cost and
+    # dissolving the per-step eviction churn. "rebuild" (the prior per-step reconstruction) stays as the
+    # AGENT_LOOP_MODE=rebuild fallback. Env-driven so it's overridable without code changes; mode arg wins.
+    if (mode or os.environ.get("AGENT_LOOP_MODE", "accumulate")) == "accumulate":
         return run_turn_accumulate(build_slice=build_slice, llm=llm, tools=tools, dispatch=dispatch,
                                    hooks=hooks, max_steps=max_steps, signal=signal)
     total = {"prompt_tokens": 0, "completion_tokens": 0}

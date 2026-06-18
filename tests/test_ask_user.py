@@ -64,9 +64,10 @@ class _Resp:
 
 
 class _SpinLLM:
-    """Always emits the SAME failing tool call — a model stuck in a loop."""
+    """Always emits the SAME failing tool call — a model stuck in a loop. (No len(messages)==2 assert:
+    the default loop_mode is now 'accumulate', where working memory grows within the loop; this test
+    exercises the mode-agnostic STUCK floor, not the rebuild-only [system,user] shape.)"""
     def complete(self, messages, schemas):
-        assert len(messages) == 2  # moat invariant: [system, user]
         return _Resp([_TC("read_file", {"path": "does-not-exist.py"})])
 
 
