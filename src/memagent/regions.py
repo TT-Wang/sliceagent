@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from .safety import wrap_untrusted
 from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
-from .text_utils import normalize_ws
+from .text_utils import normalize_ws, one_line
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
@@ -74,8 +74,8 @@ def bump_level(level: dict) -> bool:
     return True
 
 
-def one_line(s, n: int = 80) -> str:
-    return normalize_ws(s)[:n]
+# `one_line` is re-exported from text_utils (single definition; slice.py re-exports it onward as the
+# package-wide one-line renderer). Kept importable from regions for the existing call sites.
 
 
 def render_ghosts(s) -> str:

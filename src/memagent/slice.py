@@ -324,8 +324,9 @@ class Slice:
     protected_deps: set = field(default_factory=set)
     # CHANGE-SET CLOSURE state (symbol-aware): pre_defs snapshots each file's def-names BEFORE it is
     # edited, so prefetch can compute what an edit REMOVED (pre - current) and flag dependents whose
-    # CURRENT tokens still reference a removed name — a precise dangling-call-site signal (no transcript;
-    # bounded dicts/sets recomputed from the durable code graph, never accumulated history).
+    # CURRENT tokens still reference a removed name — a precise dangling-call-site signal. INTERNAL
+    # host state (def-name sets from the durable code graph), never rendered into the slice and never a
+    # conversation transcript; scoped to the files touched this session (one small set per such file).
     pre_defs: dict = field(default_factory=dict)
     stale_deps: set = field(default_factory=set)
     # DELIBERATE GROWTH (active-asker): files the LLM explicitly PINNED resident via the `pin` tool —

@@ -155,6 +155,25 @@ class OpenAILLM:
         #   live Anthropic base_url; MERGE with _reasoning_kwargs' extra_body, do not overwrite.
         return {}
 
+    def _cache_routing_kwargs(self) -> dict:
+        """Map the session cache-routing hint to the ACTIVE provider; gated like the sibling
+        quirk-mappers (`_reasoning_kwargs`/`_cache_kwargs`) so a provider-specific param never
+        reaches an endpoint that rejects it.
+
+        `prompt_cache_key` is an OpenAI Chat-Completions field (routes identical-prefix requests to
+        the same cache shard for a higher hit rate; 0 added tokens). OpenAI-compatible providers
+        (the default Moonshot path, DeepSeek) accept-and-ignore it harmlessly. It is INVALID on an
+        Anthropic-compatible endpoint (which caches via explicit cache_control breakpoints — see
+        `_cache_kwargs`), so we return {} there to keep that request byte-stable and untouched.
+        """
+        key = getattr(self, "_cache_key", None)
+        if not key:
+            return {}
+        model, base = self.model.lower(), self._base_url.lower()
+        if "claude" in model or "anthropic" in base:
+            return {}  # Anthropic uses cache_control, not prompt_cache_key
+        return {"prompt_cache_key": key}
+
     def _merge_kwargs(self, kwargs: dict, extra: dict) -> None:
         """Fold `extra` into `kwargs`, MERGING `extra_body` instead of overwriting it.
 
@@ -177,8 +196,7 @@ class OpenAILLM:
                    if self.model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
                    else "max_tokens")
             kwargs[key] = self.max_tokens
-        if getattr(self, "_cache_key", None):     # session-stable cache routing (0 added tokens)
-            kwargs["prompt_cache_key"] = self._cache_key
+        self._merge_kwargs(kwargs, self._cache_routing_kwargs())  # session-stable cache routing (0 added tokens)
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:
