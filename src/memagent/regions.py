@@ -459,6 +459,10 @@ def _r_recent(ctx) -> str:
 REGION_ORDER = (
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
+    # REPO MAP — the resident structural map of the project (cache tier B): always present + bounded, so a
+    # broad task navigates from here instead of re-listing/find. STABLE (built once/session → cache-warm);
+    # new files mid-task show in the LIVE worktree region. Suppresses itself when empty.
+    ("repo_map",       STABLE,   lambda c: (f"\n# REPO MAP (the project's file structure — your resident map; navigate from here, do NOT re-list the tree)\n{c['repo_map']}\n\n" if c.get("repo_map") else ""), 1),
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are in the durable cache: use recall_history to view them)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
@@ -470,6 +474,10 @@ REGION_ORDER = (
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
     ("recent",         VOLATILE, _r_recent, 5),
+    # WORKSPACE STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
+    # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
+    # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
+    ("worktree",       VOLATILE, lambda c: (f"# WORKSPACE STATE (LIVE — current branch & changed files, re-read THIS turn; this is the up-to-date git state — trust it over any session-start project facts)\n{c['worktree']}\n\n" if c.get("worktree") else ""), 6),
     # OPEN USER REPORT rides ABOVE the error (a stale "done" note can't outrank a user's BROKEN report);
     # both are the highest-authority, freshest tail right above NOW.
     ("user_report",    VOLATILE, lambda c: (f"# OPEN USER REPORT (the user reports this is BROKEN — treat it as an UNRESOLVED blocker; do NOT claim it is done or already working until you have VERIFIED the fix against the real artifact, e.g. run/open it and observe success)\n{c['s'].open_report}\n\n" if c["s"].open_report else ""), 6),

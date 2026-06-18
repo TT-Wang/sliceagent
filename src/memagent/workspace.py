@@ -300,3 +300,58 @@ def build_workspace_snapshot(cwd: str) -> str:
 
     lines.extend(_project_facts(root))
     return "\n".join(lines)
+
+
+# ── LIVE world-state (the cache's recomputed-each-build region) ───────────────
+
+
+def workspace_facts(cwd: str) -> str:
+    """STATIC project facts (manifest, package manager, verify commands, context files) for the
+    cache-stable SYSTEM tier — the git-INDEPENDENT subset of build_workspace_snapshot. Live git
+    state is deliberately NOT here; it lives in the volatile slice via git_worktree_state(), so the
+    system message stays byte-stable (prompt-cache warm). '' outside a project; never raises."""
+    resolved = _resolve_cwd(cwd)
+    if resolved is None:
+        return ""
+    root = _git_root(resolved) or _marker_root(resolved)
+    if root is None:
+        return ""
+    return "\n".join(_project_facts(root))
+
+
+def git_worktree_state(cwd: str, *, max_files: int = 20) -> str:
+    """LIVE working-tree state for the VOLATILE slice tier (the world-state cache's recomputed-each-
+    build region): current branch + the CHANGED-FILE SET (staged/modified/untracked/conflicts),
+    re-probed every build — unlike the one-shot session-start snapshot. This is the cure for the
+    stale-snapshot 're-run git' smell: the model always sees the current git state. Bounded to
+    max_files. '' outside a repo / on error; never raises (POMDP per-turn belief update analog)."""
+    resolved = _resolve_cwd(cwd)
+    if resolved is None:
+        return ""
+    git_root = _git_root(resolved)
+    if git_root is None:
+        return ""
+    porcelain = _git(git_root, "status", "--porcelain=2", "--branch")
+    head, _counts = _parse_status(porcelain)
+    if not head:
+        return ""
+    branch = "(detached HEAD)" if head == "(detached)" else head
+    changed: list[tuple[str, str]] = []
+    for line in porcelain.splitlines():
+        if line.startswith(("1 ", "2 ")):
+            parts = line.split(maxsplit=8)
+            if len(parts) >= 2 and len(parts[1]) >= 2:
+                xy = parts[1]
+                tag = "staged" if xy[0] != "." else "modified"
+                changed.append((tag, parts[-1]))
+        elif line.startswith("u "):
+            changed.append(("conflict", line.split(maxsplit=10)[-1]))
+        elif line.startswith("? "):
+            changed.append(("untracked", line[2:].strip()))
+    if not changed:
+        return f"branch {branch} · working tree clean"
+    lines = [f"branch {branch} · {len(changed)} changed file(s)"]
+    lines += [f"  {tag}: {path}" for tag, path in changed[:max_files]]
+    if len(changed) > max_files:
+        lines.append(f"  …and {len(changed) - max_files} more")
+    return "\n".join(lines)

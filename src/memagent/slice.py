@@ -92,7 +92,7 @@ from .regions import (  # noqa: F401 — re-export shims
 from .safety import wrap_untrusted
 from .subdir_hints import SubdirHints
 from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, READ_BUDGET_MAX, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
-from .workspace import build_workspace_snapshot, git_branch_status
+from .workspace import build_workspace_snapshot, git_branch_status, git_worktree_state, workspace_facts  # noqa: F401
 
 # K (RECENT window) + anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
 # (MAX_CONVERSATION/CONVO_MSG_CHARS), DISCOVERY_K, and the OPEN-FILES view caps (FULL_FILE_LINES/
@@ -204,7 +204,8 @@ SYSTEM_PROMPT = (
     "<safety>\n"
     "Do NOT make unasked git mutations (commit/push/checkout/reset/rewrite history) — ask each time before changing repo state.\n"
     "Never read, print, or commit secrets — leave .env and credential files alone unless the user explicitly asks.\n"
-    "Any WORKSPACE snapshot below is from session start — re-run git (status/branch) before relying on it.\n"
+    "Your current git state (branch + changed files) is shown LIVE in WORKSPACE STATE below, re-read every "
+    "turn — trust it; the PROJECT facts in this system message are session-start static.\n"
     "Be concise: lead with the change or the answer, not a preamble.\n"
     "</safety>"
 )
@@ -498,7 +499,7 @@ def record_user(s: Slice, message: str) -> None:
 
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
-                 subdir_hints: str = "", *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
+                 subdir_hints: str = "", worktree: str = "", repo_map: str = "", *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
@@ -512,6 +513,8 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "memory": memory,
         "threads": threads,
         "hints": render_subdir_hints(subdir_hints),
+        "worktree": worktree,
+        "repo_map": repo_map,
         "window": window,
         "max_findings": max_findings,
     }
@@ -540,10 +543,14 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     # ITEM 11(B) — git/project snapshot computed ONCE per session (NOT inside build()). It is
     # deterministic per cwd within a session, so the system message stays byte-stable (prompt-cache
     # warm) across turns. Empty outside a repo / on any error — then no WORKSPACE header is spliced.
-    snapshot = build_workspace_snapshot(cwd) if cwd else ""
+    # STATIC project facts (manifest / package manager / verify commands) go in the cacheable SYSTEM
+    # message; LIVE git state (branch + changed files) is recomputed each build() into the volatile
+    # slice (the world-state cache's tier-A region), so the system message stays byte-stable and the
+    # model always sees current git state — no stale session-start snapshot.
+    facts = workspace_facts(cwd) if cwd else ""
     workspace_block = (
-        "\n\n# WORKSPACE (snapshot at session start — re-check with git before acting)\n" + snapshot
-    ) if snapshot else ""
+        "\n\n# PROJECT (session-start facts — manifest, package manager, verify commands)\n" + facts
+    ) if facts else ""
     # I2 — RE-OBSERVED ENVIRONMENT tier. The agent must OBSERVE its world, not REMEMBER it: a fresh
     # slice that defaults to a generic Linux sandbox hallucinates /home/user on macOS (G2). These are
     # deterministic ground-truth facts (platform, real HOME, cwd, git branch/status) computed ONCE per
@@ -572,6 +579,14 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     # transcript); each level reshapes the volatile tiers smaller. Level 0 is byte-identical.
     _level = {"n": 0}
     swap = SwapManager(retriever)   # owns the working-set page lifecycle for this session
+    # CACHE tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session (stable →
+    # prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/find. Lazy
+    # import avoids any slice<->tools cycle; '' (suppressed) for hosts without root() (in-memory stubs).
+    try:
+        from .tools import repo_map as _repo_map
+        repo_map_text = _repo_map(tools.root()) if hasattr(tools, "root") else ""
+    except Exception:
+        repo_map_text = ""
     # DELEGATION (swarm) guidance — included ONLY when spawn_* tools are actually offered (sub_depth>0 and not a
     # read-only child). Computed ONCE: schemas are stable per session, so the system message stays byte-stable
     # (prompt-cache warm). Without spawn tools the block is empty (we never advertise a tool the model lacks).
@@ -605,9 +620,12 @@ def make_build_slice(state, tools, retriever, memory, task: str):
         threads = render_threads(state.open_threads()) if is_session else ""
         note_refs = pages.lookup(s.active_files, kind="project-notes", k=1)  # ITEM 17 subtree notes
         hint_text = note_refs[0].preview if note_refs else ""
+        # CACHE tier A — LIVE world-state: re-probe git each build (current branch + changed files), so
+        # the slice always carries the up-to-date working-tree state instead of a stale snapshot.
+        worktree = git_worktree_state(cwd) if cwd else ""
         # NEXT BACKEND TO FOLD: memory.recall (per-task episodic recall, below) — a sibling call for now.
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
-                            hint_text, window=caps["window"], max_findings=caps["max_findings"])
+                            hint_text, worktree, repo_map_text, window=caps["window"], max_findings=caps["max_findings"])
         return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
 
     # ITEM 3 PIN — build.rebuild_tighter() -> bool. The loop calls it on a ContextOverflow:

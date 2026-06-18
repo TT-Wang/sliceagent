@@ -111,9 +111,81 @@ def with_note(schema: dict) -> dict:
     return {**schema, "function": {**fn, "parameters": {**params, "properties": props, "required": req}}}
 
 
+# Build/VCS/cache directories that are pure noise to LIST — and FLOOD context on a real repo (the reason a
+# whole-repo "review" derailed: find/list surfaced thousands of .venv/.ruff_cache paths). list_files prunes
+# these so the model gets a clean map and doesn't fall back to raw `find`. Task-agnostic denylist (not a full
+# .gitignore parse): covers the universal offenders. ripgrep (grep tool) is already .gitignore-aware natively.
+_IGNORE_NAMES = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", ".env", "node_modules", "__pycache__", ".ruff_cache",
+    ".pytest_cache", ".mypy_cache", ".tox", ".idea", ".vscode", ".cache", "dist", "build", ".eggs", "htmlcov",
+    ".DS_Store",
+})
+_IGNORE_SUFFIX = (".egg-info", ".pyc")
+_LIST_CAP = 600   # bound recursive output so a huge tree can't flood the slice
+
+
+def _is_ignored(name: str) -> bool:
+    return name in _IGNORE_NAMES or any(name.endswith(s) for s in _IGNORE_SUFFIX)
+
+
+# Asset/binary/log files are noise in a structural MAP (they crowd out source); skipped from repo_map
+# only (list_files still shows them). Generic, not task-specific.
+_MAP_SKIP_SUFFIX = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".pdf", ".log", ".lock", ".bin",
+                    ".so", ".dylib", ".o", ".class", ".woff", ".woff2", ".ttf", ".mp4", ".mov", ".zip",
+                    ".tar", ".gz", ".whl", ".pyc", ".jsonl", ".csv", ".parquet")
+# Code extensions — used ONLY to RANK directories by source-density so the map shows the real source
+# tree first (a generic signal, identical across task types; never a task-category switch).
+_CODE_SUFFIX = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb", ".c", ".h", ".cc",
+                ".cpp", ".hpp", ".cs", ".php", ".swift", ".kt", ".scala", ".sh", ".lua", ".ml", ".ex",
+                ".exs", ".clj", ".r", ".jl", ".vue", ".sql")
+
+
+def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str:
+    """A compact, ignore-aware STRUCTURAL MAP of the project (the world-state cache's tier-B resident
+    store): directories with their files, pruned of VCS/venv/cache + asset/log noise, RANKED by source-
+    density so the real code tree shows first and never gets starved by asset/log dirs. This is what
+    kills cold-start — a 'review/understand the repo' task sees the structure RESIDENT instead of re-
+    listing with find. Built ONCE per session (stable → prompt-cache warm); new files created mid-task
+    surface via the LIVE worktree region. Over budget, late dirs collapse to a count (structure stays
+    COMPLETE). '' if root is unusable; never raises."""
+    if not root or not os.path.isdir(root):
+        return ""
+    rows: list[tuple[str, list[str], int, int]] = []  # (rel, files, total, code_count)
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):  # symlinks not followed
+            dirnames[:] = sorted(d for d in dirnames if not _is_ignored(d))
+            files = sorted(f for f in filenames
+                           if not _is_ignored(f) and not f.endswith(_MAP_SKIP_SUFFIX))
+            if not files:
+                continue
+            rel = os.path.relpath(dirpath, root)
+            code_count = sum(1 for f in files if f.endswith(_CODE_SUFFIX))
+            rows.append((rel, files, len(files), code_count))
+    except OSError:
+        return ""
+    if not rows:
+        return ""
+    # rank source-dense dirs first (so src/ beats docs/ assets), ties broken by path for stability
+    rows.sort(key=lambda r: (-r[3], r[0]))
+    lines, shown = [], 0
+    for rel, files, total, _code in rows:
+        prefix = "./" if rel == "." else rel + "/"
+        if shown < max_entries:                       # detailed: list files (per-dir capped)
+            take = files[:max_per_dir]
+            shown += len(take)
+            extra = f" (+{total - len(take)} more)" if total > len(take) else ""
+            lines.append(f"{prefix} — {', '.join(take)}{extra}")
+        else:                                         # over budget: keep the dir, collapse to a count
+            lines.append(f"{prefix} — ({total} files)")
+    return "\n".join(lines)
+
+
 TOOL_SCHEMAS = [
     _fn("read_file", "Read a file and return its contents.", {"path": {"type": "string"}}, ["path"]),
-    _fn("list_files", "List files in a directory (defaults to current directory).", {"path": {"type": "string"}}, []),
+    _fn("list_files",
+        "List a directory (ignore-aware: skips .git/.venv/caches/build noise). Pass recursive=true to map "
+        "a whole subtree in ONE call — PREFER this over shell `find` to get a clean repo map without cache junk.",
+        {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, []),
     _fn("edit_file", "Create or OVERWRITE an entire file (replaces ALL content). Use only for brand-new files.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
     _fn("append_to_file", "Append content to the end of a file (creates it if missing). Use to ADD without overwriting.",
@@ -311,8 +383,35 @@ class LocalToolHost:
         return self.read_text(args["path"])
 
     def _t_list_files(self, args: dict) -> str:
-        d = self._resolve(args.get("path") or ".")
-        return "\n".join(sorted(os.listdir(d))) or "(empty)"
+        base = self._resolve(args.get("path") or ".")
+        if not args.get("recursive"):
+            entries = sorted(os.listdir(base))
+            shown = [e + "/" if os.path.isdir(os.path.join(base, e)) else e
+                     for e in entries if not _is_ignored(e)]
+            hidden = [e for e in entries if _is_ignored(e)]
+            body = "\n".join(shown) or "(empty)"
+            if hidden:  # name them so the model KNOWS they exist (recoverable), without flooding
+                body += f"\n(+{len(hidden)} ignored: {', '.join(hidden[:6])})"
+            return body
+        # recursive: a clean, ignore-pruned, bounded repo MAP — the native alternative to shell `find`
+        rels: list[str] = []
+        capped = False
+        for dirpath, dirnames, filenames in os.walk(base):  # symlinks not followed (no .venv loops)
+            dirnames[:] = sorted(d for d in dirnames if not _is_ignored(d))  # prune in place → don't descend
+            rel = os.path.relpath(dirpath, base)
+            for f in sorted(filenames):
+                if _is_ignored(f):
+                    continue
+                rels.append(f if rel == "." else os.path.join(rel, f))
+                if len(rels) >= _LIST_CAP:
+                    capped = True
+                    break
+            if capped:
+                break
+        body = "\n".join(sorted(rels)) or "(empty)"
+        if capped:
+            body += f"\n(+more — capped at {_LIST_CAP}; pass a subdirectory path to narrow)"
+        return body
 
     def _t_edit_file(self, args: dict) -> str:
         full = self._resolve(args["path"])
