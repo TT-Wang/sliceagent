@@ -17,8 +17,6 @@ redirect, so 'encourage recall' can never rebuild the transcript. Registered whe
 """
 from __future__ import annotations
 
-import json
-
 from .text_utils import format_ts
 
 INDEX_LIMIT = 40       # breadcrumbs shown by the bare index

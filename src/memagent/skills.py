@@ -14,11 +14,7 @@ import os
 from dataclasses import dataclass
 
 from .registry import ToolEntry
-from .text_utils import normalize_ws
-
-
-def _one_line(s: str, n: int = 140) -> str:
-    return normalize_ws(s)[:n]
+from .text_utils import one_line
 
 
 @dataclass
@@ -133,7 +129,7 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
     if not cat:
         return None
     names = [n for n, _ in cat]
-    listing = "\n".join(f"- {n}: {_one_line(d)}" for n, d in cat)
+    listing = "\n".join(f"- {n}: {one_line(d, 140)}" for n, d in cat)
     desc = (
         "Load a SKILL: a reusable procedure whose detailed instructions are added to your "
         "working context and PERSIST for the rest of the task. Call it BEFORE starting work "
