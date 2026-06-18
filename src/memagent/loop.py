@@ -153,16 +153,20 @@ def _assistant_message(resp) -> dict:
     return msg
 
 
+def _prepared(hooks, msgs: list) -> list:
+    """Pre-LLM-call hook seam (context injection, prompt-cache-safe): return the hook's rewrite, or
+    `msgs` unchanged when it returns None. ONE definition for the three call sites that need identical
+    semantics — note `is not None` (an empty-list rewrite is honored), not truthiness."""
+    prepared = hooks.prepare_messages(msgs)
+    return prepared if prepared is not None else msgs
+
+
 def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks) -> StepOutcome:
     before = hooks.before_step(step_num)
     if before and before.get("block"):
         raise RuntimeError(before.get("reason") or f"step {step_num} blocked")
 
-    def _prepare(msgs):
-        prepared = hooks.prepare_messages(msgs)  # pre-LLM-call seam (inject context, prompt-cache-safe)
-        return prepared if prepared is not None else msgs
-
-    messages = _prepare(build_slice())
+    messages = _prepared(hooks, build_slice())
     dispatch(SliceBuilt(messages[-1]["content"], messages))
     dispatch(StepBegin(step_num))
 
@@ -185,7 +189,7 @@ def run_step(*, step_num: int, build_slice, llm, tools, dispatch: Dispatcher, ho
                 raise
             overflow_tries += 1
             dispatch(SliceTightened(level=overflow_tries))
-            messages = _prepare(build_slice())
+            messages = _prepared(hooks, build_slice())
             dispatch(SliceBuilt(messages[-1]["content"], messages))
 
     usage = resp.usage or {}
@@ -231,10 +235,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         # instead of leaving the user a bare status line. tools=[] structurally forbids further tool
         # calls; fully guarded so a close-out failure can't crash the turn.
         try:
-            msgs = build_slice()
-            prepared = hooks.prepare_messages(msgs)
-            if prepared is not None:
-                msgs = prepared
+            msgs = _prepared(hooks, build_slice())
             if not msgs:
                 return
             msgs = msgs[:-1] + [{"role": msgs[-1]["role"], "content": msgs[-1]["content"]
@@ -308,11 +309,7 @@ def run_turn_accumulate(*, build_slice, llm, tools, dispatch: Dispatcher, hooks:
     total_blocked = 0
     stop_reason = "end_turn"
 
-    def _prep(msgs):
-        prepared = hooks.prepare_messages(msgs)
-        return prepared if prepared is not None else msgs
-
-    messages = list(_prep(build_slice()))   # SEED — built ONCE, then we only append
+    messages = list(_prepared(hooks, build_slice()))   # SEED — built ONCE, then we only append
     seed_len = len(messages)                # never compact below the seed
     dispatch(SliceBuilt(messages[-1]["content"], messages))
 
