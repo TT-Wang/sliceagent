@@ -80,6 +80,16 @@ class OpenAILLM:
         # exceeds it truncates mid-edit → the agent retries the broken edit → step/time blowup. A
         # generous explicit cap avoids that. Standard param (provider-agnostic). 0 → leave default.
         self.max_tokens = int(os.environ.get("AGENT_MAX_TOKENS") or 8192)
+        # Provider-AGNOSTIC prompt-cache routing key (OpenAI `prompt_cache_key`, accepted/ignored
+        # harmlessly elsewhere). A session-stable key keeps every turn's requests on the same cached
+        # prefix → higher cache-hit rate at ZERO added prompt tokens. Set via set_cache_key(); the
+        # quirk stays isolated to this adapter (llm-agnostic). None → omit the kwarg entirely.
+        self._cache_key: str | None = None
+
+    def set_cache_key(self, key: str | None) -> None:
+        """Pin a session-scoped prompt-cache routing key (typically the session_id). Cheapest cache
+        lever there is: raises cache-hit rate, adds no tokens. Safe to call repeatedly."""
+        self._cache_key = key or None
 
     def is_retryable(self, error: Exception) -> bool:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
@@ -167,6 +177,8 @@ class OpenAILLM:
                    if self.model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
                    else "max_tokens")
             kwargs[key] = self.max_tokens
+        if getattr(self, "_cache_key", None):     # session-stable cache routing (0 added tokens)
+            kwargs["prompt_cache_key"] = self._cache_key
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:

@@ -142,6 +142,7 @@ def main() -> None:
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
                              policy=policy, max_depth=sub_depth, notify=print)
     session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
+    llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
     if getattr(memory, "is_durable", False):   # model's bounded valve into the cold episodic cache

@@ -12,11 +12,12 @@ slice.py — slice.py imports FROM here (one direction), so there is no import c
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 
 from .safety import wrap_untrusted
-from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
+from .swap import DEP_CEILING, MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
@@ -358,6 +359,38 @@ STOP_NUDGE_AFTER = 2  # non-edit tool calls since the last edit (with no error) 
 READONLY_NUDGE_AFTER = 4  # read-only tool calls with NO edit at all before nudging to answer/act
 EXPLORE_NUDGE_AFTER = 5  # tool calls in ONE turn with no edit before nudging to ANSWER or ask_user — keyed on
 # turn_actions (finding-INDEPENDENT), so a read-heavy Q&A that records a note each step still converges
+CLOSURE_MAX_SHOWN = 3   # max dangling-dependent locators in one CLOSURE block (bounds tokens; symbol-aware
+# staleness keeps the set tiny + self-extinguishing, so no window cap is needed to prevent a cascade)
+
+
+def render_closure(s) -> str:
+    """CHANGE-SET CLOSURE — the PRECISE half of 'verify before done'. After an edit settles, name the
+    dependents whose code STILL references a symbol your edit removed or moved: a dangling call-site a
+    coordinated change must fix (re-observation-reach = action-reach). SYMBOL-AWARE (SwapManager.prefetch
+    computes stale_deps from the cached code graph: pre-edit defs - current defs, intersected with each
+    dependent's current ref tokens), so it is SILENT on feature-adds (nothing removed → never inflates a
+    non-refactor task) and on already-fixed sites (their tokens no longer name the symbol). Locator-only,
+    advisory, self-extinguishing (kept to UNOPENED stale deps), bounded; empty on a no-graph host. It does
+    NOT police a WRONG edit at an already-reached site (e.g. s3's depth bug) — that needs behavioral verify."""
+    if os.environ.get("MEMAGENT_NO_CLOSURE"):    # safety kill-switch for the gated rollout
+        return ""
+    stale = getattr(s, "stale_deps", None) or set()
+    # SYMBOL-AWARE: stale_deps (computed in SwapManager.prefetch) are the dependents whose CURRENT tokens
+    # still reference a symbol the edit removed/moved — silent on feature-adds (nothing removed). Keep only
+    # the UNOPENED ones so the nudge self-extinguishes the instant the model opens the site to fix/confirm
+    # (precise + terminating: no cascade on tasks whose callers don't need changing). Capped small.
+    if not stale or s.last_error or s.since_edit < STOP_NUDGE_AFTER:
+        return ""
+    active = set(s.active_files)
+    unclosed = sorted(p for p in stale if p not in s.edited_files and p not in active)[:CLOSURE_MAX_SHOWN]
+    if not unclosed:
+        return ""
+    edited = ", ".join(sorted(s.edited_files)[:4])
+    body = "\n".join(f"- {p} — still references a symbol you changed/moved in {edited}; open it and update "
+                     f"it (or confirm it's correct)" for p in unclosed)
+    return ("# CHANGE-SET CLOSURE\nyour edit removed or moved a symbol these files still reference — a "
+            "coordinated change must fix every call-site, not just the definition:\n" + body + "\ndo NOT "
+            "declare done until each is updated or confirmed.\n\n")
 
 
 def render_convergence(s) -> str:
@@ -390,6 +423,8 @@ def render_convergence(s) -> str:
         return ""
     if s.last_error or s.since_edit < STOP_NUDGE_AFTER:
         return ""
+    if render_closure(s):           # an unreached dependent outranks the done-nudge (targeted > frequency):
+        return ""                   # show CLOSURE instead of STOP so the model finishes the refactor first
     strong = "STOP NOW — " if s.since_edit >= STOP_NUDGE_AFTER + 2 else ""
     return (
         f"# CONVERGENCE CHECK\n{strong}you have edited {len(s.edited_files)} file(s) and made "
@@ -517,6 +552,7 @@ REGION_ORDER = (
     # both are the highest-authority, freshest tail right above NOW.
     ("user_report",    VOLATILE, lambda c: (f"# OPEN USER REPORT (the user reports this is BROKEN — treat it as an UNRESOLVED blocker; do NOT claim it is done or already working until you have VERIFIED the fix against the real artifact, e.g. run/open it and observe success)\n{c['s'].open_report}\n\n" if c["s"].open_report else ""), 6),
     ("error",          VOLATILE, lambda c: (f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{c['s'].last_error}\n\n" if c["s"].last_error else ""), 6),
+    ("closure",        VOLATILE, lambda c: render_closure(c["s"]), 6),
     ("convergence",    VOLATILE, lambda c: render_convergence(c["s"]), 6),
     # SUBDIRECTORY CONTEXT (pre-framed in ctx['hints']) prefixes the always-present NOW footer.
     ("now",            VOLATILE, lambda c: c["hints"] + "# NOW: do the next step(s) with tools (edit based on OPEN FILES above), or — if your change is complete and verified as well as the environment allows — write the one-line final summary and make NO tool call.", 7),
