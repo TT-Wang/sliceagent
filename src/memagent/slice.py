@@ -60,6 +60,7 @@ from .regions import (  # noqa: F401 — re-export shims
     MAX_ACTION_LOG,
     MAX_ACTION_SHOWN,
     MAX_CONVERSATION,
+    MANIFEST_TURNS,
     MAX_FINDING_CHARS,
     MAX_FINDINGS,
     MAX_OPEN_THREADS,
@@ -80,6 +81,7 @@ from .regions import (  # noqa: F401 — re-export shims
     record_action,
     record_note,
     render_action_history,
+    render_cache_manifest,
     render_conversation,
     render_convergence,
     render_findings,
@@ -149,9 +151,9 @@ SYSTEM_PROMPT = (
     "2. CURRENT ERROR / OPEN USER REPORT — the unresolved failure to fix. If the user REPORTS the work is "
     "broken, treat it as an open blocker: VERIFY any fix against the real artifact (run/open it and observe "
     "success) before claiming it is done — your own note saying 'done' does NOT clear a user report.\n"
-    "3. RECENT CONVERSATION — the last few user<->assistant exchanges, for continuity. Older turns are NOT "
-    "shown here; if the user refers to something earlier in the conversation, recall_history to see it "
-    "BEFORE answering, instead of assuming.\n"
+    "3. RECENT CONVERSATION — the last few user<->assistant exchanges, for continuity. Older turns are "
+    "paged out — the PAGED-OUT HISTORY section lists them with the recall_history call to fetch each; if "
+    "the user refers to something earlier, page that turn back in BEFORE answering, instead of assuming.\n"
     "4. YOUR NOTES FROM PRIOR TOOL CALLS — facts you recorded on earlier turns. Reuse them to avoid "
     "re-deriving, but they are YOUR notes, not ground truth: VERIFY against OPEN FILES before relying on "
     "one, and a note that says the work is 'done' is NOT proof — confirm it on the real artifact first.\n"
@@ -204,10 +206,11 @@ MEMORY_REBUILD = (
     "disk, and you stay fast no matter how long the conversation gets because the slice never grows "
     "without bound.\n"
     "CONSEQUENCES, internalize them:\n"
-    "- Something not in the slice is NOT gone — it's paged out. If you need an earlier decision, an exact "
-    "prior message, or what you tried many turns ago, PAGE IT IN: call recall_history (an index of every "
-    "turn this session, which you can drill into) — or search the cache for cross-session history. Never "
-    "assume context is lost; recall it.\n"
+    "- Something not in the slice is NOT gone — it's paged out. The PAGED-OUT HISTORY section below indexes "
+    "those earlier turns (turn · title · note) WITH the exact recall_history call to fetch each — read it "
+    "before re-deriving. If you need an earlier decision, an exact prior message, or what you tried many "
+    "turns ago, PAGE IT IN with the call shown there (or recall_history(search=…) for cross-session "
+    "history). Never assume context is lost; recall it.\n"
     "- You DRIVE the slice, you don't just receive it: for a multi-file change, `pin` the files you must "
     "keep consistent so they stay resident (exploratory reads page out); call `view` to see your working-set "
     "headroom — what's resident vs paged out — and decide what to pin or let go.\n"
@@ -229,12 +232,14 @@ MEMORY_ACCUMULATE = (
     "is disk, and you stay fast no matter how long the session gets because nothing accumulates ACROSS "
     "tasks.\n"
     "CONSEQUENCES, internalize them:\n"
-    "- WITHIN this task you ALREADY have what you've read and done — do NOT re-read or re-derive it; build "
-    "on it.\n"
-    "- For something from an EARLIER task or turn this session (an exact prior message, a decision you made "
-    "before) it is NOT in front of you — PAGE IT IN: call recall_history (an index of every turn this "
-    "session, which you can drill into), or search the cache for cross-session history. Never assume it's "
-    "lost; recall it.\n"
+    "- Your recent steps are shown below, but OLDER turns of this session are PAGED OUT — they are NOT in "
+    "the slice. The PAGED-OUT HISTORY section lists them (turn · title · note) WITH the exact "
+    "recall_history call to bring each back. Before you re-read a file or re-derive something you already "
+    "worked out on an earlier turn, check that list and PAGE THE TURN BACK IN — it's one call, and the "
+    "call is printed for you.\n"
+    "- Don't re-fetch what's already in front of you (RECENT / YOUR NOTES / OPEN FILES). Reach back for "
+    "what is NOT shown — that's exactly what PAGED-OUT HISTORY (and recall_history(search=…) for other "
+    "sessions) is for. Paging an earlier turn back is normal navigation, not a failure.\n"
     "- Trust the WORLD over memory: if a note or an earlier read conflicts with a fresh tool result / OPEN "
     "FILES, the WORLD wins (a file you edited may have changed since you first read it).\n"
     "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
@@ -535,7 +540,8 @@ def record_user(s: Slice, message: str) -> None:
 
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
-                 subdir_hints: str = "", worktree: str = "", repo_map: str = "", *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
+                 subdir_hints: str = "", worktree: str = "", repo_map: str = "", cache_manifest: str = "",
+                 *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
@@ -551,13 +557,14 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "hints": render_subdir_hints(subdir_hints),
         "worktree": worktree,
         "repo_map": repo_map,
+        "cache_manifest": cache_manifest,
         "window": window,
         "max_findings": max_findings,
     }
     return render_regions(ctx)
 
 
-def make_build_slice(state, tools, retriever, memory, task: str):
+def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = ""):
     """The reconstruction seam the loop calls each step. Returns [system, user] messages.
 
     `state` is a Slice (single task) OR a Session (host-side topic manager, has .active()). The
@@ -663,9 +670,15 @@ def make_build_slice(state, tools, retriever, memory, task: str):
         # CACHE tier A — LIVE world-state: re-probe git each build (current branch + changed files), so
         # the slice always carries the up-to-date working-tree state instead of a stale snapshot.
         worktree = git_worktree_state(cwd) if cwd else ""
+        # PAGED-OUT HISTORY manifest — the cache made VISIBLE so the model CALLS recall_history (the dead
+        # active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession; bounded
+        # to MANIFEST_TURNS locators (moat), self-suppresses when no durable cache (NullMemory => []).
+        manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
+        cache_manifest = render_cache_manifest(manifest_refs)
         # NEXT BACKEND TO FOLD: memory.recall (per-task episodic recall, below) — a sibling call for now.
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
-                            hint_text, worktree, repo_map_text, window=caps["window"], max_findings=caps["max_findings"])
+                            hint_text, worktree, repo_map_text, cache_manifest,
+                            window=caps["window"], max_findings=caps["max_findings"])
         return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
 
     # ITEM 3 PIN — build.rebuild_tighter() -> bool. The loop calls it on a ContextOverflow:

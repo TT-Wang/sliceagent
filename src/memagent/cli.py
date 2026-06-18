@@ -314,7 +314,7 @@ def main() -> None:
                 print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
         record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
-        build = make_build_slice(session, tools, retriever, memory, line)
+        build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
         # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
         # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
         result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)

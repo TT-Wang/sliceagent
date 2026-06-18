@@ -1,14 +1,19 @@
-"""recall_history — the model's bounded, on-demand valve into the COLD episodic cache.
+"""recall_history — the model's first-class read into the episodic cache (a NORMAL navigation move).
 
-The cache is never part of the slice (Markov by construction). This tool lets the model CHOOSE to
-look back when reconstruction dropped something it needs — the explicit, bounded equivalent of a
-transcript agent's "scroll up". Index-then-drill:
-  recall_history()                  -> a cheap TIMESTAMPED/TITLED index of past turns to scan
+The cache is never part of the slice (Markov by construction); this tool pages a past turn back IN.
+It is the read verb for the PAGED-OUT HISTORY manifest in the slice: that manifest lists each earlier
+turn (turn · title · note) WITH the exact call to fetch it, so reaching back is copy-paste, not a
+blind guess — a cache the model can't see is a cache it never calls (the manifest is the trigger).
+  recall_history()                  -> the full TIMESTAMPED/TITLED index (turns older than the manifest)
   recall_history(last=N | turns=[]) -> a specific turn's compact trace (action/observation/note)
   recall_history(..., full=true)    -> a turn's FULL stored slice (exact past state)
-Everything is BOUNDED (the model picks depth; the payload is capped) so a lookback can't silently
-reintroduce the transcript. Heavy use is a signal the tiers under-reconstruct — a diagnostic, not
-just a feature. Registered only when memory is durable (NullMemory/eval path never sees it).
+  recall_history(search="…")        -> FTS5 over OTHER sessions' cache
+Reaching back is expected, not a failure: the slice is bounded, so an earlier turn genuinely is not in
+front of the model, and there is no automatic mechanism that can guess WHICH past turn the current
+reasoning needs — only the model can. NON-ACCUMULATION (moat): a fetched turn is TRANSIENT — it enters
+context for this loop only and is never written back into slice state (the slice is rebuilt from the
+durable stores each turn); a single turn's fetches are bounded by DISTINCT_PER_TURN + the exact-repeat
+redirect, so 'encourage recall' can never rebuild the transcript. Registered when memory is durable.
 """
 from __future__ import annotations
 
@@ -20,8 +25,8 @@ FULL_MAX = 8000        # total chars for a full-slice fetch
 OBS_TAIL = 300         # per-observation tail kept in a trace
 DISTINCT_PER_TURN = 8  # generous backstop on DISTINCT turn-fetches; repeats are redirected for free
 
-CAPTURE_BACK = ("\n\n↳ You now have this in context. Record what you need with a `note` and "
-                "CONTINUE — only call recall_history again to fetch a DIFFERENT turn.")
+CAPTURE_BACK = ("\n\n↳ Now in context. Record what you need with a `note`, then continue — and "
+                "fetch another turn from PAGED-OUT HISTORY whenever you need more.")
 
 
 def _sig(args: dict):
@@ -189,12 +194,14 @@ def make_history_tool(memory, session_id: str):
     schema = {"type": "function", "function": {
         "name": "recall_history",
         "description": (
-            "Look back into cached history. THIS session: call with NO args for a timestamped, titled "
-            "INDEX of past turns; then fetch specifics with {\"turns\":[N,...]} or {\"last\":N} for "
-            "their compact trace (actions/observations/notes), or add {\"full\":true} for a turn's full "
-            "slice. PAST sessions: pass {\"search\":\"keywords\"} to find relevant turns from OTHER "
-            "sessions (FTS5 — supports AND/OR/quoted phrases/prefix*). Use it to recover context you no "
-            "longer have — then record what you learned with a note so you don't have to re-read."),
+            "Page an earlier turn of THIS session back into context — normal navigation, since the slice "
+            "is bounded. The PAGED-OUT HISTORY section of your slice lists each earlier turn's number, "
+            "title and note WITH the exact call to fetch it: copy that — {\"turns\":[N,...]} for the "
+            "turn's actions/observations/notes (add {\"full\":true} for its full stored state), or "
+            "{\"last\":N} for the most recent N. Call with NO args for the full index of turns older than "
+            "the manifest. For OTHER sessions, {\"search\":\"keywords\"} (FTS5 — AND/OR/quoted/prefix*). "
+            "Reach back whenever an earlier turn holds something you need instead of re-deriving it; "
+            "record what you find with a note so you don't re-fetch."),
         "parameters": {"type": "object", "properties": {
             "last": {"type": "integer", "description": "fetch the most recent N turns (this session)"},
             "turns": {"type": "array", "items": {"type": "integer"},

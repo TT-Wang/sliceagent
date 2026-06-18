@@ -22,6 +22,7 @@ DEFERRED (next backends to fold in here):
 """
 from __future__ import annotations
 
+import os
 import re
 
 from .interfaces import PageRef
@@ -58,6 +59,8 @@ class PageTable:
             return self._project_notes(focus)
         if kind == "episode-xsession":
             return self._episodes(focus, k)
+        if kind == "episode-thissession":
+            return self._episodes_thissession(focus, k)
         return []
 
     # ----------------------------------------------------------------- backends
@@ -96,6 +99,31 @@ class PageTable:
                                            exclude_session=self.exclude_session)
         return [_episode_pageref(h) for h in hits]
 
+    def _episodes_thissession(self, session_id: str, k: int) -> list[PageRef]:
+        """PAGED-OUT HISTORY manifest: locator-only PageRefs for the last ``k`` turns of THIS session —
+        the TRIGGER that makes recall_history get called (the model cannot reach for a cache it cannot
+        see; pin/view died because their payoff was invisible). The single this-session episodic READ
+        entry (mirrors ``_episodes`` for cross-session) so the slice has ONE retrieval seam. Locators
+        only — turn/title/breadcrumb, NEVER step bodies; content pages in solely when the model calls
+        recall_history(turns=[N]). Bounded to ``k``; a trailing '…older' ref flags that more exist."""
+        read = getattr(self.memory, "read_episodes", None)
+        if read is None or not session_id:
+            return []
+        lines = read(session_id)        # whole-session read (same source recall_history uses)
+        if not lines:
+            return []
+        shown = lines[-k:]
+        refs = [PageRef(handle=str(ln.get("turn")), kind="episode-thissession",
+                        preview=_pack_thissession_preview(ln),
+                        score=float(ln.get("turn") or 0), untrusted=False) for ln in shown]
+        older = len(lines) - len(shown)
+        if older:
+            refs.append(PageRef(handle="…older", kind="episode-thissession",
+                                preview=(f"{older} earlier turn(s) — recall_history() for the full index, "
+                                         f"or recall_history(search=\"…\") for other sessions"),
+                                score=0.0, untrusted=False))
+        return refs
+
 
 def _episode_pageref(h: dict) -> PageRef:
     """Map one cross-session episode hit dict to a PageRef (lossless for the listing's display:
@@ -117,3 +145,38 @@ def _pack_episode_preview(h: dict) -> str:
     if snip:
         out += f"\n    match: {snip[:200]}"
     return out
+
+
+def _pack_thissession_preview(ln: dict) -> str:
+    """One locator-line body for the PAGED-OUT HISTORY manifest: the turn's title + a PAYOFF
+    breadcrumb (what the turn HOLDS), so the model can decide to page it back informedly. Locators
+    only — never step bodies/observations (those page in on demand via recall_history)."""
+    rec = ln.get("record", {}) or {}
+    meta = rec.get("meta", {}) or {}
+    title = re.sub(r"\s+", " ", (rec.get("title") or "(untitled)")).strip()[:52]
+    flag = " · FAIL" if meta.get("failing") else ""
+    crumb = _thissession_breadcrumb(rec, meta)
+    return f"turn {ln.get('turn')} · \"{title}\"{flag}" + (f" · {crumb}" if crumb else "")
+
+
+def _thissession_breadcrumb(rec: dict, meta: dict) -> str:
+    """The payoff breadcrumb (≤60 chars). An empty breadcrumb was the pin/view killer — a locator
+    with no visible payoff never gets called — so every line is GUARANTEED a content-derived hint:
+    the model's own note if it left one, else the turn's edited files, else its distinct read/grep/run
+    actions. All from data already in the record (no extra read, no LLM)."""
+    note = re.sub(r"\s+", " ", (rec.get("note") or "")).strip()
+    if note:
+        return ("note: " + note)[:60]
+    files = meta.get("files") or []
+    if files:
+        return ("edited: " + ", ".join(os.path.basename(str(f)) for f in files))[:60]
+    acts: list[str] = []
+    for st in rec.get("steps", []) or []:
+        for a in st.get("action", []) or []:
+            name = a.get("name") or ""
+            args = a.get("args", {}) if isinstance(a.get("args"), dict) else {}
+            arg = args.get("path") or args.get("query") or args.get("command") or ""
+            sig = (f"{name} {os.path.basename(str(arg))}").strip() if arg else name
+            if sig and sig not in acts:
+                acts.append(sig)
+    return ("did: " + ", ".join(acts[:3]))[:60] if acts else ""
