@@ -133,7 +133,9 @@ def ratchet_folds_lookback_into_slice():
     sink(ToolResult("recall_history", {}, "index", False))            # repeat → deduped
     assert s.reviewed.count("index") == 1
     rev = render_reviewed(s)
-    assert "HISTORY REVIEWED" in rev and "do NOT re-fetch" in rev and "turns=[3]" in rev
+    # reframed (smell -> first-class): guards against re-fetching what's already paged in, while still
+    # inviting a DIFFERENT turn — non-suppressive, but the ratchet still renders the reviewed entries.
+    assert "HISTORY REVIEWED" in rev and "already paged in" in rev and "turns=[3]" in rev
     s2 = Slice(); s2.reset("t")
     slice_sink(s2)(ToolResult("recall_history", {}, "boom", True))    # failing lookback → not recorded
     assert s2.reviewed == [] and render_reviewed(s2) == ""

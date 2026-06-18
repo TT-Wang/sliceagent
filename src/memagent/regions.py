@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from .safety import wrap_untrusted
 from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
 
+MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
+# size regardless of session length; content is paged in on demand, never accumulated into the slice).
 MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of parked topics
 MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
@@ -89,11 +91,33 @@ def render_ghosts(s) -> str:
 
 def render_reviewed(s) -> str:
     """The recall_history RATCHET tier — lookbacks already done this task, so the model sees the
-    lookback advanced the state (and doesn't re-fetch). Only rendered when something's been reviewed."""
+    lookback advanced the state (and doesn't re-fetch the SAME turn). Only rendered when something's
+    been reviewed. Non-suppressive wording: it guards against re-fetching what's already paged in, but
+    still invites fetching a DIFFERENT turn (recall is a normal read, not a smell)."""
     if not s.reviewed:
         return ""
-    return ("# HISTORY REVIEWED (you ALREADY looked these up from the cache this task — do NOT re-fetch "
-            f"them; act on what you have, or fetch a DIFFERENT turn)\n{', '.join(s.reviewed[-MAX_REVIEWED:])}\n\n")
+    return ("# HISTORY REVIEWED (already paged in this task — their content is in YOUR NOTES / RECENT "
+            "above; fetch a DIFFERENT turn from PAGED-OUT HISTORY if you need more)\n"
+            f"{', '.join(s.reviewed[-MAX_REVIEWED:])}\n\n")
+
+
+def render_cache_manifest(refs) -> str:
+    """PAGED-OUT HISTORY body: one locator line per earlier turn of THIS session (NOT in the slice),
+    each ending with the EXACT call to page it back — so reaching back is copy-paste, not a blind
+    guess. This is the TRIGGER the dead recall channel was missing: a cache the model can't see is a
+    cache it never calls (the read-side analogue of REPO MAP advertising file paths). ``refs`` are
+    locator-only PageRefs from PageTable._episodes_thissession (ONE read seam); this is pure
+    formatting. MOAT: locators only — turn/title/breadcrumb, never content; the turn's body pages in
+    on demand and is bounded by recall_history's own caps."""
+    if not refs:
+        return ""
+    lines = []
+    for r in refs:
+        if r.handle == "…older":
+            lines.append(f"- {r.preview}")          # the "+N earlier" tail (no single-turn call)
+        else:
+            lines.append(f"- {r.preview}  → recall_history(turns=[{r.handle}])")
+    return "\n".join(lines)
 
 
 def render_skills(active_skills: list[dict]) -> str:
@@ -126,8 +150,8 @@ def render_conversation(s) -> str:
         if e.get("assistant"):
             lines.append(f"  you:  {e['assistant']}")
     older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
-    tail = (f"\n(+{older} earlier turn(s) this session not shown — use recall_history to view the full "
-            "conversation)") if older > 0 else ""
+    tail = (f"\n(+{older} earlier turn(s) this session not shown — they're listed in PAGED-OUT HISTORY "
+            "below; recall_history(turns=[N]) to view any)") if older > 0 else ""
     return "\n".join(lines) + tail
 
 
@@ -471,11 +495,16 @@ REGION_ORDER = (
     ("repo_map",       STABLE,   lambda c: (f"\n# REPO MAP (the project's file structure — your resident map; navigate from here, do NOT re-list the tree)\n{c['repo_map']}\n\n" if c.get("repo_map") else ""), 1),
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
-    ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are in the durable cache: use recall_history to view them)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
+    ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground truth — verify against it before trusting; a note is NOT proof the work is done)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
     ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
     ("ghosts",         VOLATILE, lambda c: (f"\n# GHOST INDEX (recently paged OUT of this slice — bring any back with ONE call; references only)\n{render_ghosts(c['s'])}\n" if render_ghosts(c["s"]) else ""), 3),
+    # PAGED-OUT HISTORY — the cache MANIFEST: earlier turns of THIS session that are NOT in the slice,
+    # each with the exact recall_history call to page it back. Sits beside GHOST INDEX (same "it's paged
+    # out, here's the one call to get it" idiom — files there, turns here) so the model has a SEEN target
+    # to call; an unseen cache is the dead channel. Locators only (moat); suppresses itself when empty.
+    ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; page any back with the call shown)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
