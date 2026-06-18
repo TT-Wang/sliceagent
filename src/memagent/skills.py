@@ -11,14 +11,14 @@ are NOT code.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 from .registry import ToolEntry
+from .text_utils import normalize_ws
 
 
 def _one_line(s: str, n: int = 140) -> str:
-    return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
+    return normalize_ws(s)[:n]
 
 
 @dataclass

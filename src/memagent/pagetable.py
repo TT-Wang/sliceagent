@@ -23,9 +23,9 @@ DEFERRED (next backends to fold in here):
 from __future__ import annotations
 
 import os
-import re
 
 from .interfaces import PageRef
+from .text_utils import format_ts, normalize_ws
 
 # Per-code-map preview cap (signatures are compact; bounded like every tier). Mirrors the
 # former slice.DISCOVERY_CHARS so the rendered RELATED CODE block is byte-identical.
@@ -135,10 +135,10 @@ def _episode_pageref(h: dict) -> PageRef:
 
 
 def _pack_episode_preview(h: dict) -> str:
-    ts = (h.get("ts") or "")[5:16].replace("T", " ")       # "06-16 12:30"
+    ts = format_ts(h.get("ts"))                            # "06-16 12:30"
     title = (h.get("title") or "(no title)")[:60]
     note = (h.get("note") or "").strip()
-    snip = re.sub(r"\s+", " ", h.get("snippet") or "").strip()
+    snip = normalize_ws(h.get("snippet"))
     out = f"{ts} · {title}"
     if note:
         out += f"\n    note: {note[:160]}"
@@ -153,7 +153,7 @@ def _pack_thissession_preview(ln: dict) -> str:
     only — never step bodies/observations (those page in on demand via recall_history)."""
     rec = ln.get("record", {}) or {}
     meta = rec.get("meta", {}) or {}
-    title = re.sub(r"\s+", " ", (rec.get("title") or "(untitled)")).strip()[:52]
+    title = normalize_ws(rec.get("title") or "(untitled)")[:52]
     flag = " · FAIL" if meta.get("failing") else ""
     crumb = _thissession_breadcrumb(rec, meta)
     return f"turn {ln.get('turn')} · \"{title}\"{flag}" + (f" · {crumb}" if crumb else "")
@@ -164,7 +164,7 @@ def _thissession_breadcrumb(rec: dict, meta: dict) -> str:
     with no visible payoff never gets called — so every line is GUARANTEED a content-derived hint:
     the model's own note if it left one, else the turn's edited files, else its distinct read/grep/run
     actions. All from data already in the record (no extra read, no LLM)."""
-    note = re.sub(r"\s+", " ", (rec.get("note") or "")).strip()
+    note = normalize_ws(rec.get("note"))
     if note:
         return ("note: " + note)[:60]
     files = meta.get("files") or []
