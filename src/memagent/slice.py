@@ -592,8 +592,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     cwd = ""
     try:
         cwd = tools.root() if hasattr(tools, "root") else ""
-    except Exception:
-        cwd = ""
+    except Exception:  # noqa: BLE001 — cwd is optional; any host error falls back to "" (already set)
+        pass
     env_line = (
         f"\n\n# WORKING DIRECTORY\nEvery tool and command already runs INSIDE this workspace: {cwd}\n"
         "Reference files by their path RELATIVE to it (e.g. 'pkg/mod.py', 'test_x.py'). Do NOT use 'cd' "
