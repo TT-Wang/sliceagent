@@ -294,6 +294,11 @@ class Slice:
     # the swarm, not to inflating this one slice).
     read_budget: int = READ_BUDGET
     read_ceiling: int = READ_BUDGET_MAX
+    # EXPLORER mode: a read-only delegated explorer's whole job IS thorough read-only investigation, so
+    # the read-only convergence nudge ("you've explored N times, ANSWER now") must NOT fire on it — that
+    # nudge is for the TOP-LEVEL agent over-exploring instead of answering the user. max_steps bounds the
+    # explorer. Transient, set by run_subagent for read-only children. (Sibling of the EXPLORER_READ_BUDGET fix.)
+    explore_mode: bool = False
 
     def reset(self, goal: str) -> None:
         self.goal = goal
@@ -319,6 +324,7 @@ class Slice:
         self.hot = {}
         self.read_budget = READ_BUDGET   # back to the lean floor each task; grows on refault within the task
         self.read_ceiling = READ_BUDGET_MAX
+        self.explore_mode = False
 
 
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:

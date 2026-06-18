@@ -68,6 +68,14 @@ _READ_ONLY_TOOLS = frozenset({
     "read_file", "list_files", "grep", "glob", "skill", "recall_history",
 })
 
+# An EXPLORER's whole job is read-N-files-then-summarize over a SHORT, bounded turn: every file it
+# reads is relevant to its one summary, so the working-set eviction (READ_BUDGET) has NO benefit and
+# actively BREAKS it — evicted files get re-read (refault), which the anti-loop guard flags as
+# no-progress, and the child goes "stuck" before it can summarize. So an explorer keeps its whole
+# exploration resident: a generous, still-bounded read budget. (The parent only ever gets the child's
+# summary, so this never reaches the parent slice — the moat is unaffected.)
+EXPLORER_READ_BUDGET = 64
+
 
 def read_only_schemas(schemas) -> list[dict]:
     """Filter a schema list down to the read-only allowlist (drops edit/shell/spawn tools)."""
@@ -106,12 +114,19 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     the read-only allowlist (no edit/shell/spawn), so the investigation cannot mutate the
     workspace. The summary it returns is bounded the same way a writable child's is."""
     from .events import make_dispatcher
+    from .guardrails import ToolCallGuardrailConfig
     from .hooks import CompositeHooks, GuardrailHook, PermissionHook
     from .loop import run_turn
     from .slice import Slice, make_build_slice, slice_sink
 
     child_state = Slice()
     child_state.reset(task)
+    if read_only:
+        # explorer: keep the whole exploration resident (no eviction churn → no "stuck") AND don't let the
+        # read-only convergence nudge cut the review short before the key files are read — see
+        # EXPLORER_READ_BUDGET + Slice.explore_mode. max_steps bounds the explorer.
+        child_state.read_budget = child_state.read_ceiling = EXPLORER_READ_BUDGET
+        child_state.explore_mode = True
     build = make_build_slice(child_state, tools, retriever, memory, task)
 
     cap = _CaptureLast()
@@ -121,13 +136,22 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     child_dispatch = make_dispatcher(*sinks)
 
     _child_hooks = [PermissionHook(policy)] if policy is not None else []
-    _child_hooks.append(GuardrailHook())   # the cross-step loop floor also protects explore/subagent turns
+    # An EXPLORER does read-only investigation: a repeated read/list/grep is at most inefficient, never the
+    # write-loop disaster the anti-loop HARD-BLOCK guards against — and max_steps already bounds it. So relax
+    # the READ axes (no-progress / result-repeat) for explorers while KEEPING exact-failure (a repeated
+    # FAILING call is still a real loop). Stops review children going "stuck" on legitimate reads.
+    _guard_cfg = (ToolCallGuardrailConfig(no_progress_block_after=10**6, result_repeat_block_after=10**6)
+                  if read_only else None)
+    _child_hooks.append(GuardrailHook(_guard_cfg))
     hooks = CompositeHooks(*_child_hooks)
     result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=child_dispatch,
                       hooks=hooks, max_steps=max_steps)
 
     files = ", ".join(child_state.active_files) or "(none)"
-    success = result.stop_reason == "end_turn" and not child_state.last_error
+    # A READ-ONLY explorer's deliverable is its summary; a stray failed read (lingering last_error) must NOT
+    # flag the whole review as "did not finish cleanly". Only a WRITABLE child's last_error matters (it may
+    # have left the task broken). end_turn means it produced a final summary either way.
+    success = result.stop_reason == "end_turn" and (read_only or not child_state.last_error)
     status = "ok" if success else result.stop_reason
     label = "explore" if read_only else "subagent"
     summary = f"[{label} {status} · {result.steps} steps · files: {files}]"

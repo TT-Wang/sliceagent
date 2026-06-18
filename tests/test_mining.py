@@ -84,6 +84,16 @@ def edit_task_uses_postedit_path_not_readonly():
     assert "read-only" not in out and "edited 1 file" in out
 
 
+@check
+def explore_mode_suppresses_readonly_nudge():
+    # a delegated EXPLORER must NOT be told to stop exploring — its job IS read-only investigation, and the
+    # nudge was cutting reviews short before the key (large) files were read. max_steps bounds it instead.
+    s = Slice(); s.reset("review the repo"); s.turn_actions = EXPLORE_NUDGE_AFTER + 5
+    assert render_convergence(s) != ""        # a normal (top-level) agent WOULD be nudged here
+    s.explore_mode = True
+    assert render_convergence(s) == ""        # explore_mode suppresses it
+
+
 def main():
     failed = 0
     for fn in CHECKS:
