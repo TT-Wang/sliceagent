@@ -141,25 +141,7 @@ SYSTEM_PROMPT = (
     "do NOT guess, and do NOT repeat a failing action hoping it changes. Asking the user a follow-up is a "
     "normal, expected move, not a failure.\n"
     "</ask>\n\n"
-    "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
-    "You have NO raw chat transcript. Instead, every turn the host RECONSTRUCTS a bounded, relevant "
-    "'slice' of state for you — your working set — and that slice is the context below. The FULL history "
-    "of this session (every message, tool call, and result, verbatim) is preserved in a durable CACHE on "
-    "disk; the slice is only the part you need right now. Mental model: the slice is RAM, the cache is "
-    "disk, and you stay fast no matter how long the conversation gets because the slice never grows "
-    "without bound.\n"
-    "CONSEQUENCES, internalize them:\n"
-    "- Something not in the slice is NOT gone — it's paged out. If you need an earlier decision, an exact "
-    "prior message, or what you tried many turns ago, PAGE IT IN: call recall_history (an index of every "
-    "turn this session, which you can drill into) — or search the cache for cross-session history. Never "
-    "assume context is lost; recall it.\n"
-    "- You DRIVE the slice, you don't just receive it: for a multi-file change, `pin` the files you must "
-    "keep consistent so they stay resident (exploratory reads page out); call `view` to see your working-set "
-    "headroom — what's resident vs paged out — and decide what to pin or let go.\n"
-    "- The slice can be an imperfect projection. If a tier looks stale or contradicts what you observe, "
-    "trust the WORLD (OPEN FILES / a fresh tool result) over the slice, and recall_history to check what "
-    "actually happened rather than guessing.\n"
-    "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
+    "{{MEMORY_MODEL}}"  # spliced per loop_mode in make_build_slice (accumulate default / rebuild fallback)
     "The slice is organized into TIERS. Trust them in this order of AUTHORITY (highest first):\n"
     "1. OPEN FILES — live contents re-read from disk: your GROUND TRUTH. Base every edit on what is shown "
     "there, never on memory. If anything conflicts with OPEN FILES, the file wins. (A huge file shows the "
@@ -208,6 +190,54 @@ SYSTEM_PROMPT = (
     "turn — trust it; the PROJECT facts in this system message are session-start static.\n"
     "Be concise: lead with the change or the answer, not a preamble.\n"
     "</safety>"
+)
+
+
+# The "HOW YOUR MEMORY WORKS" block, spliced into SYSTEM_PROMPT per loop_mode (the {{MEMORY_MODEL}} marker).
+# REBUILD: the prior text (slice reconstructed every step → no transcript at all; pin/view drive eviction).
+MEMORY_REBUILD = (
+    "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
+    "You have NO raw chat transcript. Instead, every turn the host RECONSTRUCTS a bounded, relevant "
+    "'slice' of state for you — your working set — and that slice is the context below. The FULL history "
+    "of this session (every message, tool call, and result, verbatim) is preserved in a durable CACHE on "
+    "disk; the slice is only the part you need right now. Mental model: the slice is RAM, the cache is "
+    "disk, and you stay fast no matter how long the conversation gets because the slice never grows "
+    "without bound.\n"
+    "CONSEQUENCES, internalize them:\n"
+    "- Something not in the slice is NOT gone — it's paged out. If you need an earlier decision, an exact "
+    "prior message, or what you tried many turns ago, PAGE IT IN: call recall_history (an index of every "
+    "turn this session, which you can drill into) — or search the cache for cross-session history. Never "
+    "assume context is lost; recall it.\n"
+    "- You DRIVE the slice, you don't just receive it: for a multi-file change, `pin` the files you must "
+    "keep consistent so they stay resident (exploratory reads page out); call `view` to see your working-set "
+    "headroom — what's resident vs paged out — and decide what to pin or let go.\n"
+    "- The slice can be an imperfect projection. If a tier looks stale or contradicts what you observe, "
+    "trust the WORLD (OPEN FILES / a fresh tool result) over the slice, and recall_history to check what "
+    "actually happened rather than guessing.\n"
+    "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
+)
+# ACCUMULATE (DEFAULT): within one task your own actions+results stay visible (working memory accumulates);
+# across tasks nothing carries but a reconstructed slice + the durable cache. No pin/view (no eviction).
+MEMORY_ACCUMULATE = (
+    "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
+    "You work one TASK at a time. WITHIN the current task you can see your own earlier actions and their "
+    "results in this conversation — your working memory builds up as you go, so nothing you did THIS task "
+    "is lost. When a task finishes and a new one begins you start FRESH: the raw history is NOT carried "
+    "forward — instead a small reconstructed slice (your distilled conclusions, the recent exchange, and "
+    "the files you touched) is provided below, while the FULL verbatim history of every task this session "
+    "is preserved in a durable CACHE on disk. Mental model: this task's messages are your RAM, the cache "
+    "is disk, and you stay fast no matter how long the session gets because nothing accumulates ACROSS "
+    "tasks.\n"
+    "CONSEQUENCES, internalize them:\n"
+    "- WITHIN this task you ALREADY have what you've read and done — do NOT re-read or re-derive it; build "
+    "on it.\n"
+    "- For something from an EARLIER task or turn this session (an exact prior message, a decision you made "
+    "before) it is NOT in front of you — PAGE IT IN: call recall_history (an index of every turn this "
+    "session, which you can drill into), or search the cache for cross-session history. Never assume it's "
+    "lost; recall it.\n"
+    "- Trust the WORLD over memory: if a note or an earlier read conflicts with a fresh tool result / OPEN "
+    "FILES, the WORLD wins (a file you edited may have changed since you first read it).\n"
+    "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
 )
 
 
@@ -601,9 +631,13 @@ def make_build_slice(state, tools, retriever, memory, task: str):
     except Exception:
         _names = set()
     delegation_block = DELEGATION_BLOCK if "spawn_explore" in _names else ""
+    # Splice the memory-model explanation matching the active loop mode (default accumulate); env-driven to
+    # match run_turn's default. Computed once → the system message stays byte-stable per session.
+    mem_block = MEMORY_ACCUMULATE if os.environ.get("AGENT_LOOP_MODE", "accumulate") == "accumulate" else MEMORY_REBUILD
 
     def _system(goal: str) -> str:
-        return (SYSTEM_PROMPT + delegation_block + env_line + environment_block + workspace_block
+        return (SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
+                + env_line + environment_block + workspace_block
                 + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
                 + goal)
 
