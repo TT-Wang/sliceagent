@@ -151,12 +151,12 @@ class RipgrepCodeIndex:
         return [Snippet(path="(repo map)", text=text, score=float(matches))]
 
     def deps(self, path: str, limit: int = 6) -> list[str]:
-        """Files structurally COUPLED to `path`, from the cached def/ref graph: forward deps (files
-        `path` references — the contracts it must satisfy) ranked first, then reverse deps (files that
-        reference `path` — its callers). Used to keep an edited file's dependencies co-resident in the
-        working set (you cannot correctly edit a file whose contracts have been paged out). Returns []
-        when `path` isn't in the graph, so callers degrade gracefully. Query-INDEPENDENT (reuses the
-        cached graph; no per-call ripgrep)."""
+        """Files structurally COUPLED to `path`, from the cached def/ref graph: reverse deps (files
+        that reference `path` — its CALLERS, ranked FIRST because they break on a rename/signature
+        change), then forward deps (the contracts `path` references). Used to keep an edited file's
+        callers + contracts co-resident so a coordinated edit reaches every site that must change in
+        lockstep. Returns [] when `path` isn't in the graph, so callers degrade gracefully.
+        Query-INDEPENDENT (reuses the cached graph; no per-call ripgrep)."""
         try:
             g = self._graph(400)
         except Exception:
@@ -166,13 +166,34 @@ class RipgrepCodeIndex:
             return []
         fwd = edges.get(path, {})                                  # files `path` references (contracts)
         rev = {f: e[path] for f, e in edges.items() if path in e}  # files that reference `path` (callers)
-        ranked = sorted(fwd, key=lambda f: -fwd[f]) + sorted(rev, key=lambda f: -rev[f])
+        # CALLER-FIRST: the hazard in a coordinated edit is the REVERSE-dependents (callers/importers
+        # that break on a rename/signature change), not the forward contracts the file calls. Rank
+        # callers BEFORE contracts so truncation at `limit` drops contracts (re-readable on demand),
+        # never the call-sites that must change in lockstep (re-observation-reach >= action-reach).
+        ranked = sorted(rev, key=lambda f: -rev[f]) + sorted(fwd, key=lambda f: -fwd[f])
         seen, out = set(), []
         for f in ranked:
             if f != path and f not in seen:
                 seen.add(f)
                 out.append(f)
         return out[:limit]
+
+    def def_names(self, path: str) -> set:
+        """The symbol NAMES `path` defines (from the cached graph). Used to detect what an edit REMOVED
+        (pre-edit defs minus current defs) so a coordinated change can flag dangling references. Empty
+        on a no-graph host."""
+        try:
+            return set(self._graph(400).get("defs", {}).get(path) or ())
+        except Exception:
+            return set()
+
+    def ref_tokens(self, path: str) -> set:
+        """The identifier tokens `path` REFERENCES (from the cached graph). A file whose current tokens
+        still contain a name an edit removed/moved is a dangling call-site. Empty on a no-graph host."""
+        try:
+            return set(self._graph(400).get("tokens", {}).get(path) or ())
+        except Exception:
+            return set()
 
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
     def graph_map(self, query: str, max_files: int = 400, max_chars: int = 4000) -> str:
@@ -239,7 +260,7 @@ class RipgrepCodeIndex:
         edges = self._edges_from_tokens(files, defs, sym2file, tokens)
         self._graph_builds += 1
         self._graph_cache = {"sig": sig, "files": files, "fileset": set(files),
-                             "skeleton": skeleton, "edges": edges}
+                             "skeleton": skeleton, "edges": edges, "defs": defs, "tokens": tokens}
         return self._graph_cache
 
     def _fingerprint(self, files: list[str]) -> tuple:

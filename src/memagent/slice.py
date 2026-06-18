@@ -317,6 +317,12 @@ class Slice:
     # files an edit must stay consistent with don't page out from under it. Bounded (DEP_CEILING);
     # a plain set of relpaths (serializable, like edited_files). Empty without a dep graph.
     protected_deps: set = field(default_factory=set)
+    # CHANGE-SET CLOSURE state (symbol-aware): pre_defs snapshots each file's def-names BEFORE it is
+    # edited, so prefetch can compute what an edit REMOVED (pre - current) and flag dependents whose
+    # CURRENT tokens still reference a removed name — a precise dangling-call-site signal (no transcript;
+    # bounded dicts/sets recomputed from the durable code graph, never accumulated history).
+    pre_defs: dict = field(default_factory=dict)
+    stale_deps: set = field(default_factory=set)
     # DELIBERATE GROWTH (active-asker): files the LLM explicitly PINNED resident via the `pin` tool —
     # protected from plain-read eviction like the change set, but TASK-driven not edit-driven. Bounded
     # by PIN_CEILING (force-compacted past it). Transient: re-derived per session, never serialized.
@@ -362,6 +368,8 @@ class Slice:
         self.turns = 0
         self.ghosts = []
         self.protected_deps = set()
+        self.pre_defs = {}
+        self.stale_deps = set()
         self.pinned = []
         self.io = {"hit": 0, "miss": 0, "refault": 0, "evict": 0}
         self.hot = {}
