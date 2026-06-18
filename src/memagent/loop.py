@@ -45,6 +45,44 @@ from .scheduler import run_scheduled
 STUCK_BLOCK_BUDGET = 3
 
 
+def _final_answer(llm, msgs: list, tools, dispatch, guidance: str) -> None:
+    """Closeout helper (Fix 5b): a turn must NEVER end silently or with a bare stub. Offer ONLY ask_user
+    (all other tools stay banned) so the model can ASK instead of guessing when blocked/ambiguous; if it
+    asks, surface the question as the final message. Otherwise emit its summary — and if that is empty,
+    a deterministic, honest fallback so the user always gets a useful, non-empty closing. No new per-step
+    cost: runs only on the rare max_steps/stuck path."""
+    ask = None
+    try:
+        for sc in (tools.schemas() if hasattr(tools, "schemas") else []):
+            if sc.get("function", {}).get("name") == "ask_user":
+                ask = sc
+                break
+    except Exception:  # noqa: BLE001
+        ask = None
+    resp = None
+    try:
+        resp = llm.complete(msgs, [ask] if ask else [])
+    except Exception:  # noqa: BLE001
+        resp = None
+    for tc in (getattr(resp, "tool_calls", None) or []):     # the model chose to ASK → surface the question
+        if getattr(tc, "name", "") == "ask_user":
+            q = (getattr(tc, "args", None) or {}).get("question")
+            if q:
+                dispatch(AssistantText(str(q)))
+                return
+    content = (getattr(resp, "content", "") or "").strip()
+    if len(content) >= 40:                                   # a real summary
+        dispatch(AssistantText(content))
+        return
+    if content:                                              # short but non-empty — keep it, don't lose info
+        dispatch(AssistantText(content))
+        return
+    dispatch(AssistantText(                                  # deterministic, never-empty, honest fallback
+        "I had to stop here (" + guidance.strip().rstrip(".") + "). I could not confirm the task is fully "
+        "complete — please review the changes so far, or re-run with more steps, and tell me if you'd like "
+        "me to continue."))
+
+
 @dataclass
 class StepOutcome:
     usage: dict
@@ -201,11 +239,10 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 return
             msgs = msgs[:-1] + [{"role": msgs[-1]["role"], "content": msgs[-1]["content"]
                                  + "\n\n# TURN IS ENDING — " + guidance + " Give the user your best answer or "
-                                 "summary NOW from what you already have; make NO tool call. If the request was "
-                                 "ambiguous, ask ONE concise clarifying question instead."}]
-            resp = llm.complete(msgs, [])
-            if getattr(resp, "content", None):
-                dispatch(AssistantText(resp.content))
+                                 "summary NOW (what you did, what you verified, what remains) from what you "
+                                 "already have; make NO edit/run tool call. If the request was ambiguous or you "
+                                 "are blocked, call ask_user with ONE concise clarifying question instead."}]
+            _final_answer(llm, msgs, tools, dispatch, guidance)
         except Exception:
             pass
 
@@ -283,12 +320,11 @@ def run_turn_accumulate(*, build_slice, llm, tools, dispatch: Dispatcher, hooks:
         # NEVER end silently: one tool-less call for a final answer from the accumulated working memory.
         try:
             msgs = messages + [{"role": "user", "content": "# TURN IS ENDING — " + guidance
-                                + " Give your best answer/summary NOW from what you already have; make NO "
-                                "tool call. If the request was ambiguous, ask ONE concise question instead."}]
-            resp = llm.complete(msgs, [])
-            if getattr(resp, "content", None):
-                dispatch(AssistantText(resp.content))
-        except Exception:
+                                + " Give your best answer/summary NOW (what you did, what you verified, what "
+                                "remains) from what you already have; make NO edit/run tool call. If the request "
+                                "was ambiguous or you are blocked, call ask_user with ONE concise question instead."}]
+            _final_answer(llm, msgs, tools, dispatch, guidance)
+        except Exception:  # noqa: BLE001
             pass
 
     while True:
