@@ -99,6 +99,54 @@ def stuck_budget_is_bounded_and_small():
     assert 1 <= STUCK_BLOCK_BUDGET <= 5
 
 
+# ── Fix 5b: closeout never ends silently, offers ask_user, falls back deterministically ──
+import types  # noqa: E402
+from memagent.events import AssistantText  # noqa: E402
+from memagent.loop import _final_answer    # noqa: E402
+
+
+class _ToolsWithAsk:
+    def schemas(self): return [{"function": {"name": "ask_user"}}, {"function": {"name": "read_file"}}]
+
+
+def _collect():
+    out = []
+    return out, (lambda e: out.append(e.content) if isinstance(e, AssistantText) else None)
+
+
+@check
+def closeout_emits_model_summary_when_present():
+    class _LLM:
+        def complete(self, m, t): return types.SimpleNamespace(
+            content="Done: fixed the parser; verified import compiles; nothing remains.", tool_calls=[])
+    out, disp = _collect()
+    _final_answer(_LLM(), [{"role": "user", "content": "x"}], _ToolsWithAsk(), disp, "max_steps")
+    assert out and "fixed the parser" in out[0]
+
+
+@check
+def closeout_never_silent_on_empty_completion():
+    class _LLM:
+        def complete(self, m, t): return types.SimpleNamespace(content="", tool_calls=[])
+    out, disp = _collect()
+    _final_answer(_LLM(), [{"role": "user", "content": "x"}], _ToolsWithAsk(), disp, "max_steps")
+    assert out and len(out[0]) > 20, "must emit a non-empty deterministic fallback, never silence"
+
+
+@check
+def closeout_offers_ask_and_surfaces_the_question():
+    seen = {}
+    class _LLM:
+        def complete(self, m, tools):
+            seen["tools"] = tools
+            tc = types.SimpleNamespace(name="ask_user", args={"question": "Which module did you mean?"})
+            return types.SimpleNamespace(content="", tool_calls=[tc])
+    out, disp = _collect()
+    _final_answer(_LLM(), [{"role": "user", "content": "x"}], _ToolsWithAsk(), disp, "stuck")
+    assert seen["tools"] and seen["tools"][0]["function"]["name"] == "ask_user", "ask_user must be offered"
+    assert out == ["Which module did you mean?"], out
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:
