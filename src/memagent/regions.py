@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from .safety import wrap_untrusted
 from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
+from .text_utils import normalize_ws
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
@@ -74,7 +75,7 @@ def bump_level(level: dict) -> bool:
 
 
 def one_line(s, n: int = 80) -> str:
-    return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
+    return normalize_ws(s)[:n]
 
 
 def render_ghosts(s) -> str:
@@ -263,7 +264,7 @@ def observe(out, n: int = 260) -> str:
     the verdict, the final status, the exception — is at the END, so head-only truncation hides it
     and the agent re-runs to 'see the result'. Task-agnostic: we don't interpret the outcome, we
     just guarantee the end is visible. Keep a little head for context plus the whole tail."""
-    o = re.sub(r"\s+", " ", str(out or "")).strip()
+    o = normalize_ws(out)
     if len(o) <= n:
         return o
     head = n // 4

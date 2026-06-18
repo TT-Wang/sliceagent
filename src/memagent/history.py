@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 
+from .text_utils import format_ts
+
 INDEX_LIMIT = 40       # breadcrumbs shown by the bare index
 TRACE_MAX = 4000       # total chars for a compact-trace fetch
 FULL_MAX = 8000        # total chars for a full-slice fetch
@@ -40,7 +42,7 @@ def _sig(args: dict):
 
 
 def _short_ts(ts: str) -> str:
-    return (ts or "")[5:16].replace("T", " ")   # "06-16 12:30"
+    return format_ts(ts)   # "06-16 12:30"
 
 
 def _tail(s: str, n: int) -> str:
