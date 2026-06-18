@@ -319,6 +319,32 @@ def workspace_facts(cwd: str) -> str:
     return "\n".join(_project_facts(root))
 
 
+def project_conventions(cwd: str, *, max_chars: int = 4000) -> str:
+    """The project's agent-convention file CONTENT (first present of AGENTS.md / CLAUDE.md / .cursorrules)
+    — an ALWAYS-IN-FORCE contract that must outlive the bounded slice's eviction. Injection-neutralized
+    (reuses subdir_hints._neutralize_injection) and capped. '' when none / outside a project.
+
+    Deterministic per cwd, so it rides in the cacheable SYSTEM tier (100% prompt-cache after turn 1) and
+    CANNOT be evicted/compacted — conventions persist across a long session at ~0 marginal cost, replacing
+    the uncached, evictable manual re-read of AGENTS.md. Bounded to ONE file ≤ max_chars (smaller than a
+    transcript agent's unbounded merged context). Treat as DATA: the live conversation overrides on conflict."""
+    from .subdir_hints import _neutralize_injection
+    resolved = _resolve_cwd(cwd)
+    if resolved is None:
+        return ""
+    root = _git_root(resolved) or _marker_root(resolved)
+    if root is None:
+        return ""
+    for name in _CONTEXT_FILES:
+        text = _read_small(root / name)
+        if text.strip():
+            body = _neutralize_injection(text).strip()
+            if len(body) > max_chars:
+                body = body[:max_chars] + "\n[...truncated]"
+            return f"{name}:\n{body}"
+    return ""
+
+
 def git_worktree_state(cwd: str, *, max_files: int = 20) -> str:
     """LIVE working-tree state for the VOLATILE slice tier (the world-state cache's recomputed-each-
     build region): current branch + the CHANGED-FILE SET (staged/modified/untracked/conflicts),
