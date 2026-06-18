@@ -671,11 +671,18 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # match run_turn's default. Computed once → the system message stays byte-stable per session.
     mem_block = MEMORY_ACCUMULATE if os.environ.get("AGENT_LOOP_MODE", "accumulate") == "accumulate" else MEMORY_REBUILD
 
+    # The system message is BYTE-STABLE per session (prompt-cache warm); the ONLY per-turn variation is
+    # the active topic's goal. Encode that invariant structurally: everything constant is concatenated
+    # ONCE here, so _system() is just prefix+goal — a miscomputed-each-turn block can't silently break
+    # cache stability. (Pure reassociation of the former in-_system concat: byte-identical output.)
+    system_prefix = (
+        SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
+        + env_line + environment_block + workspace_block + conventions_block
+        + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
+    )
+
     def _system(goal: str) -> str:
-        return (SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
-                + env_line + environment_block + workspace_block + conventions_block
-                + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
-                + goal)
+        return system_prefix + goal
 
     def build() -> list[dict]:
         s = _active(state)
