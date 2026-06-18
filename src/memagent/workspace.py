@@ -159,6 +159,22 @@ def _parse_status(porcelain: str) -> tuple[str, dict[str, int]]:
     return head, counts
 
 
+def _dirty_phrases(counts: dict[str, int]) -> list[str]:
+    """The non-zero ``"<n> <label>"`` phrases of a parsed git status, in display order.
+
+    Empty list == clean tree; callers join with ", " and fall back to "clean". Single source for
+    both the one-line branch summary and the multi-line snapshot so their wording can't drift.
+    """
+    return [
+        f"{n} {label}" for label, n in (
+            ("staged", counts["staged"]),
+            ("modified", counts["modified"]),
+            ("untracked", counts["untracked"]),
+            ("conflicts", counts["conflicts"]),
+        ) if n
+    ]
+
+
 def _read_small(path: Path) -> str:
     """Read a small text file, or ``""`` — never raises, never reads huge files."""
     try:
@@ -245,14 +261,7 @@ def git_branch_status(cwd: str) -> str:
     if not head:
         return ""
     branch = "(detached HEAD)" if head == "(detached)" else head
-    dirty = [
-        f"{n} {label}" for label, n in (
-            ("staged", counts["staged"]),
-            ("modified", counts["modified"]),
-            ("untracked", counts["untracked"]),
-            ("conflicts", counts["conflicts"]),
-        ) if n
-    ]
+    dirty = _dirty_phrases(counts)
     return f"{branch} ({', '.join(dirty) if dirty else 'clean'})"
 
 
@@ -288,14 +297,7 @@ def build_workspace_snapshot(cwd: str) -> str:
         elif head == "(detached)":
             lines.append("- Branch: (detached HEAD)")
 
-        dirty = [
-            f"{n} {label}" for label, n in (
-                ("staged", counts["staged"]),
-                ("modified", counts["modified"]),
-                ("untracked", counts["untracked"]),
-                ("conflicts", counts["conflicts"]),
-            ) if n
-        ]
+        dirty = _dirty_phrases(counts)
         lines.append(f"- Status: {', '.join(dirty) if dirty else 'clean'}")
 
     lines.extend(_project_facts(root))
