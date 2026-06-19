@@ -17,7 +17,6 @@ accumulates state across turns (the only per-instance state is SubdirHints' per-
 surfaced-subtree set, which is a bounded durable store, not a transcript).
 
 DEFERRED (next backends to fold in here):
-  - Memory.recall (per-task episodic recall) — still a sibling call in slice.py this step.
   - per-file code refs (fan-out of the repo map) — kept as the single '(repo map)' page.
 """
 from __future__ import annotations
@@ -57,6 +56,8 @@ class PageTable:
             return self._code(focus, k)
         if kind == "project-notes":
             return self._project_notes(focus)
+        if kind == "memory-lessons":
+            return self._lessons(focus, k)
         if kind == "episode-xsession":
             return self._episodes(focus, k)
         if kind == "episode-thissession":
@@ -88,6 +89,17 @@ class PageTable:
             return []
         return [PageRef(handle="(project notes)", kind="project-notes", preview=text,
                         score=0.0, untrusted=True)]
+
+    def _lessons(self, query: str, k: int) -> list[PageRef]:
+        """RELEVANT MEMORY: distilled cross-session LESSONS (memem's relevance-gated retrieve), the
+        always-on per-turn recall. Distinct from `_episodes` (raw FTS5 episode text): lessons are the
+        consolidated long-term vault, episodes are the lossless cache. Each Snippet -> one PageRef
+        (preview carries the lesson text RAW; the renderer fences it). memory absent / no hits -> []."""
+        if self.memory is None:
+            return []
+        snippets = self.memory.recall(query, k=k)
+        return [PageRef(handle=sn.path, kind="memory-lessons", preview=sn.text,
+                        score=sn.score, untrusted=True) for sn in snippets]
 
     def _episodes(self, query: str, k: int) -> list[PageRef]:
         """CROSS-SESSION RECALL: FTS5 episode hits from PAST sessions (the one cross-session read
