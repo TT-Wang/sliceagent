@@ -520,11 +520,12 @@ def render_discovery(refs, *, discovery_chars: int = DISCOVERY_CHARS) -> str:
     return wrap_untrusted(joined, kind="code")
 
 
-def render_memory(snippets) -> str:
-    """Render recalled cross-session lessons (from memem) for the RELEVANT MEMORY tier."""
-    if not snippets:
+def render_memory(refs) -> str:
+    """Render recalled cross-session lessons (PageTable memory-lessons PageRefs) for the RELEVANT
+    MEMORY tier. Empty -> "" (wrap_untrusted suppresses an empty tier)."""
+    if not refs:
         return wrap_untrusted("", kind="memory")
-    body = "\n".join(f"- {one_line(sn.text, 160)}" for sn in snippets)
+    body = "\n".join(f"- {one_line(r.preview, 160)}" for r in refs)
     return wrap_untrusted(body, kind="memory")
 
 
@@ -690,7 +691,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         swap.prefetch(s)   # CO-RESIDENCY: refresh change-set deps from the code graph, BEFORE any eviction
         goal = s.goal or task
         if goal not in recall_cache:
-            recall_cache[goal] = render_memory(memory.recall(goal)) if memory is not None else ""
+            # RELEVANT MEMORY through the ONE read seam (memory-lessons backend) — no sibling recall.
+            recall_cache[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6))
         caps = TIER_CAPS[_level["n"]]
         # BIDIRECTIONAL ladder: at level 0 the render budget tracks the LIVE adaptive budget (s.read_budget,
         # grown on refault); an overflow tighten (level>0) caps it back down to the level's fixed small value.
@@ -712,7 +714,6 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # to MANIFEST_TURNS locators (moat), self-suppresses when no durable cache (NullMemory => []).
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
         cache_manifest = render_cache_manifest(manifest_refs)
-        # NEXT BACKEND TO FOLD: memory.recall (per-task episodic recall, below) — a sibling call for now.
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
                             hint_text, worktree, repo_map_text, cache_manifest,
                             window=caps["window"], max_findings=caps["max_findings"])

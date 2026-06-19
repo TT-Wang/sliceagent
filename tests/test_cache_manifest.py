@@ -139,6 +139,35 @@ def pagetable_thissession_returns_locator_refs():
     assert PageTable(memory=NullMemory()).lookup("s1", kind="episode-thissession", k=8) == []
 
 
+@check
+def pagetable_memory_lessons_unifies_recall():
+    """The RELEVANT MEMORY recall now flows through the ONE read seam (kind='memory-lessons'),
+    distinct from raw episode-xsession. PageRefs wrap recall's Snippets; render is byte-identical
+    to the former render_memory(memory.recall(...)) path; absent/empty/skip all collapse to ''."""
+    from memagent.interfaces import Snippet
+    from memagent.slice import render_memory
+
+    class _LessonMem:
+        def recall(self, q, k=6):
+            return [Snippet(path="mem://a", text="lesson  one", score=0.9),
+                    Snippet(path="mem://b", text="lesson two", score=0.4)]
+        def read_episodes(self, *a, **k): return []
+        def search_episodes(self, *a, **k): return []
+
+    refs = PageTable(memory=_LessonMem()).lookup("goal", kind="memory-lessons", k=6)
+    assert [r.kind for r in refs] == ["memory-lessons", "memory-lessons"]
+    assert [r.handle for r in refs] == ["mem://a", "mem://b"]      # Snippet.path -> handle
+    assert [r.preview for r in refs] == ["lesson  one", "lesson two"]  # RAW text -> preview
+    # render matches the OLD Snippet path exactly (one_line collapses ws, wrap_untrusted fences once)
+    rendered = render_memory(refs)
+    assert "- lesson one" in rendered and "- lesson two" in rendered
+    assert rendered.startswith("<untrusted-data kind=\"memory\">")
+    # empty / absent / skip all suppress the tier (== the old `memory is None -> ""` branch)
+    assert render_memory([]) == ""
+    assert PageTable(memory=None).lookup("g", kind="memory-lessons", k=6) == []
+    assert PageTable(memory=_LessonMem()).lookup("g", kind="memory-lessons", k=0) == []
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:
