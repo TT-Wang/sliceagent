@@ -182,13 +182,13 @@ SYSTEM_PROMPT = (
     "you state ANYTHING as true — a bug, a root cause, 'this is correct', 'this is done' — CONFIRM it against the "
     "code or a tool result (avoid hallucination, fact-check first): report the issues you have actually traced and "
     "confirmed, and do not report a plausible-looking concern you have not confirmed.\n"
-    "When you FIX a bug, edit the ROOT CAUSE, not the symptom site. From where the wrong behavior is OBSERVED, "
-    "follow the value/data flow INWARD — into the helper functions the code calls — to the function that actually "
-    "PRODUCES the wrong result, and fix it THERE. A change at a site that merely receives or forwards the value (a "
-    "__setitem__, a wrapper, an entry point) when a helper it delegates to is the real culprit will pass a shallow "
-    "check but fail the real test. Before finishing, REPRODUCE the issue's own scenario with a small execute_code "
-    "probe and confirm your edit makes it behave correctly — a fix you have not exercised against the reported "
-    "scenario is unverified.\n"
+    "When you FIX a bug, make the most DIRECT correct fix first — usually at the site the issue points to; do not "
+    "over-engineer a simple bug. But if reproducing the issue shows that direct fix does NOT actually resolve it, "
+    "the real cause is deeper: follow the value/data flow INWARD — into the helper functions the code calls — to "
+    "the function that PRODUCES the wrong result, and fix it THERE (a change at a site that merely forwards the "
+    "value to the real culprit passes a shallow check but fails the real test). Either way, before finishing, "
+    "REPRODUCE the issue's own scenario with a small execute_code probe and confirm your edit makes it behave "
+    "correctly — a fix you have not exercised against the reported scenario is unverified.\n"
     "When the task states an EXACT expected BEHAVIOR — a specific value, ordering, count, depth, or invariant "
     "('outermost sees the original depth', 'caller X must resolve through Y', 'returns a (value, source) pair') — "
     "a compile/import is NOT enough: before finishing, run ONE small execute_code probe that EXERCISES that exact "
@@ -348,6 +348,13 @@ class Slice:
     # automatic self-tuning loop (no model involvement), the validated automatic-beats-active-asker path.
     io: dict = field(default_factory=lambda: {"hit": 0, "miss": 0, "refault": 0, "evict": 0})
     hot: dict = field(default_factory=dict)
+    # INTRA-TURN STEP CACHE (cold storage, NOT rendered, transient/not-serialized). A single agentic task
+    # is ONE turn, so the turn-level episodic cache is EMPTY mid-task — the agent cannot recall its earlier
+    # STEPS, which page out of the recent-K window (`recent`) into the void → it re-derives (thrash). This
+    # keeps every step's (action, full-ish observation) cold so recall_history(step=N) can page one back on
+    # demand: the slice→cache design at STEP granularity. The slice still renders only the bounded recent
+    # window (hot) + a tiny manifest of paged-out steps; the moat holds (cold store ≠ context sent to LLM).
+    step_log: list = field(default_factory=list)
     # ADAPTIVE working-set budget (the "bounded = Markov current-state, not a fixed ceiling" reframe). The
     # resident exploratory-read budget is no longer the constant READ_BUDGET: it starts at that FLOOR and the
     # kernel GROWS it on refault thrash (SwapManager._grow) up to read_ceiling. Transient session state (like
@@ -380,6 +387,7 @@ class Slice:
         self.conversation = []
         self.turns = 0
         self.ghosts = []
+        self.step_log = []
         self.protected_deps = set()
         self.pre_defs = {}
         self.stale_deps = set()
