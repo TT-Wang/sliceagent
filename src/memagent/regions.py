@@ -417,11 +417,12 @@ def render_convergence(s) -> str:
         if not s.last_error and ta >= EXPLORE_NUDGE_AFTER:
             strong = "STOP exploring NOW — " if ta >= EXPLORE_NUDGE_AFTER + 3 else ""
             return (
-                f"# CONVERGENCE CHECK\n{strong}you've made {ta} tool calls this turn and edited nothing. You "
-                f"almost certainly have enough: ANSWER the user NOW with what you have (cite OPEN FILES) and "
-                f"make NO tool call. If the request is ambiguous or under-specified, call ask_user with ONE "
-                f"concise question INSTEAD of exploring further. Do NOT re-read or re-list what you've already "
-                f"seen.\n\n")
+                f"# CONVERGENCE CHECK\n{strong}you've made {ta} tool calls this turn and edited nothing. Decide "
+                f"NOW — stop exploring (do NOT re-read what you've seen). If the task needs a CODE CHANGE, make "
+                f"your best-effort minimal edit immediately: never finish, and never run out of steps, having "
+                f"edited nothing — an empty result is a failure, a best-effort patch is not. If the task only "
+                f"needs an ANSWER, answer the user now (cite OPEN FILES) and make NO tool call; if it is "
+                f"genuinely ambiguous, call ask_user with ONE concise question.\n\n")
         return ""
     if s.last_error or s.since_edit < STOP_NUDGE_AFTER:
         return ""
