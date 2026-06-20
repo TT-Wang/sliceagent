@@ -132,10 +132,12 @@ def edited_paths_in_code(code: str) -> list[str]:
 # API's tools= channel) — NOT restated here. Stays LLM-agnostic (no model-family blocks) and task-agnostic
 # (no language/tool-specific rules). The volatile per-turn tiers are appended as the user message by render_slice.
 SYSTEM_PROMPT = (
-    "You are an interactive coding assistant. Respond to each message in kind: if it is a greeting, a "
-    "question, or a request to explain, plan, or discuss, just reply in text and make NO tool call. If it "
-    "asks you to DO something to the code or workspace (implement, fix, refactor, run, investigate a file), "
-    "carry it out with tools and make the real change — do not merely describe it. Act when it is a task; "
+    "You are an interactive engineering agent — you work on code AND general terminal/system tasks (run "
+    "commands, configure services, drive interactive programs, inspect data, recover or solve a task in the "
+    "environment). Respond to each message in kind: if it is a greeting, a question, or a request to explain, "
+    "plan, or discuss, just reply in text and make NO tool call. If it asks you to DO something (implement, "
+    "fix, refactor, run, investigate, configure, recover, solve), carry it out with tools and make the real "
+    "change in the environment — do not merely describe it. Act when it is a task; "
     "converse when it is conversation. When the request specifies an EXACT name, function signature, API, "
     "or interface, honor it VERBATIM — do not rename or re-shape what the user asked for (a caller or test "
     "depends on that exact name).\n\n"
@@ -181,6 +183,11 @@ SYSTEM_PROMPT = (
     "understand it, do NOT pull them all into your own context — narrow with grep/RELATED CODE, or delegate the breadth.\n"
     "</work>\n\n"
     "<verification>\n"
+    "'Done' means the task's REAL end-state holds in the world — a passing check for code, but equally the "
+    "right file/output, a service that actually responds, a solved puzzle, an extracted answer, a configured "
+    "system. Confirm that end-state DIRECTLY (run / open / observe it); your own note saying 'done' is never "
+    "proof. The code-specific guidance below is the common case — apply the same observe-the-real-result "
+    "discipline to any task.\n"
     "Verify with the CHEAPEST sufficient check (import/compile/build/lint, or the smallest relevant test). If a "
     "check cannot run after ONE attempt (missing command/deps, setup errors), do NOT keep retrying or repairing "
     "the environment — make the minimal correct edit and stop.\n"
@@ -319,6 +326,14 @@ class Slice:
     # to `findings` (kept a plain list[str] so it stays JSON-serializable for taskstate/memory and
     # readable by discovery_query). Bounded with the findings ring; pruned to live keys only.
     finding_source: dict = field(default_factory=dict)
+    # AGENT WORLD MODEL — a durable, agent-MAINTAINED key→value scratchpad for NON-code task state the
+    # model must carry across many steps: an explored maze map, a text-adventure's rooms+inventory, a
+    # system inventory (processes/ports/services), a running plan. Written via the world_set tool (folded
+    # in by slice_sink, the same note→findings seam); READ straight from the rendered WORLD MODEL region
+    # (no world_get needed). Unbounded within the loop (bound = the seal, not a within-loop cut); SURVIVES
+    # the seal (distilled task state); cleared only by reset (a new task). This generalizes the slice
+    # beyond source files — where its multi-step memory wins on non-code tasks (maze/zork) actually lives.
+    world: dict = field(default_factory=dict)
     edited_files: set = field(default_factory=set)  # the change set — protected from eviction
     since_edit: int = 0  # tool calls since the last successful edit — drives the EDIT convergence check
     turn_actions: int = 0  # tool calls THIS user turn — finding-INDEPENDENT (unlike since_edit, which resets
@@ -398,6 +413,7 @@ class Slice:
         self.edit_anchor = {}
         self.findings = []
         self.finding_source = {}
+        self.world = {}                  # agent world model → wiped on a brand-new task (kept by seal())
         self.edited_files = set()
         self.since_edit = 0
         self.turn_actions = 0
@@ -846,6 +862,19 @@ def slice_sink(state):
             # further downgrades any "done"-style note to "claim" unless an observation backs it.
             new_finding = record_note(s, event.args.get("note", ""),
                                       source="tool-note" if not event.failing else "claim")
+            # WORLD MODEL — fold world_set/world_clear into the durable scratchpad (the note→findings seam,
+            # but structured key→value). The tool handler only confirms; the STATE lives here so it renders
+            # back each step, survives the seal, and clears on reset.
+            if event.name == "world_set" and not event.failing:
+                _k = str(event.args.get("key", "")).strip()
+                if _k:
+                    s.world[_k] = str(event.args.get("value", ""))
+            elif event.name == "world_clear" and not event.failing:
+                _k = str(event.args.get("key", "")).strip()
+                if _k:
+                    s.world.pop(_k, None)
+                else:
+                    s.world.clear()
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the bounded FINDINGS tier (observed) so it survives RECENT's K-window —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).

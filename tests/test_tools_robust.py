@@ -189,13 +189,13 @@ def read_text_normal_utf8_unchanged():
 
 
 @check
-def read_file_binary_degrades_via_registry():
-    # The registry wraps the handler in try/except, so a binary read_file returns an
-    # Error STRING (not a crash). Same path protects str_replace's read_text.
+def read_file_binary_returns_hexdump_view():
+    # read_file no longer REFUSES binaries — it returns a hexdump+magic view so forensics/
+    # media tasks can inspect structure (str_replace's read_text still hard-refuses; see below).
     h, root = _host()
     _write(root, "x.png", "whatever")
     out = h.run("read_file", {"path": "x.png"})
-    assert out.startswith("Error:") and "binary" in out
+    assert "binary file" in out and "hexdump" in out and not out.startswith("Error:")
 
 
 @check
