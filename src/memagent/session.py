@@ -93,6 +93,11 @@ class Session:
         it is NOT cleared by continue_topic (a new directive does not mean the user retracted the
         report — only verifying the fix, or a real topic change, clears it)."""
         s = self.active()
+        # SEAL the prior loop at this turn boundary: the finished loop was archived on TurnEnd; start the
+        # next loop fresh — CARRY the distilled context (findings + edited change-set + conversation), SEAL
+        # the raw trajectory (recent/step-cache/exploratory reads → recall-on-demand). This is what keeps
+        # per-turn cost flat across a long session (the moat) while within-loop info stays complete.
+        s.seal()
         s.goal = message
         s.last_error = ""
         # demote (don't clear): keep counts, drop the failing flag — see WS2 above

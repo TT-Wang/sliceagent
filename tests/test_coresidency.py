@@ -23,7 +23,7 @@ class _FakeTools:
         return "."
 
 
-# ── dependency co-residency (the s3 multi-file root cause) ──────────────────────────────────────
+# ── dependency co-residency (re-faultable eviction; OPEN-FILES residency is an open design call) ───
 @check
 def dependency_of_edited_file_survives_eviction():
     s = Slice(); s.reset("t")
@@ -34,7 +34,7 @@ def dependency_of_edited_file_survives_eviction():
         touch_file(s, f"other{i}.py")
     assert "eventbus/dispatcher.py" in s.active_files, "edited file must never evict"
     assert "eventbus/context.py" in s.active_files, "a DEPENDENCY of an edited file must stay co-resident"
-    assert "other0.py" not in s.active_files, "unrelated old reads still evict (no bloat)"
+    assert "other0.py" not in s.active_files, "unrelated old reads page out (re-faultable via the ghost index)"
 
 
 @check
@@ -44,20 +44,27 @@ def plain_reads_still_evict_no_bloat():
     touch_file(s, "plain.py")                                 # a plain read, NOT a dep
     for i in range(READ_BUDGET + 3):
         touch_file(s, f"r{i}.py")
-    assert "plain.py" not in s.active_files, "non-dependency reads must still be bounded by READ_BUDGET"
+    assert "plain.py" not in s.active_files, "non-dependency reads bounded by READ_BUDGET (re-faultable)"
 
 
 @check
-def protected_deps_are_bounded():
+def protected_deps_stay_resident_by_relevance():
+    # bound ≠ size: the dependency CLOSURE (relevance) stays resident IN FULL — it is NOT truncated to a
+    # count. Irrelevant plain reads still evict by staleness. (The closure's only hard backstop is the
+    # per-symbol fan-out limit at COLLECTION time in prefetch, never an eviction cap.)
     s = Slice(); s.reset("t")
     touch_file(s, "core.py", edited=True)
-    s.protected_deps = {f"dep{i}.py" for i in range(DEP_CEILING + 4)}
-    for i in range(DEP_CEILING + 4):
+    n = DEP_CEILING + 4
+    s.protected_deps = {f"dep{i}.py" for i in range(n)}
+    for i in range(n):
         touch_file(s, f"dep{i}.py")
     for i in range(READ_BUDGET + 2):
-        touch_file(s, f"x{i}.py")
+        touch_file(s, f"x{i}.py")                              # irrelevant plain reads
     kept = [p for p in s.active_files if p.startswith("dep")]
-    assert len(kept) <= DEP_CEILING, f"co-resident deps must be bounded by DEP_CEILING, kept {len(kept)}"
+    assert len(kept) == n, f"the whole dependency closure must stay resident by RELEVANCE, kept {len(kept)}/{n}"
+    plain = [p for p in s.active_files if p.startswith("x")]
+    assert len(plain) <= READ_BUDGET, f"non-dependency reads bounded by READ_BUDGET (re-faultable), kept {len(plain)}"
+    assert "core.py" in s.active_files, "edited file always resident"
 
 
 @check
@@ -67,7 +74,7 @@ def no_dep_graph_reduces_to_old_rule():
     for i in range(READ_BUDGET + 3):
         touch_file(s, f"r{i}.py")
     reads = [p for p in s.active_files if p != "a.py"]
-    assert "a.py" in s.active_files and len(reads) == READ_BUDGET, "empty deps → exactly the old behavior"
+    assert "a.py" in s.active_files and len(reads) == READ_BUDGET, "empty deps → re-faultable READ_BUDGET reads"
 
 
 # ── prompt-cache locality (drives cache-hit% and wall time) ──────────────────────────────────────

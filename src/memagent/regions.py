@@ -27,6 +27,8 @@ MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-deriva
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
 
 K = 4  # sliding window for the RECENT (action→observation) tier
+STEP_CACHE_CHARS = 1200   # per-step observation kept in the COLD intra-turn step cache (recall_history(step=N) payload)
+STEP_MANIFEST_SHOWN = 8   # bounded locator count for the PAGED-OUT STEPS manifest (the moat: constant, not history-len)
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
 MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-signal first)
@@ -52,10 +54,13 @@ CONVO_MSG_CHARS = 300    # per-message cap in the conversation tier (bounded; th
 #   level 1 = ~half: fewer recent steps, fewer reads, fewer findings, leaner discovery.
 #   level 2 = floor: K=1, READ_BUDGET=1, NO discovery (discovery_k=0), MAX_FINDINGS=2, region-only files.
 # Every region still sources from a DURABLE store; tightening only reduces how much is rendered.
+_NO_CAP = 1_000_000   # level-0 sentinel: the RENDER does not re-truncate — RELEVANCE/STALENESS (record_note
+# retire + record_action supersede) already bounds findings/recent. A real size bound applies ONLY under the
+# physical-overflow tighten ladder (levels 1-2 below). bound ≠ size: level 0 shows all that's relevant.
 TIER_CAPS = (
     # window,        read_budget, discovery_k,  max_findings, full_file_lines, region_only
-    {"window": K, "read_budget": READ_BUDGET, "discovery_k": DISCOVERY_K,
-     "max_findings": MAX_FINDINGS, "full_file_lines": FULL_FILE_LINES, "region_only": False},
+    {"window": _NO_CAP, "read_budget": READ_BUDGET, "discovery_k": DISCOVERY_K,
+     "max_findings": _NO_CAP, "full_file_lines": FULL_FILE_LINES, "region_only": False},
     {"window": max(1, K // 2), "read_budget": max(1, READ_BUDGET // 2),
      "discovery_k": max(1, DISCOVERY_K // 2), "max_findings": max(2, MAX_FINDINGS // 2),
      "full_file_lines": FULL_FILE_LINES, "region_only": False},
@@ -120,6 +125,26 @@ def render_cache_manifest(refs) -> str:
         else:
             lines.append(f"- {r.preview}  → recall_history(turns=[{r.handle}])")
     return "\n".join(lines)
+
+
+def render_step_manifest(s) -> str:
+    """PAGED-OUT STEPS manifest (intra-turn analogue of PAGED-OUT HISTORY): the steps THIS task whose
+    full output has scrolled out of RECENT (the last K). A single agentic task is ONE turn, so the
+    turn-level cache is empty mid-task — without this the agent re-derives what it already found. Renders
+    bounded locators only (step N: action) ending with the recall call; the full output lives COLD in
+    s.step_log and pages back via recall_history(step=N). MOAT: locators only, constant count."""
+    log = getattr(s, "step_log", None)
+    if not log or len(log) <= K:
+        return ""                       # nothing has scrolled out of RECENT yet
+    paged = log[:-K]                    # steps older than the recent-K window (their full obs is gone from RECENT)
+    shown = paged[-STEP_MANIFEST_SHOWN:]
+    out = []
+    older = len(paged) - len(shown)
+    if older:
+        out.append(f"- …{older} earlier step(s)")
+    for e in shown:
+        out.append(f"- step {e['n']}: {e['action']}  → recall_history(step=[{e['n']}])")
+    return "\n".join(out)
 
 
 def render_skills(active_skills: list[dict]) -> str:
@@ -213,9 +238,12 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
     if not is_new:                   # already established — refresh its recency, don't duplicate
         s.findings.remove(note)
     s.findings.append(note)
-    s.findings = s.findings[-MAX_FINDINGS:]
+    # BOUNDED = SEAL THE LOOP, not cut within it: findings are NOT truncated or retired inside a loop —
+    # every distinct conclusion the loop established stays whole (any within-loop cut harms the LLM). The
+    # only reduction is exact-duplicate dedup above (same fact refreshed, no information lost). The bound
+    # is the loop-boundary SEAL (TurnEnd archive + a fresh next loop), never a within-section filter.
     s.finding_source[note] = source
-    # keep the source map bounded to the live ring (no unbounded growth across turns)
+    # keep the source map bounded to the LIVE finding set (no unbounded growth across turns)
     live = set(s.findings)
     for k in [k for k in s.finding_source if k not in live]:
         del s.finding_source[k]
@@ -310,8 +338,28 @@ def record_action(s, name: str, args: dict, out: str) -> None:
         astr = json.dumps(display, ensure_ascii=False)
     except Exception:
         astr = str(display)
-    s.recent.append({"action": f"{name}({one_line(astr, 60)})", "observation": observe(out, 260)})
-    s.recent = s.recent[-K:]
+    # RECENT by STALENESS, not a K-count (bound ≠ size). An observation is retired when its content is
+    # already represented elsewhere: (a) a NEWER run of the same action supersedes the older one (keep the
+    # latest per action), and (b) a read/edit of a file now RESIDENT in OPEN FILES is redundant (OPEN FILES
+    # shows it live, in full). What remains is the genuinely un-resident output — command results, reads of
+    # evicted files — which is task-bounded, never step-proportional, so the moat holds without a K cap.
+    target = (args.get("path") if isinstance(args, dict)
+              and name in ("read_file", "edit_file", "str_replace", "append_to_file", "list_files") else None)
+    s.recent = [e for e in s.recent if e.get("sig") != sig]   # supersede an exact re-run
+    s.recent.append({"action": f"{name}({one_line(astr, 60)})", "observation": observe(out, 260),
+                     "sig": sig, "name": name, "path": target})
+    s.recent = [e for e in s.recent
+                if not (e.get("path") and e["path"] in s.active_files
+                        and e["name"] in ("read_file", "edit_file", "str_replace", "append_to_file"))]
+    # NO within-loop bound on RECENT: every distinct observation stays for the whole loop (a cut would
+    # harm the LLM). The two reductions above are pure dedup — a re-run supersedes its own obsolete output,
+    # and a read of a now-resident file is shown IN FULL by OPEN FILES — so no information is lost. The
+    # bound is the loop-boundary seal, not a recency/relevance filter here.
+    # INTRA-TURN STEP CACHE: cold-store a fuller observation per step so a step that pages out of the
+    # recent-K window stays recall_history(step=N)-able (the slice→cache design within a single long turn).
+    if hasattr(s, "step_log"):
+        s.step_log.append({"n": len(s.step_log) + 1, "action": f"{name}({one_line(astr, 60)})",
+                           "obs": observe(out, STEP_CACHE_CHARS)})
 
 
 # POSIX-general signal that a command is UNAVAILABLE (not that the agent's code is wrong): the
@@ -511,10 +559,14 @@ STABLE, VOLATILE = "stable", "volatile"
 
 def _r_recent(ctx) -> str:
     s, window = ctx["s"], ctx["window"]
+    shown = s.recent[-window:]
     steps = "\n".join(
-        f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(s.recent[-window:])
+        f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(shown)
     ) or "(none yet — first move)"
-    return f"# RECENT (last {window})\n{steps}"
+    # at level 0 window is the _NO_CAP sentinel (relevance/staleness already bounds s.recent); under the
+    # overflow-tighten floor it's a small number — show the heading accordingly, never the sentinel.
+    head = f"last {window}" if window < 10_000 else f"{len(shown)} live — superseded/resident steps retired"
+    return f"# RECENT ({head})\n{steps}"
 
 
 # Each region is (name, tier, render(ctx)->framed-fragment, slot). The renderer OWNS its header
@@ -525,6 +577,10 @@ def _r_recent(ctx) -> str:
 # # YOUR NOTES / the # OPEN USER REPORT blocker / the # REPEATED-FAILING header all live in the
 # literals below — relocated verbatim from render_slice, not duplicated.)
 REGION_ORDER = (
+    # DURABLE TASK SPEC — the original request, kept resident every turn so standing requirements (exact
+    # signature, output format, stated rules) survive continue_topic + the seal. Rendered only once the
+    # current directive has MOVED off the original (multi-turn); on turn 1 the system TASK already carries it.
+    ("task_spec",      STABLE,   lambda c: (f"# TASK SPEC (the ORIGINAL request — these requirements hold for the WHOLE task; honor them EXACTLY: an exact function name/signature, output format, or stated rule is binding)\n{c['s'].task_spec}\n\n" if getattr(c['s'], 'task_spec', '') and c['s'].task_spec != c['s'].goal else ""), 0),
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP — the resident structural map of the project (cache tier B): always present + bounded, so a
@@ -543,6 +599,11 @@ REGION_ORDER = (
     # out, here's the one call to get it" idiom — files there, turns here) so the model has a SEEN target
     # to call; an unseen cache is the dead channel. Locators only (moat); suppresses itself when empty.
     ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; page any back with the call shown)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    # PAGED-OUT STEPS — the INTRA-TURN cache manifest: earlier steps of THIS task whose full output
+    # scrolled out of RECENT. Same "it's paged out, here's the one call" idiom as GHOST/HISTORY, but at
+    # STEP granularity (a long agentic task is ONE turn, so HISTORY is empty mid-task). Lets the model
+    # page a past step's output back instead of re-deriving it. Locators only (moat); empty-suppressing.
+    ("step_manifest",  VOLATILE, lambda c: (f"\n# PAGED-OUT STEPS (earlier this task — full output scrolled out of RECENT; recall it instead of re-deriving)\n{render_step_manifest(c['s'])}\n" if render_step_manifest(c["s"]) else ""), 3),
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part

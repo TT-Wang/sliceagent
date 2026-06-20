@@ -17,12 +17,14 @@ READ_BUDGET_MAX = 16  # per-slice DISASTER CEILING for refault-driven growth. A 
                       # resident reads than this; genuine BREADTH ("review the repo") is delegated to the subagent SWARM
                       # (each child a fresh lean slice), NOT served by inflating one slice toward the context window
                       # (that invites context-rot / lost-in-the-middle — see auto-memory: kernel-architecture).
-EDIT_CEILING = 8   # max files in the change set
-DEP_CEILING = 8    # max read-only DEPENDENCIES kept co-resident. Raised 4->8 so a HIGH-FAN-IN edited
-                   # symbol keeps ALL its callers resident (caller-first ranked in code_index.deps),
-                   # not just 4 — the call-sites that break on a rename must stay in re-observation
-                   # reach. Still hard-bounded (a few K tokens, orders under a whole transcript); genuine
-                   # breadth beyond this goes to the swarm, never to inflating one slice.
+# bound ≠ size: the change set + dependency closure are RELEVANCE sets, kept resident IN FULL (evict no
+# longer truncates them — see evict/prefetch). These two constants are now PHYSICAL fan-in backstops
+# (guard against a pathological 100s-of-callers symbol), generous and well above any coherent change —
+# NOT relevance caps. swap_tools.py reads them for the occupancy display; the real overflow handler is
+# the physical-context tighten ladder, not these.
+EDIT_CEILING = 32  # physical backstop on the change set (a coherent change is far smaller); not a relevance cap
+DEP_CEILING = 64   # per-symbol caller fan-out backstop — keep ALL direct callers that break on the change
+                   # (caller-first ranked in code_index.deps); generous physical guard, not a relevance cap.
 MAX_GHOSTS = 6     # GHOST INDEX ring — pointers to recently paged-out files/skills (also the refault recency window)
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
@@ -76,18 +78,17 @@ class SwapManager:
         s.pinned = [p for p in s.pinned if p != path]
 
     def evict(self, s) -> None:
-        """Keep the change set (edited, ≤EDIT_CEILING) + PINNED files (deliberate growth, ≤PIN_CEILING) +
-        HOT files (kernel-granted refault protection, ≤HOT_CEILING) + read-only DEPS (≤DEP_CEILING) +
-        most-recent READ_BUDGET reads. Edited/pinned/hot/deps NEVER evict for a plain read (re-observation
-        reach must cover them); other reads are residue. No graph + no promotions → old rule exactly."""
-        edited = [p for p in s.active_files if p in s.edited_files][-EDIT_CEILING:]
-        edited_set = set(edited)
+        """Keep the change set (edited) + PINNED + HOT + the WHOLE dependency closure (relevance, not a
+        count) + most-recent read_budget exploratory reads; page the rest OUT — non-lossy, since every
+        evicted file leaves a GHOST recovery pointer and re-reads on demand (a REFAULT, which also widens
+        the budget). Edited/pinned/hot/deps never evict for a plain read (re-observation reach must cover
+        them). NOTE: whether OPEN FILES should evict at all within a loop is an OPEN design decision (see
+        the bound-is-relevance discussion); this is the re-faultable middle ground pending that call."""
+        edited_set = {p for p in s.active_files if p in s.edited_files}
         pinned_set = {p for p in s.active_files if p in getattr(s, "pinned", ())} - edited_set
         hot_set = {p for p in s.active_files if p in getattr(s, "hot", {})} - edited_set - pinned_set
         protect = edited_set | pinned_set | hot_set
-        deps = [p for p in s.active_files
-                if p in s.protected_deps and p not in protect][-DEP_CEILING:]
-        deps_set = set(deps)
+        deps_set = {p for p in s.active_files if p in s.protected_deps and p not in protect}
         read_budget = getattr(s, "read_budget", READ_BUDGET)   # LIVE adaptive budget (grows on refault); floor = READ_BUDGET
         reads = [p for p in s.active_files
                  if p not in s.edited_files and p not in deps_set and p not in protect][-read_budget:]
@@ -116,10 +117,10 @@ class SwapManager:
                 if p not in s.edited_files and p not in s.pre_defs:
                     s.pre_defs[p] = r.def_names(p)
         if hasattr(r, "deps") and s.edited_files:
-            edited = list(s.edited_files)[:EDIT_CEILING]   # materialize ONCE (reused below)
+            edited = list(s.edited_files)   # the WHOLE change set (relevance, not a count) — materialize ONCE
             deps: set = set()
             for e in edited:
-                deps.update(r.deps(e, limit=DEP_CEILING))
+                deps.update(r.deps(e, limit=DEP_CEILING))   # all direct callers that break on the change
             s.protected_deps = deps - s.edited_files
             # CHANGE-SET CLOSURE (symbol-aware): names the edits removed/moved, then the dependents whose
             # CURRENT tokens still reference one — precise dangling call-sites. SILENT on feature-adds

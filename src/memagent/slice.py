@@ -136,12 +136,22 @@ SYSTEM_PROMPT = (
     "question, or a request to explain, plan, or discuss, just reply in text and make NO tool call. If it "
     "asks you to DO something to the code or workspace (implement, fix, refactor, run, investigate a file), "
     "carry it out with tools and make the real change — do not merely describe it. Act when it is a task; "
-    "converse when it is conversation.\n\n"
+    "converse when it is conversation. When the request specifies an EXACT name, function signature, API, "
+    "or interface, honor it VERBATIM — do not rename or re-shape what the user asked for (a caller or test "
+    "depends on that exact name).\n\n"
     "<ask>\n"
     "If a request is AMBIGUOUS, or you have FAILED or been blocked and are unsure how to proceed, call the "
     "ask_user tool with ONE concise question (optionally up to ~4 short options) and wait for the answer — "
     "do NOT guess, and do NOT repeat a failing action hoping it changes. Asking the user a follow-up is a "
     "normal, expected move, not a failure.\n"
+    "CLARIFY BEFORE COMMITTING: before you deliver an artifact (a function, file, or design) whose "
+    "CORRECTNESS depends on details the request does NOT state — exact behavior, numeric conventions, "
+    "formats, ordering, edge cases — and the user is present to answer, ASK your most important clarifying "
+    "questions FIRST instead of guessing. Guessing hidden requirements and committing a whole artifact is a "
+    "common, costly failure. In a back-and-forth dialogue, ending your turn with a focused question (or "
+    "calling ask_user) is the correct move, not premature delivery; gather what you need over a few short "
+    "exchanges, then deliver. Only when the spec is already complete (e.g. a precise issue with tests) or no "
+    "one can clarify should you proceed directly on a best-effort reading.\n"
     "</ask>\n\n"
     "{{MEMORY_MODEL}}"  # spliced per loop_mode in make_build_slice (accumulate default / rebuild fallback)
     "The slice is organized into TIERS. Trust them in this order of AUTHORITY (highest first):\n"
@@ -290,6 +300,14 @@ DELEGATION_BLOCK = (
 @dataclass
 class Slice:
     goal: str = ""
+    # DURABLE TASK SPEC — the original defining request for this topic (the first user message), kept
+    # WHOLE and resident for the life of the topic. Standing requirements live here (an exact function
+    # name/signature, output format, "use British spelling", "don't use lib X", an invariant) — they are
+    # ALWAYS relevant to the task, so they must never be truncated by a per-message cap, reset by a new
+    # directive (continue_topic moves `goal`, not this), or dropped by the turn SEAL. Cleared only by a
+    # real task change (reset/new_topic). bound-is-relevance applied to the task itself: the spec is the
+    # one thing that is relevant the whole way through. ONE bounded field (the request, not a transcript).
+    task_spec: str = ""
     recent: list[dict] = field(default_factory=list)
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
@@ -371,6 +389,7 @@ class Slice:
 
     def reset(self, goal: str) -> None:
         self.goal = goal
+        self.task_spec = goal   # a brand-new task: the defining request IS the durable spec
         self.recent = []
         self.action_log = {}
         self.active_files = []
@@ -397,6 +416,31 @@ class Slice:
         self.read_budget = READ_BUDGET   # back to the lean floor each task; grows on refault within the task
         self.read_ceiling = READ_BUDGET_MAX
         self.explore_mode = False
+
+    def seal(self) -> None:
+        """SEAL the loop at a TURN boundary — "bounded = seal the within-loop info" (the moat is the seal
+        BETWEEN loops, never a cut WITHIN one). The finished loop's COMPLETE info was archived to the
+        durable cache on TurnEnd; here the NEXT loop starts FRESH so per-turn cost stays flat across a
+        long multi-turn session instead of growing like a transcript.
+
+        CARRY (distilled, durable continuity): findings + their sources, the in-progress edited change-set
+        (+ its edit anchors), conversation ring, goal, the OPEN USER REPORT blocker, deliberate pins, and
+        the demoted anti-loop tally — all kept by simply not touching them.
+        SEAL (archived + recall-on-demand via recall_history): the RAW within-loop trajectory — recent
+        steps, the intra-turn step cache, exploratory (non-edited) reads, and the prior loop's transient
+        kernel state. None of it is lost: it's in the durable cache, one recall away if the next loop needs
+        it. Distinct from reset() (a brand-new task wipes everything); seal() preserves the distilled carry."""
+        self.recent = []                  # raw step trajectory → archived; recall_history pages it back
+        self.step_log = []                # raw intra-turn step cache → archived
+        self.ghosts = []                  # recovery pointers for the prior loop's evictions → moot now
+        self.hot = {}                     # prior loop's kernel soft-pins → reset
+        self.turn_actions = 0             # fresh action epoch for the new loop
+        self.read_budget = READ_BUDGET    # back to the lean floor; re-grows on refault within the new loop
+        # CARRY the in-progress change-set resident; SEAL exploratory reads (re-readable / recallable).
+        self.active_files = [p for p in self.active_files if p in self.edited_files]
+        self.edit_anchor = {p: a for p, a in self.edit_anchor.items() if p in self.edited_files}
+        self.protected_deps = set()       # re-derived from the carried change-set by prefetch on next build
+        self.stale_deps = set()
 
 
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:
@@ -445,19 +489,43 @@ def _focus_line(s: Slice, path: str, lines: list[str]) -> int:
     return 1
 
 
+def _relevant_regions(s: Slice, path: str, lines: list[str], region_lines: int = REGION_LINES) -> list[tuple]:
+    """Multi-focus RELEVANCE view of a large EXPLORATORY file: the union of windows around EVERY line
+    that matches the current focus (edit anchor + task/error identifiers), merged. Bound by RELEVANCE
+    (which symbols the task references), NOT by a single fixed window — show ALL relevant symbols in
+    full, never just the first N lines / one window (bound ≠ size). Returns 1-based inclusive (a,b)
+    ranges; empty match → the head region (something to orient on)."""
+    half = max(1, region_lines // 2)
+    terms = {t.lower() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", f"{s.goal} {s.last_error}")}
+    anchor = s.edit_anchor.get(path)
+    foci = [i for i, ln in enumerate(lines, 1)
+            if (anchor and anchor in ln) or (terms and any(t in ln.lower() for t in terms))]
+    if not foci:
+        foci = [1 + half]   # no relevant symbol here → orient on the head
+    windows: list[list] = []
+    for f in foci:
+        a, b = max(1, f - half), min(len(lines), f + half)
+        if windows and a <= windows[-1][1] + 1:        # overlaps/adjoins the previous window → merge
+            windows[-1][1] = max(windows[-1][1], b)
+        else:
+            windows.append([a, b])
+    return [(a, b) for a, b in windows]
+
+
 def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
                     region_only: bool = False, read_budget: int = READ_BUDGET) -> str:
-    """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap.
-    A file is shown IN FULL up to FULL_FILE_LINES; a genuinely huge file is shown as its
-    RELEVANT REGION (around the agent's focus) in full — never head+tail. Markov bounds
-    growth over time; relevance bounds what's included. No artificial token ceiling.
+    """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap (bound ≠ size).
+    The RELEVANCE CLOSURE — edited files (the change set) + protected deps (the dependency closure) — is
+    shown IN FULL regardless of length: it is proven-relevant, so no line cap applies. A merely
+    EXPLORATORY read is shown in full when small, else as the UNION of its relevant symbol-regions
+    (multi-focus, every matching symbol in full — not one window). The only hard size bound is the
+    physical context window, reached via the ITEM-3 tighten ladder (region_only=True at the overflow
+    floor) — a real limit, not an arbitrary budget.
 
-    `full_file_lines`/`region_only`/`read_budget` are tightening knobs (ITEM 3): at the floor
-    every file collapses to its relevant region only (region_only=True) and only `read_budget`
-    recent reads are SHOWN (edited files — the change set — are always shown), shrinking the
-    slice for an overflow rebuild WITHOUT mutating the durable working set. At level 0 build()
-    passes the LIVE adaptive budget (s.read_budget, grown on refault) so the view tracks what
-    SwapManager.evict kept; the READ_BUDGET default just serves direct callers (the lean floor)."""
+    `full_file_lines`/`region_only`/`read_budget` are the overflow-tighten knobs: at the floor even the
+    closure collapses to regions (last resort) and only `read_budget` recent exploratory reads are SHOWN
+    (the change set is always shown), shrinking the slice for an overflow rebuild WITHOUT mutating the
+    durable working set. At level 0 the closure is uncapped and read_budget IS the live adaptive budget."""
     if not s.active_files:
         return "(no files opened yet)"
     # Render-time view cap: SHOW the most-recent read_budget exploratory reads; the change set (edited
@@ -495,18 +563,28 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
             continue
         lines = body.splitlines()
         total = len(lines)
-        if not region_only and total <= full_file_lines:
+        # RELEVANCE CLOSURE (edited change set + protected dependency closure) is shown IN FULL, however
+        # long: it is proven-relevant to the current change, so no line cap applies (bound ≠ size). Only
+        # the overflow-tighten floor (region_only, the physical-context fallback) collapses it.
+        in_closure = (p in s.edited_files) or (p in getattr(s, "protected_deps", set()))
+        if not region_only and (in_closure or total <= full_file_lines):
             parts.append(f"### {p} ({total} lines — full)\n```\n{body}\n```")
-        else:
+        elif region_only:
+            # overflow FLOOR (last resort, physical-context fallback): a single collapsed window.
             focus = _focus_line(s, p, lines)
-            half = REGION_LINES // 2
-            a = max(1, focus - half)
-            b = min(total, a + REGION_LINES - 1)
+            b = min(total, focus + REGION_LINES // 2)
             a = max(1, b - REGION_LINES + 1)
-            region = "\n".join(lines[a - 1:b])
-            hdr = (f"### {p} ({total} lines — showing the relevant region, lines {a}-{b}; "
-                   f"grep to locate other parts, then edit — a failed str_replace re-aims this region)")
-            parts.append(f"{hdr}\n```\n{region}\n```")
+            hdr = f"### {p} ({total} lines — overflow floor, lines {a}-{b}; grep for the rest)"
+            parts.append(f"{hdr}\n```\n" + "\n".join(lines[a - 1:b]) + "\n```")
+        else:
+            # huge EXPLORATORY read: the UNION of relevant symbol-regions in full (multi-focus), not one
+            # window — every symbol the task references stays visible (relevance bounds it, not a size cap).
+            regions = _relevant_regions(s, p, lines)
+            shown_lines = sum(b - a + 1 for a, b in regions)
+            blocks = [f"# lines {a}-{b}\n" + "\n".join(lines[a - 1:b]) for a, b in regions]
+            hdr = (f"### {p} ({total} lines — {len(regions)} relevant region(s), {shown_lines} lines; "
+                   f"grep to locate other parts, then edit — a failed str_replace re-aims this view)")
+            parts.append(f"{hdr}\n```\n" + "\n…\n".join(blocks) + "\n```")
     return "\n\n".join(parts)
 
 
