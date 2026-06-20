@@ -18,8 +18,10 @@ import tempfile
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
+from .procman import ProcManager
 from .registry import ToolEntry, ToolRegistry
 from .sandbox import LocalSandbox
+from .terminal import SessionManager
 
 # I1 PROVENANCE — host SELF-INFLICTED error sentinels. These name failures caused by the HOST's own
 # guard rails (file-tool confinement, permission denial), NOT by a real bug in the user's code. Lesson
@@ -193,8 +195,11 @@ TOOL_SCHEMAS = [
     _fn("str_replace", "Replace a unique snippet in an existing file. old_string must match exactly and occur once.",
         {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
         ["path", "old_string", "new_string"]),
-    _fn("run_command", "Run a shell command; returns combined output (and exit code on failure).",
-        {"command": {"type": "string"}}, ["command"]),
+    _fn("run_command",
+        "Run a shell command (blocking); returns combined output (and exit code on failure). Pass "
+        "timeout (seconds, default 30, max 600) for slow commands like builds. For a process that must "
+        "STAY alive (a server) or that you want to probe later, use proc_start instead.",
+        {"command": {"type": "string"}, "timeout": {"type": "number"}}, ["command"]),
     _fn("execute_code",
         "Run a Python script that does MULTIPLE file/shell actions in ONE turn, then prints a "
         "short result. Helpers (no imports needed): read_file(path), write_file(path, content), "
@@ -210,6 +215,49 @@ TOOL_SCHEMAS = [
         "Asking is better than spinning.",
         {"question": {"type": "string"},
          "options": {"type": "array", "items": {"type": "string"}}}, ["question"]),
+    _fn("proc_start",
+        "Start a LONG-RUNNING / background process (a server, a watcher, a multi-minute build) and "
+        "return a handle (p1, p2, …). Non-blocking — it keeps running across turns. Use for anything "
+        "you must keep alive and probe later, then proc_tail/proc_poll/proc_wait/proc_kill.",
+        {"command": {"type": "string"}}, ["command"]),
+    _fn("proc_poll", "Check a background process by handle: 'running' or 'exited <code>'.",
+        {"handle": {"type": "string"}}, ["handle"]),
+    _fn("proc_tail", "Read recent output (stdout+stderr) of a background process.",
+        {"handle": {"type": "string"}, "lines": {"type": "number"}}, ["handle"]),
+    _fn("proc_wait",
+        "Wait up to timeout seconds for a background process to exit; returns its status + recent output.",
+        {"handle": {"type": "string"}, "timeout": {"type": "number"}}, ["handle"]),
+    _fn("proc_kill", "Terminate a background process and its child group.",
+        {"handle": {"type": "string"}}, ["handle"]),
+    _fn("terminal_open",
+        "Open a persistent interactive terminal (PTY) session. Use for anything that needs a LIVE "
+        "terminal: driving a REPL or text game, answering successive prompts, a TUI, or just holding "
+        "shell state (cd/export/venv) across turns. Omit command for a shell; pass command to launch "
+        "a program directly (e.g. 'python3 -i -q'). 'session' names it (default 'main').",
+        {"session": {"type": "string"}, "command": {"type": "string"}}, []),
+    _fn("terminal_send",
+        "Send input to a terminal session. By default a newline is appended (sends a line). Set "
+        "enter=false to send raw keys without a newline (e.g. a control char like '\\u0003' for Ctrl-C, "
+        "or an escape sequence). Returns the immediate echo/output.",
+        {"session": {"type": "string"}, "input": {"type": "string"}, "enter": {"type": "boolean"}},
+        ["input"]),
+    _fn("terminal_read", "Read the output a terminal session has produced (drains the live stream).",
+        {"session": {"type": "string"}, "timeout": {"type": "number"}}, []),
+    _fn("terminal_wait",
+        "Wait until a regex pattern appears in a terminal session's output (or timeout) — the reliable "
+        "way to sync: send a command, then wait for its prompt/result before sending the next.",
+        {"session": {"type": "string"}, "until": {"type": "string"}, "timeout": {"type": "number"}},
+        ["until"]),
+    _fn("terminal_close", "Close a terminal session and kill its process group.",
+        {"session": {"type": "string"}}, []),
+    _fn("world_set",
+        "Save DURABLE task state to your WORLD MODEL under a key (overwrites that key). Use it to maintain "
+        "non-code state across many steps: an explored maze map, a game's rooms+inventory, a system "
+        "inventory, a running plan. It's shown back to you every step in the WORLD MODEL section — keep it "
+        "updated; you don't need to read it back. value may be multiline.",
+        {"key": {"type": "string"}, "value": {"type": "string"}}, ["key", "value"]),
+    _fn("world_clear", "Remove a key from your WORLD MODEL (omit key to clear all of it).",
+        {"key": {"type": "string"}}, []),
 ]
 
 
@@ -228,6 +276,12 @@ class LocalToolHost:
         self._root = root
         self.timeout = timeout
         self.sandbox = sandbox or LocalSandbox()
+        # Background/long-running processes — the live-handle registry the one-shot sandbox can't
+        # express (servers, multi-minute builds). Scrubs secrets like the sandbox; cleanup() at exit.
+        _scrub = getattr(self.sandbox, "scrub_secrets", True)
+        self.procs = ProcManager(scrub_secrets=_scrub)
+        # Interactive PTY sessions — drive REPLs/TUIs/games, hold shell+env across turns.
+        self.terminals = SessionManager(scrub_secrets=_scrub)
         # I2 — RE-OBSERVATION REACH = ACTION REACH. File tools and shell must reach the
         # SAME places, or the agent writes (via shell, unconfined) files its file tools can
         # never read back, and OPEN FILES lies "(not created yet)" about real on-disk files.
@@ -251,6 +305,13 @@ class LocalToolHost:
             "edit_file": self._t_edit_file, "append_to_file": self._t_append,
             "str_replace": self._t_str_replace, "run_command": self._t_run_command,
             "execute_code": self._t_execute_code, "ask_user": self._t_ask_user,
+            "proc_start": self._t_proc_start, "proc_poll": self._t_proc_poll,
+            "proc_tail": self._t_proc_tail, "proc_wait": self._t_proc_wait,
+            "proc_kill": self._t_proc_kill,
+            "terminal_open": self._t_terminal_open, "terminal_send": self._t_terminal_send,
+            "terminal_read": self._t_terminal_read, "terminal_wait": self._t_terminal_wait,
+            "terminal_close": self._t_terminal_close,
+            "world_set": self._t_world_set, "world_clear": self._t_world_clear,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -374,13 +435,40 @@ class LocalToolHost:
             return [FileAccess("search", args.get("path") or ".", recursive=True)]
         if name in ("edit_file", "append_to_file", "str_replace"):
             return [FileAccess("readwrite", p)] if p else [AllAccess()]
-        if name in ("run_command", "execute_code"):
-            return [AllAccess()]  # arbitrary execution → globally exclusive
+        if name in ("run_command", "execute_code", "proc_start", "proc_poll",
+                    "proc_tail", "proc_wait", "proc_kill", "terminal_open", "terminal_send",
+                    "terminal_read", "terminal_wait", "terminal_close"):
+            return [AllAccess()]  # arbitrary / stateful execution → globally exclusive
         return [AllAccess()]
 
     # --- builtin tool handlers (args) -> str (the registry catches exceptions) ---
     def _t_read_file(self, args: dict) -> str:
-        return self.read_text(args["path"])
+        # Text files: return the content. Binary files: instead of refusing (which blanks the
+        # agent on forensics/media/archive tasks), return a hexdump + size + magic so it can
+        # inspect structure and pick the right CLI. str_replace still uses read_text() (which
+        # raises on binary) — you can't text-edit a binary, so that path stays a hard error.
+        path = args["path"]
+        full = self._resolve(path)
+        with open(full, "rb") as f:
+            raw = f.read()
+        sample = raw[:8192].decode("utf-8", errors="replace")
+        if looks_binary(path, sample):
+            return self._binary_view(path, raw)
+        return raw.decode("utf-8")
+
+    @staticmethod
+    def _binary_view(path: str, raw: bytes, head_bytes: int = 256) -> str:
+        head = raw[:head_bytes]
+        rows = []
+        for off in range(0, len(head), 16):
+            chunk = head[off:off + 16]
+            hexpart = " ".join(f"{b:02x}" for b in chunk)
+            asciipart = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            rows.append(f"{off:08x}  {hexpart:<47}  {asciipart}")
+        return (f"{path}: binary file, {len(raw)} bytes — text tools can't edit it; inspect/convert "
+                f"it with run_command/execute_code (the right CLI).\n"
+                f"magic: {head[:8].hex()}\n"
+                f"hexdump (first {len(head)} bytes):\n" + "\n".join(rows))
 
     def _t_list_files(self, args: dict) -> str:
         base = self._resolve(args.get("path") or ".")
@@ -465,12 +553,85 @@ class LocalToolHost:
         return f"User answered: {str(ans).strip()}"
 
     def _t_run_command(self, args: dict) -> str:
-        code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=self.timeout)
+        # Optional per-call timeout (default self.timeout, hard ceiling 600s) so slow builds don't
+        # die at the 30s default and come back as exit 124. Long-lived processes use proc_start.
+        try:
+            t = float(args.get("timeout") or self.timeout)
+        except (TypeError, ValueError):
+            t = float(self.timeout)
+        t = max(1.0, min(t, 600.0))
+        code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=t)
         self._grant_shell_paths(args.get("command", ""))  # I2 reach=action: dirs the shell touched
         out = out.strip()
         if code != 0:
             return f"Exit code {code}\n{out or '(no output)'}"
         return out or "(command produced no output)"
+
+    # --- background / long-running processes (procman) ---
+    def _t_proc_start(self, args: dict) -> str:
+        h = self.procs.start(args["command"], cwd=self.root())
+        return (f"Started background process {h}: {args['command']}\n"
+                f"Use proc_tail/proc_poll/proc_wait/proc_kill with handle {h}.")
+
+    def _t_proc_poll(self, args: dict) -> str:
+        return self.procs.poll(args["handle"])
+
+    def _t_proc_tail(self, args: dict) -> str:
+        return self.procs.tail(args["handle"], int(args.get("lines") or 40))
+
+    def _t_proc_wait(self, args: dict) -> str:
+        try:
+            t = float(args.get("timeout") or 30.0)
+        except (TypeError, ValueError):
+            t = 30.0
+        # proc_wait is a poll-with-timeout — allow sub-second waits (unlike run_command's 1s floor).
+        return self.procs.wait(args["handle"], max(0.05, min(t, 600.0)))
+
+    def _t_proc_kill(self, args: dict) -> str:
+        return self.procs.kill(args["handle"])
+
+    # --- interactive PTY sessions (terminal) ---
+    def _t_terminal_open(self, args: dict) -> str:
+        name = args.get("session") or "main"
+        self.terminals.open(name, cwd=self.root(), command=args.get("command") or None)
+        banner = self.terminals.peek(name, timeout=0.6)  # peek, not read — don't eat the first prompt
+        return f"Opened terminal session {name!r}.\n{banner}"
+
+    def _t_terminal_send(self, args: dict) -> str:
+        name = args.get("session") or "main"
+        enter = args.get("enter")
+        enter = True if enter is None else bool(enter)
+        return self.terminals.send(name, args["input"], enter=enter)
+
+    def _t_terminal_read(self, args: dict) -> str:
+        name = args.get("session") or "main"
+        try:
+            t = float(args.get("timeout") or 1.0)
+        except (TypeError, ValueError):
+            t = 1.0
+        return self.terminals.read(name, timeout=max(0.05, min(t, 120.0)))
+
+    def _t_terminal_wait(self, args: dict) -> str:
+        name = args.get("session") or "main"
+        try:
+            t = float(args.get("timeout") or 10.0)
+        except (TypeError, ValueError):
+            t = 10.0
+        return self.terminals.wait(name, args["until"], timeout=max(0.1, min(t, 600.0)))
+
+    def _t_terminal_close(self, args: dict) -> str:
+        return self.terminals.close(args.get("session") or "main")
+
+    # --- world model (durable agent scratchpad; state lives in the Slice, folded by slice_sink) ---
+    def _t_world_set(self, args: dict) -> str:
+        k = (args.get("key") or "").strip()
+        if not k:
+            return "Error: world_set requires a non-empty 'key'."
+        return f"WORLD MODEL: saved {k!r} (shown back in the WORLD MODEL section each step)."
+
+    def _t_world_clear(self, args: dict) -> str:
+        k = (args.get("key") or "").strip()
+        return f"WORLD MODEL: cleared {repr(k) if k else '(all keys)'}."
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])

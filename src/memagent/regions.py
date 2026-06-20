@@ -267,6 +267,22 @@ def render_findings(findings: list[str], sources: dict | None = None) -> str:
     return "\n".join(f"- {f}{_SOURCE_TAG.get(sources.get(f, 'tool-note'), '')}" for f in findings)
 
 
+def render_world(world: dict) -> str:
+    """The agent's durable WORLD MODEL — a maintained key→value scratchpad (maze map, inventory,
+    system state, plan). Long/multiline values render as their own block; short ones as bullets.
+    No within-loop cap (bound = the seal, not a cut): the whole maintained state shows each step."""
+    if not world:
+        return ""
+    parts = []
+    for k, v in world.items():
+        v = str(v)
+        if "\n" in v or len(v) > 80:
+            parts.append(f"## {k}\n{v}")
+        else:
+            parts.append(f"- {k}: {v}")
+    return "\n".join(parts)
+
+
 # ── ANTI-LOOP / RECENT / CURRENT ERROR ────────────────────────────────────────
 # the underlying operations inside an execute_code body — so the anti-loop tally can see
 # THROUGH code-as-action (otherwise every script is a unique signature and loops hide)
@@ -591,6 +607,7 @@ REGION_ORDER = (
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground truth — verify against it before trusting; a note is NOT proof the work is done)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
+    ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across steps)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
     ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
     ("ghosts",         VOLATILE, lambda c: (f"\n# GHOST INDEX (recently paged OUT of this slice — bring any back with ONE call; references only)\n{render_ghosts(c['s'])}\n" if render_ghosts(c["s"]) else ""), 3),
