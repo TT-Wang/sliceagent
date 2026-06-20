@@ -1,0 +1,146 @@
+"""run_turn overflow + interrupt paths (the rarely-fired branches a happy-path suite never reaches).
+Covers three deficiencies found by adversarial review of the collapsed accumulate loop:
+  A. overflow compaction must drop a WHOLE exchange (assistant + ALL its tool replies), not a fixed
+     2-window — else parallel tool calls leave orphaned `tool` messages (invalid → provider 400).
+  B. if the SEED itself overflows (nothing left to compact), fail SOFT (TurnInterrupted 'overflow'),
+     never raise uncaught and crash the session.
+  C. ctrl-C during the TOOL phase (a hung run_command) aborts cleanly, not just during llm.complete.
+No model, no pytest. Run: PYTHONPATH=src python tests/test_loop_overflow.py
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from memagent.context_overflow import ContextOverflow                # noqa: E402
+from memagent.events import TurnInterrupted                          # noqa: E402
+from memagent.hooks import Hooks                                     # noqa: E402
+from memagent.interfaces import Snippet                              # noqa: E402
+from memagent.loop import run_turn                                   # noqa: E402
+from memagent.slice import Slice, make_build_slice                   # noqa: E402
+
+CHECKS = []
+def check(fn):
+    CHECKS.append(fn)
+    return fn
+
+
+class _Resp:
+    def __init__(self, *, content="", tool_calls=None, finish_reason="tool_use", usage=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+        self.finish_reason = finish_reason
+        self.usage = usage or {"prompt_tokens": 1, "completion_tokens": 1}
+
+
+class _TC:
+    def __init__(self, name, args, id):
+        self.name = name; self.args = args; self.id = id
+
+
+class _Retriever:
+    def retrieve(self, query, k=6):
+        return [] if k <= 0 else [Snippet(path="r.py", text="x", score=1.0)]
+
+
+class _Tools:
+    def schemas(self):
+        return []
+    def accesses(self, name, args):
+        return []          # no conflicts → parallel calls run concurrently
+    def run(self, name, args):
+        return "ok"
+
+
+class _KbdTools(_Tools):
+    def run(self, name, args):
+        raise KeyboardInterrupt()   # simulate ctrl-C during tool execution
+
+
+class _ScriptLLM:
+    """Returns scripted responses per complete(); 'OVERFLOW' raises ContextOverflow. Records the
+    EXACT messages it was handed each call so we can assert the post-compaction sequence is valid."""
+    def __init__(self, script):
+        self.script = script; self.i = 0; self.seen = []
+    def complete(self, messages, schemas):
+        self.seen.append([dict(m) for m in messages])
+        r = self.script[min(self.i, len(self.script) - 1)]; self.i += 1
+        if r == "OVERFLOW":
+            raise ContextOverflow(RuntimeError("context_length_exceeded"))
+        return r
+
+
+def _valid_tool_sequence(msgs) -> bool:
+    """Every `tool` message must reference a tool_call_id DECLARED by a preceding assistant message."""
+    declared = set()
+    for m in msgs:
+        if m.get("role") == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                declared.add(tc["id"])
+        elif m.get("role") == "tool":
+            if m.get("tool_call_id") not in declared:
+                return False
+    return True
+
+
+def _build():
+    s = Slice(); s.reset("t")
+    return make_build_slice(s, _Tools(), _Retriever(), None, "t")
+
+
+@check
+def overflow_compacts_whole_exchange_not_fixed_window():
+    # step1: 3 PARALLEL tool calls; step2: 1 tool call; step3: overflow → must drop the WHOLE 3-call
+    # exchange (not a 2-window that would orphan two tool messages). Then it completes.
+    llm = _ScriptLLM([
+        _Resp(tool_calls=[_TC("noop", {}, "c1"), _TC("noop", {}, "c2"), _TC("noop", {}, "c3")]),
+        _Resp(tool_calls=[_TC("noop", {}, "c4")]),
+        "OVERFLOW",
+        _Resp(content="done", finish_reason="stop"),
+    ])
+    events = []
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    post = llm.seen[-1]   # messages handed to the final (post-compaction) complete()
+    assert _valid_tool_sequence(post), f"orphaned tool message after compaction: {[m.get('role') for m in post]}"
+    # the oldest (3-call) exchange was dropped wholesale → no leading orphan tool messages
+    seed_then = [m.get("role") for m in post][2:]   # seed is [system, user]
+    assert "tool" not in seed_then[:1], f"first post-seed message is an orphan tool: {seed_then}"
+
+
+@check
+def seed_overflow_fails_soft_not_crash():
+    # the seed itself always overflows (nothing accumulated to compact) → graceful, not an exception.
+    llm = _ScriptLLM(["OVERFLOW"])
+    events = []
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
+    assert res.stop_reason == "overflow", res.stop_reason
+    interrupts = [e for e in events if isinstance(e, TurnInterrupted)]
+    assert interrupts and interrupts[0].reason == "overflow", interrupts
+
+
+@check
+def ctrl_c_during_tool_aborts_gracefully():
+    llm = _ScriptLLM([_Resp(tool_calls=[_TC("noop", {}, "c1")]), _Resp(content="done", finish_reason="stop")])
+    events = []
+    res = run_turn(build_slice=_build(), llm=llm, tools=_KbdTools(),
+                   dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
+    assert res.stop_reason == "aborted", res.stop_reason
+    assert any(isinstance(e, TurnInterrupted) and e.reason == "aborted" for e in events)
+
+
+def main():
+    failed = 0
+    for fn in CHECKS:
+        try:
+            fn(); print(f"PASS {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1; print(f"FAIL {fn.__name__}: {e!r}")
+    print(f"\n{len(CHECKS) - failed}/{len(CHECKS)} passed")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
