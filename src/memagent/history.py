@@ -69,21 +69,27 @@ def render_index(lines: list[dict]) -> str:
 
 
 def render_trace(lines: list[dict], cap: int = TRACE_MAX) -> str:
-    from .tool_summary import summarize_tool_result   # item 14b: '[tool] action -> outcome, N lines'
+    """Page a sealed turn back as its clean MARKDOWN snapshot (the seal artifact) — a smooth read, like
+    opening a readable doc. Falls back to a computed action→result trace for older records that predate
+    the stored markdown."""
+    from .tool_summary import summarize_tool_result   # fallback path only
     out, used = [], 0
     for ln in lines:
         rec = ln.get("record", {})
         head = f"\n── turn {ln.get('turn')} · {_short_ts(ln.get('ts',''))} · {rec.get('title') or ''}"
-        block = [head]
-        for st in rec.get("steps", []):
-            for a, o in zip(st.get("action", []), st.get("observation", [])):
-                # informative deterministic one-liner (replaces the raw head+tail dump)
-                summary = summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
-                                                failing=bool(a.get("failing")))
-                block.append(f"  • {summary} → {_tail(o, OBS_TAIL)}")
-        if rec.get("note"):
-            block.append(f"  ↳ note: {rec['note'][:200]}")
-        chunk = "\n".join(block)
+        md = rec.get("markdown")
+        if md:                                   # the SEAL artifact — return it directly (smooth read)
+            chunk = head + "\n" + md
+        else:                                    # older record without a stored markdown → compute a trace
+            block = [head]
+            for st in rec.get("steps", []):
+                for a, o in zip(st.get("action", []), st.get("observation", [])):
+                    summary = summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
+                                                    failing=bool(a.get("failing")))
+                    block.append(f"  • {summary} → {_tail(o, OBS_TAIL)}")
+            if rec.get("note"):
+                block.append(f"  ↳ note: {rec['note'][:200]}")
+            chunk = "\n".join(block)
         if used + len(chunk) > cap:
             out.append("\n…[older turns truncated — narrow with turns=[…]]")
             break
@@ -120,8 +126,12 @@ def render_cross_session(refs) -> str:
     return "\n".join(out)
 
 
-def make_history_tool(memory, session_id: str):
+def make_history_tool(memory, session_id: str, get_slice=None):
     """ToolEntry for recall_history, reading `memory`'s episodic cache for this session.
+
+    `get_slice` (optional) returns the active Slice so `step=[N]` can page an earlier STEP's full output
+    back from the COLD intra-turn step cache (s.step_log) — the within-task analogue of turn recall (a
+    long agentic task is ONE turn, so the turn-level cache is empty mid-task and only step recall helps).
 
     Guardrail reins on REPETITION, not count — so a genuine search (distinct fetches, each returning
     new info) is never blocked, only the useless loop (re-fetching the same thing) is. An exact repeat
@@ -138,6 +148,18 @@ def make_history_tool(memory, session_id: str):
     pages = PageTable(memory=memory, exclude_session=session_id)
 
     def _handler(args: dict) -> str:
+        # INTRA-TURN step recall (this task): page back an earlier STEP's full output from the cold
+        # step cache (s.step_log). Distinct from turn recall; the loop's GuardrailHook reins exact
+        # repeats. The PAGED-OUT STEPS manifest advertises which step numbers are recallable.
+        steps = args.get("step")
+        if steps and get_slice is not None:
+            log = getattr(get_slice(), "step_log", None) or []
+            want = {int(x) for x in steps}
+            sel = [e for e in log if e.get("n") in want]
+            if not sel:
+                return ("No matching step (see the PAGED-OUT STEPS manifest for the recallable step "
+                        "numbers this task).")
+            return "\n".join(f"# step {e['n']}: {e['action']}\n{e['obs']}" for e in sel) + CAPTURE_BACK
         # cross-session shape (item 12): search=... runs FTS5 across PAST sessions. Distinct
         # from the index/turns/last shapes (this session's cache) — checked first, no rein
         # (each query is a real search returning new info, like the distinct-fetch path).
@@ -187,13 +209,17 @@ def make_history_tool(memory, session_id: str):
             "title and note WITH the exact call to fetch it: copy that — {\"turns\":[N,...]} for the "
             "turn's actions/observations/notes (add {\"full\":true} for its full stored state), or "
             "{\"last\":N} for the most recent N. Call with NO args for the full index of turns older than "
-            "the manifest. For OTHER sessions, {\"search\":\"keywords\"} (FTS5 — AND/OR/quoted/prefix*). "
-            "Reach back whenever an earlier turn holds something you need instead of re-deriving it; "
-            "record what you find with a note so you don't re-fetch."),
+            "the manifest. To page back an earlier STEP of the CURRENT task whose full output scrolled out "
+            "of RECENT, {\"step\":[N,...]} (the numbers shown in the PAGED-OUT STEPS section) — use this "
+            "instead of re-running/re-reading to recover what you already saw. For OTHER sessions, "
+            "{\"search\":\"keywords\"} (FTS5 — AND/OR/quoted/prefix*). Reach back whenever an earlier turn "
+            "or step holds something you need instead of re-deriving it; record what you find with a note."),
         "parameters": {"type": "object", "properties": {
             "last": {"type": "integer", "description": "fetch the most recent N turns (this session)"},
             "turns": {"type": "array", "items": {"type": "integer"},
                       "description": "fetch these specific turn numbers (from the index, this session)"},
+            "step": {"type": "array", "items": {"type": "integer"},
+                     "description": "page back these STEP numbers' full output from THIS task (PAGED-OUT STEPS manifest)"},
             "full": {"type": "boolean", "description": "return the full stored slice instead of the compact trace"},
             "search": {"type": "string",
                        "description": "FTS5 query across PAST sessions (not this one); returns matching turns"},
