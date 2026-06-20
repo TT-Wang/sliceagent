@@ -40,6 +40,11 @@ from .scheduler import run_scheduled
 # already represents a 3-4x repeat caught by the guardrail, so a few blocks = genuinely stuck.
 STUCK_BLOCK_BUDGET = 3
 
+# Shown when the working context overflows and can't be compacted further (the seed itself is too big).
+# With one loop mode there's no tighten-ladder fallback, so we fail SOFT here instead of crashing.
+OVERFLOW_MSG = ("The working context overflowed and could not be compacted further. Stopping this turn — "
+                "try a narrower request, or reduce the number of files in play, and continue.")
+
 
 def _final_answer(llm, msgs: list, tools, dispatch, guidance: str) -> None:
     """Closeout helper (Fix 5b): a turn must NEVER end silently or with a bare stub. Offer ONLY ask_user
@@ -191,54 +196,66 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             raise RuntimeError(before.get("reason") or f"step {steps} blocked")
         dispatch(StepBegin(steps))
 
-        # overflow → threshold-compact the oldest post-seed exchange and retry (bounded)
-        overflow_tries = 0
-        while True:
-            try:
-                resp = with_retry(
-                    lambda: llm.complete(messages, tools.schemas()),
-                    is_retryable=getattr(llm, "is_retryable", None), dispatch=dispatch,
-                )
-                break
-            except ContextOverflow:
-                if len(messages) <= seed_len + 2 or overflow_tries >= 4:
-                    raise
-                overflow_tries += 1
-                del messages[seed_len:seed_len + 2]   # drop the oldest accumulated exchange
-                dispatch(SliceTightened(level=overflow_tries))
-            except KeyboardInterrupt:
-                dispatch(TurnInterrupted("aborted"))
-                return TurnResult("aborted", steps, total)
+        # The whole step is interrupt-guarded: ctrl-C anywhere — the blocking llm.complete OR a slow tool
+        # in run_tool_batch (a hung run_command) — aborts the turn cleanly instead of crashing it.
+        try:
+            # overflow → compact the OLDEST WHOLE exchange and retry (bounded). An exchange is one
+            # assistant message + ALL its tool replies (N parallel calls → N tool messages), or a lone
+            # continue/user message. A fixed 2-window would orphan tool messages on parallel calls (a
+            # tool message with no preceding tool_calls → invalid sequence → provider 400). If the SEED
+            # itself overflows (nothing left to compact), fail SOFT — no tighten-ladder fallback exists.
+            overflow_tries = 0
+            while True:
+                try:
+                    resp = with_retry(
+                        lambda: llm.complete(messages, tools.schemas()),
+                        is_retryable=getattr(llm, "is_retryable", None), dispatch=dispatch,
+                    )
+                    break
+                except ContextOverflow:
+                    if len(messages) <= seed_len or overflow_tries >= 4:
+                        dispatch(TurnInterrupted("overflow", message=OVERFLOW_MSG))
+                        dispatch(TurnEnd("overflow", steps, total))
+                        return TurnResult("overflow", steps, total)
+                    end = seed_len + 1
+                    while end < len(messages) and messages[end].get("role") == "tool":
+                        end += 1
+                    overflow_tries += 1
+                    del messages[seed_len:end]   # drop the oldest WHOLE exchange (assistant + its tools)
+                    dispatch(SliceTightened(level=overflow_tries))
 
-        usage = resp.usage or {}
-        usage_result = hooks.record_step_usage(usage)
-        stop_turn = bool(usage_result and usage_result.get("stop_turn"))
-        total["prompt_tokens"] += usage.get("prompt_tokens", 0)
-        total["completion_tokens"] += usage.get("completion_tokens", 0)
-        if resp.content:
-            dispatch(AssistantText(resp.content))
-
-        stop = _normalize_stop(resp)
-        if stop != "tool_use" or stop_turn:
-            # the LLM ended the while(true) (or budget forced it): append its FINAL text only — never a
-            # dangling assistant.tool_calls (that would make the transcript / close-out invalid).
+            usage = resp.usage or {}
+            usage_result = hooks.record_step_usage(usage)
+            stop_turn = bool(usage_result and usage_result.get("stop_turn"))
+            total["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            total["completion_tokens"] += usage.get("completion_tokens", 0)
             if resp.content:
-                messages.append({"role": "assistant", "content": resp.content})
-            stop_reason = "end_turn" if stop_turn else stop
-            dispatch(StepEnd(steps, usage, stop_reason))
-            cont = hooks.should_continue_after_stop(stop_reason)  # Oracle/verification plugs in here
-            if cont and cont.get("continue"):
-                messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
-                continue
-            break
+                dispatch(AssistantText(resp.content))
 
-        # tool_use: accumulate the assistant turn (with tool_calls), run, accumulate the tool results
-        messages.append(_assistant_message(resp))
-        blocked, results = run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
-        total_blocked += blocked
-        for r in results:
-            messages.append({"role": "tool", "tool_call_id": r["id"], "content": r["output"]})
-        dispatch(StepEnd(steps, usage, "tool_use"))
+            stop = _normalize_stop(resp)
+            if stop != "tool_use" or stop_turn:
+                # the LLM ended the while(true) (or budget forced it): append its FINAL text only — never a
+                # dangling assistant.tool_calls (that would make the transcript / close-out invalid).
+                if resp.content:
+                    messages.append({"role": "assistant", "content": resp.content})
+                stop_reason = "end_turn" if stop_turn else stop
+                dispatch(StepEnd(steps, usage, stop_reason))
+                cont = hooks.should_continue_after_stop(stop_reason)  # Oracle/verification plugs in here
+                if cont and cont.get("continue"):
+                    messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
+                    continue
+                break
+
+            # tool_use: accumulate the assistant turn (with tool_calls), run, accumulate the tool results
+            messages.append(_assistant_message(resp))
+            blocked, results = run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
+            total_blocked += blocked
+            for r in results:
+                messages.append({"role": "tool", "tool_call_id": r["id"], "content": r["output"]})
+            dispatch(StepEnd(steps, usage, "tool_use"))
+        except KeyboardInterrupt:
+            dispatch(TurnInterrupted("aborted"))
+            return TurnResult("aborted", steps, total)
 
         after = hooks.after_step(steps, usage, "tool_use")
         if after and after.get("stop_turn"):
