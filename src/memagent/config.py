@@ -89,13 +89,6 @@ class Config:
     def show_slice(self) -> bool:
         return _truthy(self._get("agent", "show_slice", "SHOW_SLICE", False))
 
-    @property
-    def loop_mode(self) -> str:
-        # "accumulate" (DEFAULT — per-LOOP working-memory accumulation, the validated 3-layer redesign)
-        # | "rebuild" (the prior per-step slice reconstruction, kept as a fallback). run_turn also reads
-        # AGENT_LOOP_MODE directly so the mode is overridable without code changes.
-        return self._get("agent", "loop_mode", "AGENT_LOOP_MODE", "accumulate")
-
     # --- sandbox ---
     @property
     def sandbox_backend(self) -> str:
