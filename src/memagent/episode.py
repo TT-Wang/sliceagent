@@ -68,7 +68,7 @@ class EpisodeSink:
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SliceBuilt):
-            # run_step dispatches one SliceBuilt first each step → opens a new step
+            # the loop dispatches SliceBuilt for the seed → opens a new step segment
             self._steps.append({"slice": event.rendered, "action": [], "observation": []})
         elif isinstance(event, AssistantText):
             if event.content and event.content.strip():   # content-emitting models' note

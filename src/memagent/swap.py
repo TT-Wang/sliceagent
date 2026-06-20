@@ -29,7 +29,6 @@ MAX_GHOSTS = 6     # GHOST INDEX ring — pointers to recently paged-out files/s
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
 MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
 MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
-PIN_CEILING = 12         # max files the LLM may deliberately PIN resident (mlock) — the GENEROUS disaster ceiling
 HOT_TTL = 3              # steps a REFAULT-promoted file stays kernel-protected (self-tuning; not the model)
 HOT_CEILING = 4  # bound the kernel-granted soft-pin set — never an accumulating tier (decoupled from
                  # DEP_CEILING so raising the dep ceiling doesn't widen the refault soft-pin set)
@@ -61,33 +60,16 @@ class SwapManager:
             s.edited_files.add(path)
         self.evict(s)
 
-    def pin(self, s, path: str) -> None:
-        """DELIBERATE growth (mlock): mark a file resident + reclaim-protected so it survives plain-read
-        eviction (a multi-file task pins the files it must keep consistent). Bounded by PIN_CEILING — the
-        GENEROUS disaster ceiling: past it the kernel FORCE-COMPACTS the least-recent pin (it never refuses
-        or errors). The moat holds: growth is TASK-driven and bounded, never history-proportional."""
-        if not path:
-            return
-        if path not in s.pinned:
-            s.pinned.append(path)
-        del s.pinned[:-PIN_CEILING]   # force-compact the least-recent pins past the disaster ceiling
-        self.load(s, path)            # make it resident now (evict keeps it: it's pinned)
-
-    def unpin(self, s, path: str) -> None:
-        """Release a pin — the file reverts to ordinary residue (may page out as the working set moves on)."""
-        s.pinned = [p for p in s.pinned if p != path]
-
     def evict(self, s) -> None:
-        """Keep the change set (edited) + PINNED + HOT + the WHOLE dependency closure (relevance, not a
-        count) + most-recent read_budget exploratory reads; page the rest OUT — non-lossy, since every
-        evicted file leaves a GHOST recovery pointer and re-reads on demand (a REFAULT, which also widens
-        the budget). Edited/pinned/hot/deps never evict for a plain read (re-observation reach must cover
-        them). NOTE: whether OPEN FILES should evict at all within a loop is an OPEN design decision (see
-        the bound-is-relevance discussion); this is the re-faultable middle ground pending that call."""
+        """Keep the change set (edited) + HOT + the WHOLE dependency closure (relevance, not a count) +
+        most-recent read_budget exploratory reads; page the rest OUT — non-lossy, since every evicted
+        file leaves a GHOST recovery pointer and re-reads on demand (a REFAULT, which also widens the
+        budget). Edited/hot/deps never evict for a plain read (re-observation reach must cover them).
+        NOTE: whether OPEN FILES should evict at all within a loop is an OPEN design decision (see the
+        bound-is-relevance discussion); this is the re-faultable middle ground pending that call."""
         edited_set = {p for p in s.active_files if p in s.edited_files}
-        pinned_set = {p for p in s.active_files if p in getattr(s, "pinned", ())} - edited_set
-        hot_set = {p for p in s.active_files if p in getattr(s, "hot", {})} - edited_set - pinned_set
-        protect = edited_set | pinned_set | hot_set
+        hot_set = {p for p in s.active_files if p in getattr(s, "hot", {})} - edited_set
+        protect = edited_set | hot_set
         deps_set = {p for p in s.active_files if p in s.protected_deps and p not in protect}
         read_budget = getattr(s, "read_budget", READ_BUDGET)   # LIVE adaptive budget (grows on refault); floor = READ_BUDGET
         reads = [p for p in s.active_files

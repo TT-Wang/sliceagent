@@ -45,38 +45,11 @@ CONVO_MSG_CHARS = 300    # per-message cap in the conversation tier (bounded; th
 
 
 # ── PER-REGION CAPS (tighten-rebuild ladder) ──────────────────────────────────
-# ITEM 3 — tighten-rebuild caps, keyed by escalation LEVEL. When the LLM signals a context overflow
-# the loop calls build.rebuild_tighter() to step the level up; each level shrinks the volatile regions
-# so the SAME slice (no transcript) is reconstructed smaller and retried. The cap KEYS map onto the
-# typed regions: window→RECENT, read_budget→OPEN FILES, discovery_k→RELATED CODE, max_findings→
-# YOUR NOTES, full_file_lines/region_only→OPEN FILES rendering.
-#   level 0 = the module defaults, byte-identical to the un-tightened slice (the common path).
-#   level 1 = ~half: fewer recent steps, fewer reads, fewer findings, leaner discovery.
-#   level 2 = floor: K=1, READ_BUDGET=1, NO discovery (discovery_k=0), MAX_FINDINGS=2, region-only files.
-# Every region still sources from a DURABLE store; tightening only reduces how much is rendered.
-_NO_CAP = 1_000_000   # level-0 sentinel: the RENDER does not re-truncate — RELEVANCE/STALENESS (record_note
-# retire + record_action supersede) already bounds findings/recent. A real size bound applies ONLY under the
-# physical-overflow tighten ladder (levels 1-2 below). bound ≠ size: level 0 shows all that's relevant.
-TIER_CAPS = (
-    # window,        read_budget, discovery_k,  max_findings, full_file_lines, region_only
-    {"window": _NO_CAP, "read_budget": READ_BUDGET, "discovery_k": DISCOVERY_K,
-     "max_findings": _NO_CAP, "full_file_lines": FULL_FILE_LINES, "region_only": False},
-    {"window": max(1, K // 2), "read_budget": max(1, READ_BUDGET // 2),
-     "discovery_k": max(1, DISCOVERY_K // 2), "max_findings": max(2, MAX_FINDINGS // 2),
-     "full_file_lines": FULL_FILE_LINES, "region_only": False},
-    {"window": 1, "read_budget": 1, "discovery_k": 0, "max_findings": 2,
-     "full_file_lines": REGION_LINES, "region_only": True},
-)
-_MAX_TIER_LEVEL = len(TIER_CAPS) - 1
-
-
-def bump_level(level: dict) -> bool:
-    """Step the tighten level up one notch. Returns True while it could tighten further (the slice
-    will be smaller next build), False once already at the floor (the loop must give up)."""
-    if level["n"] >= _MAX_TIER_LEVEL:
-        return False
-    level["n"] += 1
-    return True
+# _NO_CAP — the "no render cap" sentinel. OPEN FILES / RECENT / YOUR NOTES are bounded by RELEVANCE and
+# STALENESS (record_note dedup/retire + record_action supersede), never by an arbitrary size cap — bound ≠
+# size, the slice shows all that's relevant. The only hard limit is the physical context window, handled by
+# the loop's overflow path (drop the oldest accumulated exchange), not by truncating a tier.
+_NO_CAP = 1_000_000
 
 
 # `one_line` is re-exported from text_utils (single definition; slice.py re-exports it onward as the

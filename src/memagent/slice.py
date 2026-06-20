@@ -53,6 +53,7 @@ from .pagetable import PageTable
 # here so tests/callers importing them from memagent.slice keep working; render_slice calls them
 # unchanged. regions.py imports nothing from slice.py (one-direction import — no cycle).
 from .regions import (  # noqa: F401 — re-export shims
+    _NO_CAP,
     CONVO_MSG_CHARS,
     DISCOVERY_K,
     FULL_FILE_LINES,
@@ -70,9 +71,7 @@ from .regions import (  # noqa: F401 — re-export shims
     REGION_LINES,
     REGION_ORDER,
     STOP_NUDGE_AFTER,
-    TIER_CAPS,
     action_sig,
-    bump_level,
     capture_user_report,
     is_done_claim,
     is_user_report,
@@ -93,13 +92,13 @@ from .regions import (  # noqa: F401 — re-export shims
 )
 from .safety import wrap_untrusted
 from .subdir_hints import SubdirHints
-from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, PIN_CEILING, READ_BUDGET, READ_BUDGET_MAX, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
+from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET, READ_BUDGET_MAX, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
 from .workspace import build_workspace_snapshot, git_branch_status, git_worktree_state, project_conventions, workspace_facts  # noqa: F401
 
 # K (RECENT window) + anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
 # (MAX_CONVERSATION/CONVO_MSG_CHARS), DISCOVERY_K, and the OPEN-FILES view caps (FULL_FILE_LINES/
-# REGION_LINES) now live in regions.py (re-exported above). The tighten-rebuild ladder TIER_CAPS +
-# bump_level (folded into per-region cap metadata) also live there; make_build_slice imports them.
+# REGION_LINES) now live in regions.py (re-exported above), along with _NO_CAP (the no-render-cap
+# sentinel for the uncapped tiers); make_build_slice imports them.
 MAX_ARTIFACT_CHARS = 1500  # cap for INCIDENTAL output only (discovery snippets) — never for the working set
 DISCOVERY_CHARS = 4000     # cap for the RELATED CODE map (signatures are compact; bounded like every tier)
 HINTS_CHARS = 4000         # cap for the SUBDIRECTORY CONTEXT tier (project conventions for the active area)
@@ -155,7 +154,7 @@ SYSTEM_PROMPT = (
     "exchanges, then deliver. Only when the spec is already complete (e.g. a precise issue with tests) or no "
     "one can clarify should you proceed directly on a best-effort reading.\n"
     "</ask>\n\n"
-    "{{MEMORY_MODEL}}"  # spliced per loop_mode in make_build_slice (accumulate default / rebuild fallback)
+    "{{MEMORY_MODEL}}"  # spliced with MEMORY_ACCUMULATE in make_build_slice (byte-stable per session)
     "The slice is organized into TIERS. Trust them in this order of AUTHORITY (highest first):\n"
     "1. OPEN FILES — live contents re-read from disk: your GROUND TRUTH. Base every edit on what is shown "
     "there, never on memory. If anything conflicts with OPEN FILES, the file wins. (A huge file shows the "
@@ -232,32 +231,9 @@ SYSTEM_PROMPT = (
 )
 
 
-# The "HOW YOUR MEMORY WORKS" block, spliced into SYSTEM_PROMPT per loop_mode (the {{MEMORY_MODEL}} marker).
-# REBUILD: the prior text (slice reconstructed every step → no transcript at all; pin/view drive eviction).
-MEMORY_REBUILD = (
-    "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
-    "You have NO raw chat transcript. Instead, every turn the host RECONSTRUCTS a bounded, relevant "
-    "'slice' of state for you — your working set — and that slice is the context below. The FULL history "
-    "of this session (every message, tool call, and result, verbatim) is preserved in a durable CACHE on "
-    "disk; the slice is only the part you need right now. Mental model: the slice is RAM, the cache is "
-    "disk, and you stay fast no matter how long the conversation gets because the slice never grows "
-    "without bound.\n"
-    "CONSEQUENCES, internalize them:\n"
-    "- Something not in the slice is NOT gone — it's paged out. The PAGED-OUT HISTORY section below indexes "
-    "those earlier turns (turn · title · note) WITH the exact recall_history call to fetch each — read it "
-    "before re-deriving. If you need an earlier decision, an exact prior message, or what you tried many "
-    "turns ago, PAGE IT IN with the call shown there (or recall_history(search=…) for cross-session "
-    "history). Never assume context is lost; recall it.\n"
-    "- You DRIVE the slice, you don't just receive it: for a multi-file change, `pin` the files you must "
-    "keep consistent so they stay resident (exploratory reads page out); call `view` to see your working-set "
-    "headroom — what's resident vs paged out — and decide what to pin or let go.\n"
-    "- The slice can be an imperfect projection. If a tier looks stale or contradicts what you observe, "
-    "trust the WORLD (OPEN FILES / a fresh tool result) over the slice, and recall_history to check what "
-    "actually happened rather than guessing.\n"
-    "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
-)
-# ACCUMULATE (DEFAULT): within one task your own actions+results stay visible (working memory accumulates);
-# across tasks nothing carries but a reconstructed slice + the durable cache. No pin/view (no eviction).
+# The "HOW YOUR MEMORY WORKS" block, spliced into SYSTEM_PROMPT at the {{MEMORY_MODEL}} marker. WITHIN a
+# task your own actions+results stay visible (working memory accumulates); ACROSS tasks nothing carries but
+# a reconstructed slice + the durable cache (recall_history pages earlier turns back in).
 MEMORY_ACCUMULATE = (
     "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
     "You work one TASK at a time. WITHIN the current task you can see your own earlier actions and their "
@@ -369,10 +345,6 @@ class Slice:
     # conversation transcript; scoped to the files touched this session (one small set per such file).
     pre_defs: dict = field(default_factory=dict)
     stale_deps: set = field(default_factory=set)
-    # DELIBERATE GROWTH (active-asker): files the LLM explicitly PINNED resident via the `pin` tool —
-    # protected from plain-read eviction like the change set, but TASK-driven not edit-driven. Bounded
-    # by PIN_CEILING (force-compacted past it). Transient: re-derived per session, never serialized.
-    pinned: list = field(default_factory=list)
     # KERNEL-INTERNAL self-tuning state — NOT rendered into the slice the model sees, NOT serialized
     # (taskstate ignores it), transient. Pure mechanism, like Linux vmstat + mm/workingset refault
     # tracking. `io` = per-session page hit/miss/refault/evict counters (makes the moat MEASURED, not
@@ -426,7 +398,6 @@ class Slice:
         self.protected_deps = set()
         self.pre_defs = {}
         self.stale_deps = set()
-        self.pinned = []
         self.io = {"hit": 0, "miss": 0, "refault": 0, "evict": 0}
         self.hot = {}
         self.read_budget = READ_BUDGET   # back to the lean floor each task; grows on refault within the task
@@ -529,19 +500,16 @@ def _relevant_regions(s: Slice, path: str, lines: list[str], region_lines: int =
 
 
 def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
-                    region_only: bool = False, read_budget: int = READ_BUDGET) -> str:
+                    read_budget: int = READ_BUDGET) -> str:
     """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap (bound ≠ size).
     The RELEVANCE CLOSURE — edited files (the change set) + protected deps (the dependency closure) — is
     shown IN FULL regardless of length: it is proven-relevant, so no line cap applies. A merely
-    EXPLORATORY read is shown in full when small, else as the UNION of its relevant symbol-regions
-    (multi-focus, every matching symbol in full — not one window). The only hard size bound is the
-    physical context window, reached via the ITEM-3 tighten ladder (region_only=True at the overflow
-    floor) — a real limit, not an arbitrary budget.
+    EXPLORATORY read is shown in full when small (<= full_file_lines), else as the UNION of its relevant
+    symbol-regions (multi-focus, every matching symbol in full — not one window).
 
-    `full_file_lines`/`region_only`/`read_budget` are the overflow-tighten knobs: at the floor even the
-    closure collapses to regions (last resort) and only `read_budget` recent exploratory reads are SHOWN
-    (the change set is always shown), shrinking the slice for an overflow rebuild WITHOUT mutating the
-    durable working set. At level 0 the closure is uncapped and read_budget IS the live adaptive budget."""
+    `read_budget` is the live adaptive VIEW budget: the most-recent N exploratory reads are SHOWN (the
+    change set is always shown). SwapManager.evict already enforces it on the durable working set, so this
+    is pure presentation — s.active_files is untouched."""
     if not s.active_files:
         return "(no files opened yet)"
     # Render-time view cap: SHOW the most-recent read_budget exploratory reads; the change set (edited
@@ -583,15 +551,8 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
         # long: it is proven-relevant to the current change, so no line cap applies (bound ≠ size). Only
         # the overflow-tighten floor (region_only, the physical-context fallback) collapses it.
         in_closure = (p in s.edited_files) or (p in getattr(s, "protected_deps", set()))
-        if not region_only and (in_closure or total <= full_file_lines):
+        if in_closure or total <= full_file_lines:
             parts.append(f"### {p} ({total} lines — full)\n```\n{body}\n```")
-        elif region_only:
-            # overflow FLOOR (last resort, physical-context fallback): a single collapsed window.
-            focus = _focus_line(s, p, lines)
-            b = min(total, focus + REGION_LINES // 2)
-            a = max(1, b - REGION_LINES + 1)
-            hdr = f"### {p} ({total} lines — overflow floor, lines {a}-{b}; grep for the rest)"
-            parts.append(f"{hdr}\n```\n" + "\n".join(lines[a - 1:b]) + "\n```")
         else:
             # huge EXPLORATORY read: the UNION of relevant symbol-regions in full (multi-focus), not one
             # window — every symbol the task references stays visible (relevance bounds it, not a size cap).
@@ -758,9 +719,6 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # (the SubdirHints above), and cross-session episodes (memory) behind lookup(). Built ONCE per
     # closure; build() drives it. Backends emit RAW text; the renderer fences (one layer).
     pages = PageTable(retriever, memory, hints)
-    # ITEM 3 — escalation level for tighten-rebuild. Lives in the closure (per-session state, not a
-    # transcript); each level reshapes the volatile tiers smaller. Level 0 is byte-identical.
-    _level = {"n": 0}
     swap = SwapManager(retriever)   # owns the working-set page lifecycle for this session
     # CACHE tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session (stable →
     # prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/find. Lazy
@@ -778,9 +736,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     except Exception:
         _names = set()
     delegation_block = DELEGATION_BLOCK if "spawn_explore" in _names else ""
-    # Splice the memory-model explanation matching the active loop mode (default accumulate); env-driven to
-    # match run_turn's default. Computed once → the system message stays byte-stable per session.
-    mem_block = MEMORY_ACCUMULATE if os.environ.get("AGENT_LOOP_MODE", "accumulate") == "accumulate" else MEMORY_REBUILD
+    # Splice the memory-model explanation into the system prompt (computed once → byte-stable per session).
+    mem_block = MEMORY_ACCUMULATE
 
     # The system message is BYTE-STABLE per session (prompt-cache warm); the ONLY per-turn variation is
     # the active topic's goal. Encode that invariant structurally: everything constant is concatenated
@@ -802,15 +759,13 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         if goal not in recall_cache:
             # RELEVANT MEMORY through the ONE read seam (memory-lessons backend) — no sibling recall.
             recall_cache[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6))
-        caps = TIER_CAPS[_level["n"]]
-        # BIDIRECTIONAL ladder: at level 0 the render budget tracks the LIVE adaptive budget (s.read_budget,
-        # grown on refault); an overflow tighten (level>0) caps it back down to the level's fixed small value.
-        read_budget = s.read_budget if _level["n"] == 0 else min(s.read_budget, caps["read_budget"])
-        artifacts = build_artifacts(s, tools, full_file_lines=caps["full_file_lines"],
-                                    region_only=caps["region_only"], read_budget=read_budget)
+        # the render view budget tracks the LIVE adaptive budget (s.read_budget, grown on refault by
+        # SwapManager); OPEN FILES/RECENT/findings are otherwise UNCAPPED (bound = relevance, not size).
+        read_budget = s.read_budget
+        artifacts = build_artifacts(s, tools, full_file_lines=FULL_FILE_LINES, read_budget=read_budget)
         # PageTable.lookup is the single read path. discovery_query builds the code focus (Markov:
-        # latest finding + current error + task); discovery_k=0 at the floor => the backend skips it.
-        code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=caps["discovery_k"])
+        # latest finding + current error + task).
+        code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=DISCOVERY_K)
         discovery = render_discovery(code_refs, discovery_chars=DISCOVERY_CHARS)
         threads = render_threads(state.open_threads()) if is_session else ""
         note_refs = pages.lookup(s.active_files, kind="project-notes", k=1)  # ITEM 17 subtree notes
@@ -825,12 +780,9 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         cache_manifest = render_cache_manifest(manifest_refs)
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
                             hint_text, worktree, repo_map_text, cache_manifest,
-                            window=caps["window"], max_findings=caps["max_findings"])
+                            window=_NO_CAP, max_findings=_NO_CAP)
         return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
 
-    # ITEM 3 PIN — build.rebuild_tighter() -> bool. The loop calls it on a ContextOverflow:
-    # True means it tightened (rebuild and retry); False means it is at the floor (give up / re-raise).
-    build.rebuild_tighter = lambda: bump_level(_level)
     return build
 
 
