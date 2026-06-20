@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.context_overflow import ContextOverflow                # noqa: E402
 from memagent.events import TurnInterrupted                          # noqa: E402
-from memagent.hooks import Hooks                                     # noqa: E402
+from memagent.hooks import BudgetHook, Hooks, OracleHook             # noqa: E402
 from memagent.interfaces import Snippet                              # noqa: E402
 from memagent.loop import run_turn                                   # noqa: E402
 from memagent.slice import Slice, make_build_slice                   # noqa: E402
@@ -129,6 +129,65 @@ def ctrl_c_during_tool_aborts_gracefully():
                    dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
     assert res.stop_reason == "aborted", res.stop_reason
     assert any(isinstance(e, TurnInterrupted) and e.reason == "aborted" for e in events)
+
+
+class _BudgetLLM:
+    def complete(self, messages, schemas):
+        return _Resp(tool_calls=[_TC("noop", {}, "c1")], usage={"prompt_tokens": 10, "completion_tokens": 5})
+
+
+@check
+def budget_stop_parks_not_done():
+    # F: a token-budget stop must PARK (a non-end_turn reason → caller records 'parked'), NEVER 'done'.
+    events = []
+    res = run_turn(build_slice=_build(), llm=_BudgetLLM(), tools=_Tools(),
+                   dispatch=lambda e: events.append(e), hooks=BudgetHook(15), max_steps=20)
+    assert res.stop_reason != "end_turn", f"budget stop masqueraded as done: {res.stop_reason}"
+    assert res.stop_reason == "token_budget", res.stop_reason
+    assert any(isinstance(e, TurnInterrupted) and e.reason == "token_budget" for e in events)
+
+
+class _Oracle:
+    def __init__(self, results):
+        self.results = results; self.i = 0
+    def verify(self):
+        r = self.results[min(self.i, len(self.results) - 1)]; self.i += 1
+        return r
+
+
+@check
+def oracle_feedback_rides_the_message_channel():
+    # N: when verify() fails, the failure DETAIL must reach the model via the message channel (the seed
+    # never re-renders mid-turn, so last_error is invisible). The model must SEE "TESTS FAILED: foo".
+    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop")])   # always "ends"; oracle drives retry
+    hooks = OracleHook(_Oracle([(False, "TESTS FAILED: foo"), (True, "")]), lambda out: None)
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=hooks, max_steps=10)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    # call 2 (the retry) must have been handed a message containing the failure detail
+    retry_msgs = llm.seen[1]
+    assert any("TESTS FAILED: foo" in (m.get("content") or "") for m in retry_msgs), \
+        "Oracle failure detail never reached the model (verify-loop dead)"
+
+
+class _CountLLM:
+    def __init__(self):
+        self.calls = 0
+    def complete(self, messages, schemas):
+        self.calls += 1
+        return _Resp(tool_calls=[_TC("noop", {}, f"c{self.calls}")],
+                     usage={"prompt_tokens": 10, "completion_tokens": 5})
+
+
+@check
+def closeout_tokens_are_accounted():
+    # G: the closeout's extra completion must be counted in total (and fed to the budget). max_steps=2 →
+    # 2 step calls + 1 closeout call = 3 × 10 prompt tokens = 30. Without the fix the closeout is invisible.
+    llm = _CountLLM()
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=Hooks(), max_steps=2)
+    assert llm.calls == 3, f"expected 2 steps + 1 closeout call, got {llm.calls}"
+    assert res.usage["prompt_tokens"] == 30, f"closeout tokens not accounted: {res.usage}"
 
 
 def main():

@@ -134,8 +134,11 @@ class OracleHook(Hooks):
         ok, output = self.oracle.verify()
         if ok:
             return None
-        self.on_feedback(output)
-        return {"continue": True}
+        self.on_feedback(output)   # also record into the slice (for the NEXT turn's seed / durable cache)
+        # CRITICAL: the failure detail must ride the MESSAGE channel — under the accumulate loop the seed
+        # is built once and never re-rendered mid-turn, so a slice mutation (last_error) is invisible to
+        # THIS turn's retry. Put `output` in `feedback` so the loop appends it as the model's next input.
+        return {"continue": True, "feedback": f"Verification failed — fix this, then finish:\n{output}"}
 
 
 class PermissionHook(Hooks):
