@@ -214,14 +214,52 @@ _SLASH = {
 }
 
 
-class _SlashCompleter(Completer):
+_COMPLETE_IGNORE = {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__",
+                    ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build", ".idea", ".vscode"}
+
+
+def _repo_files(root: str, cap: int = 4000) -> list:
+    """A bounded, ignore-pruned list of repo-relative file paths for prompt file-completion (Aider-style:
+    let the user tab-complete a filename to reference it). Best-effort; empty on any error."""
+    out = []
+    try:
+        for dp, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in _COMPLETE_IGNORE and not d.startswith(".")]
+            for fn in files:
+                if fn.startswith("."):
+                    continue
+                rel = os.path.relpath(os.path.join(dp, fn), root)
+                out.append(rel)
+                if len(out) >= cap:
+                    return out
+    except OSError:
+        pass
+    return out
+
+
+class _InputCompleter(Completer):
+    """Slash-command completion at line start (Kimi-style palette) + filename completion on the current
+    word anywhere (Aider-style), so referencing a file is a tab away."""
+
+    def __init__(self, files=None):
+        self._files = files or []
+
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        if not text.startswith("/") or " " in text:
+        if text.startswith("/") and " " not in text:           # slash command palette
+            for cmd, desc in _SLASH.items():
+                if cmd.startswith(text):
+                    yield Completion(cmd, start_position=-len(text), display_meta=desc)
             return
-        for cmd, desc in _SLASH.items():
-            if cmd.startswith(text):
-                yield Completion(cmd, start_position=-len(text), display_meta=desc)
+        words = text.split()
+        word = words[-1] if (words and not text.endswith(" ")) else ""
+        if len(word) < 2 or word.startswith("/"):              # file-path completion on the current word
+            return
+        wl = word.lower()
+        starts = [p for p in self._files if os.path.basename(p).lower().startswith(wl)]
+        subs = [p for p in self._files if wl in p.lower() and p not in starts]
+        for p in (starts + subs)[:20]:                          # basename-prefix first, then substring
+            yield Completion(p, start_position=-len(word), display_meta="file")
 
 
 def _toolbar(stats: dict):
@@ -240,12 +278,12 @@ def _toolbar(stats: dict):
 class TuiInput:
     """prompt_toolkit input with history, slash completion, and the status toolbar."""
 
-    def __init__(self, stats: dict):
+    def __init__(self, stats: dict, root: str | None = None):
         hist_dir = os.path.expanduser("~/.memagent")
         os.makedirs(hist_dir, exist_ok=True)
         self.session = PromptSession(
             history=FileHistory(os.path.join(hist_dir, "history")),
-            completer=_SlashCompleter(),
+            completer=_InputCompleter(_repo_files(root) if root else None),
             complete_while_typing=True,
             bottom_toolbar=_toolbar(stats),
         )

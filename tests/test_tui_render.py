@@ -64,6 +64,21 @@ def render_plan_handles_empty_and_bad_input():
     assert _render_plan([{"step": "x", "status": "weird"}, "not a dict"]) is not None
 
 
+@check
+def completer_does_slash_and_files():
+    from prompt_toolkit.document import Document
+    from memagent.tui import _InputCompleter
+    comp = _InputCompleter(files=["src/memagent/util.py", "tests/test_util.py", "README.md"])
+    # slash palette at line start
+    slash = [c.text for c in comp.get_completions(Document("/pl"), None)]
+    assert "/plan" in slash, slash
+    # filename completion on the current word (basename-prefix first)
+    files = [c.text for c in comp.get_completions(Document("please edit util"), None)]
+    assert "src/memagent/util.py" in files and "tests/test_util.py" in files, files
+    # short words / mid-prose don't spam
+    assert list(comp.get_completions(Document("a"), None)) == []
+
+
 def main():
     failed = 0
     for fn in CHECKS:
