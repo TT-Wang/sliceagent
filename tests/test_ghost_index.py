@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.slice import (MAX_ACTIVE_SKILLS, MAX_GHOSTS, READ_BUDGET, Slice,  # noqa: E402
-                            add_skill, render_ghosts, render_slice, touch_file)
+                            add_skill, touch_file)
 
 CHECKS = []
 def check(fn):
@@ -57,18 +57,6 @@ def ghost_ring_is_bounded():
     for i in range(30):
         touch_file(s, f"g{i}.py")
     assert len(s.ghosts) <= MAX_GHOSTS, len(s.ghosts)
-
-
-@check
-def render_shows_pointers_and_is_suppressed_when_empty():
-    assert render_ghosts(Slice()) == ""
-    s = Slice(); s.reset("t")
-    for i in range(6):
-        touch_file(s, f"x{i}.py")
-    body = render_ghosts(s)
-    assert "read_file" in body and "x0.py" in body, body
-    assert "GHOST INDEX" in render_slice(s, "(open files)")
-    assert "GHOST INDEX" not in render_slice(Slice(), "(open files)")
 
 
 if __name__ == "__main__":

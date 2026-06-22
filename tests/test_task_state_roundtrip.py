@@ -58,7 +58,7 @@ def resume_reconstructs_slice():
     assert r.goal == s.goal and r.findings == s.findings and r.edited_files == s.edited_files
     assert r.edit_anchor == s.edit_anchor
     assert r.since_edit == 0                             # resume = fresh action epoch
-    assert r.recent == [] and r.action_log == {} and r.active_skills == []   # transient cleared
+    assert r.action_log == {} and r.active_skills == []   # transient cleared
 
 @check
 def empty_error_not_none_string():

@@ -156,10 +156,12 @@ class EpisodeIndex:
             pass
 
     def search(self, query: str, *, limit: int = 5,
-               exclude_session: str | None = None) -> list[dict]:
-        """FTS5 discovery across all indexed sessions. Returns bounded hit dicts ordered
-        by rank. `exclude_session` drops the current session lineage (those turns are
-        already reachable via recall_history). Never raises — bad FTS5 syntax → []."""
+               exclude_session: str | None = None,
+               only_session: str | None = None) -> list[dict]:
+        """FTS5 discovery over indexed sessions. Returns bounded hit dicts ordered by rank.
+        `exclude_session` drops the current session lineage (cross-session recall). `only_session`
+        restricts to ONE session (within-session content recall of the long tail — turns past the
+        manifest/index window). Opposite scopings; pass at most one. Never raises."""
         if not self.is_active or self._con is None:
             return []
         q = (query or "").strip()
@@ -184,6 +186,8 @@ class EpisodeIndex:
         for r in rows:
             session_id = r[0]
             if exclude_session and session_id == exclude_session:
+                continue
+            if only_session and session_id != only_session:
                 continue
             try:
                 turn = int(r[2])

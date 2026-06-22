@@ -145,15 +145,10 @@ def main() -> None:
     llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
-    # recall_history: the model's bounded valve into the cold cache (paged-out turns + intra-turn steps),
-    # bound to the CURRENT active slice so a topic switch retargets it.
-    from .slice import _active
-
-    def _get_slice():
-        return _active(session)
+    # recall_history: the model's bounded valve into the cold cache (paged-out turns of this session).
     if getattr(memory, "is_durable", False):
         from .history import make_history_tool
-        base_tools.registry.register(make_history_tool(memory, session.session_id, get_slice=_get_slice))
+        base_tools.registry.register(make_history_tool(memory, session.session_id))
 
     # write side of the memory loop: mine a lesson per successful, error-resolving turn
     miner = None

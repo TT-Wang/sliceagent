@@ -58,14 +58,14 @@ def independent_evolution():
 
 @check
 def in_session_switch_is_lossless():
-    # within a session, switching keeps the SAME slice object — recent/action_log preserved
+    # within a session, switching keeps the SAME slice object — findings/action_log preserved
     sess = fresh()
     a_id = sess.new_topic("A")
-    sess.active().recent = [{"action": "x", "observation": "y"}]
+    sess.active().findings = ["a distilled finding"]
     sess.active().action_log = {"sig": {"count": 1}}
     sess.new_topic("B")
     sa = sess.switch_topic(a_id)
-    assert sa.recent == [{"action": "x", "observation": "y"}]
+    assert sa.findings == ["a distilled finding"]
     assert sa.action_log == {"sig": {"count": 1}}
 
 

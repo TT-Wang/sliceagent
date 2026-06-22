@@ -6,9 +6,9 @@ mutates no slice — completely off the moat. Deterministic, bounded, zero LLM. 
 dispatcher alongside slice_sink (the eval harness does this) and read `.summary()` after the run.
 
 Signals (per Kimi's #8):
-  - re_reads : a read_file on a path that was ALREADY read within the last `window` steps. A re-read is
-    the clearest reconstruction-MISS signal: the slice didn't carry what the model needed, so it paid a
-    whole turn to fetch it again.
+  - re_reads : a read_file on a path ALREADY read within the last `window` steps. Within a turn the prior
+    read is still in the accumulated transcript, so a re-read signals the model isn't using its resident
+    context; across turns it's the reconstruction-MISS signal (the seed/seal didn't carry what it needed).
   - recalls  : recall_history calls — recovery from the cold cache (the model knew it forgot).
   - reads    : total successful read_file calls (the denominator for a re-read RATE).
 """

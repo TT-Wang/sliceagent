@@ -190,6 +190,50 @@ def closeout_tokens_are_accounted():
     assert res.usage["prompt_tokens"] == 30, f"closeout tokens not accounted: {res.usage}"
 
 
+class _ErrLLM:
+    def is_retryable(self, e):
+        return False   # force with_retry to re-raise immediately (no backoff sleep in the test)
+    def complete(self, messages, schemas):
+        raise RuntimeError("boom: simulated non-retryable provider error")
+
+
+@check
+def unexpected_llm_error_parks_not_crashes():
+    # Q: a non-retryable llm error past with_retry must route through _park (reason 'error'), never escape
+    # run_turn uncaught (which would kill the session with no TurnInterrupted).
+    events = []
+    res = run_turn(build_slice=_build(), llm=_ErrLLM(), tools=_Tools(),
+                   dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
+    assert res.stop_reason == "error", res.stop_reason
+    assert any(isinstance(e, TurnInterrupted) and e.reason == "error" for e in events)
+
+
+@check
+def throwing_build_slice_parks_not_crashes():
+    # R: a build_slice (memory/retriever/probe) that throws BEFORE the loop must park, not crash.
+    def boom():
+        raise RuntimeError("retriever exploded during seed build")
+    events = []
+    res = run_turn(build_slice=boom, llm=_ScriptLLM([_Resp(content="x", finish_reason="stop")]),
+                   tools=_Tools(), dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
+    assert res.stop_reason == "error", res.stop_reason
+    assert any(isinstance(e, TurnInterrupted) and e.reason == "error" for e in events)
+
+
+@check
+def selfcheck_forces_one_verification_pass_then_accepts():
+    # SelfCheckHook: first 'done' -> forced verification feedback (rides messages); second 'done' accepted.
+    from memagent.hooks import SelfCheckHook
+    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop"),
+                      _Resp(content="verified, done", finish_reason="stop")])
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=SelfCheckHook(), max_steps=10)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    assert len(llm.seen) == 2, f"expected done->self-check->done (2 calls), got {len(llm.seen)}"
+    assert any("definition-of-done" in (m.get("content") or "") for m in llm.seen[1]), \
+        "self-check feedback was not delivered to the model"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

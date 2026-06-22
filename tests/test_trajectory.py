@@ -224,7 +224,7 @@ def open_user_report_renders_as_blocker():
     # renders AFTER the stale findings, in the most-salient tail right before NOW — so a 'done' note
     # can't outrank it. (Empirical no-regression validated by the head-to-head re-run.)
     assert out.index("OPEN USER REPORT") > out.index("**Done")
-    assert out.index("OPEN USER REPORT") > out.index("# RECENT"), "report must be in the salient tail"
+    assert out.index("OPEN USER REPORT") > out.index("# YOUR NOTES"), "report must be in the salient tail, after the notes bulk"
 
 
 @check

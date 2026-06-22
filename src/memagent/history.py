@@ -7,7 +7,7 @@ blind guess — a cache the model can't see is a cache it never calls (the manif
   recall_history()                  -> the full TIMESTAMPED/TITLED index (turns older than the manifest)
   recall_history(last=N | turns=[]) -> a specific turn's compact trace (action/observation/note)
   recall_history(..., full=true)    -> a turn's FULL stored slice (exact past state)
-  recall_history(search="…")        -> FTS5 over OTHER sessions' cache
+  recall_history(search="…")        -> FTS5 content search: THIS session's long tail + other sessions
 Reaching back is expected, not a failure: the slice is bounded, so an earlier turn genuinely is not in
 front of the model, and there is no automatic mechanism that can guess WHICH past turn the current
 reasoning needs — only the model can. NON-ACCUMULATION (moat): a fetched turn is TRANSIENT — it enters
@@ -113,25 +113,25 @@ def render_full(lines: list[dict], cap: int = FULL_MAX) -> str:
     return "\n".join(out).strip() or "(no slice stored)"
 
 
-def render_cross_session(refs) -> str:
-    """Render cross-session episode PageRefs (from PageTable.lookup(kind='episode-xsession')) — a
-    bounded discovery listing the model can scan, then drill into a session's own cache. NOT this
-    session's turns: these come from PAST sessions, so there's no in-session turn to fetch — the
-    locator (handle) + packed preview (ts/title/note/match) is the recall payload."""
-    out = ["# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)"]
-    for r in refs:
-        out.append(f"- [{r.handle}] {r.preview}")
-    if len(out) == 1:
-        return "No matching past sessions found."
-    return "\n".join(out)
+def render_search(mine, cross) -> str:
+    """Render a content search. THIS session's matching turns come WITH the exact fetch call — the
+    model searched by content and now has the turn number, so the long tail past the manifest/index
+    window is reachable without guessing a number. PAST sessions' FTS5 hits follow as read-only
+    context (no in-session turn to fetch)."""
+    out = []
+    if mine:
+        out.append("# THIS SESSION — content matches (page the full turn with the call shown)")
+        for r in mine:
+            out.append(f"- turn {r.handle}: {r.preview}  → recall_history(turns=[{r.handle}])")
+    if cross:
+        out.append("# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)")
+        for r in cross:
+            out.append(f"- [{r.handle}] {r.preview}")
+    return "\n".join(out) if out else "No content matches found."
 
 
-def make_history_tool(memory, session_id: str, get_slice=None):
+def make_history_tool(memory, session_id: str):
     """ToolEntry for recall_history, reading `memory`'s episodic cache for this session.
-
-    `get_slice` (optional) returns the active Slice so `step=[N]` can page an earlier STEP's full output
-    back from the COLD intra-turn step cache (s.step_log) — the within-task analogue of turn recall (a
-    long agentic task is ONE turn, so the turn-level cache is empty mid-task and only step recall helps).
 
     Guardrail reins on REPETITION, not count — so a genuine search (distinct fetches, each returning
     new info) is never blocked, only the useless loop (re-fetching the same thing) is. An exact repeat
@@ -148,28 +148,17 @@ def make_history_tool(memory, session_id: str, get_slice=None):
     pages = PageTable(memory=memory, exclude_session=session_id)
 
     def _handler(args: dict) -> str:
-        # INTRA-TURN step recall (this task): page back an earlier STEP's full output from the cold
-        # step cache (s.step_log). Distinct from turn recall; the loop's GuardrailHook reins exact
-        # repeats. The PAGED-OUT STEPS manifest advertises which step numbers are recallable.
-        steps = args.get("step")
-        if steps and get_slice is not None:
-            log = getattr(get_slice(), "step_log", None) or []
-            want = {int(x) for x in steps}
-            sel = [e for e in log if e.get("n") in want]
-            if not sel:
-                return ("No matching step (see the PAGED-OUT STEPS manifest for the recallable step "
-                        "numbers this task).")
-            return "\n".join(f"# step {e['n']}: {e['action']}\n{e['obs']}" for e in sel) + CAPTURE_BACK
-        # cross-session shape (item 12): search=... runs FTS5 across PAST sessions. Distinct
-        # from the index/turns/last shapes (this session's cache) — checked first, no rein
-        # (each query is a real search returning new info, like the distinct-fetch path).
+        # content-search shape: search=... runs FTS5 over THIS session's long tail (turns past the
+        # manifest/index window — reachable by content, not just by a turn number nobody knows) AND
+        # past sessions. Checked first, no rein (each query is a real search returning new info).
         q = args.get("search")
         if isinstance(q, str) and q.strip():
-            refs = pages.lookup(q.strip(), kind="episode-xsession", k=6)
-            if not refs:
-                return ("No matching PAST sessions. (This searches other sessions; for THIS "
-                        "session's turns call recall_history() with no args.)")
-            return render_cross_session(refs) + CAPTURE_BACK
+            mine = pages.lookup(q.strip(), kind="episode-search-thissession", k=6)
+            cross = pages.lookup(q.strip(), kind="episode-xsession", k=6)
+            if not mine and not cross:
+                return ("No content matches in this or past sessions for that query. Try different "
+                        "keywords, or recall_history() (no args) for this session's full index.")
+            return render_search(mine, cross) + CAPTURE_BACK
         lines = memory.read_episodes(session_id)
         if len(lines) != guard["seen"]:          # cache grew (or first call) → new turn → reset rein
             guard["seen"] = len(lines)
@@ -209,19 +198,17 @@ def make_history_tool(memory, session_id: str, get_slice=None):
             "title and note WITH the exact call to fetch it: copy that — {\"turns\":[N,...]} for the "
             "turn's actions/observations/notes (add {\"full\":true} for its full stored state), or "
             "{\"last\":N} for the most recent N. Call with NO args for the full index of turns older than "
-            "the manifest. To page back an earlier STEP of the CURRENT task whose full output scrolled out "
-            "of RECENT, {\"step\":[N,...]} (the numbers shown in the PAGED-OUT STEPS section) — use this "
-            "instead of re-running/re-reading to recover what you already saw. For OTHER sessions, "
-            "{\"search\":\"keywords\"} (FTS5 — AND/OR/quoted/prefix*). Reach back whenever an earlier turn "
-            "or step holds something you need instead of re-deriving it; record what you find with a note."),
+            "the manifest. To find an old turn by CONTENT (this session or past ones) when you don't know "
+            "its number, {\"search\":\"keywords\"} (FTS5 — AND/OR/quoted/prefix*). Reach back whenever an "
+            "earlier turn holds something you need instead of re-deriving it; record what you find with a note."),
         "parameters": {"type": "object", "properties": {
             "last": {"type": "integer", "description": "fetch the most recent N turns (this session)"},
             "turns": {"type": "array", "items": {"type": "integer"},
                       "description": "fetch these specific turn numbers (from the index, this session)"},
-            "step": {"type": "array", "items": {"type": "integer"},
-                     "description": "page back these STEP numbers' full output from THIS task (PAGED-OUT STEPS manifest)"},
             "full": {"type": "boolean", "description": "return the full stored slice instead of the compact trace"},
             "search": {"type": "string",
-                       "description": "FTS5 query across PAST sessions (not this one); returns matching turns"},
+                       "description": "Content search (FTS5) over THIS session's earlier turns AND past "
+                                      "sessions — find an old turn by what it was ABOUT when you don't know "
+                                      "its number; this-session matches come with the call to page them back"},
         }}}}
     return ToolEntry(name="recall_history", schema=schema, handler=_handler, source="builtin")

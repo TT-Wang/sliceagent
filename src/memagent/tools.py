@@ -19,7 +19,7 @@ from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
 from .procman import ProcManager
-from .registry import ToolEntry, ToolRegistry
+from .registry import ToolEntry, ToolRegistry, ToolText
 from .sandbox import LocalSandbox
 from .terminal import SessionManager
 
@@ -49,6 +49,9 @@ def write_file(path, content):
     _d = _os.path.dirname(path)
     if _d: _os.makedirs(_d, exist_ok=True)
     with open(path, "w", encoding="utf-8") as _f: _f.write(content)
+    if content[:2] == "#!":  # a shebang script should be runnable (parity with the edit_file tool)
+        try: _os.chmod(path, _os.stat(path).st_mode | 0o111)
+        except OSError: pass
     return f"wrote {len(content)} bytes to {path}"
 
 def append_file(path, content):
@@ -252,9 +255,9 @@ TOOL_SCHEMAS = [
         {"session": {"type": "string"}}, []),
     _fn("world_set",
         "Save DURABLE task state to your WORLD MODEL under a key (overwrites that key). Use it to maintain "
-        "non-code state across many steps: an explored maze map, a game's rooms+inventory, a system "
-        "inventory, a running plan. It's shown back to you every step in the WORLD MODEL section — keep it "
-        "updated; you don't need to read it back. value may be multiline.",
+        "non-code state across turns: an explored maze map, a game's rooms+inventory, a system "
+        "inventory, a running plan. It appears in the WORLD MODEL section of your context from your NEXT "
+        "turn on; within THIS turn, re-read a value from your own world_set call above. value may be multiline.",
         {"key": {"type": "string"}, "value": {"type": "string"}}, ["key", "value"]),
     _fn("world_clear", "Remove a key from your WORLD MODEL (omit key to clear all of it).",
         {"key": {"type": "string"}}, []),
@@ -504,8 +507,20 @@ class LocalToolHost:
     def _t_edit_file(self, args: dict) -> str:
         full = self._resolve(args["path"])
         self._mkparent(full)
-        self._atomic_write(full, args["content"])
-        return f"Wrote {len(args['content'])} bytes to {args['path']}"
+        content = args["content"]
+        self._atomic_write(full, content)
+        if content[:2] == "#!":          # a shebang script should be runnable (general, task-agnostic)
+            self._make_executable(full)
+        return f"Wrote {len(content)} bytes to {args['path']}"
+
+    def _make_executable(self, full: str) -> None:
+        """chmod +x a freshly-written shebang script (a script the agent declared executable via '#!'
+        should run without a separate chmod). Best-effort; never fails the write."""
+        try:
+            import stat as _stat
+            os.chmod(full, os.stat(full).st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+        except OSError:
+            pass
 
     def _t_append(self, args: dict) -> str:
         full = self._resolve(args["path"])
@@ -526,7 +541,7 @@ class LocalToolHost:
             self._atomic_write(full, updated)
             return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
         if n > 1:
-            return f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique"
+            return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique", ok=False)
         # n == 0: exact match failed. Try a whitespace-tolerant UNIQUE fuzzy span before
         # giving up. fuzzy_find_unique returns None on 0/>1 candidates, so uniqueness is
         # preserved — we never replace an ambiguous match.
@@ -536,14 +551,14 @@ class LocalToolHost:
             self._atomic_write(full, updated)
             return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
                     f"({len(cur)} → {len(updated)} bytes)")
-        return (f"Error: old_string not found in {args['path']} — your snippet does not match "
+        return ToolText(f"Error: old_string not found in {args['path']} — your snippet does not match "
                 f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
-                f"the whole file with edit_file. Do NOT retry the same str_replace.")
+                f"the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)
 
     def _t_ask_user(self, args: dict) -> str:
         q = (args.get("question") or "").strip()
         if not q:
-            return "Error: ask_user requires a non-empty 'question'."
+            return ToolText("Error: ask_user requires a non-empty 'question'.", ok=False)
         opts = args.get("options")
         opts = [str(o) for o in opts] if isinstance(opts, list) and opts else None
         try:
@@ -564,7 +579,7 @@ class LocalToolHost:
         self._grant_shell_paths(args.get("command", ""))  # I2 reach=action: dirs the shell touched
         out = out.strip()
         if code != 0:
-            return f"Exit code {code}\n{out or '(no output)'}"
+            return ToolText(f"Exit code {code}\n{out or '(no output)'}", ok=False)
         return out or "(command produced no output)"
 
     # --- background / long-running processes (procman) ---
@@ -626,8 +641,12 @@ class LocalToolHost:
     def _t_world_set(self, args: dict) -> str:
         k = (args.get("key") or "").strip()
         if not k:
-            return "Error: world_set requires a non-empty 'key'."
-        return f"WORLD MODEL: saved {k!r} (shown back in the WORLD MODEL section each step)."
+            return ToolText("Error: world_set requires a non-empty 'key'.", ok=False)
+        v = " ".join(str(args.get("value", "")).split())   # one-line echo so the value is readable THIS turn
+        if len(v) > 200:
+            v = v[:200] + "…"
+        return (f"WORLD MODEL: saved {k!r} = {v} (in your WORLD MODEL section from your NEXT turn; "
+                f"this turn, re-read it from this call).")
 
     def _t_world_clear(self, args: dict) -> str:
         k = (args.get("key") or "").strip()
@@ -653,7 +672,7 @@ class LocalToolHost:
             code_n, out = self.sandbox.run(cmd, cwd=root, timeout=self.timeout)
             out = out.strip()
             if code_n != 0:
-                return f"Exit code {code_n}\n{out or '(no output)'}"
+                return ToolText(f"Exit code {code_n}\n{out or '(no output)'}", ok=False)
             return out or "(execute_code produced no output)"
         finally:
             try:

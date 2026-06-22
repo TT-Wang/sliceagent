@@ -62,6 +62,8 @@ class PageTable:
             return self._episodes(focus, k)
         if kind == "episode-thissession":
             return self._episodes_thissession(focus, k)
+        if kind == "episode-search-thissession":
+            return self._episodes_search_thissession(focus, k)
         return []
 
     # ----------------------------------------------------------------- backends
@@ -111,6 +113,18 @@ class PageTable:
                                            exclude_session=self.exclude_session)
         return [_episode_pageref(h) for h in hits]
 
+    def _episodes_search_thissession(self, query: str, k: int) -> list[PageRef]:
+        """WITHIN-SESSION content recall: FTS5 over the CURRENT session's episodes (the long-tail past
+        the manifest/index window). Closes the gap where an old turn was reachable only by a turn number
+        nobody knew. Each hit -> a PageRef whose handle is the TURN NUMBER, so the model pages the full
+        turn with recall_history(turns=[N]) — search by content, fetch by the number it just learned."""
+        if self.memory is None or not isinstance(query, str) or not query.strip():
+            return []
+        hits = self.memory.search_episodes(query.strip(), limit=k, only_session=self.exclude_session)
+        return [PageRef(handle=str(h.get("turn")), kind="episode-search-thissession",
+                        preview=_pack_episode_preview(h), score=float(h.get("score") or 0.0),
+                        untrusted=False) for h in hits]
+
     def _episodes_thissession(self, session_id: str, k: int) -> list[PageRef]:
         """PAGED-OUT HISTORY manifest: locator-only PageRefs for the last ``k`` turns of THIS session —
         the TRIGGER that makes recall_history get called (the model cannot reach for a cache it cannot
@@ -131,8 +145,9 @@ class PageTable:
         older = len(lines) - len(shown)
         if older:
             refs.append(PageRef(handle="…older", kind="episode-thissession",
-                                preview=(f"{older} earlier turn(s) — recall_history() for the full index, "
-                                         f"or recall_history(search=\"…\") for other sessions"),
+                                preview=(f"{older} earlier turn(s) not shown — recall_history() for the full "
+                                         f"index, or recall_history(search=\"keywords\") to find an older turn "
+                                         f"of THIS session by content (also matches past sessions)"),
                                 score=0.0, untrusted=False))
         return refs
 

@@ -17,6 +17,25 @@ Handler = Callable[[dict], str]      # (args) -> result string
 AccessFn = Callable[[dict], list]    # (args) -> list[Access] for the scheduler/permissions
 
 
+class ToolText(str):
+    """A tool result that carries an EXPLICIT success flag (.ok). It IS a str — every existing caller
+    that concatenates / slices / .startswith() keeps working — but the loop reads `.ok` instead of
+    re-inferring failure from prose (`startswith("Error")`), which false-flagged legitimate output that
+    merely begins with "Error"/"Exit code" (a grep hit, a log line, a docstring). A handler that fails
+    WITHOUT raising returns ToolText(msg, ok=False); the registry sets ok=True for any normal return and
+    ok=False for a raised exception. See run()."""
+    __slots__ = ("_ok",)
+
+    def __new__(cls, value: str = "", ok: bool = True):
+        obj = super().__new__(cls, value)
+        obj._ok = ok  # type: ignore[attr-defined]
+        return obj
+
+    @property
+    def ok(self) -> bool:
+        return getattr(self, "_ok", True)
+
+
 def _all_access(_args: dict) -> list:
     return [AllAccess()]
 
@@ -78,11 +97,19 @@ class ToolRegistry:
         except Exception:
             return [AllAccess()]
 
-    def run(self, name: str, args: dict) -> str:
+    def run(self, name: str, args: dict) -> ToolText:
+        """The single tool choke point. Returns ToolText (a str carrying .ok) so the loop reads an
+        EXPLICIT success flag rather than re-inferring failure from prose. ok=False ⟺ a genuine failure:
+        an unknown tool, a raised handler, or a handler that returned ToolText(ok=False) itself (e.g. a
+        nonzero exit code, a not-unique str_replace). A handler that returns a plain string is SUCCESS —
+        even if that string happens to begin with "Error" (a grep hit, a log line)."""
         e = self._tools.get(name)
         if e is None:
-            return f'Error: unknown tool "{name}"'
+            return ToolText(f'Error: unknown tool "{name}"', ok=False)
         try:
-            return str(e.handler(args))
-        except Exception as ex:  # errors come back as strings so the model can react
-            return f"Error: {ex}"
+            out = e.handler(args)
+        except Exception as ex:  # a raised handler is a genuine failure → ok=False, surfaced for the model
+            return ToolText(f"Error: {ex}", ok=False)
+        if isinstance(out, ToolText):
+            return out  # handler already declared ok/not-ok (e.g. a nonzero exit code)
+        return ToolText("" if out is None else str(out), ok=True)  # normal return = success
