@@ -261,6 +261,19 @@ TOOL_SCHEMAS = [
         {"key": {"type": "string"}, "value": {"type": "string"}}, ["key", "value"]),
     _fn("world_clear", "Remove a key from your WORLD MODEL (omit key to clear all of it).",
         {"key": {"type": "string"}}, []),
+    _fn("require",
+        "Record a STANDING REQUIREMENT that must HOLD when the task is done — an exact name/signature, an "
+        "output format, a stated rule, or a constraint the user adds. It joins your STANDING REQUIREMENTS "
+        "contract (shown every turn from your next turn on, and the bar for 'done'). Record only DURABLE "
+        "constraints, never transient sub-steps or chit-chat; re-recording the same one is a no-op.",
+        {"text": {"type": "string"}}, ["text"]),
+    _fn("requirement_done",
+        "Mark a STANDING REQUIREMENT satisfied (after verifying it against the real end-state). It stays "
+        "shown as '[x] done' so it is not re-flagged but not forgotten. `text` must match the requirement.",
+        {"text": {"type": "string"}}, ["text"]),
+    _fn("drop_requirement",
+        "Remove a STANDING REQUIREMENT the user RETRACTED or that no longer applies. `text` must match.",
+        {"text": {"type": "string"}}, ["text"]),
 ]
 
 
@@ -315,6 +328,8 @@ class LocalToolHost:
             "terminal_read": self._t_terminal_read, "terminal_wait": self._t_terminal_wait,
             "terminal_close": self._t_terminal_close,
             "world_set": self._t_world_set, "world_clear": self._t_world_clear,
+            "require": self._t_require, "requirement_done": self._t_requirement_done,
+            "drop_requirement": self._t_drop_requirement,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -651,6 +666,25 @@ class LocalToolHost:
     def _t_world_clear(self, args: dict) -> str:
         k = (args.get("key") or "").strip()
         return f"WORLD MODEL: cleared {repr(k) if k else '(all keys)'}."
+
+    # --- standing requirements (the durable contract; state lives in the Slice, folded by slice_sink) ---
+    def _t_require(self, args: dict) -> str:
+        t = " ".join((args.get("text") or "").split())
+        if not t:
+            return ToolText("Error: require needs a non-empty 'text'.", ok=False)
+        return f"REQUIREMENT recorded: {t} (in your STANDING REQUIREMENTS from your next turn until done/dropped)."
+
+    def _t_requirement_done(self, args: dict) -> str:
+        t = " ".join((args.get("text") or "").split())
+        if not t:
+            return ToolText("Error: requirement_done needs the requirement 'text'.", ok=False)
+        return f"REQUIREMENT marked done: {t} (stays shown as [x], no longer flagged outstanding)."
+
+    def _t_drop_requirement(self, args: dict) -> str:
+        t = " ".join((args.get("text") or "").split())
+        if not t:
+            return ToolText("Error: drop_requirement needs the requirement 'text'.", ok=False)
+        return f"REQUIREMENT dropped: {t}."
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])
