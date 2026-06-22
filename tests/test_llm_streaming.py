@@ -5,6 +5,7 @@ blocking path returns (content, tool-calls parsed, usage incl. cached). No sink 
 """
 import os
 import sys
+import threading
 from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -101,6 +102,29 @@ def no_sink_uses_blocking_path():
     llm.client = NS(chat=NS(completions=_BlockingCompletions()))
     msg = llm.complete([{"role": "user", "content": "hi"}], [])
     assert msg.content == "hi there" and msg.usage["prompt_tokens"] == 4
+
+
+@check
+def off_main_thread_uses_blocking_path():
+    # subagents share the parent llm (sink IS set) but run OFF the main thread via run_scheduled — they must
+    # NOT stream (keeps the off-main watchdog deadline + no N-thread spinner race).
+    resp = NS(choices=[NS(message=NS(content="child done", tool_calls=[]), finish_reason="stop")],
+              usage=NS(prompt_tokens=3, completion_tokens=1, prompt_tokens_details=None))
+    class _BlockingCompletions:
+        def create(self, **kw):
+            assert "stream" not in kw, "off-main run must NOT stream"
+            return resp
+    llm = _stub(_CHUNKS, on_delta=lambda k, t: None)        # sink wired
+    llm.client = NS(chat=NS(completions=_BlockingCompletions()))
+    box = {}
+    def _run():
+        try:
+            box["msg"] = llm.complete([{"role": "user", "content": "x"}], [])
+        except Exception as e:  # noqa: BLE001
+            box["err"] = e
+    t = threading.Thread(target=_run); t.start(); t.join()
+    assert "err" not in box, box.get("err")
+    assert box["msg"].content == "child done"
 
 
 @check
