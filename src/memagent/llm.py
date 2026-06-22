@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 from .context_overflow import ContextOverflow, is_context_overflow
 from .interfaces import AssistantMessage, ToolCall
@@ -306,9 +307,13 @@ class OpenAILLM:
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:
-            # STREAM when a live sink is wired (interactive cli/TUI), else the blocking path (eval/headless
-            # unchanged). getattr keeps the object-__new__ test stubs working. Same assembled result either way.
-            resp = self._create_streaming(kwargs) if getattr(self, "_on_delta", None) else self._create(kwargs)
+            # STREAM only on the MAIN thread with a live sink wired (the interactive turn). OFF-main runs —
+            # parallel subagents/explorers sharing this llm via run_scheduled threads — take the BLOCKING
+            # path so they keep the off-main hard-deadline watchdog AND never racily drive the single TUI
+            # spinner from N threads. getattr keeps the object-__new__ test stubs working. Same result either way.
+            _stream = (getattr(self, "_on_delta", None) is not None
+                       and threading.current_thread() is threading.main_thread())
+            resp = self._create_streaming(kwargs) if _stream else self._create(kwargs)
         except Exception as e:
             # Context overflow is NOT a backoff case (is_retryable stays unchanged): signal the
             # rebuild loop to TIGHTEN the slice rather than re-send the identical oversized request.
