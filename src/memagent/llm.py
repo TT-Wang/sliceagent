@@ -29,6 +29,33 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
     return "none" if direct else _CLASHX
 
 
+def _usage_dict(raw) -> dict | None:
+    """Normalize a provider usage object into a typed token breakdown (borrowed from Kimi kosong
+    `TokenUsage`, usage.ts): `output` plus input split into cache-read / cache-creation / other. Keeps
+    the legacy prompt_tokens/completion_tokens/cached_tokens keys so existing consumers keep working,
+    and adds the typed fields the telemetry layer needs to measure per-turn FRESH-input cost (the moat).
+    Provider-agnostic: every field defaults to 0, so a provider that omits a counter never crashes."""
+    if not raw:
+        return None
+    prompt = getattr(raw, "prompt_tokens", 0) or 0
+    output = getattr(raw, "completion_tokens", 0) or 0
+    details = getattr(raw, "prompt_tokens_details", None)
+    # cache READ: OpenAI nests it under prompt_tokens_details; Moonshot/some report it top-level.
+    cache_read = (getattr(details, "cached_tokens", None)
+                  or getattr(raw, "cached_tokens", None) or 0)
+    # cache CREATION: Anthropic-compatible only (absent on OpenAI/Moonshot → 0).
+    cache_create = getattr(raw, "cache_creation_input_tokens", 0) or 0
+    input_other = max(0, prompt - cache_read - cache_create)
+    usage = {
+        "prompt_tokens": prompt, "completion_tokens": output,            # legacy / back-compat
+        "input_other": input_other, "output": output,                   # typed (Kimi TokenUsage shape)
+        "input_cache_read": cache_read, "input_cache_creation": cache_create,
+    }
+    if cache_read:
+        usage["cached_tokens"] = cache_read                              # legacy key (only when present)
+    return usage
+
+
 class OpenAILLM:
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  base_url: str | None = None, proxy: str | None = None, timeout: float | None = None):
@@ -126,7 +153,10 @@ class OpenAILLM:
 
     def is_retryable(self, error: Exception) -> bool:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
-        return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError))
+
+        from .errors import EmptyResponseError
+        return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError,
+                                  InternalServerError, EmptyResponseError))
 
     def _on_alarm(self, signum, frame):
         """SIGALRM handler: a request blew the HARD wall-clock deadline → raise a retryable timeout."""
@@ -345,14 +375,14 @@ class OpenAILLM:
             except Exception:
                 args = {}
             calls.append(ToolCall(id=tc.id, name=tc.function.name, args=args))
-        usage = None
-        if resp.usage:
-            usage = {"prompt_tokens": resp.usage.prompt_tokens, "completion_tokens": resp.usage.completion_tokens}
-            # Cache read-back: provider-agnostic, key omitted when absent (no crash on providers
-            # that don't report a cache hit). OpenAI/Anthropic-compatible both nest it here.
-            cached = getattr(getattr(resp.usage, "prompt_tokens_details", None), "cached_tokens", None)
-            if cached is not None:
-                usage["cached_tokens"] = cached
+        # Degenerate completion — no content AND no tool calls (and not a content-filter stop). Some
+        # providers/proxies occasionally emit an empty body; returning it stalls the loop, so raise a
+        # RETRYABLE error (Kimi APIEmptyResponseError) and let with_retry re-roll. content_filter is
+        # excluded — re-rolling would just filter again.
+        if not (msg.content or "").strip() and not calls and choice.finish_reason != "content_filter":
+            from .errors import EmptyResponseError
+            raise EmptyResponseError(f"empty completion (finish_reason={choice.finish_reason})")
+        usage = _usage_dict(resp.usage)
         return AssistantMessage(
             content=msg.content, tool_calls=calls, usage=usage, finish_reason=choice.finish_reason
         )

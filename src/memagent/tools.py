@@ -488,6 +488,23 @@ class LocalToolHost:
                 f"magic: {head[:8].hex()}\n"
                 f"hexdump (first {len(head)} bytes):\n" + "\n".join(rows))
 
+    @staticmethod
+    def _detect_crlf(full: str) -> bool:
+        """True if the existing file uses Windows CRLF line endings (sample the head). Used to PRESERVE
+        line endings on edit: the model emits '\\n', and writing that to a CRLF file rewrites every line
+        ending — a huge spurious diff / corruption on Windows-authored repos. Borrowed from Kimi kaos."""
+        try:
+            with open(full, "rb") as f:
+                return b"\r\n" in f.read(65536)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _preserve_eol(text: str, crlf: bool) -> str:
+        """Convert `text` to CRLF iff the target file is CRLF (normalize first → idempotent, handles
+        mixed input). No-op for the common LF case, so LF files never gain spurious '\\r'."""
+        return text.replace("\r\n", "\n").replace("\n", "\r\n") if crlf else text
+
     def _t_list_files(self, args: dict) -> str:
         base = self._resolve(args.get("path") or ".")
         if not args.get("recursive"):
@@ -523,6 +540,8 @@ class LocalToolHost:
         full = self._resolve(args["path"])
         self._mkparent(full)
         content = args["content"]
+        if os.path.exists(full):                      # preserve the file's existing line endings (CRLF)
+            content = self._preserve_eol(content, self._detect_crlf(full))
         self._atomic_write(full, content)
         if content[:2] == "#!":          # a shebang script should be runnable (general, task-agnostic)
             self._make_executable(full)
@@ -547,12 +566,13 @@ class LocalToolHost:
     def _t_str_replace(self, args: dict) -> str:
         full = self._resolve(args["path"])
         cur = self.read_text(args["path"])
+        crlf = self._detect_crlf(full)                # preserve the file's line endings on write-back
         old = args["old_string"]
         new = args["new_string"]
         n = cur.count(old)
         if n == 1:
             # Exact match stays the PRIMARY path — unchanged behavior.
-            updated = cur.replace(old, new, 1)
+            updated = self._preserve_eol(cur.replace(old, new, 1), crlf)
             self._atomic_write(full, updated)
             return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
         if n > 1:
@@ -562,7 +582,7 @@ class LocalToolHost:
         # preserved — we never replace an ambiguous match.
         span = fuzzy_find_unique(cur, old)
         if span is not None:
-            updated = cur[:span[0]] + new + cur[span[1]:]
+            updated = self._preserve_eol(cur[:span[0]] + new + cur[span[1]:], crlf)
             self._atomic_write(full, updated)
             return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
                     f"({len(cur)} → {len(updated)} bytes)")

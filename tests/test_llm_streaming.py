@@ -164,6 +164,60 @@ def reasoning_effort_with_tools_400_degrades_and_sticks():
     assert calls == [False], f"sticky → reasoning_effort never sent again with tools: {calls}"
 
 
+@check
+def typed_usage_splits_cache_read_from_other():
+    # borrowed Kimi TokenUsage: input split into other / cache-read / cache-creation, output kept.
+    from memagent.llm import _usage_dict
+    raw = NS(prompt_tokens=100, completion_tokens=20,
+             prompt_tokens_details=NS(cached_tokens=30), cache_creation_input_tokens=10)
+    u = _usage_dict(raw)
+    assert u["output"] == 20 and u["input_cache_read"] == 30 and u["input_cache_creation"] == 10
+    assert u["input_other"] == 60, u                     # 100 - 30 - 10
+    assert u["prompt_tokens"] == 100 and u["completion_tokens"] == 20 and u["cached_tokens"] == 30  # back-compat
+    # Moonshot reports cached_tokens at the TOP level (no prompt_tokens_details)
+    u2 = _usage_dict(NS(prompt_tokens=50, completion_tokens=5, cached_tokens=12))
+    assert u2["input_cache_read"] == 12 and u2["input_other"] == 38, u2
+    # provider that omits cache counters → zeros, no crash, no spurious cached_tokens key
+    u3 = _usage_dict(NS(prompt_tokens=8, completion_tokens=2, prompt_tokens_details=None))
+    assert u3["input_cache_read"] == 0 and u3["input_other"] == 8 and "cached_tokens" not in u3
+    assert _usage_dict(None) is None
+
+
+@check
+def empty_completion_raises_retryable():
+    from memagent.errors import EmptyResponseError, classify
+    resp = NS(choices=[NS(message=NS(content=None, tool_calls=[]), finish_reason="stop")],
+              usage=NS(prompt_tokens=5, completion_tokens=0, prompt_tokens_details=None))
+    class _Blocking:
+        def create(self, **kw):
+            return resp
+    llm = _stub([], on_delta=None)
+    llm.client = NS(chat=NS(completions=_Blocking()))
+    raised = None
+    try:
+        llm.complete([{"role": "user", "content": "x"}], [])
+    except EmptyResponseError as e:
+        raised = e
+    assert raised is not None, "empty content + no tool calls must raise EmptyResponseError"
+    assert llm.is_retryable(raised) is True, "empty response must be retryable"
+    c = classify(raised)
+    assert c["retryable"] is True and c["kind"] == "empty_response", c
+    # content_filter is NOT re-rolled (would just filter again) → no raise
+    resp.choices[0].finish_reason = "content_filter"
+    llm.complete([{"role": "user", "content": "x"}], [])  # must not raise
+
+
+@check
+def classify_buckets_failures_for_telemetry():
+    from memagent.errors import classify
+    assert classify(RuntimeError("429 rate limit exceeded"))["kind"] == "rate_limit"
+    assert classify(RuntimeError("connection error: econnreset"))["kind"] == "connection"
+    e = RuntimeError("server blew up"); e.status_code = 503
+    assert classify(e)["kind"] == "server" and classify(e)["retryable"] is True
+    a = RuntimeError("forbidden"); a.status_code = 403
+    assert classify(a)["kind"] == "auth" and classify(a)["retryable"] is False
+
+
 def main():
     failed = 0
     for fn in CHECKS:
