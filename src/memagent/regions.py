@@ -30,6 +30,7 @@ MAX_REQ_CHARS = 200      # each requirement is ONE compact line
 MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
 MAX_PLAN_CHARS = 200     # each plan step is ONE compact line
 _PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
+MAX_MISSION_CHARS = 300  # the MISSION (session north-star) is ONE compact objective line
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -524,6 +525,10 @@ REGION_ORDER = (
     # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
     # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
     # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
+    # MISSION — the session-spanning NORTH STAR (Kimi goal mode): the overarching objective that persists
+    # ACROSS topic switches, above any single topic's goal. Self-suppresses when unset → zero bytes by
+    # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
+    ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),

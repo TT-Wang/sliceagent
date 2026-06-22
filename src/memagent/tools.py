@@ -285,6 +285,14 @@ TOOL_SCHEMAS = [
                        "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
                        "required": ["step", "status"]}}},
         ["steps"]),
+    _fn("set_mission",
+        "Set your MISSION — the overarching NORTH-STAR objective for a long multi-step task (the 'why'), "
+        "shown at the top of your context every turn so you stay oriented across many steps. Set it once at "
+        "the start of a substantial task; it is ABOVE the literal task and your step plan. Re-setting "
+        "replaces it. Skip it for quick one-off requests.",
+        {"text": {"type": "string"}}, ["text"]),
+    _fn("mission_done", "Clear your MISSION once the overarching objective is achieved (it stops showing).",
+        {}, []),
 ]
 
 
@@ -341,6 +349,7 @@ class LocalToolHost:
             "world_set": self._t_world_set, "world_clear": self._t_world_clear,
             "require": self._t_require, "requirement_done": self._t_requirement_done,
             "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
+            "set_mission": self._t_set_mission, "mission_done": self._t_mission_done,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -728,6 +737,15 @@ class LocalToolHost:
         done = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "done")
         doing = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "in_progress")
         return f"PLAN updated: {n} steps ({done} done, {doing} in progress) — shown in your PLAN section."
+
+    def _t_set_mission(self, args: dict) -> str:
+        t = " ".join((args.get("text") or "").split())
+        if not t:
+            return ToolText("Error: set_mission needs a non-empty 'text'.", ok=False)
+        return f"MISSION set: {t} (shown at the top of your context until you call mission_done)."
+
+    def _t_mission_done(self, args: dict) -> str:
+        return "MISSION cleared (achieved — no longer shown)."
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])

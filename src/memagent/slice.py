@@ -63,6 +63,7 @@ from .regions import (  # noqa: F401 — re-export shims
     MANIFEST_TURNS,
     MAX_FINDING_CHARS,
     MAX_FINDINGS,
+    MAX_MISSION_CHARS,
     MAX_OPEN_THREADS,
     MAX_PLAN_CHARS,
     MAX_PLAN_ITEMS,
@@ -312,6 +313,11 @@ class Slice:
     # (acceptance criteria): this is the step sequence + progress. Replace-all via the update_plan tool
     # (folded by slice_sink). Carried by seal() (continuity), wiped by reset(). Bounded (MAX_PLAN_ITEMS).
     plan: list[dict] = field(default_factory=list)  # [{"step": str, "status": pending|in_progress|done}]
+    # MISSION (Kimi goal mode) — the NORTH-STAR objective / "why" framing the agent sets to stay oriented
+    # over a long multi-step task, ABOVE the literal `goal`. ONE string (inherently bounded); set via
+    # set_mission, cleared via mission_done. Self-suppresses when empty (no bloat). Carried by seal()
+    # across the task's turns; wiped by reset() (a brand-new task) — same lifecycle as requirements/plan.
+    mission: str = ""
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
@@ -392,6 +398,7 @@ class Slice:
         self.goal = goal
         self.requirements = []   # a brand-new task starts with an EMPTY contract (model curates it in-band)
         self.plan = []           # a brand-new task starts with an empty plan (kept by seal() within a task)
+        self.mission = ""        # north-star objective — wiped on a brand-new task (kept by seal())
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
@@ -881,6 +888,11 @@ def slice_sink(state):
                     if _step:
                         _new.append({"step": _step, "status": _st})
                 s.plan = _new
+            # MISSION (north star) — fold set_mission/mission_done (the handler only confirms; STATE here).
+            elif event.name == "set_mission" and not event.failing:
+                s.mission = " ".join(str(event.args.get("text", "")).split())[:MAX_MISSION_CHARS]
+            elif event.name == "mission_done" and not event.failing:
+                s.mission = ""
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
