@@ -95,6 +95,27 @@ def _diff(name: str, args: dict):
     return Group(*lines) if lines else None
 
 
+_PLAN_GLYPH = {"done": ("✓", "ok"), "in_progress": ("▶", "accent"), "pending": ("○", "dim")}
+
+
+def _render_plan(steps: list):
+    """A live PLAN/TODO checklist panel (borrowed Aider/Kimi UX): '✓ done', '▶ in-progress', '○ pending'.
+    Surfaces the model's update_plan tier as first-class UI instead of a generic tool card."""
+    lines = []
+    for it in steps:
+        if not isinstance(it, dict):
+            continue
+        status = it.get("status", "pending")
+        glyph, gstyle = _PLAN_GLYPH.get(status, ("○", "dim"))
+        text_style = TH["dim"] if status == "done" else "default"
+        lines.append(Text.assemble(Text(f"{glyph} ", style=TH.get(gstyle, gstyle)),
+                                   Text(_shorten(str(it.get("step", "")), 80), style=text_style)))
+    done = sum(1 for it in steps if isinstance(it, dict) and it.get("status") == "done")
+    title = Text(f"plan · {done}/{len(steps)} done", style=TH["accent"])
+    return Panel(Group(*lines) if lines else Text("(empty plan)", style=TH["dim"]),
+                 title=title, border_style=TH["dim"], expand=False)
+
+
 # ── the rendering sink (consumes the loop's events) ──────────────────────────────────────────
 class RichSink:
     """An event sink that renders the live turn with Rich. Drop-in for cli_sink."""
@@ -134,6 +155,15 @@ class RichSink:
             self._spin(f"{_tool_header(e.name, e.args)} …")
         elif isinstance(e, ToolResult):
             self._stop()
+            # Surface the model-curated state tiers as first-class UI (borrowed Aider/Kimi UX): a live
+            # PLAN checklist and the MISSION line, instead of a generic tool card.
+            if e.name == "update_plan" and not e.failing:
+                self.c.print(_render_plan(e.args.get("steps") or []))
+                return
+            if e.name == "set_mission" and not e.failing:
+                self.c.print(Text.assemble(Text("  🎯 mission: ", style=TH["accent"]),
+                                           Text(_shorten(str(e.args.get("text", "")), 80), style="bold")))
+                return
             mark = Text("✓", style=TH["ok"]) if not e.failing else Text("✗", style=TH["fail"])
             head = Text.assemble(mark, " ", Text(_tool_header(e.name, e.args), style=TH["tool"]))
             body = [head]
@@ -154,6 +184,9 @@ class RichSink:
         elif isinstance(e, StepEnd):
             u = e.usage or {}
             self.stats["tokens"] = self.stats.get("tokens", 0) + u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
+            # FRESH (non-cache-read) input — the moat metric (typed usage from the llm adapter). Shown in
+            # the toolbar so the user sees the bounded-slice cost stay flat, not the gross token count.
+            self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
         elif isinstance(e, LessonSaved):
             self.c.print(Text(f"  💡 learned: {_shorten(e.title, 70)}", style=TH["dim"]))
         elif isinstance(e, TurnInterrupted):
@@ -171,6 +204,8 @@ def make_rich_sink(console: Console, stats: dict) -> RichSink:
 
 # ── input layer (prompt_toolkit) ─────────────────────────────────────────────────────────────
 _SLASH = {
+    "/plan":    "show the agent's current PLAN + mission",
+    "/cost":    "show per-turn cost / token metrics (needs AGENT_METRICS=1)",
     "/switch":  "switch to a parked topic by id (/switch <id>)",
     "/resume":  "resume a parked topic by id (/resume <id>)",
     "/threads": "list open/parked topics",
@@ -196,7 +231,7 @@ def _toolbar(stats: dict):
             f" <b>memagent</b>  model <b>{stats.get('model','?')}</b>"
             f"  policy <b>{stats.get('policy','?')}</b>"
             f"  topic <b>{topic}</b>"
-            f"  tokens <b>{stats.get('tokens',0)}</b>"
+            f"  tokens <b>{stats.get('tokens',0)}</b> (fresh <b>{stats.get('fresh',0)}</b>)"
             f"   <i>/help · ctrl-c abort · ctrl-d quit</i> "
         )
     return render

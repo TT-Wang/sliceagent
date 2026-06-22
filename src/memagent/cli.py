@@ -264,7 +264,27 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /threads · /switch <id> · /resume <id> · /help · /exit")
+            _console.print("commands: /threads · /switch <id> · /resume <id> · /plan · /cost · /help · /exit")
+        elif cmd == "/plan":
+            s = session.active() if session.active_id else None
+            plan = getattr(s, "plan", None) if s else None
+            mission = getattr(s, "mission", "") if s else ""
+            if mission:
+                _console.print(f"  🎯 mission: {mission}")
+            if not plan:
+                _console.print("  (no active plan — the agent sets one with update_plan on multi-step tasks)")
+            else:
+                mark = {"done": "✓", "in_progress": "▶", "pending": "○"}
+                for it in plan:
+                    _console.print(f"  {mark.get(it.get('status'), '○')} {it.get('step', '')}")
+        elif cmd == "/cost":
+            if metrics is None:
+                _console.print("  (cost metrics off — start with AGENT_METRICS=1 to track per-turn cost)")
+            else:
+                s = metrics.summary()
+                _console.print(f"  per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
+                               f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']} "
+                               f"out={s['output']} retries={s['retries']} overflows={s['overflows']}")
         elif cmd == "/threads":
             ts = session.open_threads(include_active=True)
             _console.print("  (no topics yet)" if not ts else
