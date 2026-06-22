@@ -33,12 +33,17 @@ def qualify(server: str, tool: str) -> str:
     return name
 
 
+_MCP_MAX_OUTPUT = 100_000   # cap one MCP tool result so a runaway payload can't blow up the slice (Kimi)
+
+
 def _result_to_text(result) -> str:
     parts = []
     for block in (getattr(result, "content", None) or []):
         t = getattr(block, "text", None)
         parts.append(t if t is not None else f"[{getattr(block, 'type', 'content')}]")
     text = "\n".join(parts).strip() or "(no content)"
+    if len(text) > _MCP_MAX_OUTPUT:           # bound an oversized result (server returning a huge blob)
+        text = text[:_MCP_MAX_OUTPUT] + f"\n…[truncated {len(text) - _MCP_MAX_OUTPUT} chars of MCP output]"
     return f"Error: {text}" if getattr(result, "isError", False) else text
 
 

@@ -40,6 +40,14 @@ def _all_access(_args: dict) -> list:
     return [AllAccess()]
 
 
+def _missing_required(schema: dict, args: dict) -> list:
+    """Required parameters the tool schema declares that are absent (or None) in the call. Present-but-
+    empty (e.g. content="") counts as supplied; only truly-missing args are flagged."""
+    params = (schema.get("function") or {}).get("parameters") or {}
+    a = args or {}
+    return [r for r in (params.get("required") or []) if a.get(r) is None]
+
+
 @dataclass
 class ToolEntry:
     name: str
@@ -106,6 +114,11 @@ class ToolRegistry:
         e = self._tools.get(name)
         if e is None:
             return ToolText(f'Error: unknown tool "{name}"', ok=False)
+        # Validate the call against the tool's declared required args (Kimi AJV-style) — a clear
+        # "missing required argument" lets a no-transcript model self-correct, vs an opaque KeyError.
+        missing = _missing_required(e.schema, args)
+        if missing:
+            return ToolText(f'Error: {name} missing required argument(s): {", ".join(missing)}', ok=False)
         try:
             out = e.handler(args)
         except Exception as ex:  # a raised handler is a genuine failure → ok=False, surfaced for the model
