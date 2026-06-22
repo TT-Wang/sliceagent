@@ -203,7 +203,12 @@ def main() -> None:
     if episodic is not None:
         sinks.append(episodic)
     sinks.append(log_sink())
-    sinks.append(_tui.make_rich_sink(_console, _stats) if _tui else cli_sink(cfg.show_slice))
+    if _tui:
+        _rich = _tui.make_rich_sink(_console, _stats)
+        sinks.append(_rich)
+        llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the TUI spinner (Kimi-style)
+    else:
+        sinks.append(cli_sink(cfg.show_slice))
     # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
     # snapshots to the shared monitor dir; view them in the STANDING server (python -m memagent.monitor),
     # which stays up across sessions and goes idle when none is running.

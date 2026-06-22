@@ -95,11 +95,30 @@ class OpenAILLM:
         # prefix → higher cache-hit rate at ZERO added prompt tokens. Set via set_cache_key(); the
         # quirk stays isolated to this adapter (llm-agnostic). None → omit the kwarg entirely.
         self._cache_key: str | None = None
+        # Optional LIVE token sink for interactive streaming (set by the cli/TUI). When set, complete()
+        # STREAMS the completion and emits deltas (kind in {"content","reasoning"}) so a slow turn renders
+        # LIVE instead of freezing on one blocking call (borrowed periphery — Kimi-style live events).
+        # None → the blocking non-streaming path (eval/headless unchanged; byte-identical assembled result).
+        self._on_delta = None
 
     def set_cache_key(self, key: str | None) -> None:
         """Pin a session-scoped prompt-cache routing key (typically the session_id). Cheapest cache
         lever there is: raises cache-hit rate, adds no tokens. Safe to call repeatedly."""
         self._cache_key = key or None
+
+    def set_delta_sink(self, fn) -> None:
+        """Wire a live-delta sink for interactive STREAMING: fn(kind: str, text: str), kind in
+        {'content','reasoning'}. None restores the blocking non-streaming path. Safe to call repeatedly.
+        Pure transport/UX — the slice/loop/moat never see it (the assembled result is identical)."""
+        self._on_delta = fn
+
+    def _emit(self, kind: str, text: str) -> None:
+        sink = getattr(self, "_on_delta", None)
+        if sink and text:
+            try:
+                sink(kind, text)
+            except Exception:  # noqa: BLE001 — a render error must NEVER break the LLM call
+                pass
 
     def is_retryable(self, error: Exception) -> bool:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
@@ -149,6 +168,66 @@ class OpenAILLM:
             )
         finally:
             ex.shutdown(wait=False)  # don't block on a possibly-wedged call; let its thread die with the socket
+
+    def _create_streaming(self, kwargs: dict):
+        """Interactive STREAMING variant of _create: drain the SSE stream into an assembled response under
+        the SAME SIGALRM hard deadline (this path is always main-thread — set only by the cli — so SIGALRM
+        arms; if not, fall back to the httpx read-timeout). Returns the same response SHAPE as _create so
+        complete() is identical downstream. The deadline wraps the whole drain (the wait is in iteration,
+        not in create()), so a stalled stream still aborts instead of hanging."""
+        import signal as _signal
+        try:
+            prev = _signal.signal(_signal.SIGALRM, self._on_alarm)
+            _signal.alarm(self._hard_timeout)
+        except (ValueError, AttributeError, OSError):
+            return self._stream_assemble(kwargs)  # not main thread → rely on the httpx read-timeout
+        try:
+            return self._stream_assemble(kwargs)
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, prev)
+
+    def _stream_assemble(self, kwargs: dict):
+        """Stream the completion, emit content/reasoning deltas live (self._emit), and assemble the pieces
+        into a response object with the SAME shape complete() reads from the non-streamed path (choices[0]
+        .message.content / .tool_calls[*].function.{name,arguments} / .finish_reason / .usage). So the rest
+        of complete() — tool-arg JSON parse, usage dict, cache read-back — is byte-identical to the blocking
+        path. include_usage gives the final usage chunk; tool-call deltas are reassembled by index."""
+        from types import SimpleNamespace as NS
+        skw = {**kwargs, "stream": True, "stream_options": {"include_usage": True}}
+        parts: list[str] = []
+        calls: dict[int, dict] = {}          # index → {id, name, args:[fragments]}
+        finish = None
+        usage = None
+        for chunk in self.client.chat.completions.create(**skw):
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage           # final include_usage chunk (choices may be empty here)
+            for ch in (getattr(chunk, "choices", None) or []):
+                if getattr(ch, "finish_reason", None):
+                    finish = ch.finish_reason
+                d = getattr(ch, "delta", None)
+                if d is None:
+                    continue
+                txt = getattr(d, "content", None)
+                if txt:
+                    parts.append(txt); self._emit("content", txt)
+                rc = getattr(d, "reasoning_content", None) or getattr(d, "reasoning", None)
+                if rc:
+                    self._emit("reasoning", rc)
+                for tcd in (getattr(d, "tool_calls", None) or []):
+                    slot = calls.setdefault(getattr(tcd, "index", 0), {"id": None, "name": None, "args": []})
+                    if getattr(tcd, "id", None):
+                        slot["id"] = tcd.id
+                    fn = getattr(tcd, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["args"].append(fn.arguments)
+        tool_calls = [NS(id=c["id"], function=NS(name=c["name"], arguments="".join(c["args"])))
+                      for _, c in sorted(calls.items())]
+        message = NS(content=("".join(parts) or None), tool_calls=tool_calls)
+        return NS(choices=[NS(message=message, finish_reason=finish)], usage=usage)
 
     def _reasoning_kwargs(self) -> dict:
         """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never
@@ -227,7 +306,9 @@ class OpenAILLM:
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
         try:
-            resp = self._create(kwargs)
+            # STREAM when a live sink is wired (interactive cli/TUI), else the blocking path (eval/headless
+            # unchanged). getattr keeps the object-__new__ test stubs working. Same assembled result either way.
+            resp = self._create_streaming(kwargs) if getattr(self, "_on_delta", None) else self._create(kwargs)
         except Exception as e:
             # Context overflow is NOT a backoff case (is_retryable stays unchanged): signal the
             # rebuild loop to TIGHTEN the slice rather than re-send the identical oversized request.
