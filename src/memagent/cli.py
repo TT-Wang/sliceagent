@@ -38,19 +38,33 @@ def _load_env(path: str = ".env") -> None:
 
 
 LOG_FILE = "scratch/durable-log.jsonl"
+LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate the debug log past this (keep one prior) — Kimi RotatingFileSink
 
 
 def log_sink(path: str = LOG_FILE):
+    from .safety import redact_text   # strip secrets before they hit the on-disk debug log (off the moat)
+
+    def _scrub_args(args: dict) -> dict:          # redact string values (edit_file content, inline tokens)
+        return {k: (redact_text(v) if isinstance(v, str) else v) for k, v in (args or {}).items()}
+
     def sink(e: Event) -> None:
         rec = None
+        # REDACT each string field BEFORE serializing (redacting the JSON line itself can corrupt
+        # quotes/escapes). A .env read or a token in a command must not land in the log in plaintext
+        # — reuses the same safety.redact_text the episodic-persist path uses, so the stores agree.
         if isinstance(e, AssistantText):
-            rec = {"role": "assistant", "content": e.content}
+            rec = {"role": "assistant", "content": redact_text(e.content)}
         elif isinstance(e, ToolResult):
-            rec = {"role": "tool", "name": e.name, "args": e.args, "full": e.output}
+            rec = {"role": "tool", "name": e.name, "args": _scrub_args(e.args), "full": redact_text(e.output)}
         elif isinstance(e, LessonSaved):
-            rec = {"role": "lesson", "title": e.title, "content": e.content}
+            rec = {"role": "lesson", "title": redact_text(e.title), "content": redact_text(e.content)}
         if rec is not None:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            try:                                  # rotate so the debug log can't grow unbounded
+                if os.path.getsize(path) > LOG_MAX_BYTES:
+                    os.replace(path, path + ".1")
+            except OSError:
+                pass
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return sink
@@ -207,6 +221,14 @@ def main() -> None:
     if episodic is not None:
         sinks.append(episodic)
     sinks.append(log_sink())
+    # optional: the moat-MEASURING cost sink (AGENT_METRICS=1). Accumulates the per-turn FRESH-input
+    # curve (should stay flat as the conversation grows) + cache-hit rate + reliability counters; the
+    # summary prints at session end. Pure observer — eval/default path untouched.
+    metrics = None
+    if os.environ.get("AGENT_METRICS"):
+        from .metrics import make_metrics_sink
+        metrics = make_metrics_sink()
+        sinks.append(metrics)
     if _tui:
         _rich = _tui.make_rich_sink(_console, _stats)
         sinks.append(_rich)
@@ -261,7 +283,10 @@ def main() -> None:
             _console.print(f"  unknown command {cmd} (/help)")
         return True
 
-    hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None)]
+    # AGENT_AUTO_APPROVE: comma-separated fnmatch globs over the command, pre-approved so safe read-only
+    # commands never prompt (e.g. AGENT_AUTO_APPROVE="git status*,git diff*,ls *,cat *").
+    _auto = [r.strip() for r in (os.environ.get("AGENT_AUTO_APPROVE") or "").split(",") if r.strip()]
+    hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None, auto_approve=_auto)]
     hook_list.append(GuardrailHook())  # cross-step loop guard (per-turn counters, reset each task)
     if cfg.verify_cmd:
         oracle = CommandOracle(cfg.verify_cmd)
@@ -332,6 +357,11 @@ def main() -> None:
     if getattr(memory, "is_durable", False):
         memory.consolidate(session.session_id)
         print("  · consolidated session memory")
+    if metrics is not None:                                 # the moat number: per-turn fresh-input curve
+        s = metrics.summary()
+        print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
+              f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']}({s['tool_failures']} fail) "
+              f"retries={s['retries']} overflows={s['overflows']} errors={s['errors']}")
 
 
 if __name__ == "__main__":

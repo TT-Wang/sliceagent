@@ -11,10 +11,31 @@ are NOT code.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 from dataclasses import dataclass
 
 from .registry import ToolEntry
 from .text_utils import one_line
+
+_MAX_SCAN_DEPTH = 8   # bound skill-root walk depth (Kimi MAX_SKILL_SCAN_DEPTH) — defensive vs deep trees
+
+
+def expand_skill_args(body: str, argstr: str) -> str:
+    """Substitute a skill's parameter placeholders (Kimi expandSkillParameters): `$ARGUMENTS` → the full
+    arg string, `$1`/`$2`/… → positional tokens (shell-split). A skill with no placeholders is returned
+    unchanged, so existing skills are unaffected."""
+    if "$ARGUMENTS" not in body and not re.search(r"\$\d", body):
+        return body
+    argstr = argstr or ""
+    try:
+        parts = shlex.split(argstr)
+    except ValueError:                      # unbalanced quotes → fall back to whitespace split
+        parts = argstr.split()
+    out = body.replace("$ARGUMENTS", argstr)
+    for i, tok in enumerate(parts, 1):
+        out = out.replace(f"${i}", tok)
+    return out
 
 
 @dataclass
@@ -25,6 +46,7 @@ class Skill:
     path: str
     provenance: str = "user"   # "user" | "consolidation" (item 13); from `provenance:` frontmatter
     root: str = ""             # the discovery root this skill came from (where its .usage.json lives)
+    when_to_use: str = ""      # from `when-to-use:` frontmatter — shown in the catalog to improve routing (Kimi)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -66,7 +88,10 @@ class SkillManager:
         for root in self.roots:
             if not os.path.isdir(root):
                 continue
-            for dp, _dirs, files in os.walk(root):
+            for dp, _dirs, files in os.walk(root):           # followlinks=False → no symlink cycles
+                if dp[len(root):].count(os.sep) > _MAX_SCAN_DEPTH:
+                    _dirs[:] = []                            # bound depth (Kimi MAX_SKILL_SCAN_DEPTH)
+                    continue
                 for fn in files:
                     if fn == "SKILL.md" or (fn.endswith(".md") and dp == root):
                         self._load(os.path.join(dp, fn), root)
@@ -82,12 +107,13 @@ class SkillManager:
         name = (meta.get("name") or "").strip().lower()
         if not name and os.path.basename(path) != "SKILL.md":
             name = os.path.splitext(os.path.basename(path))[0].lower()
-        desc = (meta.get("description") or meta.get("when-to-use") or "").strip()
+        when = (meta.get("when-to-use") or meta.get("when_to_use") or "").strip()
+        desc = (meta.get("description") or when or "").strip()
         if not name or not body.strip():
             return
         prov = (meta.get("provenance") or "user").strip().lower() or "user"
-        self._skills.setdefault(name, Skill(name, desc, body.strip(), path,
-                                            provenance=prov, root=root))  # first-wins
+        self._skills.setdefault(name, Skill(name, desc, body.strip(), path, provenance=prov,
+                                            root=root, when_to_use=when))  # first-wins
 
     def add(self, name: str, body: str, description: str = "") -> None:
         """Register an in-memory skill (e.g. contributed by a plugin). First-wins, so a
@@ -129,18 +155,29 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
     if not cat:
         return None
     names = [n for n, _ in cat]
-    listing = "\n".join(f"- {n}: {one_line(d, 140)}" for n, d in cat)
+
+    def _line(n: str, d: str) -> str:                       # show when-to-use to improve routing (Kimi)
+        s = manager._skills.get(n)
+        w = (s.when_to_use if s else "") or ""
+        base = f"- {n}: {one_line(d, 140)}"
+        return base + (f" (when: {one_line(w, 80)})" if w and w != d else "")
+
+    listing = "\n".join(_line(n, d) for n, d in cat)
     desc = (
         "Load a SKILL: a reusable procedure whose detailed instructions are added to your "
         "working context and PERSIST for the rest of the task. Call it BEFORE starting work "
-        "when a task matches one of these skills. Available skills:\n" + listing
+        "when a task matches one of these skills. Pass `arguments` to fill a parameterized skill "
+        "($ARGUMENTS / $1 $2 in its body). Available skills:\n" + listing
     )
     schema = {
         "type": "function",
         "function": {
             "name": "skill", "description": desc,
             "parameters": {"type": "object",
-                           "properties": {"name": {"type": "string", "enum": names}},
+                           "properties": {
+                               "name": {"type": "string", "enum": names},
+                               "arguments": {"type": "string", "description": "Optional. Substituted "
+                                             "into the skill's $ARGUMENTS / $1 $2 placeholders."}},
                            "required": ["name"]},
         },
     }
@@ -149,7 +186,9 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
         body = manager.load(args.get("name", ""))
         if body is None:
             return f"Error: no skill named {args.get('name')!r}. Available: {', '.join(names)}"
-        return body  # slice_sink folds this into the ACTIVE SKILL tier (persists across turns)
+        # expand $ARGUMENTS / $N placeholders (no-op for skills without them); slice_sink folds the
+        # result into the ACTIVE SKILL tier (persists across turns).
+        return expand_skill_args(body, args.get("arguments") or "")
 
     return ToolEntry(name="skill", schema=schema, handler=handler,
                      accesses=lambda _a: [], source="skill")

@@ -18,6 +18,13 @@ from typing import Callable
 from .context_overflow import is_context_overflow
 from .events import ApiRetry, Dispatcher
 
+
+class EmptyResponseError(Exception):
+    """The provider returned a degenerate completion — no content AND no tool calls (borrowed from
+    Kimi kosong `APIEmptyResponseError`, errors.ts). Some providers/proxies occasionally emit an empty
+    body; returning it stalls the loop. Classified RETRYABLE so `with_retry` re-rolls instead."""
+
+
 # Monotonic counter for jitter-seed uniqueness within the same process.
 # Lock-guarded to avoid races in concurrent retry paths (Hermes retry_utils.py:12).
 _jitter_counter = 0
@@ -69,6 +76,7 @@ def classify(error: Exception) -> dict:
     msg = str(error).lower()
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
     overflow = is_context_overflow(error)
+    empty = isinstance(error, EmptyResponseError)
     retryable = False
     if status == 429 or "rate limit" in msg or "overloaded" in msg or "503" in msg:
         retryable = True
@@ -76,11 +84,31 @@ def classify(error: Exception) -> dict:
         retryable = True
     if "timeout" in msg or "timed out" in msg or "connection error" in msg or "econn" in msg:
         retryable = True
+    if empty:
+        retryable = True  # degenerate empty completion — re-roll (Kimi isRetryableGenerateError)
     if status in (401, 403):
         retryable = False  # auth — never retry
     if overflow:
         retryable = False  # tighten the slice, don't blindly re-send the oversized request
-    return {"retryable": retryable, "is_context_overflow": overflow, "status": status}
+    # Bucket the failure for telemetry (orthogonal to `retryable`; lets the metrics layer count
+    # rate-limit vs timeout vs overflow vs empty — the Pythonic form of Kimi's typed error hierarchy).
+    if overflow:
+        kind = "context_overflow"
+    elif status in (401, 403):
+        kind = "auth"
+    elif empty:
+        kind = "empty_response"
+    elif status == 429 or "rate limit" in msg or "too many requests" in msg or "overloaded" in msg:
+        kind = "rate_limit"
+    elif (isinstance(status, int) and 500 <= status < 600) or "503" in msg:
+        kind = "server"
+    elif "timeout" in msg or "timed out" in msg:
+        kind = "timeout"
+    elif "connection" in msg or "econn" in msg:
+        kind = "connection"
+    else:
+        kind = "unknown"
+    return {"retryable": retryable, "is_context_overflow": overflow, "status": status, "kind": kind}
 
 
 def with_retry(

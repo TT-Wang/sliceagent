@@ -183,26 +183,51 @@ class PermissionHook(Hooks):
     """Gate tool execution. `policy(name, args) -> ToolDecision`.
 
     When a policy returns `ask`, resolve it interactively via `on_ask(name, args, reason)
-    -> 'yes'|'no'|'always'` (the host supplies a TTY prompt). 'always' memorizes the tool
-    for the session so it isn't re-asked (Kimi-style session-approval). Non-interactive
-    hosts (on_ask=None) deny an `ask` — safe by default."""
+    -> 'yes'|'no'|'always'` (the host supplies a TTY prompt). Non-interactive hosts
+    (on_ask=None) deny an `ask` — safe by default.
 
-    def __init__(self, policy, on_ask=None):
+    'always' memorizes a session approval — but keyed by the CALL, not the bare tool name
+    (Kimi-style rule patterns). Approving one shell command must NOT bless every shell command:
+    run_command/execute_code are remembered by their exact command/code; other tools (already
+    gated by policy) are remembered by name. `auto_approve` pre-seeds fnmatch rules matched
+    against the command (e.g. ["git status*", "ls *"]) so safe read-only commands never prompt."""
+
+    _CMD_TOOLS = ("run_command", "execute_code")
+
+    def __init__(self, policy, on_ask=None, auto_approve=None):
         self.policy = policy
         self.on_ask = on_ask
-        self._approved: set[str] = set()  # session-approved tool names
+        self._approved: set[str] = set()        # exact approval keys (call patterns, not bare tool names)
+        self._rules: list[str] = list(auto_approve or [])   # pre-seeded fnmatch globs over the command
+
+    @classmethod
+    def _key(cls, name: str, args: dict) -> str:
+        # command-SPECIFIC for the dangerous tools — approving `npm test` must not auto-allow `rm -rf`.
+        if name in cls._CMD_TOOLS:
+            return f"{name}:{(args.get('command') or args.get('code') or '').strip()}"
+        return name                             # name-level for the rest (policy already gates them)
+
+    def _pre_allowed(self, name: str, args: dict, key: str) -> bool:
+        if key in self._approved:
+            return True
+        cmd = (args.get("command") or args.get("code") or "").strip()
+        if cmd and self._rules:
+            import fnmatch
+            return any(fnmatch.fnmatch(cmd, rule) for rule in self._rules)
+        return False
 
     def authorize_tool(self, name, args):
         d = self.policy(name, args)
         if not d.ask:
             return d
-        if name in self._approved:
+        key = self._key(name, args)
+        if self._pre_allowed(name, args, key):
             return ALLOW
         if self.on_ask is None:
             return ToolDecision(False, DENIAL_NO_PROMPT)
         verdict = (self.on_ask(name, args, d.reason) or "no").lower()
         if verdict == "always":
-            self._approved.add(name)
+            self._approved.add(key)             # remember THIS call pattern, not the whole tool
             return ALLOW
         return ALLOW if verdict == "yes" else ToolDecision(False, DENIAL_USER)
 
