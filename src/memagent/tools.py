@@ -663,9 +663,16 @@ class LocalToolHost:
         return out or "(command produced no output)"
 
     # --- background / long-running processes (procman) ---
+    def _host_only_note(self) -> str:
+        # #4: background procs + PTY sessions run on the HOST, not through self.sandbox. Under a non-local
+        # sandbox (e.g. docker) that defeats container isolation — surface it instead of silently bypassing.
+        return ("[warning: this runs on the HOST, NOT inside the configured sandbox — "
+                f"{type(self.sandbox).__name__} isolation does not apply]\n"
+                if type(self.sandbox).__name__ != "LocalSandbox" else "")
+
     def _t_proc_start(self, args: dict) -> str:
         h = self.procs.start(args["command"], cwd=self.root())
-        return (f"Started background process {h}: {args['command']}\n"
+        return (f"{self._host_only_note()}Started background process {h}: {args['command']}\n"
                 f"Use proc_tail/proc_poll/proc_wait/proc_kill with handle {h}.")
 
     def _t_proc_poll(self, args: dict) -> str:
@@ -690,7 +697,7 @@ class LocalToolHost:
         name = args.get("session") or "main"
         self.terminals.open(name, cwd=self.root(), command=args.get("command") or None)
         banner = self.terminals.peek(name, timeout=0.6)  # peek, not read — don't eat the first prompt
-        return f"Opened terminal session {name!r}.\n{banner}"
+        return f"{self._host_only_note()}Opened terminal session {name!r}.\n{banner}"
 
     def _t_terminal_send(self, args: dict) -> str:
         name = args.get("session") or "main"

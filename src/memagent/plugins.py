@@ -99,14 +99,22 @@ def load_plugins(registry, skills, dirs: list[str] | None = None, *, root: str, 
     search = list(dict.fromkeys((dirs or []) + _default_dirs()))
     mcp_servers: dict = {}
     hooks: list = []
-    for rootdir in search:
-        if not os.path.isdir(rootdir):
-            continue
-        for entry in sorted(os.listdir(rootdir)):
-            pdir = os.path.join(rootdir, entry)
-            if os.path.isfile(os.path.join(pdir, "plugin.toml")) and \
-               os.path.isfile(os.path.join(pdir, "__init__.py")):
-                ctx = _load_one(pdir, registry, skills, root=root, config=config, on_log=on_log)
-                mcp_servers.update(ctx.mcp_servers)
-                hooks.extend(ctx.hooks)
+    found = [os.path.join(r, e) for r in search if os.path.isdir(r) for e in sorted(os.listdir(r))
+             if os.path.isfile(os.path.join(r, e, "plugin.toml"))
+             and os.path.isfile(os.path.join(r, e, "__init__.py"))]
+    # SECURITY (#6/#7): a plugin's __init__.py executes with FULL host privileges, and a plugin hook can
+    # allow/deny any tool and rewrite messages/results. Loading is therefore OPT-IN: require an explicit
+    # AGENT_ALLOW_PLUGINS=1 before running ANY plugin code — otherwise a plugin dropped in ~/.memagent/
+    # plugins (a default search dir) would auto-execute silently. Default off = safe.
+    allowed = (os.environ.get("AGENT_ALLOW_PLUGINS") or "").strip().lower() in ("1", "true", "yes", "on")
+    if not allowed:
+        if found:
+            on_log(f"{len(found)} plugin(s) present but NOT loaded — set AGENT_ALLOW_PLUGINS=1 to run them "
+                   "(plugin code executes with HOST privileges and can register auth hooks)")
+        return mcp_servers, hooks
+    for pdir in found:
+        on_log(f"⚠ loading TRUSTED plugin {os.path.basename(pdir)} — runs with host privileges")
+        ctx = _load_one(pdir, registry, skills, root=root, config=config, on_log=on_log)
+        mcp_servers.update(ctx.mcp_servers)
+        hooks.extend(ctx.hooks)
     return mcp_servers, hooks
