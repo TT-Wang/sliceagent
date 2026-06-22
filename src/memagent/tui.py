@@ -103,6 +103,7 @@ class RichSink:
         self.c = console
         self.stats = stats
         self._status = None
+        self._stream = ""        # live-streamed assistant text for the CURRENT step (transient; tail shown in spinner)
 
     def _stop(self) -> None:
         if self._status is not None:
@@ -111,8 +112,20 @@ class RichSink:
 
     def _spin(self, label: str) -> None:
         self._stop()
+        self._stream = ""        # new step → reset the streamed tail
         self._status = self.c.status(Text(label, style=TH["dim"]), spinner="dots")
         self._status.start()
+
+    def on_delta(self, kind: str, text: str) -> None:
+        """Live token sink wired to OpenAILLM.set_delta_sink — turns the static 'thinking…' spinner into a
+        LIVE writing indicator (the streamed tail), so a slow turn shows progress instead of freezing. The
+        streamed tail is TRANSIENT (it lives only in the spinner label); the final AssistantText renders the
+        canonical Markdown once, so there is no double-print. No-op when no spinner is active (e.g. routing)."""
+        if self._status is None or kind != "content" or not text:
+            return
+        self._stream += text
+        tail = " ".join(self._stream.split())[-100:]   # last ~100 chars, single line
+        self._status.update(Text(f"writing… {tail}", style=TH["dim"]))
 
     def __call__(self, e: Event) -> None:
         if isinstance(e, SliceBuilt):
