@@ -109,6 +109,13 @@ def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
     body = [
         "## Goal", task.goal,
         "## Findings", "\n".join(f"- {f}" for f in task.findings),
+        # carried slice tiers — JSON-per-bullet so dict items round-trip EXACTLY (no markdown-escape
+        # hazard). Without these, resuming a task silently dropped the standing contract / todo / north-
+        # star / world model (data loss). Mission is a single verbatim line like Status.
+        "## Requirements", "\n".join(f"- {json.dumps(r, ensure_ascii=False)}" for r in task.requirements),
+        "## Plan", "\n".join(f"- {json.dumps(p, ensure_ascii=False)}" for p in task.plan),
+        "## Mission", task.mission,
+        "## World", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}" for k, v in task.world.items()),
         "## Working set", "\n".join(f"- {p}" for p in task.active_files),
         "## Edited", "\n".join(f"- {p}" for p in sorted(task.edited_files)),
         # anchor is TAB-separated (a path never contains TAB; anchors may contain ' :: ' etc.)
@@ -128,11 +135,31 @@ def _parse_task_md(path: str) -> TaskState | None:
         if "\t" in b:
             p, a = b.split("\t", 1)
             anchors[p.strip()] = a
+    def _json_bullets(key):
+        out = []
+        for b in _bullets(sec.get(key, "")):
+            b = b.strip()
+            if not b:
+                continue
+            try:
+                out.append(json.loads(b))
+            except Exception:  # a corrupt line must not break resume
+                pass
+        return out
+
+    world = {}
+    for kv in _json_bullets("world"):
+        if isinstance(kv, list) and len(kv) == 2:
+            world[kv[0]] = kv[1]
     return TaskState(
         task_id=fm.get("task_id", ""), session_id=fm.get("session_id", ""),
         title=fm.get("title", ""), status=fm.get("status", "active"),
         goal=sec.get("goal", ""),
         findings=_bullets(sec.get("findings", "")),
+        requirements=[r for r in _json_bullets("requirements") if isinstance(r, dict)],
+        plan=[p for p in _json_bullets("plan") if isinstance(p, dict)],
+        mission=sec.get("mission", ""),
+        world=world,
         active_files=_bullets(sec.get("working set", "")),
         edited_files=_bullets(sec.get("edited", "")),
         edit_anchor=anchors,
