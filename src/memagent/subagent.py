@@ -14,7 +14,9 @@ so parent and child share one workspace and one sandbox.
 """
 from __future__ import annotations
 
+import copy
 import json
+import os
 
 from .access import AllAccess, ReadAllAccess
 from .events import AssistantText, ToolStarted
@@ -76,6 +78,26 @@ _READ_ONLY_TOOLS = frozenset({
 # summary, so this never reaches the parent slice — the moat is unaffected.)
 EXPLORER_READ_BUDGET = 64
 
+# EXPLORER PROFILE — reasoning intent for read-only explorer children. They NAVIGATE/READ (find files,
+# trace usages, summarize), which the model does well at low reasoning effort; running them at the parent's
+# (often "full") setting just burns wall-clock. Default "fast"; override for an A/B (set to "full" to match
+# the parent). Borrowed from Kimi Code's per-PROFILE subagent config. Applied via a per-child llm VIEW so the
+# shared parent llm is never mutated and parallel siblings never race on it.
+EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lower()
+
+
+def _profile_llm(llm, read_only: bool):
+    """The llm VIEW for a child: a read-only EXPLORER runs at EXPLORER_REASONING via a SHALLOW COPY (shares
+    the thread-safe openai client + all config; only `reasoning` is overridden — never touches the parent or
+    a sibling). Writable children use the parent llm unchanged. No-op when already at the target reasoning."""
+    if not read_only or not EXPLORER_REASONING:
+        return llm
+    if getattr(llm, "reasoning", None) == EXPLORER_REASONING:
+        return llm
+    view = copy.copy(llm)
+    view.reasoning = EXPLORER_REASONING
+    return view
+
 
 def read_only_schemas(schemas) -> list[dict]:
     """Filter a schema list down to the read-only allowlist (drops edit/shell/spawn tools)."""
@@ -127,6 +149,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         # EXPLORER_READ_BUDGET + Slice.explore_mode. max_steps bounds the explorer.
         child_state.read_budget = child_state.read_ceiling = EXPLORER_READ_BUDGET
         child_state.explore_mode = True
+    child_llm = _profile_llm(llm, read_only)   # EXPLORER profile → fast reasoning (per-child view, no mutation)
     build = make_build_slice(child_state, tools, retriever, memory, task)
 
     cap = _CaptureLast()
@@ -144,7 +167,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                   if read_only else None)
     _child_hooks.append(GuardrailHook(_guard_cfg))
     hooks = CompositeHooks(*_child_hooks)
-    result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=child_dispatch,
+    result = run_turn(build_slice=build, llm=child_llm, tools=tools, dispatch=child_dispatch,
                       hooks=hooks, max_steps=max_steps)
 
     files = ", ".join(child_state.active_files) or "(none)"

@@ -142,10 +142,13 @@ class _FakeLLM:
     def __init__(self, text, *, expect_read_only=False):
         self._text = text
         self._expect_read_only = expect_read_only
-        self.calls = 0
+        self._calls = [0]            # a list so a shallow copy (the explorer profile's per-child llm view) shares it
         self.last_tool_names = []
+    @property
+    def calls(self):
+        return self._calls[0]
     def complete(self, messages, schemas):
-        self.calls += 1
+        self._calls[0] += 1
         names = _names(schemas)
         self.last_tool_names = names
         if self._expect_read_only:
@@ -239,6 +242,23 @@ def explorer_guard_does_not_stuck_on_repeated_reads():
             break
         default.transform_tool_result("read_file", {"path": "a.py"}, "same content")
     assert blocked, "default guard should block a repeated no-progress read (explorer must differ)"
+
+
+@check
+def explorer_profile_runs_fast_reasoning_without_mutating_parent():
+    # EXPLORER profile: a read-only child runs at fast reasoning via a per-child llm VIEW; the shared parent
+    # llm is never mutated and a writable child uses the parent unchanged.
+    from types import SimpleNamespace
+    from memagent.subagent import _profile_llm, EXPLORER_REASONING
+    parent = SimpleNamespace(reasoning="full")
+    view = _profile_llm(parent, read_only=True)
+    assert view.reasoning == EXPLORER_REASONING == "fast", view.reasoning
+    assert parent.reasoning == "full", "parent llm must NOT be mutated (per-child view only)"
+    assert view is not parent, "explorer must get its OWN llm view"
+    assert _profile_llm(parent, read_only=False) is parent, "writable child uses the parent llm unchanged"
+    # already-fast parent → no needless copy
+    fast = SimpleNamespace(reasoning="fast")
+    assert _profile_llm(fast, read_only=True) is fast
 
 
 def main():
