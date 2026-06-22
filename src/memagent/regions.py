@@ -27,6 +27,9 @@ MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-deriva
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
 MAX_REQUIREMENTS = 20    # bounded STANDING REQUIREMENTS contract (count) — the moat's no-unbounded-growth
 MAX_REQ_CHARS = 200      # each requirement is ONE compact line
+MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
+MAX_PLAN_CHARS = 200     # each plan step is ONE compact line
+_PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -232,6 +235,17 @@ def render_requirements(requirements: list[dict]) -> str:
         return ""
     return "\n".join(f"- [{'x' if r.get('done') else ' '}] {r['text']}" + (" (done)" if r.get("done") else "")
                      for r in requirements)
+
+
+def render_plan(plan: list[dict]) -> str:
+    """The PLAN tier body: the model's ordered execution steps with live status (Kimi/Claude TodoWrite).
+    Numbered + status-marked ('[~]' in-progress, '[x]' done, '[ ]' pending). Self-suppresses when empty.
+    Bounded by MAX_PLAN_ITEMS (folded in slice_sink). Volatile WORKING state — distinct from STANDING
+    REQUIREMENTS (acceptance criteria): this is the step sequence and the agent's live progress through it."""
+    if not plan:
+        return ""
+    return "\n".join(f"{i}. [{_PLAN_MARK.get(it.get('status'), ' ')}] {it['step']}"
+                     for i, it in enumerate(plan, 1))
 
 
 # ── ANTI-LOOP / RECENT / CURRENT ERROR ────────────────────────────────────────
@@ -519,6 +533,7 @@ REGION_ORDER = (
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground truth — verify against it before trusting; a note is NOT proof the work is done)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
+    ("plan",           VOLATILE, lambda c: (f"# PLAN (your ordered steps & live progress — keep exactly ONE step in_progress; '[~]'=in progress, '[x]'=done, '[ ]'=pending; update with update_plan)\n{render_plan(c['s'].plan)}\n\n" if getattr(c['s'], 'plan', None) else ""), 3),
     ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
     ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),

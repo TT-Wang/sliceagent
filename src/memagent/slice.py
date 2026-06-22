@@ -64,6 +64,8 @@ from .regions import (  # noqa: F401 — re-export shims
     MAX_FINDING_CHARS,
     MAX_FINDINGS,
     MAX_OPEN_THREADS,
+    MAX_PLAN_CHARS,
+    MAX_PLAN_ITEMS,
     MAX_REQUIREMENTS,
     MAX_REQ_CHARS,
     MAX_REPORT_CHARS,
@@ -85,6 +87,7 @@ from .regions import (  # noqa: F401 — re-export shims
     render_conversation,
     render_convergence,
     render_findings,
+    render_plan,
     render_regions,
     render_requirements,
     render_reviewed,
@@ -305,6 +308,10 @@ class Slice:
     # EMPTY by default → a greeting/question has NO contract and the region self-suppresses, so a trivial
     # first message can never become a binding spec. bound-is-relevance: only what must hold at the end.
     requirements: list[dict] = field(default_factory=list)  # [{"text": str, "done": bool}], insertion order
+    # PLAN (TodoWrite) — the model's ORDERED execution steps with live status. Distinct from requirements
+    # (acceptance criteria): this is the step sequence + progress. Replace-all via the update_plan tool
+    # (folded by slice_sink). Carried by seal() (continuity), wiped by reset(). Bounded (MAX_PLAN_ITEMS).
+    plan: list[dict] = field(default_factory=list)  # [{"step": str, "status": pending|in_progress|done}]
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
@@ -384,6 +391,7 @@ class Slice:
     def reset(self, goal: str) -> None:
         self.goal = goal
         self.requirements = []   # a brand-new task starts with an EMPTY contract (model curates it in-band)
+        self.plan = []           # a brand-new task starts with an empty plan (kept by seal() within a task)
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
@@ -858,6 +866,21 @@ def slice_sink(state):
                             _hit["done"] = True
                     elif _hit:                                        # drop_requirement
                         s.requirements.remove(_hit)
+            # PLAN (TodoWrite) — fold update_plan: the model sends the FULL ordered list each call, so this
+            # REPLACES s.plan (validated + bounded). Distinct from requirements (criteria); this is the step
+            # sequence + live progress. Replace-all keeps it simple and always consistent with the model's view.
+            elif event.name == "update_plan" and not event.failing:
+                _new = []
+                for _it in (event.args.get("steps") or [])[:MAX_PLAN_ITEMS]:
+                    if not isinstance(_it, dict):
+                        continue
+                    _step = " ".join(str(_it.get("step", "")).split())[:MAX_PLAN_CHARS]
+                    _st = str(_it.get("status", "pending")).strip().lower()
+                    if _st not in ("pending", "in_progress", "done"):
+                        _st = "pending"
+                    if _step:
+                        _new.append({"step": _step, "status": _st})
+                s.plan = _new
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).

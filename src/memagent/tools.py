@@ -274,6 +274,17 @@ TOOL_SCHEMAS = [
     _fn("drop_requirement",
         "Remove a STANDING REQUIREMENT the user RETRACTED or that no longer applies. `text` must match.",
         {"text": {"type": "string"}}, ["text"]),
+    _fn("update_plan",
+        "Maintain an ordered PLAN (a TODO list) for a multi-step task. Pass the COMPLETE list of steps "
+        "every time — it REPLACES the previous plan. Keep exactly ONE step 'in_progress'; mark each 'done' "
+        "as you finish it. The plan shows in your PLAN section across turns so progress survives and the "
+        "user can follow along. Use it for non-trivial multi-step work; skip it for a single action.",
+        {"steps": {"type": "array", "description": "the full ordered step list (replaces the prior plan)",
+                   "items": {"type": "object", "properties": {
+                       "step": {"type": "string", "description": "one concrete step, imperative"},
+                       "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
+                       "required": ["step", "status"]}}},
+        ["steps"]),
 ]
 
 
@@ -329,7 +340,7 @@ class LocalToolHost:
             "terminal_close": self._t_terminal_close,
             "world_set": self._t_world_set, "world_clear": self._t_world_clear,
             "require": self._t_require, "requirement_done": self._t_requirement_done,
-            "drop_requirement": self._t_drop_requirement,
+            "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -705,6 +716,18 @@ class LocalToolHost:
         if not t:
             return ToolText("Error: drop_requirement needs the requirement 'text'.", ok=False)
         return f"REQUIREMENT dropped: {t}."
+
+    def _t_update_plan(self, args: dict) -> str:
+        # The STATE lives in the slice's PLAN tier (folded by slice_sink from this event); the handler
+        # only validates + confirms (the world_set/require pattern).
+        steps = args.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return ToolText("Error: update_plan requires a non-empty 'steps' list "
+                            "(each {step, status: pending|in_progress|done}).", ok=False)
+        n = len(steps)
+        done = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "done")
+        doing = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "in_progress")
+        return f"PLAN updated: {n} steps ({done} done, {doing} in progress) — shown in your PLAN section."
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])
