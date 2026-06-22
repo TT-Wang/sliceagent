@@ -83,10 +83,10 @@ def interrupt_renders_warning():
 @check
 def slash_completer_offers_navigation_commands():
     from prompt_toolkit.document import Document
-    comp = tui._SlashCompleter()
+    comp = tui._InputCompleter()   # no repo files wired → behaves slash-only here
     got = [c.text for c in comp.get_completions(Document("/sw", len("/sw")), None)]
     assert "/switch" in got, got
-    # a non-slash line offers nothing
+    # a non-slash line offers nothing when no repo files are wired
     assert list(comp.get_completions(Document("hello", 5), None)) == []
 
 

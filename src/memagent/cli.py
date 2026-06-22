@@ -321,7 +321,7 @@ def main() -> None:
             f"episodic={'on' if episodic is not None else 'off'} · "
             f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
             f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
-    _input = _tui.TuiInput(_stats) if _tui else None
+    _input = _tui.TuiInput(_stats, root=root) if _tui else None
     if _tui:
         _tui.banner(_console, info)
     else:
