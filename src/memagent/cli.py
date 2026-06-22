@@ -373,7 +373,10 @@ def main() -> None:
         if reviewer is not None:                            # OPT-IN: critique the turn off-thread
             reviewer.review(session.session_id)
 
-    # session end: consolidate the episodic cache into long-term memory (the cache→memory loop)
+    # session end: tear down background procs / PTY sessions (also atexit-guarded for crash/abort) so
+    # leaked servers/shells don't outlive the agent (#5).
+    base_tools.cleanup()
+    # consolidate the episodic cache into long-term memory (the cache→memory loop)
     if getattr(memory, "is_durable", False):
         memory.consolidate(session.session_id)
         print("  · consolidated session memory")
