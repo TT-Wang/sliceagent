@@ -268,11 +268,12 @@ class OpenAILLM:
         error) for providers that have none. Keeps the quirk isolated to this adapter."""
         if self.reasoning != "fast":
             return {}
+        from .model_catalog import capability
         model, base = self.model.lower(), self._base_url.lower()
         if "deepseek" in model or "deepseek" in base:
             return {"extra_body": {"thinking": {"type": "disabled"}}}  # deepseek: disable thinking
-        if model.startswith(("o1", "o3", "o4", "gpt-5")):
-            return {"reasoning_effort": "low"}                          # OpenAI reasoning models
+        if capability(self.model, self._base_url).supports_reasoning_effort:
+            return {"reasoning_effort": "low"}                          # OpenAI reasoning models (catalog)
         return {}  # unknown / non-reasoning provider → leave at provider default (graceful)
 
     def _cache_kwargs(self, messages: list[dict]) -> dict:
@@ -330,12 +331,10 @@ class OpenAILLM:
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
         kwargs: dict = dict(model=self.model, messages=messages, tools=tools, tool_choice="auto")
         if self.max_tokens:
-            # Provider quirk (isolated here per llm-agnostic): OpenAI gpt-5/o-series renamed this
-            # param to max_completion_tokens and REJECT max_tokens with a 400. Pick the right key.
-            key = ("max_completion_tokens"
-                   if self.model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
-                   else "max_tokens")
-            kwargs[key] = self.max_tokens
+            # Provider quirk (now sourced from the model catalog — gpt-5/o-series renamed this param to
+            # max_completion_tokens and REJECT max_tokens with a 400). One source of truth, not inline.
+            from .model_catalog import capability
+            kwargs[capability(self.model, self._base_url).tokens_param] = self.max_tokens
         self._merge_kwargs(kwargs, self._cache_routing_kwargs())  # session-stable cache routing (0 added tokens)
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
