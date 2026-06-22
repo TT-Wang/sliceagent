@@ -659,7 +659,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     return render_regions(ctx)
 
 
-def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = ""):
+def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = "", system_extra: str = ""):
     """The reconstruction seam the loop calls ONCE per turn to build the SEED. Returns [system, user]
     messages; within the turn the loop accumulates native messages (no per-step rebuild).
 
@@ -746,9 +746,13 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # the active topic's goal. Encode that invariant structurally: everything constant is concatenated
     # ONCE here, so _system() is just prefix+goal — a miscomputed-each-turn block can't silently break
     # cache stability. (Pure reassociation of the former in-_system concat: byte-identical output.)
+    # AGENT ROLE — a per-agent system-prompt layer for a named subagent (Kimi-style extra-system-prompt).
+    # Empty for the top-level agent; set by run_subagent from the spawned AgentSpec.system_prompt.
+    agent_block = ("\n\n# AGENT ROLE (you are running as a named subagent for this sub-task)\n" + system_extra
+                   ) if system_extra else ""
     system_prefix = (
         SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
-        + env_line + environment_block + workspace_block + conventions_block
+        + env_line + environment_block + workspace_block + conventions_block + agent_block
         + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
     )
 
