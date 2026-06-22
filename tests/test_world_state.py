@@ -96,7 +96,10 @@ def slice_contains_repo_map_and_live_worktree():
     _, build = _build(wd)
     msgs = build()
     system, user = msgs[0]["content"], msgs[1]["content"]
-    assert "# REPO MAP" in user and "core.py" in user, "repo map missing from slice"
+    # REPO MAP is session-static → it rides the cacheable SYSTEM prefix (shared across turns + subagents),
+    # NOT the volatile user slice; live worktree stays in the user slice.
+    assert "# REPO MAP" in system and "core.py" in system, "repo map should be in the cacheable SYSTEM prefix"
+    assert "# REPO MAP" not in user, "repo map must NOT be in the volatile user slice anymore"
     assert "# WORKSPACE STATE (LIVE" in user and "modified: pkg/core.py" in user, "live worktree missing"
     # PROJECT facts (static) live in the SYSTEM message; live git does NOT (cache stability)
     assert "# PROJECT" in system, "static project facts missing from system msg"

@@ -746,13 +746,20 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # the active topic's goal. Encode that invariant structurally: everything constant is concatenated
     # ONCE here, so _system() is just prefix+goal — a miscomputed-each-turn block can't silently break
     # cache stability. (Pure reassociation of the former in-_system concat: byte-identical output.)
+    # REPO MAP lives in the BYTE-STABLE system prefix (not the volatile user slice): it's session-static, so
+    # placing it before the per-turn goal / per-agent role makes it a prompt-cache PREFIX shared by every
+    # turn AND every subagent (Kimi-style prefix-sharing) — instead of full-price ~11k re-sent each turn
+    # because the volatile OPEN FILES preceded it in the user message. Comes BEFORE agent_block so the parent
+    # and its children share the identical prefix up to (and including) the map.
+    repo_map_block = ("\n\n# REPO MAP (the project's file structure — your resident map; navigate from here, "
+                      "do NOT re-list the tree)\n" + repo_map_text) if repo_map_text else ""
     # AGENT ROLE — a per-agent system-prompt layer for a named subagent (Kimi-style extra-system-prompt).
     # Empty for the top-level agent; set by run_subagent from the spawned AgentSpec.system_prompt.
     agent_block = ("\n\n# AGENT ROLE (you are running as a named subagent for this sub-task)\n" + system_extra
                    ) if system_extra else ""
     system_prefix = (
         SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
-        + env_line + environment_block + workspace_block + conventions_block + agent_block
+        + env_line + environment_block + workspace_block + conventions_block + repo_map_block + agent_block
         + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
     )
 
@@ -786,7 +793,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
         cache_manifest = render_cache_manifest(manifest_refs)
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
-                            hint_text, worktree, repo_map_text, cache_manifest,
+                            hint_text, worktree, "", cache_manifest,  # repo_map now rides the cacheable SYSTEM prefix
                             max_findings=_NO_CAP)
         return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
 

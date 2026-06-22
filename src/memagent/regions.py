@@ -513,10 +513,8 @@ REGION_ORDER = (
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
-    # REPO MAP — the resident structural map of the project (cache tier B): always present + bounded, so a
-    # broad task navigates from here instead of re-listing/find. STABLE (built once/session → cache-warm);
-    # new files mid-task show in the LIVE worktree region. Suppresses itself when empty.
-    ("repo_map",       STABLE,   lambda c: (f"\n# REPO MAP (the project's file structure — your resident map; navigate from here, do NOT re-list the tree)\n{c['repo_map']}\n\n" if c.get("repo_map") else ""), 1),
+    # REPO MAP moved to the BYTE-STABLE system prefix (make_build_slice) so it's a prompt-cache PREFIX
+    # shared across every turn + subagent, instead of full-price in the volatile user slice. (Region removed.)
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
