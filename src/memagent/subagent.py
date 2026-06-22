@@ -19,7 +19,7 @@ import json
 import os
 
 from .access import AllAccess, ReadAllAccess
-from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, AgentSpec  # named-agent registry (file-defined kinds)
+from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, SUBAGENT_EXCLUDED_TOOLS, AgentSpec  # named-agent registry
 from .events import AssistantText, ToolStarted
 from .slice import one_line
 
@@ -223,11 +223,13 @@ class SubagentHost:
 
     def schemas(self) -> list[dict]:
         s = list(self.inner.schemas())
-        if self.spec is not None and self.spec.tools is not None:
-            # a restricted CHILD (explorer, or any custom kind with an allowlist) sees ONLY its tools —
-            # no edit/shell/spawn beyond the allowlist (an explorer's list has none → cannot recurse).
-            allow = set(self.spec.tools)
-            return [x for x in s if x.get("function", {}).get("name") in allow]
+        if self.spec is not None:
+            # CHILD host: never expose ask_user (a subagent must not stall on the END-USER — ambiguity is the
+            # parent's job; it returns a summary instead). Then restrict to the kind's allowlist if it has one.
+            s = [x for x in s if x.get("function", {}).get("name") not in SUBAGENT_EXCLUDED_TOOLS]
+            if self.spec.tools is not None:
+                allow = set(self.spec.tools)
+                return [x for x in s if x.get("function", {}).get("name") in allow]
         if self.depth < self.max_depth:  # parent (or a general child) — offer delegation while depth remains
             s.append(_SUBAGENT_SCHEMA)
             s.append(_EXPLORE_SCHEMA)
@@ -263,6 +265,11 @@ class SubagentHost:
         return self.inner.read_text(path)
 
     def run(self, name: str, args: dict) -> str:
+        if self.spec is not None and name in SUBAGENT_EXCLUDED_TOOLS:
+            # defense-in-depth: even if the model calls a tool it was not offered, a CHILD can't ask the
+            # end-user — return a directive instead of blocking on input (which would stall the parent).
+            return ("Error: a subagent cannot ask the user. Decide on a reasonable assumption, proceed, and "
+                    "state the assumption in your summary; the parent will handle any real ambiguity.")
         if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
             return self.inner.run(name, args)
         if self.depth >= self.max_depth:

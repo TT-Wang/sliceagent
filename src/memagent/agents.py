@@ -17,6 +17,11 @@ from dataclasses import dataclass
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
 READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history")
 
+# Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A
+# subagent must not stop to ask the END-USER — ambiguity is the parent's job; a child that blocks on input
+# is a stall (and racy/meaningless when several run in parallel). It returns its summary instead.
+SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user"})
+
 # Mutating tools — an agent whose allowlist includes ANY of these is "writable" (globally serialized vs
 # other writers); an allowlist with none of them is read-only (parallelizes as a swarm).
 WRITE_TOOLS = frozenset({

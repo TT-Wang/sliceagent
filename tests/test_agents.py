@@ -97,6 +97,33 @@ def custom_agent_child_tools_restricted_to_allowlist():
     assert names == ["read_file"], names   # _Inner only offers read_file; grep absent there but allowlisted
 
 
+class _InnerWithAsk:
+    def schemas(self):
+        return [{"type": "function", "function": {"name": n, "parameters": {}}}
+                for n in ("read_file", "edit_file", "ask_user")]
+    def accesses(self, n, a):
+        return []
+    def run(self, n, a):
+        return f"inner:{n}"
+
+
+@check
+def subagent_cannot_ask_user_but_parent_can():
+    # CHILD (any spec) must not be offered ask_user; a general child keeps its other (writable) tools.
+    child = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None, policy=None,
+                         max_depth=1, depth=1, spec=BUILTIN_AGENTS["general"])
+    names = [s["function"]["name"] for s in child.schemas()]
+    assert "ask_user" not in names, names
+    assert "edit_file" in names, "a general child keeps its writable tools — only ask_user is barred"
+    # defense-in-depth: even a hallucinated ask_user call is barred, not executed (no user prompt → no stall)
+    out = child.run("ask_user", {"question": "?"})
+    assert out.startswith("Error: a subagent cannot ask the user"), out
+    # the top-level agent (parent host, spec=None) CAN still ask the user
+    parent = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None, policy=None,
+                          max_depth=1, depth=0)
+    assert "ask_user" in [s["function"]["name"] for s in parent.schemas()]
+
+
 def main():
     failed = 0
     for fn in CHECKS:
