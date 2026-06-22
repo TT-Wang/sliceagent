@@ -66,6 +66,8 @@ class TaskState:
     status: str = "active"
     goal: str = ""
     findings: list[str] = field(default_factory=list)
+    requirements: list[dict] = field(default_factory=list)  # STANDING REQUIREMENTS contract (carried)
+    world: dict = field(default_factory=dict)               # agent WORLD MODEL (carried; was dropped on resume)
     active_files: list[str] = field(default_factory=list)
     edited_files: list[str] = field(default_factory=list)   # list on the wire; a set in the Slice
     edit_anchor: dict[str, str] = field(default_factory=dict)

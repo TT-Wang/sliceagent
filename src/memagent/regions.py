@@ -25,6 +25,8 @@ MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator
 MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of parked topics
 MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
+MAX_REQUIREMENTS = 20    # bounded STANDING REQUIREMENTS contract (count) — the moat's no-unbounded-growth
+MAX_REQ_CHARS = 200      # each requirement is ONE compact line
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -218,6 +220,18 @@ def render_world(world: dict) -> str:
         else:
             parts.append(f"- {k}: {v}")
     return "\n".join(parts)
+
+
+def render_requirements(requirements: list[dict]) -> str:
+    """The STANDING REQUIREMENTS contract body: the constraints that must hold when the task is DONE.
+    Self-suppresses when empty (a greeting/question has no contract → no bytes, no binding spec — the
+    structural kill for the 'first message becomes the spec' bug). Append-order + status-flip-in-place
+    (open '- [ ]', satisfied '- [x] … (done)') so a change touches only its own line and unrelated
+    turns stay byte-identical (warm STABLE prefix). Bounded by MAX_REQUIREMENTS (folded in slice_sink)."""
+    if not requirements:
+        return ""
+    return "\n".join(f"- [{'x' if r.get('done') else ' '}] {r['text']}" + (" (done)" if r.get("done") else "")
+                     for r in requirements)
 
 
 # ── ANTI-LOOP / RECENT / CURRENT ERROR ────────────────────────────────────────
@@ -491,10 +505,12 @@ STABLE, VOLATILE = "stable", "volatile"
 # # YOUR NOTES / the # OPEN USER REPORT blocker / the # REPEATED-FAILING header all live in the
 # literals below — relocated verbatim from render_slice, not duplicated.)
 REGION_ORDER = (
-    # DURABLE TASK SPEC — the original request, kept resident every turn so standing requirements (exact
-    # signature, output format, stated rules) survive continue_topic + the seal. Rendered only once the
-    # current directive has MOVED off the original (multi-turn); on turn 1 the system TASK already carries it.
-    ("task_spec",      STABLE,   lambda c: (f"# TASK SPEC (the ORIGINAL request — these requirements hold for the WHOLE task; honor them EXACTLY: an exact function name/signature, output format, or stated rule is binding)\n{c['s'].task_spec}\n\n" if getattr(c['s'], 'task_spec', '') and c['s'].task_spec != c['s'].goal else ""), 0),
+    # STANDING REQUIREMENTS — the live contract that must hold when the task is DONE: a model-curated set
+    # of constraints (exact signature, output format, stated rule, an added requirement), maintained in-band
+    # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
+    # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
+    # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
+    ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP — the resident structural map of the project (cache tier B): always present + bounded, so a

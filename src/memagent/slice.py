@@ -64,6 +64,8 @@ from .regions import (  # noqa: F401 — re-export shims
     MAX_FINDING_CHARS,
     MAX_FINDINGS,
     MAX_OPEN_THREADS,
+    MAX_REQUIREMENTS,
+    MAX_REQ_CHARS,
     MAX_REPORT_CHARS,
     EXPLORE_NUDGE_AFTER,
     READONLY_NUDGE_AFTER,
@@ -84,6 +86,7 @@ from .regions import (  # noqa: F401 — re-export shims
     render_convergence,
     render_findings,
     render_regions,
+    render_requirements,
     render_reviewed,
     render_skills,
     render_threads,
@@ -137,7 +140,10 @@ SYSTEM_PROMPT = (
     "change in the environment — do not merely describe it. Act when it is a task; "
     "converse when it is conversation. When the request specifies an EXACT name, function signature, API, "
     "or interface, honor it VERBATIM — do not rename or re-shape what the user asked for (a caller or test "
-    "depends on that exact name).\n\n"
+    "depends on that exact name). When the user states a STANDING requirement that must hold at the end (an "
+    "exact name/signature, an output format, a rule, or a constraint added mid-task), record it with "
+    "require(...) so it persists as your contract across turns, and requirement_done(...) once you have "
+    "VERIFIED it — durable constraints only, never transient sub-steps or chit-chat.\n\n"
     "<ask>\n"
     "If a request is AMBIGUOUS, or you have FAILED or been blocked and are unsure how to proceed, call the "
     "ask_user tool with ONE concise question (optionally up to ~4 short options) and wait for the answer — "
@@ -291,11 +297,14 @@ class Slice:
     # DURABLE TASK SPEC — the original defining request for this topic (the first user message), kept
     # WHOLE and resident for the life of the topic. Standing requirements live here (an exact function
     # name/signature, output format, "use British spelling", "don't use lib X", an invariant) — they are
-    # ALWAYS relevant to the task, so they must never be truncated by a per-message cap, reset by a new
-    # directive (continue_topic moves `goal`, not this), or dropped by the turn SEAL. Cleared only by a
-    # real task change (reset/new_topic). bound-is-relevance applied to the task itself: the spec is the
-    # one thing that is relevant the whole way through. ONE bounded field (the request, not a transcript).
-    task_spec: str = ""
+    # STANDING REQUIREMENTS — the live contract that must hold when the task is DONE: a model-CURATED set
+    # of constraints (an exact name/signature, an output format, a stated rule, an added requirement), NOT
+    # the frozen first message. The model maintains it in-band via require / requirement_done /
+    # drop_requirement (folded by slice_sink, the world_set seam — zero extra LLM call). CARRIED across
+    # turns (the seal never touches it; continue_topic moves `goal`, not this), wiped only by reset/new_topic.
+    # EMPTY by default → a greeting/question has NO contract and the region self-suppresses, so a trivial
+    # first message can never become a binding spec. bound-is-relevance: only what must hold at the end.
+    requirements: list[dict] = field(default_factory=list)  # [{"text": str, "done": bool}], insertion order
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
@@ -374,7 +383,7 @@ class Slice:
 
     def reset(self, goal: str) -> None:
         self.goal = goal
-        self.task_spec = goal   # a brand-new task: the defining request IS the durable spec
+        self.requirements = []   # a brand-new task starts with an EMPTY contract (model curates it in-band)
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
@@ -821,6 +830,23 @@ def slice_sink(state):
                     s.world.pop(_k, None)
                 else:
                     s.world.clear()
+            # STANDING REQUIREMENTS — fold require/requirement_done/drop_requirement into the carried
+            # contract (same seam; the handler only confirms). Text-matched + idempotent so a re-emit is a
+            # no-op (byte-stable prefix); append-only + status-flip-in-place so a change never reorders
+            # existing lines; no match on done/drop = no-op (never silently corrupt the contract).
+            elif event.name in ("require", "requirement_done", "drop_requirement") and not event.failing:
+                _t = " ".join(str(event.args.get("text", "")).split())[:MAX_REQ_CHARS]
+                if _t:
+                    _hit = next((r for r in s.requirements if r["text"].lower() == _t.lower()), None)
+                    if event.name == "require":
+                        if _hit is None:
+                            s.requirements.append({"text": _t, "done": False})
+                            del s.requirements[:-MAX_REQUIREMENTS]   # bound: keep the most recent N
+                    elif event.name == "requirement_done":
+                        if _hit:
+                            _hit["done"] = True
+                    elif _hit:                                        # drop_requirement
+                        s.requirements.remove(_hit)
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).

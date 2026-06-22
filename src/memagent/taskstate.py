@@ -20,6 +20,8 @@ def slice_to_task_state(s: Slice, task_id: str, *, session_id: str = "", title: 
         task_id=task_id, session_id=session_id,
         title=title or one_line(s.goal, 60), status=status, goal=s.goal,
         findings=list(s.findings),
+        requirements=[dict(r) for r in s.requirements],   # carry the standing contract across resume
+        world=dict(s.world),                              # carry the agent WORLD MODEL (was silently lost)
         active_files=list(s.active_files),
         edited_files=sorted(s.edited_files),                              # byte-stable across checkpoints
         edit_anchor={p: a for p, a in s.edit_anchor.items() if p in s.active_files},  # consistency
@@ -32,6 +34,8 @@ def task_state_to_slice(ts: TaskState, s: Slice | None = None) -> Slice:
     s = s or Slice()
     s.reset(ts.goal)                 # zeroes transient tiers (recent/action_log/active_skills/...)
     s.findings = list(ts.findings)
+    s.requirements = [dict(r) for r in getattr(ts, "requirements", [])]   # restore the standing contract
+    s.world = dict(getattr(ts, "world", {}))                              # restore the WORLD MODEL
     s.active_files = list(ts.active_files)
     s.edited_files = set(ts.edited_files)
     s.edit_anchor = dict(ts.edit_anchor)
