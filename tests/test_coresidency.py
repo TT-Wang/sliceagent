@@ -83,8 +83,7 @@ def open_files_lead_volatile_tiers():
     s = Slice(); s.reset("t")
     s.last_error = "boom"
     out = render_slice(s, "ARTIFACTS")
-    # stable bulk (OPEN FILES) must precede the volatile, recency-salient tail (RECENT / CURRENT ERROR)
-    assert out.index("# OPEN FILES") < out.index("# RECENT"), "OPEN FILES must lead RECENT (cache prefix)"
+    # stable bulk (OPEN FILES) must precede the volatile, recency-salient tail (CURRENT ERROR)
     assert out.index("# OPEN FILES") < out.index("# CURRENT ERROR"), "OPEN FILES must lead CURRENT ERROR"
 
 

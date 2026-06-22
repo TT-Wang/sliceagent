@@ -31,7 +31,14 @@ from .events import (
 )
 from .guidance import BUDGET_EXHAUSTED, STUCK
 from .hooks import Hooks
+from .registry import ToolText
 from .scheduler import run_scheduled
+
+
+def _as_text(out):
+    """Preserve a ToolText (str subclass carrying .ok); coerce anything non-str defensively. Used so the
+    scheduler step does not strip the registry's structured success flag back to a plain string."""
+    return out if isinstance(out, str) else str(out)
 
 
 # Anti-spin floor: after this many guardrail BLOCKS in one turn the loop stops and hands control back
@@ -44,6 +51,12 @@ STUCK_BLOCK_BUDGET = 3
 # With one loop mode there's no tighten-ladder fallback, so we fail SOFT here instead of crashing.
 OVERFLOW_MSG = ("The working context overflowed and could not be compacted further. Stopping this turn — "
                 "try a narrower request, or reduce the number of files in play, and continue.")
+
+# Breadcrumb inserted ONCE when overflow compaction drops the oldest exchange, so the loss is never
+# silent: the model is told it happened and how to recover (the episode sink archived it losslessly).
+OVERFLOW_COMPACTED = ("[context note: the oldest step(s) of this turn were compacted out to fit the window. "
+                      "If you need details from an early step, re-derive them or call recall_history if it is "
+                      "available — do not assume that work is undone.]")
 
 
 def _final_answer(llm, msgs: list, tools, dispatch, guidance: str) -> dict:
@@ -118,9 +131,12 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
         decision = hooks.authorize_tool(tc.name, tc.args)
         if not decision.allow:
             blocked += 1
-            tasks.append(([], (lambda d=decision: f"Error: blocked by policy: {d.reason or 'denied'}")))
+            tasks.append(([], (lambda d=decision: ToolText(f"Error: blocked by policy: {d.reason or 'denied'}", ok=False))))
         else:
-            tasks.append((tools.accesses(tc.name, tc.args), (lambda tc=tc: str(tools.run(tc.name, tc.args)))))
+            # preserve ToolText (a str subclass carrying .ok) — coercing with str() here would strip the
+            # success flag and force the failing check back onto the prose-match it is meant to replace.
+            tasks.append((tools.accesses(tc.name, tc.args),
+                          (lambda tc=tc: _as_text(tools.run(tc.name, tc.args)))))
         # real OpenAI tool_calls carry an id; synthesize a stable index-based one if absent (e.g. test
         # fakes / a provider that omits it) so accumulate's assistant.tool_calls ↔ tool messages still match.
         metas.append((_tool_call_id(tc, len(metas)), tc.name, tc.args))
@@ -131,7 +147,12 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
         transformed = hooks.transform_tool_result(name, args, out)  # mutating seam (plugins/redaction)
         if transformed is not None:
             out = transformed
-        failing = out.startswith("Error") or out.startswith("Exit code")
+        # M: trust the STRUCTURED success flag the registry attached (ToolText.ok) — a tool that returned
+        # normally succeeded even if its output begins with "Error"/"Exit code" (a grep hit, a log line).
+        # Fall back to the old prose-match ONLY for plain strings with no flag (a plugin transform that
+        # returned a bare str, an MCP tool, or a test fake).
+        ok = getattr(out, "ok", None)
+        failing = (out.startswith("Error") or out.startswith("Exit code")) if ok is None else (not ok)
         dispatch(ToolResult(name, args, out, failing))
         results.append({"id": tcid, "name": name, "args": args, "output": out, "failing": failing})
     return blocked, results
@@ -168,21 +189,22 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     slice mutation (which would never re-render): prepare_messages is applied per llm.complete, and a
     continue-hook's `feedback` (e.g. the Oracle's test failure) is appended as the model's next input.
 
-    Every NON-clean exit (max_steps, stuck, token budget, hook block, overflow, abort) routes through ONE
+    Every NON-clean exit — max_steps, stuck, token budget, hook block, overflow, abort, AND any
+    UNEXPECTED internal error (a non-retryable llm failure, a throwing build_slice) — routes through ONE
     helper, _park: honest reason + exactly one TurnInterrupted (+ an ACCOUNTED closeout where another model
     call is affordable). A budget/hook stop PARKS — never `end_turn` (the caller checkpoints end_turn⇒done).
-    Overflow compacts the oldest WHOLE exchange; a seed that alone overflows parks soft."""
+    Overflow compacts the oldest WHOLE exchange; a seed that alone overflows parks soft.
+
+    (Known deferred — M: failing-tool detection in run_tool_batch is still a prose match, not a structured
+    ToolHost.run ok-flag, so a legit tool output beginning with "Error"/"Exit code" can false-flag.)"""
     hooks = hooks or Hooks()
     hooks.reset_for_turn()  # clear per-turn guards ONCE per user task (not per step)
     total = {"prompt_tokens": 0, "completion_tokens": 0}
     steps = 0
     total_blocked = 0
     said_anything = False    # did the turn emit ANY assistant text? (never end truly silent)
-
-    schemas = tools.schemas() if hasattr(tools, "schemas") else []  # stable per session → hoist once
-    messages = list(build_slice())   # SEED — built ONCE, stored RAW (prepare_messages applies per-call)
-    seed_len = len(messages)         # never compact below the seed
-    dispatch(SliceBuilt(messages[-1]["content"], messages))
+    messages: list = []      # defined BEFORE the seed build so _park's closure is safe even if it throws
+    seed_len = 0
 
     def _account(usage: dict) -> None:
         total["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -190,7 +212,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
 
     def _park(reason: str, msg: str | None, *, closeout: bool = True) -> TurnResult:
         """The ONE non-clean exit: an optional ACCOUNTED closeout, then exactly one TurnInterrupted."""
-        if closeout and msg is not None:
+        if closeout and msg is not None and messages:
             try:
                 cmsgs = _prepared(hooks, messages + [{"role": "user", "content": "# TURN IS ENDING — " + msg
                     + " Give your best answer/summary NOW (what you did, what you verified, what remains) from "
@@ -202,85 +224,110 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         dispatch(TurnInterrupted(reason, message=msg))
         return TurnResult(reason, steps, total)
 
-    while True:
-        if signal is not None and signal.is_set():
-            return _park("aborted", None, closeout=False)
-        if steps >= max_steps:
-            return _park("max_steps", BUDGET_EXHAUSTED("max_steps"))
+    # The ENTIRE turn (seed build + loop) is wrapped so EVERY non-clean exit routes through _park — even
+    # ones we did not anticipate: a non-retryable llm error past with_retry, or a throwing build_slice /
+    # retriever / probe. The session must NEVER die uncaught with no TurnInterrupted (Q + R).
+    try:
+        schemas = tools.schemas() if hasattr(tools, "schemas") else []  # stable per session → hoist once
+        messages = list(build_slice())   # SEED — built ONCE, stored RAW (prepare_messages applies per-call)
+        seed_len = len(messages)         # never compact below the seed
+        seed_view = _prepared(hooks, messages)  # dispatch what the model will SEE (== messages unless a hook injects)
+        dispatch(SliceBuilt(seed_view[-1]["content"], seed_view))
 
-        steps += 1
-        before = hooks.before_step(steps)
-        if before and before.get("block"):
-            # a hook signalled "block this step" — PARK gracefully (closeout would re-block), never crash.
-            return _park("blocked", before.get("reason") or "step blocked by a hook", closeout=False)
-        dispatch(StepBegin(steps))
+        while True:
+            if signal is not None and signal.is_set():
+                return _park("aborted", None, closeout=False)
+            if steps >= max_steps:
+                return _park("max_steps", BUDGET_EXHAUSTED("max_steps"))
 
-        # The whole step is interrupt-guarded: ctrl-C anywhere — the blocking llm.complete OR a slow tool
-        # in run_tool_batch (a hung run_command) — aborts the turn cleanly instead of crashing it.
-        try:
-            # overflow → compact the OLDEST WHOLE exchange (assistant + ALL its tool replies; a fixed
-            # 2-window would orphan tool messages on parallel calls → invalid sequence → provider 400).
-            # If the SEED itself overflows (nothing left to compact), fail SOFT — no tighten ladder exists.
-            overflow_tries = 0
-            while True:
-                try:
-                    resp = with_retry(
-                        lambda: llm.complete(_prepared(hooks, messages), schemas),
-                        is_retryable=getattr(llm, "is_retryable", None), dispatch=dispatch,
-                    )
-                    break
-                except ContextOverflow:
-                    if len(messages) <= seed_len or overflow_tries >= 4:
-                        return _park("overflow", OVERFLOW_MSG, closeout=False)
-                    end = seed_len + 1
-                    while end < len(messages) and messages[end].get("role") == "tool":
-                        end += 1
-                    overflow_tries += 1
-                    del messages[seed_len:end]
-                    dispatch(SliceTightened(level=overflow_tries))
+            steps += 1
+            before = hooks.before_step(steps)
+            if before and before.get("block"):
+                # a hook signalled "block this step" — PARK gracefully (closeout would re-block), never crash.
+                return _park("blocked", before.get("reason") or "step blocked by a hook", closeout=False)
+            dispatch(StepBegin(steps))
 
-            usage = resp.usage or {}
-            _account(usage)
-            budget_stop = bool((hooks.record_step_usage(usage) or {}).get("stop_turn"))
-            if resp.content:
-                dispatch(AssistantText(resp.content))
-                said_anything = True
-            stop = _normalize_stop(resp)
+            # The step is interrupt-guarded: ctrl-C anywhere — the blocking llm.complete OR a slow tool in
+            # run_tool_batch (a hung run_command) — aborts the turn cleanly instead of crashing it.
+            try:
+                # overflow → compact the OLDEST WHOLE exchange (assistant + ALL its tool replies; a fixed
+                # 2-window would orphan tool messages on parallel calls → invalid sequence → provider 400).
+                # If the SEED itself overflows (nothing left to compact), fail SOFT — no tighten ladder.
+                overflow_tries = 0
+                compacted = False   # have we inserted the "oldest steps compacted" breadcrumb yet?
+                while True:
+                    try:
+                        resp = with_retry(
+                            lambda: llm.complete(_prepared(hooks, messages), schemas),
+                            is_retryable=getattr(llm, "is_retryable", None), dispatch=dispatch,
+                        )
+                        break
+                    except ContextOverflow:
+                        floor = seed_len + (1 if compacted else 0)  # keep the breadcrumb pinned just below the seed
+                        if len(messages) <= floor or overflow_tries >= 4:
+                            return _park("overflow", OVERFLOW_MSG, closeout=False)
+                        end = floor + 1
+                        while end < len(messages) and messages[end].get("role") == "tool":
+                            end += 1
+                        del messages[floor:end]   # drop the oldest WHOLE exchange (assistant + its tool replies)
+                        overflow_tries += 1
+                        if not compacted:   # breadcrumb ONCE so the drop is never silent (lossless-by-default)
+                            messages.insert(seed_len, {"role": "user", "content": OVERFLOW_COMPACTED})
+                            compacted = True
+                        dispatch(SliceTightened(level=overflow_tries))
 
-            if budget_stop:
-                # F: a token-budget stop is a PARK, never end_turn/done. Append the final content (never a
-                # dangling tool_calls); no closeout — we're already at the ceiling.
+                usage = resp.usage or {}
+                _account(usage)
+                budget_stop = bool((hooks.record_step_usage(usage) or {}).get("stop_turn"))
                 if resp.content:
-                    messages.append({"role": "assistant", "content": resp.content})
-                dispatch(StepEnd(steps, usage, "token_budget"))
+                    dispatch(AssistantText(resp.content))
+                    said_anything = True
+                stop = _normalize_stop(resp)
+
+                if budget_stop:
+                    # F: a token-budget stop is a PARK, never end_turn/done. Append the final content (never
+                    # a dangling tool_calls); no closeout — we're already at the ceiling.
+                    if resp.content:
+                        messages.append({"role": "assistant", "content": resp.content})
+                    dispatch(StepEnd(steps, usage, "token_budget"))
+                    return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
+
+                if stop != "tool_use":
+                    # the LLM ended the while(true): append its FINAL text only — never a dangling tool_calls.
+                    if resp.content:
+                        messages.append({"role": "assistant", "content": resp.content})
+                    dispatch(StepEnd(steps, usage, stop))
+                    cont = hooks.should_continue_after_stop(stop)  # Oracle/verify: feedback rides the message channel
+                    if cont and cont.get("continue"):
+                        messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
+                        continue
+                    if not said_anything:   # never end the turn truly silent (e.g. empty end_turn after tools)
+                        dispatch(AssistantText("Done — no summary to add."))
+                    dispatch(TurnEnd(stop, steps, total))   # the ONE clean-exit event
+                    return TurnResult(stop, steps, total)
+
+                # tool_use: accumulate the assistant turn (with tool_calls), run, accumulate the tool results
+                messages.append(_assistant_message(resp))
+                blocked, results = run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
+                total_blocked += blocked
+                for r in results:
+                    messages.append({"role": "tool", "tool_call_id": r["id"], "content": r["output"]})
+                dispatch(StepEnd(steps, usage, "tool_use"))
+            except KeyboardInterrupt:
+                return _park("aborted", None, closeout=False)
+
+            after = hooks.after_step(steps, usage, "tool_use")
+            if after and after.get("stop_turn"):
                 return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
-
-            if stop != "tool_use":
-                # the LLM ended the while(true): append its FINAL text only — never a dangling tool_calls.
-                if resp.content:
-                    messages.append({"role": "assistant", "content": resp.content})
-                dispatch(StepEnd(steps, usage, stop))
-                cont = hooks.should_continue_after_stop(stop)  # Oracle/verify: feedback rides the message channel
-                if cont and cont.get("continue"):
-                    messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
-                    continue
-                if not said_anything:   # never end the turn truly silent (e.g. empty end_turn after tools)
-                    dispatch(AssistantText("Done — no summary to add."))
-                dispatch(TurnEnd(stop, steps, total))   # the ONE clean-exit event
-                return TurnResult(stop, steps, total)
-
-            # tool_use: accumulate the assistant turn (with tool_calls), run, accumulate the tool results
-            messages.append(_assistant_message(resp))
-            blocked, results = run_tool_batch(resp.tool_calls, tools, dispatch, hooks)
-            total_blocked += blocked
-            for r in results:
-                messages.append({"role": "tool", "tool_call_id": r["id"], "content": r["output"]})
-            dispatch(StepEnd(steps, usage, "tool_use"))
-        except KeyboardInterrupt:
-            return _park("aborted", None, closeout=False)
-
-        after = hooks.after_step(steps, usage, "tool_use")
-        if after and after.get("stop_turn"):
-            return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
-        if total_blocked >= STUCK_BLOCK_BUDGET:
-            return _park("stuck", STUCK)
+            if total_blocked >= STUCK_BLOCK_BUDGET:
+                return _park("stuck", STUCK)
+    except KeyboardInterrupt:
+        # ctrl-C during SETUP (build_slice/schemas), before the step's own interrupt guard is in scope.
+        return _park("aborted", None, closeout=False)
+    except Exception as e:  # noqa: BLE001 — Q + R: any unexpected error PARKS, never crashes the session.
+        import os as _os
+        if _os.environ.get("MEMAGENT_DEBUG_TRACE"):  # opt-in traceback so a parked 'error' is diagnosable
+            import sys as _sys
+            import traceback as _tb
+            _tb.print_exc(file=_sys.stderr)
+        return _park("error", f"an internal error ended the turn ({type(e).__name__})", closeout=False)

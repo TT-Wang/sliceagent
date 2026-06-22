@@ -197,7 +197,8 @@ class NullMemory:
         return []
 
     def search_episodes(self, query: str, *, limit: int = 5,
-                        exclude_session: str | None = None) -> list[dict]:
+                        exclude_session: str | None = None,
+                        only_session: str | None = None) -> list[dict]:
         return []
 
     def checkpoint_task(self, task: TaskState) -> None:
@@ -323,15 +324,17 @@ class MememMemory:
             pass
 
     def search_episodes(self, query: str, *, limit: int = 5,
-                        exclude_session: str | None = None) -> list[dict]:
-        """Cross-session episode discovery (FTS5). Returns bounded hit dicts (see
-        search_index.EpisodeIndex.search) or [] when the index is unavailable. This is the
-        ACROSS-sessions counterpart to read_episodes (single-session). Never raises."""
+                        exclude_session: str | None = None,
+                        only_session: str | None = None) -> list[dict]:
+        """Episode discovery (FTS5). `exclude_session` => cross-session recall; `only_session` =>
+        within-session content recall of the long tail (turns past the manifest/index window).
+        Returns bounded hit dicts (see search_index.EpisodeIndex.search) or [] when unavailable."""
         idx = self._episode_index()
         if idx is None:
             return []
         try:
-            return idx.search(query, limit=limit, exclude_session=exclude_session)
+            return idx.search(query, limit=limit, exclude_session=exclude_session,
+                              only_session=only_session)
         except Exception:
             return []
 

@@ -191,10 +191,9 @@ class ToolCallGuardrail:
                 code="repeated_exact_failure",
                 message=(
                     f"Loop blocked: '{tool_name}' has already failed {exact_count} times this "
-                    f"turn with these EXACT arguments. You have no record of those failures "
-                    f"(your context is rebuilt each turn) — they happened. Do NOT retry it "
-                    f"unchanged. Read CURRENT ERROR and OPEN FILES, then either fix the root "
-                    f"cause with a DIFFERENT call (different args/path/command, or a different "
+                    f"turn with these EXACT arguments — they are in the transcript above. Do NOT "
+                    f"retry it unchanged. Read CURRENT ERROR and OPEN FILES, then either fix the "
+                    f"root cause with a DIFFERENT call (different args/path/command, or a different "
                     f"tool), or, if the work is already complete, write the final summary and "
                     f"make NO tool call."
                 ),
@@ -211,9 +210,9 @@ class ToolCallGuardrail:
                     message=(
                         f"Loop blocked: this read-only '{tool_name}' call has returned the SAME "
                         f"result {record[1]} times this turn. Repeating it cannot reveal anything "
-                        f"new. Use the result already shown in OPEN FILES / RECENT, or change the "
-                        f"query/path. If you have what you need, act on it or write the final "
-                        f"summary."
+                        f"new. Use the result already shown in OPEN FILES or the transcript above, "
+                        f"or change the query/path. If you have what you need, act on it or write "
+                        f"the final summary."
                     ),
                     tool_name=tool_name,
                     count=record[1],
@@ -252,11 +251,10 @@ class ToolCallGuardrail:
                 code="result_no_progress",
                 message=(
                     f"Loop blocked: you have already seen this EXACT output {top_count} times this "
-                    f"turn (across possibly different commands/tools) — your context is rebuilt each "
-                    f"turn so you have no record of those repeats, but they happened. Re-observing it "
-                    f"cannot reveal anything new. Act on the result already in OPEN FILES / RECENT "
-                    f"with a DIFFERENT step, or — if the work is complete — write the final summary "
-                    f"and make NO tool call."
+                    f"turn (across possibly different commands/tools) — the repeats are in the "
+                    f"transcript above. Re-observing it cannot reveal anything new. Act on the "
+                    f"result already in OPEN FILES with a DIFFERENT step, or — if the work is "
+                    f"complete — write the final summary and make NO tool call."
                 ),
                 tool_name=tool_name,
                 count=top_count,
@@ -272,9 +270,9 @@ class ToolCallGuardrail:
                 code="call_budget",
                 message=(
                     f"Loop blocked: {self._calls_since_edit} tool calls this turn with NO successful "
-                    f"change landing — you are exploring in circles (your context is rebuilt each turn, "
-                    f"so you can't see the spin). Stop calling tools: act on what OPEN FILES already "
-                    f"shows, or write your final summary/answer and make NO tool call."
+                    f"change landing — you are exploring in circles (the whole sequence is in the "
+                    f"transcript above). Stop calling tools: act on what OPEN FILES already shows, "
+                    f"or write your final summary/answer and make NO tool call."
                 ),
                 tool_name=tool_name,
                 count=self._calls_since_edit,

@@ -3,8 +3,8 @@
 An output-only event sink (sibling of LessonMiner): it buffers one turn's events and flushes ONE
 record via `memory.append_episode` when the turn closes. It NEVER touches the Slice, so the cache
 can never enter the LLM context — Markov by construction. Record shape:
-`{steps: [{slice, action:[{name,args,failing}], observation:[...]}], note, meta}` — per-step units
-so a multi-step turn keeps coherent (state, action) pairs.
+`{steps: [{slice, action:[{name,args,failing}], observation:[...]}], note, meta}` — the SEED slice is
+captured once (step 1) plus the turn's accumulated (action, observation) units; lossless for turn recall.
 """
 from __future__ import annotations
 

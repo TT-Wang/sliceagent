@@ -10,9 +10,9 @@ moat is MEASURED, not asserted."""
 from __future__ import annotations
 
 READ_BUDGET = 4    # FLOOR for the exploratory-read residue — the lean DEFAULT, NOT a hard cap. The kernel GROWS the
-                   # live budget (s.read_budget) on refault thrash up to READ_BUDGET_MAX, bidirectionally with the
-                   # overflow tighten ladder. "Bounded" = no PASSIVE/history-proportional growth (Markov current-state),
-                   # never a fixed size ceiling. SINGLE owner; slice.py re-exports all bounds below.
+                   # live budget (s.read_budget) on refault thrash up to READ_BUDGET_MAX. "Bounded" = no PASSIVE/
+                   # history-proportional growth (Markov current-state), never a fixed size ceiling. SINGLE owner;
+                   # slice.py re-exports all bounds below.
 READ_BUDGET_MAX = 16  # per-slice DISASTER CEILING for refault-driven growth. A single COHERENT task rarely needs more
                       # resident reads than this; genuine BREADTH ("review the repo") is delegated to the subagent SWARM
                       # (each child a fresh lean slice), NOT served by inflating one slice toward the context window
@@ -86,9 +86,9 @@ class SwapManager:
         s.active_files = [p for p in s.active_files if p in keep]
 
     def prefetch(self, s) -> None:
-        """Refresh change-set protected DEPS from the code graph BEFORE evict (a dep must never page out then re-pin).
-        Also AGE the kernel-granted soft-pins one step (runs once per build = once per step) so refault protection is
-        temporary, never an accumulating tier. No graph → deps no-op; the hot decay still runs."""
+        """Refresh change-set protected DEPS from the code graph (recomputed once per turn at seed build).
+        Also AGE the kernel-granted soft-pins one notch (runs once per build = once per TURN) so refault
+        protection is temporary, never an accumulating tier. No graph → deps no-op; the hot decay still runs."""
         if getattr(s, "hot", None):
             s.hot = {p: t - 1 for p, t in s.hot.items() if t - 1 > 0}
         r = self.retriever

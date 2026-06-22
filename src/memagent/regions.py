@@ -26,9 +26,6 @@ MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of 
 MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
 MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
 
-K = 4  # sliding window for the RECENT (action→observation) tier
-STEP_CACHE_CHARS = 1200   # per-step observation kept in the COLD intra-turn step cache (recall_history(step=N) payload)
-STEP_MANIFEST_SHOWN = 8   # bounded locator count for the PAGED-OUT STEPS manifest (the moat: constant, not history-len)
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
 MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-signal first)
@@ -44,29 +41,16 @@ MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — last N user<->assistant 
 CONVO_MSG_CHARS = 300    # per-message cap in the conversation tier (bounded; the cache holds the full text)
 
 
-# ── PER-REGION CAPS (tighten-rebuild ladder) ──────────────────────────────────
-# _NO_CAP — the "no render cap" sentinel. OPEN FILES / RECENT / YOUR NOTES are bounded by RELEVANCE and
-# STALENESS (record_note dedup/retire + record_action supersede), never by an arbitrary size cap — bound ≠
-# size, the slice shows all that's relevant. The only hard limit is the physical context window, handled by
-# the loop's overflow path (drop the oldest accumulated exchange), not by truncating a tier.
+# ── PER-REGION RENDER: UNCAPPED-BY-RELEVANCE ──────────────────────────────────
+# _NO_CAP — the "no render cap" sentinel. OPEN FILES / YOUR NOTES are bounded by RELEVANCE
+# (record_note dedup/retire), never by an arbitrary size cap — bound ≠ size, the slice shows all that's
+# relevant. The only hard limit is the physical context window, handled by the loop's overflow path
+# (drop the oldest accumulated exchange), not by truncating a tier.
 _NO_CAP = 1_000_000
 
 
 # `one_line` is re-exported from text_utils (single definition; slice.py re-exports it onward as the
 # package-wide one-line renderer). Kept importable from regions for the existing call sites.
-
-
-def render_ghosts(s) -> str:
-    """GHOST INDEX body: one-line recovery pointers to recently paged-out files/skills (refs only)."""
-    if not s.ghosts:
-        return ""
-    lines = []
-    for g in s.ghosts[-MAX_GHOSTS:]:
-        if g["kind"] == "file":
-            lines.append(f"- {g['ref']} — was open; `read_file {g['ref']}` to bring it back")
-        elif g["kind"] == "skill":
-            lines.append(f"- skill '{g['ref']}' — was loaded; `skill {g['ref']}` to reload")
-    return "\n".join(lines)
 
 
 def render_reviewed(s) -> str:
@@ -98,26 +82,6 @@ def render_cache_manifest(refs) -> str:
         else:
             lines.append(f"- {r.preview}  → recall_history(turns=[{r.handle}])")
     return "\n".join(lines)
-
-
-def render_step_manifest(s) -> str:
-    """PAGED-OUT STEPS manifest (intra-turn analogue of PAGED-OUT HISTORY): the steps THIS task whose
-    full output has scrolled out of RECENT (the last K). A single agentic task is ONE turn, so the
-    turn-level cache is empty mid-task — without this the agent re-derives what it already found. Renders
-    bounded locators only (step N: action) ending with the recall call; the full output lives COLD in
-    s.step_log and pages back via recall_history(step=N). MOAT: locators only, constant count."""
-    log = getattr(s, "step_log", None)
-    if not log or len(log) <= K:
-        return ""                       # nothing has scrolled out of RECENT yet
-    paged = log[:-K]                    # steps older than the recent-K window (their full obs is gone from RECENT)
-    shown = paged[-STEP_MANIFEST_SHOWN:]
-    out = []
-    older = len(paged) - len(shown)
-    if older:
-        out.append(f"- …{older} earlier step(s)")
-    for e in shown:
-        out.append(f"- step {e['n']}: {e['action']}  → recall_history(step=[{e['n']}])")
-    return "\n".join(out)
 
 
 def render_skills(active_skills: list[dict]) -> str:
@@ -243,7 +207,7 @@ def render_findings(findings: list[str], sources: dict | None = None) -> str:
 def render_world(world: dict) -> str:
     """The agent's durable WORLD MODEL — a maintained key→value scratchpad (maze map, inventory,
     system state, plan). Long/multiline values render as their own block; short ones as bullets.
-    No within-loop cap (bound = the seal, not a cut): the whole maintained state shows each step."""
+    No cap (bound = the seal, not a cut): the whole maintained state renders into each turn's seed."""
     if not world:
         return ""
     parts = []
@@ -303,7 +267,7 @@ def action_sig(name: str, args: dict) -> str:
 
 
 def record_action(s, name: str, args: dict, out: str) -> None:
-    """Fold one tool result into the tiers (deterministic — no LLM)."""
+    """Fold one tool result into the action tally + error/exploration state (deterministic — no LLM)."""
     s.turn_actions = getattr(s, "turn_actions", 0) + 1   # per-turn exploration counter (finding-independent)
     failing = out.startswith("Error") or out.startswith("Exit code")
     if failing:
@@ -322,33 +286,6 @@ def record_action(s, name: str, args: dict, out: str) -> None:
             del s.action_log[k]
         while len(s.action_log) > MAX_ACTION_LOG:
             del s.action_log[next(iter(s.action_log))]
-    display = {k: v for k, v in args.items() if k != "note"} if isinstance(args, dict) else args
-    try:
-        astr = json.dumps(display, ensure_ascii=False)
-    except Exception:
-        astr = str(display)
-    # RECENT by STALENESS, not a K-count (bound ≠ size). An observation is retired when its content is
-    # already represented elsewhere: (a) a NEWER run of the same action supersedes the older one (keep the
-    # latest per action), and (b) a read/edit of a file now RESIDENT in OPEN FILES is redundant (OPEN FILES
-    # shows it live, in full). What remains is the genuinely un-resident output — command results, reads of
-    # evicted files — which is task-bounded, never step-proportional, so the moat holds without a K cap.
-    target = (args.get("path") if isinstance(args, dict)
-              and name in ("read_file", "edit_file", "str_replace", "append_to_file", "list_files") else None)
-    s.recent = [e for e in s.recent if e.get("sig") != sig]   # supersede an exact re-run
-    s.recent.append({"action": f"{name}({one_line(astr, 60)})", "observation": observe(out, 260),
-                     "sig": sig, "name": name, "path": target})
-    s.recent = [e for e in s.recent
-                if not (e.get("path") and e["path"] in s.active_files
-                        and e["name"] in ("read_file", "edit_file", "str_replace", "append_to_file"))]
-    # NO within-loop bound on RECENT: every distinct observation stays for the whole loop (a cut would
-    # harm the LLM). The two reductions above are pure dedup — a re-run supersedes its own obsolete output,
-    # and a read of a now-resident file is shown IN FULL by OPEN FILES — so no information is lost. The
-    # bound is the loop-boundary seal, not a recency/relevance filter here.
-    # INTRA-TURN STEP CACHE: cold-store a fuller observation per step so a step that pages out of the
-    # recent-K window stays recall_history(step=N)-able (the slice→cache design within a single long turn).
-    if hasattr(s, "step_log"):
-        s.step_log.append({"n": len(s.step_log) + 1, "action": f"{name}({one_line(astr, 60)})",
-                           "obs": observe(out, STEP_CACHE_CHARS)})
 
 
 # POSIX-general signal that a command is UNAVAILABLE (not that the agent's code is wrong): the
@@ -546,18 +483,6 @@ def capture_user_report(s, message: str) -> bool:
 STABLE, VOLATILE = "stable", "volatile"
 
 
-def _r_recent(ctx) -> str:
-    s, window = ctx["s"], ctx["window"]
-    shown = s.recent[-window:]
-    steps = "\n".join(
-        f"{i + 1}. {st['action']}\n     → {st['observation']}" for i, st in enumerate(shown)
-    ) or "(none yet — first move)"
-    # at level 0 window is the _NO_CAP sentinel (relevance/staleness already bounds s.recent); under the
-    # overflow-tighten floor it's a small number — show the heading accordingly, never the sentinel.
-    head = f"last {window}" if window < 10_000 else f"{len(shown)} live — superseded/resident steps retired"
-    return f"# RECENT ({head})\n{steps}"
-
-
 # Each region is (name, tier, render(ctx)->framed-fragment, slot). The renderer OWNS its header
 # literal + spacing and SUPPRESSES itself (returns '') when empty. `tier` documents the
 # stable-bulk/volatile-tail split (prompt-cache locality). `slot` maps the fragment onto the former
@@ -580,24 +505,17 @@ REGION_ORDER = (
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground truth — verify against it before trusting; a note is NOT proof the work is done)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
-    ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across steps)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
+    ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
     ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
-    ("ghosts",         VOLATILE, lambda c: (f"\n# GHOST INDEX (recently paged OUT of this slice — bring any back with ONE call; references only)\n{render_ghosts(c['s'])}\n" if render_ghosts(c["s"]) else ""), 3),
     # PAGED-OUT HISTORY — the cache MANIFEST: earlier turns of THIS session that are NOT in the slice,
     # each with the exact recall_history call to page it back. Sits beside GHOST INDEX (same "it's paged
     # out, here's the one call to get it" idiom — files there, turns here) so the model has a SEEN target
     # to call; an unseen cache is the dead channel. Locators only (moat); suppresses itself when empty.
     ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; page any back with the call shown)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
-    # PAGED-OUT STEPS — the INTRA-TURN cache manifest: earlier steps of THIS task whose full output
-    # scrolled out of RECENT. Same "it's paged out, here's the one call" idiom as GHOST/HISTORY, but at
-    # STEP granularity (a long agentic task is ONE turn, so HISTORY is empty mid-task). Lets the model
-    # page a past step's output back instead of re-deriving it. Locators only (moat); empty-suppressing.
-    ("step_manifest",  VOLATILE, lambda c: (f"\n# PAGED-OUT STEPS (earlier this task — full output scrolled out of RECENT; recall it instead of re-deriving)\n{render_step_manifest(c['s'])}\n" if render_step_manifest(c["s"]) else ""), 3),
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
-    ("recent",         VOLATILE, _r_recent, 5),
     # WORKSPACE STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
     # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
     # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
@@ -615,14 +533,12 @@ REGION_ORDER = (
 
 def render_regions(ctx: dict) -> str:
     """Iterate REGION_ORDER, render each typed region into its framed fragment, and assemble the ONE
-    user string (the moat). Each region suppresses itself when empty; the slot grouping + the two
-    blank-line separators (between the action tally and RECENT, and between RECENT and the high-
-    authority tail) reproduce render_slice's former parts[] concatenation byte-for-byte (stable bulk
-    leads for prompt-cache locality, volatile salient tail trails). `ctx` carries the Slice + the
-    pre-rendered passthroughs (artifacts / discovery / memory / threads / hints) + caps (window /
-    max_findings). Blank-line glue: slot 4 (action body) and slot 5 (RECENT) are flanked by '' parts."""
+    user string (the moat). Each region suppresses itself when empty; the slot grouping + the blank-line
+    separator between the action tally (slot 4) and the high-authority tail (slot 6) keeps the stable bulk
+    leading for prompt-cache locality and the volatile salient tail trailing. `ctx` carries the Slice + the
+    pre-rendered passthroughs (artifacts / discovery / memory / threads / hints) + the max_findings cap."""
     slots: dict[int, str] = {}
     for _name, _tier, render, slot in REGION_ORDER:
         slots[slot] = slots.get(slot, "") + render(ctx)
-    parts = [slots[0], slots[1], slots[2], slots[3], slots[4], "", slots[5], "", slots[6], slots[7]]
+    parts = [slots[0], slots[1], slots[2], slots[3], slots[4], "", slots[6], slots[7]]
     return "\n".join(parts)

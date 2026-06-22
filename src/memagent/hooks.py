@@ -141,6 +141,43 @@ class OracleHook(Hooks):
         return {"continue": True, "feedback": f"Verification failed — fix this, then finish:\n{output}"}
 
 
+_SELF_CHECK = (
+    "STOP — definition-of-done check (required, ONE time). Before you finish, verify your work against "
+    "the task's REAL acceptance criteria:\n"
+    "1) Re-read the task and list EVERY concrete requirement: the exact output file path(s) it asks for, "
+    "the required fields/values/format, each distinct sub-task, and any 'do not change X' constraint.\n"
+    "2) For EACH requirement, CONFIRM it against the ACTUAL end-state right now — run a command or read "
+    "the real file (do NOT trust your memory, a note, or a schema-shape check): the required output "
+    "exists at the EXACT path, its contents/values are correct, every sub-task is done, and you changed "
+    "nothing you were told to leave alone.\n"
+    "3) If anything is unmet or unverified, fix it and re-check. When a value must match something that "
+    "already exists (a file, a git object, expected output), COPY it exactly — do not retype it.\n"
+    "Finish only when ALL requirements are confirmed against the real end-state. If everything already "
+    "checks out, just say so and finish — do not make changes for their own sake."
+)
+
+
+class SelfCheckHook(Hooks):
+    """Structural definition-of-done gate for AUTONOMOUS runs (no human to catch a premature 'done').
+    On the FIRST time the model declares done, force exactly ONE verification pass: re-derive the task's
+    requirements and confirm each against the REAL end-state. Fires once per turn then accepts the next
+    'done', so it can never loop. Moat-safe: it only appends a message (the proven feedback channel) — the
+    agent does the real tool calls to verify. The no-oracle cousin of OracleHook: with no external
+    AGENT_VERIFY_CMD, the agent self-sources its acceptance check instead of declaring done blind."""
+
+    def __init__(self):
+        self._fired = False
+
+    def reset_for_turn(self):
+        self._fired = False
+
+    def should_continue_after_stop(self, stop_reason):
+        if stop_reason != "end_turn" or self._fired:
+            return None
+        self._fired = True
+        return {"continue": True, "feedback": _SELF_CHECK}
+
+
 class PermissionHook(Hooks):
     """Gate tool execution. `policy(name, args) -> ToolDecision`.
 

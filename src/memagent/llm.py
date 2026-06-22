@@ -30,9 +30,19 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
 
 class OpenAILLM:
     def __init__(self, model: str | None = None, api_key: str | None = None,
-                 base_url: str | None = None, proxy: str | None = None, timeout: float = 60.0):
+                 base_url: str | None = None, proxy: str | None = None, timeout: float | None = None):
         import httpx
         from openai import OpenAI
+
+        # Request timeout is env-configurable (LLM_TIMEOUT_SEC) — large ACCUMULATED contexts produce a
+        # single long non-streaming completion that legitimately exceeds the 60s default over a high-
+        # latency proxy, and the hard watchdog would then false-kill a valid slow call (every retry
+        # timing out → the turn parks 'error'). Default stays 60 for snappy interactive use.
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("LLM_TIMEOUT_SEC") or os.environ.get("LLM_TIMEOUT") or 60.0)
+            except (TypeError, ValueError):
+                timeout = 60.0
 
         # Provider-AGNOSTIC env: LLM_API_KEY / LLM_BASE_URL are canonical. OPENAI_*/MOONSHOT_* are
         # kept ONLY as a back-compat fallback (the SDK is OpenAI-compatible and many shells already
@@ -102,26 +112,43 @@ class OpenAILLM:
         raise APITimeoutError(request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
 
     def _create(self, kwargs: dict):
-        """Call the SDK with a HARD wall-clock deadline that ALWAYS fires. The httpx/SDK read-timeout
-        only bounds the gap BETWEEN bytes, so a connection that goes silent mid-response can hang far
-        past `timeout` (observed: a stalled Moonshot read wedging the loop for 10+ min). A SIGALRM
-        deadline guarantees the call returns control to the retry path. POSIX + main-thread only;
-        falls back to a plain call elsewhere (Windows / worker thread), where the SDK timeout still
-        applies. Task-agnostic, provider-agnostic reliability — the backstop the timeout param promised."""
+        """Call the SDK with a HARD wall-clock deadline that ALWAYS fires, on ANY thread. The httpx/SDK
+        read-timeout only bounds the gap BETWEEN bytes, so a connection that goes silent mid-response can
+        hang far past `timeout` (observed: a stalled read wedging the loop 10+ min). On the main thread a
+        SIGALRM deadline guarantees control returns to the retry path. OFF the main thread — e.g. a
+        Terminal-Bench / any host ThreadPoolExecutor worker, where SIGALRM cannot arm — a watchdog thread
+        enforces the SAME deadline (the abandoned SDK call is left to die on its socket while control
+        returns). Without this, a wedged connection in a worker thread hangs the turn FOREVER, since the
+        SDK timeout alone misses silent mid-response stalls. Task/provider-agnostic reliability."""
         import signal as _signal
-        armed = False
         try:
             prev = _signal.signal(_signal.SIGALRM, self._on_alarm)
             _signal.alarm(self._hard_timeout)
-            armed = True
         except (ValueError, AttributeError, OSError):
-            armed = False  # not main thread / no SIGALRM → rely on the SDK timeout
+            return self._create_watchdog(kwargs)  # not the main thread → enforce the deadline via a thread
         try:
             return self.client.chat.completions.create(**kwargs)
         finally:
-            if armed:
-                _signal.alarm(0)
-                _signal.signal(_signal.SIGALRM, prev)
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, prev)
+
+    def _create_watchdog(self, kwargs: dict):
+        """Off-main-thread hard deadline: run the SDK call in a 1-shot worker and abandon it if it blows
+        the wall-clock budget (raise a RETRYABLE timeout so with_retry can retry, then the loop parks
+        gracefully instead of hanging). A fresh executor per call so a wedged call never blocks the next."""
+        import concurrent.futures as _f
+        import httpx
+        from openai import APITimeoutError
+        ex = _f.ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-watchdog")
+        fut = ex.submit(self.client.chat.completions.create, **kwargs)
+        try:
+            return fut.result(timeout=self._hard_timeout)
+        except _f.TimeoutError:
+            raise APITimeoutError(
+                request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions")
+            )
+        finally:
+            ex.shutdown(wait=False)  # don't block on a possibly-wedged call; let its thread die with the socket
 
     def _reasoning_kwargs(self) -> dict:
         """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never

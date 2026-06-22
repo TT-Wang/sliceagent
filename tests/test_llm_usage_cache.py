@@ -84,6 +84,7 @@ def _llm(*, model="gpt-5.5", base_url="", reasoning="full", resp=None):
     obj._base_url = base_url
     obj.reasoning = reasoning
     obj.max_tokens = 8192
+    obj._hard_timeout = 30  # set by __init__ in real use; _create()/_create_watchdog read it
     obj.client = _FakeClient(resp if resp is not None else _FakeResp(_FakeUsage()))
     return obj
 

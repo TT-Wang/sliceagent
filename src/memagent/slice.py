@@ -2,26 +2,26 @@
 
 NORTH STAR — the slice is a CACHE, not a log. Every model call is a pure function
 f(selector, store): the durable stores (disk, code graph, episode cache) are the only
-authority; the slice is a small typed SELECTOR over them, reconstructed each step — so the
-fast tier can be flushed and rebuilt every step because a re-fault is always safe. This is a
-DEMAND-PAGED SNAPSHOT MACHINE: build() = a context switch that faults in exactly the regions
-this step references; the Slice = an MVCC-style snapshot descriptor / a PCB. The single
-invariant "cache not log" IMPLIES the moat (a cache keeps no history), task-agnosticism (a
-cache doesn't know what it caches), and LLM-agnosticism (the cache contract sits below the
-model). Borrowed + validated against CPU/MMU/out-of-order/microkernel/dataflow/DB designs
-(see auto-memory: kernel-architecture).
+authority; the slice is a small typed SELECTOR over them, reconstructed ONCE PER TURN as the
+SEED. Within the turn, working memory ACCUMULATES as native assistant/tool messages — no
+per-step rebuild, no within-turn eviction; the bound is the TURN-BOUNDARY seal (the next turn
+starts from a fresh seed + recall). This is a DEMAND-PAGED SNAPSHOT MACHINE: build() = a
+context switch that faults in exactly the regions this turn references; the Slice = an
+MVCC-style snapshot descriptor / a PCB. The single invariant "cache not log" IMPLIES the moat
+(a cache keeps no history), task-agnosticism (a cache doesn't know what it caches), and
+LLM-agnosticism (the cache contract sits below the model). Borrowed + validated against
+CPU/MMU/out-of-order/microkernel/dataflow/DB designs (see auto-memory: kernel-architecture).
 
-No chat history. The host builds the model-visible messages fresh each step via
-`make_build_slice` (the reconstruction seam the loop calls). Tool results flow back
-into the tiers through `slice_sink` (an event sink) — so the loop stays decoupled
-from slice internals and just dispatches events.
+No chat history across turns. The host builds the SEED messages once per turn via
+`make_build_slice` (the reconstruction seam); within the turn the loop accumulates native
+messages. Tool results also fold into the carried tiers through `slice_sink` (an event sink)
+for the NEXT seed — so the loop stays decoupled from slice internals and just dispatches events.
 
 Tiers, each with its own compaction policy:
   task        -> stable (system message, cacheable)
   error       -> verbatim, auto-cleared on a clean run
   findings    -> distilled conclusions the model carries forward (anti-re-derivation)
   action tally-> counted; only repeated/failing shown (anti-loop)
-  recent      -> sliding window of the last K steps
   open files  -> the working set, re-read fresh from ground truth
   related code-> retrieved discovery candidates (fuzzy, agent-correctable)
 
@@ -57,7 +57,6 @@ from .regions import (  # noqa: F401 — re-export shims
     CONVO_MSG_CHARS,
     DISCOVERY_K,
     FULL_FILE_LINES,
-    K,
     MAX_ACTION_LOG,
     MAX_ACTION_SHOWN,
     MAX_CONVERSATION,
@@ -84,7 +83,6 @@ from .regions import (  # noqa: F401 — re-export shims
     render_conversation,
     render_convergence,
     render_findings,
-    render_ghosts,
     render_regions,
     render_reviewed,
     render_skills,
@@ -95,7 +93,7 @@ from .subdir_hints import SubdirHints
 from .swap import DEP_CEILING, EDIT_CEILING, HOT_CEILING, HOT_TTL, MAX_ACTIVE_SKILLS, MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET, READ_BUDGET_MAX, SwapManager, _DEFAULT_SWAP  # noqa: F401 — working-set bounds OWNED by swap.py, re-exported here
 from .workspace import build_workspace_snapshot, git_branch_status, git_worktree_state, project_conventions, workspace_facts  # noqa: F401
 
-# K (RECENT window) + anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
+# Anti-loop caps (MAX_ACTION_LOG/MAX_ACTION_SHOWN), the RECENT-CONVERSATION caps
 # (MAX_CONVERSATION/CONVO_MSG_CHARS), DISCOVERY_K, and the OPEN-FILES view caps (FULL_FILE_LINES/
 # REGION_LINES) now live in regions.py (re-exported above), along with _NO_CAP (the no-render-cap
 # sentinel for the uncapped tiers); make_build_slice imports them.
@@ -168,8 +166,9 @@ SYSTEM_PROMPT = (
     "4. YOUR NOTES FROM PRIOR TOOL CALLS — facts you recorded on earlier turns. Reuse them to avoid "
     "re-deriving, but they are YOUR notes, not ground truth: VERIFY against OPEN FILES before relying on "
     "one, and a note that says the work is 'done' is NOT proof — confirm it on the real artifact first.\n"
-    "5. REPEATED/FAILING + RECENT STEPS — your recent actions this turn. If an action is REPEATEDLY "
-    "FAILING, stop repeating it; read the file and fix the root cause (or recall_history / ask_user).\n"
+    "5. REPEATED/FAILING ACTIONS — an anti-loop tally of actions repeated or failing across this task "
+    "(your actual recent steps are in the conversation above). If an action is REPEATEDLY FAILING, stop "
+    "repeating it; read the file and fix the root cause (or recall_history / ask_user).\n"
     "6. RELATED CODE / RELEVANT MEMORY — fuzzy search candidates and past-session lessons; may be "
     "incomplete or stale — verify against OPEN FILES before relying on them.\n\n"
     "<work>\n"
@@ -187,6 +186,12 @@ SYSTEM_PROMPT = (
     "system. Confirm that end-state DIRECTLY (run / open / observe it); your own note saying 'done' is never "
     "proof. The code-specific guidance below is the common case — apply the same observe-the-real-result "
     "discipline to any task.\n"
+    "If your result is a SOLUTION you worked out by REASONING — a sequence of moves/commands, a "
+    "reconstructed value, a path, a generated script or a file that must satisfy a checker — do NOT trust the "
+    "reasoning alone: REPLAY it end-to-end against the real program/checker (feed the steps back in, run the "
+    "script, diff the output, re-run the program with your answer) and observe success BEFORE you declare "
+    "done. If the replay does not succeed, use what it shows to correct the result and replay again. A "
+    "solution you believe is right but have not executed is UNVERIFIED.\n"
     "Verify with the CHEAPEST sufficient check (import/compile/build/lint, or the smallest relevant test). If a "
     "check cannot run after ONE attempt (missing command/deps, setup errors), do NOT keep retrying or repairing "
     "the environment — make the minimal correct edit and stop.\n"
@@ -291,7 +296,6 @@ class Slice:
     # real task change (reset/new_topic). bound-is-relevance applied to the task itself: the spec is the
     # one thing that is relevant the whole way through. ONE bounded field (the request, not a transcript).
     task_spec: str = ""
-    recent: list[dict] = field(default_factory=list)
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
@@ -305,8 +309,9 @@ class Slice:
     # AGENT WORLD MODEL — a durable, agent-MAINTAINED key→value scratchpad for NON-code task state the
     # model must carry across many steps: an explored maze map, a text-adventure's rooms+inventory, a
     # system inventory (processes/ports/services), a running plan. Written via the world_set tool (folded
-    # in by slice_sink, the same note→findings seam); READ straight from the rendered WORLD MODEL region
-    # (no world_get needed). Unbounded within the loop (bound = the seal, not a within-loop cut); SURVIVES
+    # in by slice_sink, the same note→findings seam); READ from the rendered WORLD MODEL region, built into
+    # each turn's SEED (no world_get needed) — within the SAME turn a just-set value lives only in the
+    # model's own world_set call above until the next seed re-renders it. Unbounded (bound = the seal); SURVIVES
     # the seal (distilled task state); cleared only by reset (a new task). This generalizes the slice
     # beyond source files — where its multi-step memory wins on non-code tasks (maze/zork) actually lives.
     world: dict = field(default_factory=dict)
@@ -353,13 +358,6 @@ class Slice:
     # automatic self-tuning loop (no model involvement), the validated automatic-beats-active-asker path.
     io: dict = field(default_factory=lambda: {"hit": 0, "miss": 0, "refault": 0, "evict": 0})
     hot: dict = field(default_factory=dict)
-    # INTRA-TURN STEP CACHE (cold storage, NOT rendered, transient/not-serialized). A single agentic task
-    # is ONE turn, so the turn-level episodic cache is EMPTY mid-task — the agent cannot recall its earlier
-    # STEPS, which page out of the recent-K window (`recent`) into the void → it re-derives (thrash). This
-    # keeps every step's (action, full-ish observation) cold so recall_history(step=N) can page one back on
-    # demand: the slice→cache design at STEP granularity. The slice still renders only the bounded recent
-    # window (hot) + a tiny manifest of paged-out steps; the moat holds (cold store ≠ context sent to LLM).
-    step_log: list = field(default_factory=list)
     # ADAPTIVE working-set budget (the "bounded = Markov current-state, not a fixed ceiling" reframe). The
     # resident exploratory-read budget is no longer the constant READ_BUDGET: it starts at that FLOOR and the
     # kernel GROWS it on refault thrash (SwapManager._grow) up to read_ceiling. Transient session state (like
@@ -377,7 +375,6 @@ class Slice:
     def reset(self, goal: str) -> None:
         self.goal = goal
         self.task_spec = goal   # a brand-new task: the defining request IS the durable spec
-        self.recent = []
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
@@ -394,7 +391,6 @@ class Slice:
         self.conversation = []
         self.turns = 0
         self.ghosts = []
-        self.step_log = []
         self.protected_deps = set()
         self.pre_defs = {}
         self.stale_deps = set()
@@ -417,8 +413,6 @@ class Slice:
         steps, the intra-turn step cache, exploratory (non-edited) reads, and the prior loop's transient
         kernel state. None of it is lost: it's in the durable cache, one recall away if the next loop needs
         it. Distinct from reset() (a brand-new task wipes everything); seal() preserves the distilled carry."""
-        self.recent = []                  # raw step trajectory → archived; recall_history pages it back
-        self.step_log = []                # raw intra-turn step cache → archived
         self.ghosts = []                  # recovery pointers for the prior loop's evictions → moot now
         self.hot = {}                     # prior loop's kernel soft-pins → reset
         self.turn_actions = 0             # fresh action epoch for the new loop
@@ -634,7 +628,7 @@ def record_user(s: Slice, message: str) -> None:
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                  subdir_hints: str = "", worktree: str = "", repo_map: str = "", cache_manifest: str = "",
-                 *, window: int = K, max_findings: int = MAX_FINDINGS) -> str:
+                 *, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
@@ -651,17 +645,17 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "worktree": worktree,
         "repo_map": repo_map,
         "cache_manifest": cache_manifest,
-        "window": window,
         "max_findings": max_findings,
     }
     return render_regions(ctx)
 
 
 def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = ""):
-    """The reconstruction seam the loop calls each step. Returns [system, user] messages.
+    """The reconstruction seam the loop calls ONCE per turn to build the SEED. Returns [system, user]
+    messages; within the turn the loop accumulates native messages (no per-step rebuild).
 
     `state` is a Slice (single task) OR a Session (host-side topic manager, has .active()). The
-    ACTIVE slice is resolved EACH call, so a mid-turn topic switch redirects the next reconstruction.
+    ACTIVE slice is resolved EACH call, so a topic switch redirects the next turn's seed.
     System (instructions + the active topic's goal) is stable per topic and cacheable; the user
     message is the volatile slice. Cross-session memory is recalled once per topic-goal (cached);
     code discovery is per-turn (adapts as the agent works)."""
@@ -780,7 +774,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         cache_manifest = render_cache_manifest(manifest_refs)
         user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
                             hint_text, worktree, repo_map_text, cache_manifest,
-                            window=_NO_CAP, max_findings=_NO_CAP)
+                            max_findings=_NO_CAP)
         return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
 
     return build
@@ -816,7 +810,7 @@ def slice_sink(state):
                                       source="tool-note" if not event.failing else "claim")
             # WORLD MODEL — fold world_set/world_clear into the durable scratchpad (the note→findings seam,
             # but structured key→value). The tool handler only confirms; the STATE lives here so it renders
-            # back each step, survives the seal, and clears on reset.
+            # into each turn's seed, survives the seal, and clears on reset.
             if event.name == "world_set" and not event.failing:
                 _k = str(event.args.get("key", "")).strip()
                 if _k:
@@ -828,7 +822,7 @@ def slice_sink(state):
                 else:
                     s.world.clear()
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
-            # distilled summary into the bounded FINDINGS tier (observed) so it survives RECENT's K-window —
+            # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
             if event.name in ("spawn_subagent", "spawn_explore") and not event.failing and event.output:
                 new_finding = record_note(s, event.output, source="observed") or new_finding
