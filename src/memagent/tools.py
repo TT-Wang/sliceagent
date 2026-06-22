@@ -42,10 +42,21 @@ _CODE_PRELUDE = '''\
 import os as _os, sys as _sys, subprocess as _sp
 _sys.path.insert(0, _os.getcwd())
 
+def _confine(path):
+    # Confine code-as-action file helpers to the workspace (cwd = workspace root in the sandbox). Without
+    # this, an absolute path or ../ escape let execute_code read/write outside allowed_roots, bypassing the
+    # file-tool boundary. Shell (run_command) stays unconfined by design; these in-code helpers do not.
+    _p = _os.path.realpath(path)
+    _root = _os.path.realpath(_os.getcwd())
+    if _p != _root and not _p.startswith(_root + _os.sep):
+        raise PermissionError(f"path escapes workspace: {path} (use run_command for paths outside it)")
+    return path
+
 def read_file(path):
-    with open(path, encoding="utf-8") as _f: return _f.read()
+    with open(_confine(path), encoding="utf-8") as _f: return _f.read()
 
 def write_file(path, content):
+    path = _confine(path)
     _d = _os.path.dirname(path)
     if _d: _os.makedirs(_d, exist_ok=True)
     with open(path, "w", encoding="utf-8") as _f: _f.write(content)
@@ -55,12 +66,14 @@ def write_file(path, content):
     return f"wrote {len(content)} bytes to {path}"
 
 def append_file(path, content):
+    path = _confine(path)
     _d = _os.path.dirname(path)
     if _d: _os.makedirs(_d, exist_ok=True)
     with open(path, "a", encoding="utf-8") as _f: _f.write(content)
     return f"appended {len(content)} bytes to {path}"
 
 def str_replace(path, old, new):
+    path = _confine(path)
     with open(path, encoding="utf-8") as _f: _cur = _f.read()
     _n = _cur.count(old)
     if _n != 1: return (f"error: old_string occurs {_n}x in {path} (need exactly 1) — "
@@ -333,6 +346,18 @@ class LocalToolHost:
         # into this same object later (Step ③). The host just projects from it.
         self.registry = registry or ToolRegistry()
         self._register_builtins()
+        import atexit
+        atexit.register(self.cleanup)   # leaked background procs / PTYs must not survive exit/abort/crash
+
+    def cleanup(self) -> None:
+        """Tear down background processes + PTY sessions (idempotent; never raises). Wired to atexit AND
+        called by the CLI on exit/abort, so leaked servers/shells/PTYs don't outlive the agent (#5)."""
+        for _mgr in (getattr(self, "procs", None), getattr(self, "terminals", None)):
+            try:
+                if _mgr is not None:
+                    _mgr.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _register_builtins(self) -> None:
         handlers = {
