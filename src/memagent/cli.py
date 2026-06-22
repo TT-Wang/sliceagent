@@ -139,8 +139,12 @@ def main() -> None:
                             if e.source.startswith("plugin:"))
     tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
+        from .agents import load_agents
+        # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md (Kimi-style)
+        agent_roots = list(cfg.skills_roots or []) + [root, os.path.join(root, ".memagent")]
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
-                             policy=policy, max_depth=sub_depth, notify=print)
+                             policy=policy, max_depth=sub_depth, notify=print,
+                             agents=load_agents(agent_roots))
     session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
     llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic

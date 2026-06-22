@@ -19,6 +19,7 @@ import json
 import os
 
 from .access import AllAccess, ReadAllAccess
+from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, AgentSpec  # named-agent registry (file-defined kinds)
 from .events import AssistantText, ToolStarted
 from .slice import one_line
 
@@ -66,9 +67,7 @@ _EXPLORE_SCHEMA = {
 # Tools a READ-ONLY child may see. NO run_command/execute_code: the policy layer can't
 # guarantee a side-effect-free shell, so they are deferred (plan sec 6 defer). spawn_subagent
 # is absent by construction — a read-only child cannot recurse into a writable one.
-_READ_ONLY_TOOLS = frozenset({
-    "read_file", "list_files", "grep", "glob", "skill", "recall_history",
-})
+_READ_ONLY_TOOLS = frozenset(READ_ONLY_TOOLS)   # the explorer allowlist — single source of truth in agents.py
 
 # An EXPLORER's whole job is read-N-files-then-summarize over a SHORT, bounded turn: every file it
 # reads is relevant to its one summary, so the working-set eviction (READ_BUDGET) has NO benefit and
@@ -86,16 +85,14 @@ EXPLORER_READ_BUDGET = 64
 EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lower()
 
 
-def _profile_llm(llm, read_only: bool):
-    """The llm VIEW for a child: a read-only EXPLORER runs at EXPLORER_REASONING via a SHALLOW COPY (shares
-    the thread-safe openai client + all config; only `reasoning` is overridden — never touches the parent or
-    a sibling). Writable children use the parent llm unchanged. No-op when already at the target reasoning."""
-    if not read_only or not EXPLORER_REASONING:
-        return llm
-    if getattr(llm, "reasoning", None) == EXPLORER_REASONING:
+def _profile_llm(llm, reasoning):
+    """The llm VIEW for a child running at a given reasoning intent ("fast"/"full"): a SHALLOW COPY with
+    `reasoning` overridden (shares the thread-safe openai client + all config; never mutates the parent or
+    races a sibling). No-op — returns the parent llm — when `reasoning` is falsy (inherit) or already matches."""
+    if not reasoning or getattr(llm, "reasoning", None) == reasoning:
         return llm
     view = copy.copy(llm)
-    view.reasoning = EXPLORER_REASONING
+    view.reasoning = reasoning
     return view
 
 
@@ -127,19 +124,23 @@ def _nested_sink(notify, depth: int):
 
 def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  max_steps: int = 20, depth: int = 1, notify=None,
-                 read_only: bool = False) -> str:
-    """Run a child agent on `task` with a fresh slice; return a bounded summary string.
-    The child's events stay on its OWN dispatcher — they never touch the parent's slice
-    (that's the bounded-context guarantee); only the returned summary crosses back.
+                 read_only: bool = False, spec: AgentSpec | None = None) -> str:
+    """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
+    The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
+    context guarantee); only the summary crosses back.
 
-    When `read_only` is True the child runs as an EXPLORER: its `tools` host exposes only
-    the read-only allowlist (no edit/shell/spawn), so the investigation cannot mutate the
-    workspace. The summary it returns is bounded the same way a writable child's is."""
+    `spec` is the named AgentSpec (tools allowlist + reasoning + system-prompt layer). Back-compat: when
+    `spec` is None it is derived from `read_only` (the built-in explorer vs general). A read-only spec runs
+    as an EXPLORER — its tool host exposes only the read-only allowlist, so it cannot mutate the workspace."""
     from .events import make_dispatcher
     from .guardrails import ToolCallGuardrailConfig
     from .hooks import CompositeHooks, GuardrailHook, PermissionHook
     from .loop import run_turn
     from .slice import Slice, make_build_slice, slice_sink
+
+    if spec is None:
+        spec = BUILTIN_AGENTS["explorer" if read_only else "general"]
+    read_only = spec.read_only   # the kind decides; everything below keys off the SPEC
 
     child_state = Slice()
     child_state.reset(task)
@@ -149,8 +150,8 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         # EXPLORER_READ_BUDGET + Slice.explore_mode. max_steps bounds the explorer.
         child_state.read_budget = child_state.read_ceiling = EXPLORER_READ_BUDGET
         child_state.explore_mode = True
-    child_llm = _profile_llm(llm, read_only)   # EXPLORER profile → fast reasoning (per-child view, no mutation)
-    build = make_build_slice(child_state, tools, retriever, memory, task)
+    child_llm = _profile_llm(llm, spec.reasoning)   # per-kind reasoning via a per-child llm view (no mutation)
+    build = make_build_slice(child_state, tools, retriever, memory, task, system_extra=spec.system_prompt)
 
     cap = _CaptureLast()
     sinks = [slice_sink(child_state), cap]
@@ -176,7 +177,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     # have left the task broken). end_turn means it produced a final summary either way.
     success = result.stop_reason == "end_turn" and (read_only or not child_state.last_error)
     status = "ok" if success else result.stop_reason
-    label = "explore" if read_only else "subagent"
+    label = {"explorer": "explore", "general": "subagent"}.get(spec.name, spec.name)  # named-kind label
     summary = f"[{label} {status} · {result.steps} steps · files: {files}]"
     if cap.text:
         summary += " " + one_line(cap.text, 400)
@@ -193,7 +194,7 @@ class SubagentHost:
 
     def __init__(self, inner, *, llm, retriever, memory, policy,
                  max_depth: int = 1, max_steps: int = 20, depth: int = 0, notify=None,
-                 read_only: bool = False):
+                 read_only: bool = False, spec: AgentSpec | None = None, agents=None):
         self.inner = inner
         self.llm = llm
         self.retriever = retriever
@@ -203,7 +204,11 @@ class SubagentHost:
         self.max_steps = max_steps
         self.depth = depth
         self.notify = notify
-        self.read_only = read_only
+        # spec set on a CHILD host restricts its tools to that kind's allowlist; None = a PARENT host that
+        # offers the spawn tools. read_only is a back-compat alias for spec=explorer.
+        self.spec = spec or (BUILTIN_AGENTS["explorer"] if read_only else None)
+        self.read_only = self.spec.read_only if self.spec is not None else False
+        self.agents = agents or BUILTIN_AGENTS
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -218,14 +223,29 @@ class SubagentHost:
 
     def schemas(self) -> list[dict]:
         s = list(self.inner.schemas())
-        if self.read_only:
-            # An EXPLORE child sees ONLY the read-only allowlist — no edit/shell tools, and
-            # no spawn_* at all (so it cannot recurse into a writable child).
-            return read_only_schemas(s)
-        if self.depth < self.max_depth:  # only offer delegation while there's depth left
+        if self.spec is not None and self.spec.tools is not None:
+            # a restricted CHILD (explorer, or any custom kind with an allowlist) sees ONLY its tools —
+            # no edit/shell/spawn beyond the allowlist (an explorer's list has none → cannot recurse).
+            allow = set(self.spec.tools)
+            return [x for x in s if x.get("function", {}).get("name") in allow]
+        if self.depth < self.max_depth:  # parent (or a general child) — offer delegation while depth remains
             s.append(_SUBAGENT_SCHEMA)
             s.append(_EXPLORE_SCHEMA)
+            s.append(self._agent_schema())
         return s
+
+    def _agent_schema(self) -> dict:
+        """The generic `spawn_agent` tool — delegate to a NAMED agent kind from the registry (Kimi-style:
+        one Agent tool + a pluggable roster). The description enumerates the available kinds by name."""
+        roster = "; ".join(f"{n}: {sp.description}" for n, sp in self.agents.items())
+        return {"type": "function", "function": {
+            "name": "spawn_agent",
+            "description": ("Delegate a self-contained sub-task to a NAMED agent kind that runs in its OWN "
+                            "bounded context and returns ONLY a summary. Available kinds — " + roster),
+            "parameters": {"type": "object", "properties": {
+                "agent": {"type": "string", "description": "the agent kind to run (a name from the list)"},
+                "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
+            }, "required": ["agent", "task"]}}}
 
     def accesses(self, name: str, args: dict) -> list:
         if name == "spawn_explore":
@@ -234,27 +254,36 @@ class SubagentHost:
             return [ReadAllAccess()]
         if name == "spawn_subagent":
             return [AllAccess()]  # WRITABLE nested work → globally exclusive (two writers in one workspace serialize)
+        if name == "spawn_agent":   # a read-only kind parallelizes (swarm); a writable kind serializes
+            sp = self.agents.get(args.get("agent", ""))
+            return [ReadAllAccess()] if (sp is not None and sp.read_only) else [AllAccess()]
         return self.inner.accesses(name, args)
 
     def read_text(self, path: str) -> str:
         return self.inner.read_text(path)
 
     def run(self, name: str, args: dict) -> str:
-        if name not in ("spawn_subagent", "spawn_explore"):
+        if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
             return self.inner.run(name, args)
         if self.depth >= self.max_depth:
             return "Error: subagent depth limit reached"
-        read_only = name == "spawn_explore"
+        if name == "spawn_agent":
+            spec = self.agents.get(args.get("agent", ""))
+            if spec is None:
+                return ("Error: unknown agent %r. Available: %s"
+                        % (args.get("agent", ""), ", ".join(self.agents)))
+        else:   # back-compat built-in tools → their specs
+            spec = BUILTIN_AGENTS["explorer" if name == "spawn_explore" else "general"]
         child_tools = SubagentHost(
             self.inner, llm=self.llm, retriever=self.retriever, memory=self.memory,
             policy=self.policy, max_depth=self.max_depth, max_steps=self.max_steps,
-            depth=self.depth + 1, notify=self.notify, read_only=read_only,
+            depth=self.depth + 1, notify=self.notify, spec=spec, agents=self.agents,
         )
         try:
             return run_subagent(
                 args["task"], tools=child_tools, llm=self.llm, retriever=self.retriever,
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
-                depth=self.depth + 1, notify=self.notify, read_only=read_only,
+                depth=self.depth + 1, notify=self.notify, spec=spec,
             )
         except Exception as e:  # a child failure must not crash the parent
             return f"Error: subagent crashed: {e}"

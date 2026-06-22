@@ -111,8 +111,8 @@ def host_writable_schemas_unchanged_regression():
     # every inner tool preserved, nothing dropped
     for n in inner_names:
         assert n in names, n
-    # delegation tools appended (depth<max_depth)
-    assert names == inner_names + ["spawn_subagent", "spawn_explore"], names
+    # delegation tools appended (depth<max_depth): the two built-ins + the generic registry tool
+    assert names == inner_names + ["spawn_subagent", "spawn_explore", "spawn_agent"], names
 
 
 @check
@@ -249,16 +249,16 @@ def explorer_profile_runs_fast_reasoning_without_mutating_parent():
     # EXPLORER profile: a read-only child runs at fast reasoning via a per-child llm VIEW; the shared parent
     # llm is never mutated and a writable child uses the parent unchanged.
     from types import SimpleNamespace
-    from memagent.subagent import _profile_llm, EXPLORER_REASONING
+    from memagent.subagent import _profile_llm
     parent = SimpleNamespace(reasoning="full")
-    view = _profile_llm(parent, read_only=True)
-    assert view.reasoning == EXPLORER_REASONING == "fast", view.reasoning
+    view = _profile_llm(parent, "fast")
+    assert view.reasoning == "fast", view.reasoning
     assert parent.reasoning == "full", "parent llm must NOT be mutated (per-child view only)"
-    assert view is not parent, "explorer must get its OWN llm view"
-    assert _profile_llm(parent, read_only=False) is parent, "writable child uses the parent llm unchanged"
-    # already-fast parent → no needless copy
+    assert view is not parent, "a reasoning override must get its OWN llm view"
+    assert _profile_llm(parent, None) is parent, "no reasoning override → parent llm unchanged"
+    # already at target → no needless copy
     fast = SimpleNamespace(reasoning="fast")
-    assert _profile_llm(fast, read_only=True) is fast
+    assert _profile_llm(fast, "fast") is fast
 
 
 def main():
