@@ -67,6 +67,7 @@ class TaskState:
     goal: str = ""
     findings: list[str] = field(default_factory=list)
     requirements: list[dict] = field(default_factory=list)  # STANDING REQUIREMENTS contract (carried)
+    plan: list[dict] = field(default_factory=list)          # PLAN / TodoWrite steps + status (carried)
     world: dict = field(default_factory=dict)               # agent WORLD MODEL (carried; was dropped on resume)
     active_files: list[str] = field(default_factory=list)
     edited_files: list[str] = field(default_factory=list)   # list on the wire; a set in the Slice
