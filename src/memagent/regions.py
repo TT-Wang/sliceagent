@@ -295,10 +295,15 @@ def action_sig(name: str, args: dict) -> str:
     return name
 
 
-def record_action(s, name: str, args: dict, out: str) -> None:
-    """Fold one tool result into the action tally + error/exploration state (deterministic — no LLM)."""
+def record_action(s, name: str, args: dict, out: str, failing: bool | None = None) -> None:
+    """Fold one tool result into the action tally + error/exploration state (deterministic — no LLM).
+
+    `failing` is the AUTHORITATIVE flag from the tool layer (ToolText.ok / event.failing); the loop
+    passes it. The prose heuristic is a back-compat fallback only — relying on it misclassified a grep/
+    log line that legitimately starts with "Error" as a failure (corrupting last_error/anti-loop)."""
     s.turn_actions = getattr(s, "turn_actions", 0) + 1   # per-turn exploration counter (finding-independent)
-    failing = out.startswith("Error") or out.startswith("Exit code")
+    if failing is None:
+        failing = out.startswith("Error") or out.startswith("Exit code")
     if failing:
         s.last_error = out if len(out) <= 800 else out[:120] + "\n…[trace truncated]…\n" + out[-680:]
     elif name in ("run_command", "execute_code"):

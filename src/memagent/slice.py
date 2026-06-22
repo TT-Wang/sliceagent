@@ -441,6 +441,16 @@ class Slice:
         self.hot = {}                     # prior loop's kernel soft-pins → reset
         self.turn_actions = 0             # fresh action epoch for the new loop
         self.read_budget = READ_BUDGET    # back to the lean floor; re-grows on refault within the new loop
+        # BOUND THE CARRY AT THE SEAL (not within the loop): the next loop starts from the most-recent
+        # MAX_FINDINGS distilled facts; older ones are in the durable episodic cache (archived at TurnEnd,
+        # recallable). This is the loop-boundary bound the moat prescribes — without it findings carried
+        # unbounded across a long session (transcript-style growth). pre_defs is transient pre-edit state,
+        # re-derived by prefetch next loop, so it's dropped too (world is intentionally durable: kept).
+        if len(self.findings) > MAX_FINDINGS:
+            self.findings = self.findings[-MAX_FINDINGS:]
+            live = set(self.findings)
+            self.finding_source = {k: v for k, v in self.finding_source.items() if k in live}
+        self.pre_defs = {}
         # CARRY the in-progress change-set resident; SEAL exploratory reads (re-readable / recallable).
         self.active_files = [p for p in self.active_files if p in self.edited_files]
         self.edit_anchor = {p: a for p, a in self.edit_anchor.items() if p in self.edited_files}
@@ -927,7 +937,7 @@ def slice_sink(state):
                 did_edit = bool(mutated) and not event.failing
                 for p in paths_in_code(code):
                     touch_file(s, p, edited=(p in mutated))  # code-as-action edits join the change set
-            record_action(s, event.name, event.args, event.output)
+            record_action(s, event.name, event.args, event.output, failing=event.failing)
             # convergence tracking: a real edit OR a genuinely-new finding resets the spin counter —
             # actively LEARNING (recording new facts) is progress, not spinning (review #5). Only a call
             # that neither edits nor learns advances the convergence/no-progress counter.
