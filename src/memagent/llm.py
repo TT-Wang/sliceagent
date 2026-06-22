@@ -101,6 +101,9 @@ class OpenAILLM:
         # LIVE instead of freezing on one blocking call (borrowed periphery — Kimi-style live events).
         # None → the blocking non-streaming path (eval/headless unchanged; byte-identical assembled result).
         self._on_delta = None
+        # Sticky: set True once this provider 400s on reasoning_effort+tools (gpt-5.5 chat/completions);
+        # thereafter reasoning_effort is dropped when tools are present (graceful degrade, no re-400).
+        self._drop_reasoning_effort = False
 
     def set_cache_key(self, key: str | None) -> None:
         """Pin a session-scoped prompt-cache routing key (typically the session_id). Cheapest cache
@@ -306,20 +309,33 @@ class OpenAILLM:
         self._merge_kwargs(kwargs, self._cache_routing_kwargs())  # session-stable cache routing (0 added tokens)
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
+        # Provider quirk (isolated here, llm-agnostic): some reasoning models (gpt-5.5) reject
+        # reasoning_effort TOGETHER with function tools on /v1/chat/completions (400 — "use /v1/responses").
+        # Once seen, drop reasoning_effort whenever tools are present so we degrade to default reasoning
+        # instead of 400ing every tool-calling turn. (Sticky — set in the except below.)
+        if getattr(self, "_drop_reasoning_effort", False) and kwargs.get("tools"):
+            kwargs.pop("reasoning_effort", None)
+        # STREAM only on the MAIN thread with a live sink wired (the interactive turn). OFF-main runs —
+        # parallel subagents/explorers sharing this llm via run_scheduled threads — take the BLOCKING path
+        # so they keep the off-main hard-deadline watchdog AND never racily drive the single TUI spinner from
+        # N threads. getattr keeps the object-__new__ test stubs working. Same assembled result either way.
+        _stream = (getattr(self, "_on_delta", None) is not None
+                   and threading.current_thread() is threading.main_thread())
+        _creator = self._create_streaming if _stream else self._create
         try:
-            # STREAM only on the MAIN thread with a live sink wired (the interactive turn). OFF-main runs —
-            # parallel subagents/explorers sharing this llm via run_scheduled threads — take the BLOCKING
-            # path so they keep the off-main hard-deadline watchdog AND never racily drive the single TUI
-            # spinner from N threads. getattr keeps the object-__new__ test stubs working. Same result either way.
-            _stream = (getattr(self, "_on_delta", None) is not None
-                       and threading.current_thread() is threading.main_thread())
-            resp = self._create_streaming(kwargs) if _stream else self._create(kwargs)
+            resp = _creator(kwargs)
         except Exception as e:
             # Context overflow is NOT a backoff case (is_retryable stays unchanged): signal the
             # rebuild loop to TIGHTEN the slice rather than re-send the identical oversized request.
             if is_context_overflow(e):
                 raise ContextOverflow(e, status_code=getattr(e, "status_code", None)) from e
-            raise
+            # reasoning_effort + tools rejected by this model → drop it, remember, retry ONCE (graceful
+            # degrade to default reasoning instead of crashing the turn). General; no model name hardcoded.
+            if "reasoning_effort" in str(e) and kwargs.pop("reasoning_effort", None) is not None:
+                self._drop_reasoning_effort = True
+                resp = _creator(kwargs)
+            else:
+                raise
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []

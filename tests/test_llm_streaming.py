@@ -137,6 +137,33 @@ def render_error_never_breaks_the_call():
     assert msg.content == "Hello world", "a render error must be swallowed; assembly continues"
 
 
+@check
+def reasoning_effort_with_tools_400_degrades_and_sticks():
+    # gpt-5.5 rejects reasoning_effort + function tools on chat/completions (400). complete() must drop
+    # reasoning_effort, retry once, remember (sticky), and never re-send it with tools.
+    calls = []
+    ok = NS(choices=[NS(message=NS(content="ok", tool_calls=[]), finish_reason="stop")],
+            usage=NS(prompt_tokens=1, completion_tokens=1, prompt_tokens_details=None))
+    class _C:
+        def create(self, **kw):
+            calls.append("reasoning_effort" in kw)
+            if "reasoning_effort" in kw:
+                raise RuntimeError("400 - Function tools with reasoning_effort are not supported ... use /v1/responses")
+            return ok
+    llm = _stub([], on_delta=None)
+    llm.model = "gpt-5.5"; llm.reasoning = "fast"   # → _reasoning_kwargs emits reasoning_effort=low
+    llm._drop_reasoning_effort = False
+    llm.client = NS(chat=NS(completions=_C()))
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+    msg = llm.complete([{"role": "user", "content": "x"}], tools)
+    assert msg.content == "ok", msg.content
+    assert calls == [True, False], f"first WITH reasoning_effort (400) then retry WITHOUT: {calls}"
+    assert llm._drop_reasoning_effort is True, "must remember the incompatibility"
+    calls.clear()
+    llm.complete([{"role": "user", "content": "y"}], tools)
+    assert calls == [False], f"sticky → reasoning_effort never sent again with tools: {calls}"
+
+
 def main():
     failed = 0
     for fn in CHECKS:
