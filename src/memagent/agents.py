@@ -93,7 +93,11 @@ def _parse_agent_md(path: str) -> AgentSpec | None:
     if not name:
         return None
     tools_raw = meta.get("tools")
-    tools = (tuple(t for t in tools_raw.replace(",", " ").split() if t) if tools_raw else None)
+    # #58: accept both the scalar list `tools: a, b` AND inline YAML `tools: [a, b]` — strip brackets/quotes
+    # before splitting so a bracketed value doesn't become tool names like "[a".
+    tools = (tuple(t for t in tools_raw.replace(",", " ").replace("[", " ").replace("]", " ")
+                   .replace("'", " ").replace('"', " ").split() if t)
+             if tools_raw else None)
     reasoning = (meta.get("reasoning") or "").lower() or None
     return AgentSpec(name=name, description=meta.get("description", ""),
                      tools=tools, reasoning=reasoning, system_prompt=body.strip())
