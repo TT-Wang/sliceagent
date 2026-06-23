@@ -82,7 +82,7 @@ def str_replace(path, old, new):
     return f"replaced 1 occurrence in {path}"
 
 def list_files(path="."):
-    return sorted(_os.listdir(path))
+    return sorted(_os.listdir(_confine(path)))
 
 def run(cmd, timeout=60):
     _r = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
