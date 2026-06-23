@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 
-from .events import Event, TurnEnd
+from .events import Event, StepEnd, TurnEnd, TurnInterrupted
 
 RECORDS_ROOT = "scratch/records"
 
@@ -62,26 +62,41 @@ class UsageRecorder:
         self.journal = journal
         self.model = model
         self._turn = 0
+        self._acc = {"input_other": 0, "input_cache_read": 0, "input_cache_creation": 0, "output": 0}
 
     def __call__(self, e: Event) -> None:
-        if isinstance(e, TurnEnd):
-            self._turn += 1
+        # #55: the TYPED breakdown (input_other/cache_read/…) lives on StepEnd, not on TurnEnd (whose usage
+        # is just the prompt/completion totals). Accumulate per step and snapshot at turn close, so the
+        # journalled cache fields are real, not always 0. Snapshot on BOTH clean and parked turn-ends.
+        if isinstance(e, StepEnd):
             u = e.usage or {}
+            for k in self._acc:
+                self._acc[k] += u.get(k, 0) or 0
+            if "output" not in u:   # legacy usage dicts: fall back to completion_tokens for output
+                self._acc["output"] += u.get("completion_tokens", 0) or 0
+        elif isinstance(e, (TurnEnd, TurnInterrupted)):
+            self._turn += 1
+            u = getattr(e, "usage", None) or {}   # TurnInterrupted carries no usage; accumulator has it
+            # prefer the per-step accumulator; fall back to a typed field carried on the TurnEnd usage
+            # itself (back-compat for callers that pass the full breakdown there).
+            typed = {k: (self._acc[k] or u.get(k, 0) or 0) for k in self._acc}
             self.journal.record(
                 "usage", turn=self._turn, model=self.model,
                 prompt_tokens=u.get("prompt_tokens", 0),
                 completion_tokens=u.get("completion_tokens", 0),
-                input_other=u.get("input_other", 0),
-                input_cache_read=u.get("input_cache_read", 0),
+                **typed,
             )
+            self._acc = {k: 0 for k in self._acc}
 
 
 def total_usage(journal: Journal) -> dict:
     """Aggregate the journal's usage records into per-model + grand totals (a simple cost report)."""
+    fields = ("prompt_tokens", "completion_tokens", "input_other", "input_cache_read",
+              "input_cache_creation", "output")   # #55: aggregate the cache breakdown, not just prompt/compl
     by_model: dict[str, dict] = {}
     for r in journal.read("usage"):
-        m = by_model.setdefault(r.get("model") or "?", {"prompt_tokens": 0, "completion_tokens": 0, "turns": 0})
-        m["prompt_tokens"] += r.get("prompt_tokens", 0)
-        m["completion_tokens"] += r.get("completion_tokens", 0)
+        m = by_model.setdefault(r.get("model") or "?", {**{f: 0 for f in fields}, "turns": 0})
+        for f in fields:
+            m[f] += r.get(f, 0) or 0
         m["turns"] += 1
     return by_model

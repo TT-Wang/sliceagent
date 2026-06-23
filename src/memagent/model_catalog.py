@@ -33,7 +33,7 @@ def capability(model: str, base_url: str = "") -> ModelCapability:
     """Resolve the capability record for a model (first matching rule wins; specific before general)."""
     m = (model or "").lower()
     b = (base_url or "").lower()
-    if m.startswith(("o1", "o3", "o4", "gpt-5")):
+    if m.startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")):   # #57: future o5/o6 + gpt-6 reasoning models
         return ModelCapability("openai-reasoning", tokens_param="max_completion_tokens",
                                supports_reasoning_effort=True)
     if "deepseek" in m or "deepseek" in b:
