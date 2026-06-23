@@ -125,10 +125,11 @@ def build_renders_other_threads_and_follows_active():
     build = make_build_slice(sess, tools, NullRetriever(), NullMemory(), "write the docs")
     system, user = (m["content"] for m in build())
     assert "OTHER OPEN THREADS" in user and a_id in user and "fix the parser" in user
-    assert "write the docs" in system              # system TASK = the ACTIVE topic's goal
-    sess.switch_topic(a_id)                         # build follows the active topic
+    assert "write the docs" in user                 # 2B: CURRENT REQUEST = the ACTIVE topic's goal (user, not system)
+    assert "write the docs" not in system           # goal no longer rides the byte-stable system message
+    sess.switch_topic(a_id)                          # build follows the active topic
     system2, user2 = (m["content"] for m in build())
-    assert "fix the parser" in system2 and b_id in user2   # now A active, B listed as a thread
+    assert "fix the parser" in user2 and b_id in user2     # now A active (CURRENT REQUEST), B listed as a thread
 
 
 @check

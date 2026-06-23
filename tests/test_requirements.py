@@ -96,7 +96,8 @@ def hi_then_who_are_you_has_no_stale_anchor():
     wd = tempfile.mkdtemp(prefix="req-")
     build = make_build_slice(sess, LocalToolHost(root=wd), None, NullMemory(), "who are you")
     msgs = build(); system, user = msgs[0]["content"], msgs[1]["content"]
-    assert "who are you" in system, "the current directive must drive the system TASK"
+    assert "who are you" in user, "the current directive must drive the user-message CURRENT REQUEST"
+    assert "who are you" not in system, "2B: goal no longer rides the (byte-stable) system message"
     assert "STANDING REQUIREMENTS" not in user and "TASK SPEC" not in user, \
         "no stale 'hi' binding anchor may render"
 
