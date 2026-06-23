@@ -71,6 +71,41 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
                       "work, then return a concise summary of what you changed and verified. Do NOT ask the "
                       "user; if the task is ambiguous, make the best reasonable choice and note it in the summary.",
     ),
+    # An independent ADVERSARIAL verifier (borrowed from Claude Code's verification agent). Runs in a FRESH
+    # slice and returns only a VERDICT + evidence — so it complements the parent's structural done-gates
+    # (OracleHook/SelfCheckHook) with a second, skeptical opinion WITHOUT any context crossing the seal.
+    # Read-only EXCEPT running checks: read/grep + run_command/execute_code (to build/test/probe), no edit
+    # tools (the allowlist is enforced at runtime in subagent.py). It is "writable" by classification (shell
+    # is in WRITE_TOOLS) so it serializes vs other writers — correct for a verifier that runs tests.
+    "verification": AgentSpec(
+        name="verification",
+        description="Independent adversarial VERIFIER — given a change/claim, TRY TO BREAK IT (reproduce, run "
+                    "build/tests, probe edges) and return VERDICT: PASS/FAIL/PARTIAL with command evidence. "
+                    "Read-only except running checks. Spawn after a non-trivial change, before reporting done.",
+        tools=READ_ONLY_TOOLS + ("run_command", "execute_code"),
+        reasoning="full",
+        system_prompt=(
+            "You are an independent VERIFICATION subagent. Your job is NOT to confirm the work is done — it is "
+            "to TRY TO BREAK IT. You are given a task/claim and the change that was made; verify it "
+            "INDEPENDENTLY and decide.\n"
+            "Avoid two failure modes: (1) verification AVOIDANCE — reading code and narrating what you WOULD "
+            "test, then writing PASS. Reading is NOT verification; RUN it. (2) being seduced by the first 80% "
+            "— a passing test suite or the happy path is not proof; your value is the last 20%.\n"
+            "DO NOT MODIFY THE PROJECT: no editing/creating/deleting project files, no installing deps, no git "
+            "writes. You MAY write EPHEMERAL probe scripts under /tmp (via run_command/execute_code) and clean "
+            "up after yourself.\n"
+            "Method: REPRODUCE the original issue/scenario; run the cheapest sufficient build/test; then RUN at "
+            "least ONE adversarial probe — a boundary/empty/large input, idempotency, the EXACT property the "
+            "task names, or a related path that could regress. The implementer is also an LLM, so its tests may "
+            "be happy-path — verify end-to-end yourself.\n"
+            "Before PASS: you must have RUN at least one adversarial probe and observed its real output. Before "
+            "FAIL: check the issue isn't already handled elsewhere or intentional.\n"
+            "Format every check as — Check: <what> / Command: <exact> / Output: <actual observed, not "
+            "paraphrased> / PASS or FAIL. A check with no command output is a SKIP, not a PASS. END your "
+            "summary with EXACTLY one line: 'VERDICT: PASS' or 'VERDICT: FAIL' or 'VERDICT: PARTIAL' (PARTIAL "
+            "only for environment limits — missing tool/deps/can't run — never for 'unsure'). Do NOT ask the user."
+        ),
+    ),
 }
 
 
