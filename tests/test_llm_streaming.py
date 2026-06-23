@@ -218,6 +218,52 @@ def classify_buckets_failures_for_telemetry():
     assert classify(a)["kind"] == "auth" and classify(a)["retryable"] is False
 
 
+@check
+def reasoning_intent_maps_to_effort():  # #51
+    llm = _stub([], on_delta=None); llm.model = "gpt-5.5"; llm._base_url = ""
+    for intent, expect in [("fast", {"reasoning_effort": "low"}), ("full", {}),
+                           ("high", {"reasoning_effort": "high"}), ("max", {"reasoning_effort": "xhigh"})]:
+        llm.reasoning = intent
+        assert llm._reasoning_kwargs() == expect, (intent, llm._reasoning_kwargs())
+    # a non-reasoning provider ignores it entirely
+    llm.model = "kimi-k2.7-code"; llm._base_url = "https://api.moonshot.cn/v1"; llm.reasoning = "high"
+    assert llm._reasoning_kwargs() == {}, llm._reasoning_kwargs()
+
+
+@check
+def watchdog_is_daemon_and_times_out():  # #47
+    import time
+    llm = _stub([], on_delta=None); llm._hard_timeout = 1; llm._base_url = ""
+    from openai import APITimeoutError
+
+    class _Slow:
+        def create(self, **kw):
+            time.sleep(6); return "never"
+    llm.client = NS(chat=NS(completions=_Slow()))
+    t0 = time.monotonic()
+    raised = False
+    try:
+        llm._create_watchdog({})
+    except APITimeoutError:
+        raised = True
+    assert raised and (time.monotonic() - t0) < 3.5, "must abort near the 1s deadline, not wait for the slow call"
+
+    class _Ok:
+        def create(self, **kw):
+            return "ok"
+    llm.client = NS(chat=NS(completions=_Ok()))
+    assert llm._create_watchdog({}) == "ok"   # fast call returns normally
+
+    class _Boom:
+        def create(self, **kw):
+            raise RuntimeError("provider 500")
+    llm.client = NS(chat=NS(completions=_Boom()))
+    try:
+        llm._create_watchdog({}); assert False, "error must propagate"
+    except RuntimeError:
+        pass
+
+
 def main():
     failed = 0
     for fn in CHECKS:

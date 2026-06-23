@@ -22,6 +22,7 @@ class ModelCapability:
     # nor moonshot/anthropic — those map "fast" to their own knobs in llm._reasoning_kwargs.
     supports_reasoning_effort: bool = False
     supports_tools: bool = True
+    supports_stream_options: bool = True   # OpenAI stream_options={include_usage}; set False if a provider 400s
     context_window: int = 0          # 0 = unknown (no fabricated values)
 
 

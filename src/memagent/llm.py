@@ -186,22 +186,31 @@ class OpenAILLM:
             _signal.signal(_signal.SIGALRM, prev)
 
     def _create_watchdog(self, kwargs: dict):
-        """Off-main-thread hard deadline: run the SDK call in a 1-shot worker and abandon it if it blows
+        """Off-main-thread hard deadline: run the SDK call in a DAEMON worker and abandon it if it blows
         the wall-clock budget (raise a RETRYABLE timeout so with_retry can retry, then the loop parks
-        gracefully instead of hanging). A fresh executor per call so a wedged call never blocks the next."""
-        import concurrent.futures as _f
+        gracefully instead of hanging). #47: a daemon thread (vs a ThreadPoolExecutor, whose worker the
+        interpreter joins at exit) means a wedged call can NEVER block process shutdown — it dies with the
+        socket whenever the SDK call finally errors on its own timeout. One thread per call; bounded."""
+        import threading
         import httpx
         from openai import APITimeoutError
-        ex = _f.ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-watchdog")
-        fut = ex.submit(self.client.chat.completions.create, **kwargs)
-        try:
-            return fut.result(timeout=self._hard_timeout)
-        except _f.TimeoutError:
+        box: dict = {}
+
+        def _call():
+            try:
+                box["resp"] = self.client.chat.completions.create(**kwargs)
+            except BaseException as e:  # noqa: BLE001 — propagate to the caller thread
+                box["err"] = e
+
+        t = threading.Thread(target=_call, name="llm-watchdog", daemon=True)
+        t.start()
+        t.join(self._hard_timeout)
+        if t.is_alive():   # blew the deadline — abandon the (daemon) thread, raise a retryable timeout
             raise APITimeoutError(
-                request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions")
-            )
-        finally:
-            ex.shutdown(wait=False)  # don't block on a possibly-wedged call; let its thread die with the socket
+                request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+        if "err" in box:
+            raise box["err"]
+        return box["resp"]
 
     def _create_streaming(self, kwargs: dict):
         """Interactive STREAMING variant of _create: drain the SSE stream into an assembled response under
@@ -228,7 +237,14 @@ class OpenAILLM:
         of complete() — tool-arg JSON parse, usage dict, cache read-back — is byte-identical to the blocking
         path. include_usage gives the final usage chunk; tool-call deltas are reassembled by index."""
         from types import SimpleNamespace as NS
-        skw = {**kwargs, "stream": True, "stream_options": {"include_usage": True}}
+
+        from .model_catalog import capability
+        skw = {**kwargs, "stream": True}
+        # #49: stream_options is OpenAI-specific — some OpenAI-compatible providers 400 on it. Gate by the
+        # catalog flag (default True; set False for a provider that rejects it) so we still get the usage
+        # chunk where supported without breaking the others.
+        if capability(self.model, self._base_url).supports_stream_options:
+            skw["stream_options"] = {"include_usage": True}
         parts: list[str] = []
         calls: dict[int, dict] = {}          # index → {id, name, args:[fragments]}
         finish = None
@@ -264,17 +280,20 @@ class OpenAILLM:
         return NS(choices=[NS(message=message, finish_reason=finish)], usage=usage)
 
     def _reasoning_kwargs(self) -> dict:
-        """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never
-        error) for providers that have none. Keeps the quirk isolated to this adapter."""
-        if self.reasoning != "fast":
-            return {}
+        """Map the provider-agnostic reasoning intent to the ACTIVE provider's knob; no-op (never error)
+        for providers that have none. Keeps the quirk isolated to this adapter. Intents: fast→low,
+        high→high, max→xhigh; "full" (default) = the provider's OWN default (deliberately NOT forced-high —
+        forcing high would inflate tokens/cost on every turn against the moat; ask for "high"/"max" to
+        opt into more reasoning)."""
         from .model_catalog import capability
+        r = self.reasoning
         model, base = self.model.lower(), self._base_url.lower()
         if "deepseek" in model or "deepseek" in base:
-            return {"extra_body": {"thinking": {"type": "disabled"}}}  # deepseek: disable thinking
-        if capability(self.model, self._base_url).supports_reasoning_effort:
-            return {"reasoning_effort": "low"}                          # OpenAI reasoning models (catalog)
-        return {}  # unknown / non-reasoning provider → leave at provider default (graceful)
+            return {"extra_body": {"thinking": {"type": "disabled"}}} if r == "fast" else {}
+        if not capability(self.model, self._base_url).supports_reasoning_effort:
+            return {}  # unknown / non-reasoning provider → leave at provider default (graceful)
+        effort = {"fast": "low", "high": "high", "max": "xhigh"}.get(r)   # full/unknown → {} (default)
+        return {"reasoning_effort": effort} if effort else {}
 
     def _cache_kwargs(self, messages: list[dict]) -> dict:
         """Map prompt-caching intent to the ACTIVE provider's knob; no-op for providers without
