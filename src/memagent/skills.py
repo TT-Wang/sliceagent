@@ -32,10 +32,19 @@ def expand_skill_args(body: str, argstr: str) -> str:
         parts = shlex.split(argstr)
     except ValueError:                      # unbalanced quotes → fall back to whitespace split
         parts = argstr.split()
-    out = body.replace("$ARGUMENTS", argstr)
-    for i, tok in enumerate(parts, 1):
-        out = out.replace(f"${i}", tok)
-    return out
+    # ONE regex pass over the original body. The old sequential `replace(f"${i}", tok)` loop was buggy:
+    #   • $10 corrupted (replacing $1 first also matched the "$1" inside "$10")
+    #   • re-expansion (a token containing "$N" got substituted again by a later iteration)
+    #   • unfilled placeholders LEAKED as literal "$N"
+    # \d+ matches the whole index ($10 before $1), and re.sub never re-scans substituted text.
+    def _sub(m: "re.Match") -> str:
+        tok = m.group(0)
+        if tok == "$ARGUMENTS":
+            return argstr
+        idx = int(tok[1:])                  # $N → 1-based positional
+        return parts[idx - 1] if 1 <= idx <= len(parts) else ""   # unfilled → blank (no leak)
+
+    return re.sub(r"\$ARGUMENTS|\$\d+", _sub, body)
 
 
 @dataclass

@@ -785,11 +785,15 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     system_prefix = (
         SYSTEM_PROMPT.replace("{{MEMORY_MODEL}}", mem_block) + delegation_block
         + env_line + environment_block + workspace_block + conventions_block + repo_map_block + agent_block
-        + "\n\n# TASK (your checklist — do the next item that OPEN FILES shows is not done)\n"
     )
 
-    def _system(goal: str) -> str:
-        return system_prefix + goal
+    def _system() -> str:
+        # 2B / SOTA transcript construction: the system message is now FULLY byte-stable — no volatile goal.
+        # The live request used to be appended here ("# TASK\n" + goal), which (a) put the one per-turn-varying
+        # byte INSIDE the cacheable prefix (busting the system-tier cache on every goal change) and (b) leaked
+        # the parent's goal into the prefix SHARED with subagents. The request now lives ONLY in the user slice,
+        # at both primacy and recency (see build()). Cache breakpoint now sits cleanly at the end of this prefix.
+        return system_prefix
 
     def build() -> list[dict]:
         s = _active(state)
@@ -817,10 +821,19 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # to MANIFEST_TURNS locators (moat), self-suppresses when no durable cache (NullMemory => []).
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
         cache_manifest = render_cache_manifest(manifest_refs)
-        user = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
+        body = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
                             hint_text, worktree, "", cache_manifest,  # repo_map now rides the cacheable SYSTEM prefix
                             max_findings=_NO_CAP)
-        return [{"role": "system", "content": _system(goal)}, {"role": "user", "content": user}]
+        # 2B / SOTA transcript construction: the verbatim request anchors the user message at BOTH ends —
+        # PRIMACY here (above the fenced context) + RECENCY via the CURRENT REQUEST tier already inside the
+        # slice — and the whole working state is fenced in a <workspace_context> envelope so the model reads it
+        # as assembled reference state, not as the ask. (Primacy+recency U-curve / instruction-sandwich; the
+        # envelope reinforces the untrusted-by-default stance. See memory: sota-transcript-construction.)
+        req = (goal or "").strip()
+        primacy = (f"# CURRENT REQUEST (what the user is asking for RIGHT NOW — your PRIMARY instruction; "
+                   f"address THIS)\n{req}\n\n") if req else ""
+        user = f"{primacy}<workspace_context>\n{body}\n</workspace_context>"
+        return [{"role": "system", "content": _system()}, {"role": "user", "content": user}]
 
     return build
 

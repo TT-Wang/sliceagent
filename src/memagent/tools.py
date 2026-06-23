@@ -201,42 +201,66 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str
 
 
 TOOL_SCHEMAS = [
-    _fn("read_file", "Read a file and return its contents.", {"path": {"type": "string"}}, ["path"]),
+    _fn("read_file",
+        "Read and return a file's FULL contents (whole file — no line-range args). To list a directory use "
+        "list_files; to SEARCH file contents use run_command/execute_code with grep/ripgrep (there is no search "
+        "tool). Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths "
+        "use run_command. A binary file returns a hexdump preview, not editable text.",
+        {"path": {"type": "string"}}, ["path"]),
     _fn("list_files",
-        "List a directory (ignore-aware: skips .git/.venv/caches/build noise). Pass recursive=true to map "
-        "a whole subtree in ONE call — PREFER this over shell `find` to get a clean repo map without cache junk.",
+        "List directory entries (ignore-aware: skips .git/.venv/caches/build/node_modules noise). Use to "
+        "discover what exists; use read_file for a file's CONTENTS and run_command/execute_code (grep/rg) to "
+        "SEARCH text. Pass recursive=true to map a whole subtree in ONE call (flat file paths, capped at 600 — "
+        "pass a subdir to narrow) — PREFER this over shell `find` for a clean cache-free map.",
         {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, []),
-    _fn("edit_file", "Create or OVERWRITE an entire file (replaces ALL content). Use only for brand-new files.",
+    _fn("edit_file",
+        "Create a new file, or OVERWRITE an existing file's ENTIRE contents with `content` (the complete text); "
+        "parent dirs are auto-created and a leading `#!` shebang makes it executable. To change PART of an "
+        "existing file use str_replace; to add to its end use append_to_file. Do NOT use edit_file to tweak a "
+        "file — it discards all current content.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-    _fn("append_to_file", "Append content to the end of a file (creates it if missing). Use to ADD without overwriting.",
+    _fn("append_to_file",
+        "Append `content` verbatim to the END of a file (creates it + parent dirs if missing) — the only writer "
+        "that ADDS without touching existing content. Use str_replace to modify text already in the file, "
+        "edit_file to replace the whole file. No newline is added — include a leading '\\n' yourself if needed.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-    _fn("str_replace", "Replace a unique snippet in an existing file. old_string must match exactly and occur once.",
+    _fn("str_replace",
+        "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
+        "changing a file you've read. `old_string` must identify exactly ONE place: more than one occurrence is "
+        "rejected (add surrounding context); an exact match is used, else a unique whitespace-tolerant fuzzy "
+        "match. Prefer over edit_file (whole-file overwrite). If a replace fails to match, don't retry it "
+        "identically — rewrite the file with edit_file.",
         {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
         ["path", "old_string", "new_string"]),
     _fn("run_command",
-        "Run a shell command (blocking); returns combined output (and exit code on failure). Pass "
-        "timeout (seconds, default 30, max 600) for slow commands like builds. For a process that must "
-        "STAY alive (a server) or that you want to probe later, use proc_start instead.",
+        "Run a shell command (blocking, cwd=workspace root); returns combined stdout+stderr (exit code on "
+        "failure). Pass timeout (seconds, default 30, max 600) for slow builds. Use for one-shot commands that "
+        "finish; for a process that must STAY alive use proc_start, for an interactive REPL use terminal_open, "
+        "to chain several edits + a test in one turn use execute_code. No cwd arg — prepend `cd DIR &&`. The "
+        "shell is unconfined (can reach outside the workspace, unlike the file tools).",
         {"command": {"type": "string"}, "timeout": {"type": "number"}}, ["command"]),
     _fn("execute_code",
-        "Run a Python script that does MULTIPLE file/shell actions in ONE turn, then prints a "
-        "short result. Helpers (no imports needed): read_file(path), write_file(path, content), "
-        "append_file(path, content), str_replace(path, old, new), list_files(path='.'), "
-        "run(shell_cmd). The workspace is the cwd and on sys.path. ONLY what you print() is "
-        "returned. Prefer this to fire several edits AND a test in a single turn.",
+        "Run a Python script that does SEVERAL file/shell steps in ONE turn (e.g. multiple edits + a test). Use "
+        "over run_command when you'd chain many calls; over proc_start when it's one-shot (blocking, ~30s). "
+        "Helpers (no imports): read_file(path), write_file(path, content), append_file(path, content), "
+        "str_replace(path, old, new), list_files(path='.'), run(shell_cmd). Workspace is cwd + on sys.path. ONLY "
+        "what you print() is returned. The file helpers are workspace-confined — use run() (shell) for outside paths.",
         {"code": {"type": "string"}}, ["code"]),
     _fn("ask_user",
-        "Ask the user a concise follow-up question and WAIT for their answer (returned to you). Use "
-        "this whenever you are UNSURE or the request is AMBIGUOUS, or when you have FAILED / been "
-        "blocked and don't know how to proceed — instead of guessing or repeating a failing action. "
-        "Give up to ~4 short 'options' for a multiple-choice question, or omit them for open-ended. "
-        "Asking is better than spinning.",
+        "Ask the user a concise follow-up question and WAIT for their answer (returned to you). Use this "
+        "whenever you are UNSURE or the request is AMBIGUOUS, or when you have FAILED / been blocked and don't "
+        "know how to proceed — instead of guessing or repeating a failing action; prefer just answering in text "
+        "when you can infer intent. Give a few short 'options' for multiple-choice, or omit for open-ended. In "
+        "headless/eval runs there is no interactive user — it returns a fallback telling you to proceed with a "
+        "stated assumption, so never loop waiting on it.",
         {"question": {"type": "string"},
          "options": {"type": "array", "items": {"type": "string"}}}, ["question"]),
     _fn("proc_start",
-        "Start a LONG-RUNNING / background process (a server, a watcher, a multi-minute build) and "
-        "return a handle (p1, p2, …). Non-blocking — it keeps running across turns. Use for anything "
-        "you must keep alive and probe later, then proc_tail/proc_poll/proc_wait/proc_kill.",
+        "Start a LONG-RUNNING / background process (a server, a watcher, a multi-minute build) and return a "
+        "handle (p1, p2, …) immediately; it keeps running across turns. Use over run_command when the process "
+        "must outlive the turn, over terminal_open when you only launch-and-probe (it gets no stdin). It does "
+        "NOT confirm the process started — one that instantly dies still returns a handle — so "
+        "proc_poll/proc_tail to check status and proc_kill to stop.",
         {"command": {"type": "string"}}, ["command"]),
     _fn("proc_poll", "Check a background process by handle: 'running' or 'exited <code>'.",
         {"handle": {"type": "string"}}, ["handle"]),
@@ -248,10 +272,11 @@ TOOL_SCHEMAS = [
     _fn("proc_kill", "Terminate a background process and its child group.",
         {"handle": {"type": "string"}}, ["handle"]),
     _fn("terminal_open",
-        "Open a persistent interactive terminal (PTY) session. Use for anything that needs a LIVE "
-        "terminal: driving a REPL or text game, answering successive prompts, a TUI, or just holding "
-        "shell state (cd/export/venv) across turns. Omit command for a shell; pass command to launch "
-        "a program directly (e.g. 'python3 -i -q'). 'session' names it (default 'main').",
+        "Open a persistent interactive PTY session for anything needing a LIVE terminal across turns: a "
+        "REPL/text-game/TUI, answering successive prompts, or holding shell state (cd/export/venv). Unlike "
+        "proc_start (no stdin) or run_command (one-shot), you drive it with terminal_send/terminal_wait/"
+        "terminal_read and end with terminal_close. Omit command for a shell, or pass one (e.g. 'python3 -i -q'); "
+        "'session' names it (default 'main'). Don't reopen an already-open session name — close it first.",
         {"session": {"type": "string"}, "command": {"type": "string"}}, []),
     _fn("terminal_send",
         "Send input to a terminal session. By default a newline is appended (sends a line). Set "

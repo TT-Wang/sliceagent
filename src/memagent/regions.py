@@ -542,7 +542,7 @@ REGION_ORDER = (
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
-    ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (reuse to avoid re-deriving, but OPEN FILES is the ground truth — verify against it before trusting; a note is NOT proof the work is done)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
+    ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (established facts to REUSE — don't re-derive these; OPEN FILES stays the ground truth for current file contents. Per-note tags mark trust: no tag = observed, '(your note)' = your summary, '(UNVERIFIED claim)' = not yet confirmed)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
     ("plan",           VOLATILE, lambda c: (f"# PLAN (your ordered steps & live progress — keep exactly ONE step in_progress; '[~]'=in progress, '[x]'=done, '[ ]'=pending; update with update_plan)\n{render_plan(c['s'].plan)}\n\n" if getattr(c['s'], 'plan', None) else ""), 3),
     ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
     ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
@@ -555,6 +555,12 @@ REGION_ORDER = (
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
+    # CURRENT REQUEST — the live user ask, RE-SURFACED at the salient tail. `goal` also rides the cacheable
+    # system prefix (cache warmth), but a frontier model attends most to the END of the user message — so
+    # the actual ask must ALSO appear here, or intent recognition degrades: the request was buried ~12k chars
+    # up in the prefix while the tail just said "do the next step with tools". This is the fix for that
+    # salience loss — cheap (one short line), VOLATILE (no prefix-cache impact), leads the high-authority tail.
+    ("current_request", VOLATILE, lambda c: (f"# CURRENT REQUEST (what the user is asking for RIGHT NOW — your PRIMARY instruction; address THIS)\n{c['s'].goal}\n\n" if getattr(c['s'], 'goal', '') else ""), 6),
     # WORKSPACE STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
     # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
     # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
@@ -566,7 +572,7 @@ REGION_ORDER = (
     ("closure",        VOLATILE, lambda c: render_closure(c["s"]), 6),
     ("convergence",    VOLATILE, lambda c: render_convergence(c["s"]), 6),
     # SUBDIRECTORY CONTEXT (pre-framed in ctx['hints']) prefixes the always-present NOW footer.
-    ("now",            VOLATILE, lambda c: c["hints"] + "# NOW: do the next step(s) with tools (edit based on OPEN FILES above), or — if your change is complete and verified as well as the environment allows — write the one-line final summary and make NO tool call.", 7),
+    ("now",            VOLATILE, lambda c: c["hints"] + "# NOW: address the CURRENT REQUEST above. If it asks a QUESTION or for an explanation, answer it directly (read/grep to ground the answer if useful — you need NOT edit); if it asks for a CHANGE, make it with tools based on OPEN FILES; once the request is fully handled and verified as well as the environment allows, write the one-line final summary and make NO tool call.", 7),
 )
 
 
