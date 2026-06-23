@@ -111,6 +111,7 @@ class BackgroundReviewer:
             procs = promote_procedures(records)
             if procs:
                 from .memory import _skills_dir   # reuse the session-end skill-write location
+                from .safety import redact_text   # redact before persisting (parity with memory.consolidate)
                 from .skill_provenance import AUTO, reset_authoring_origin, set_authoring_origin
                 skills_dir = _skills_dir()
                 token = set_authoring_origin(AUTO)   # mark fork-authored skills curator-prunable
@@ -120,7 +121,7 @@ class BackgroundReviewer:
                             d = os.path.join(skills_dir, proc["name"])
                             os.makedirs(d, exist_ok=True)
                             with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
-                                f.write(render_skill(proc))
+                                f.write(redact_text(render_skill(proc)))   # secrets must not land on disk
                         except Exception:
                             pass
                 finally:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
+from .agents import READ_ONLY_TOOLS   # single source of truth for the known read-only surface
 from .hooks import ToolDecision
 
 ALLOW = ToolDecision(True)
@@ -50,17 +51,25 @@ _DANGEROUS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# DENY-BY-DEFAULT reader allowlist for readonly/ask modes. Keying on a mutator NAME set let unknown
+# plugin/MCP tools (and even known mutating builtins absent from the small WRITE/EXEC sets — terminal_*,
+# proc_*, world_set, update_plan, …) slip past these safety modes. Allow ONLY known-safe readers; treat
+# everything else (including any unknown tool) as a mutation. ask_user is interactive, not a mutation.
+_READERS = frozenset(READ_ONLY_TOOLS) | {"ask_user"}
+
+
 def read_only(name: str, args: dict) -> Optional[ToolDecision]:
-    """Deny anything that mutates state — read/list only."""
-    if name in WRITE_TOOLS or name in EXEC_TOOLS:
-        return ToolDecision(False, "read-only mode: mutation/execution disabled")
+    """Deny anything that is not a KNOWN read-only tool (deny-by-default — an unknown tool may mutate)."""
+    if name not in _READERS:
+        return ToolDecision(False, "read-only mode: only read/list/search tools are allowed")
     return None
 
 
 def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
-    """Defer write/exec tools to an interactive prompt (PermissionHook resolves the ask)."""
-    if name in WRITE_TOOLS or name in EXEC_TOOLS:
-        return ToolDecision(False, f"{name} will modify state or run code", ask=True)
+    """Confirm any tool that is not a KNOWN read-only tool (an unknown tool may modify state / run code)."""
+    if name not in _READERS:
+        return ToolDecision(False, f"{name} is not a known read-only tool (may modify state or run code)",
+                            ask=True)
     return None
 
 
