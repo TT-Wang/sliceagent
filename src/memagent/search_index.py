@@ -34,8 +34,17 @@ ordered by FTS5 rank (best first). `snippet` is the FTS5-highlighted excerpt.
 from __future__ import annotations
 
 import os
+import re
 
 _FTS_TABLE = "episodes"
+
+
+def _fts_match_query(q: str) -> str:
+    """#40: turn a free-text query into a SAFE FTS5 MATCH expression. Extract word tokens only and quote
+    each (a bag of literal terms, AND-ed — FTS5's default) so query punctuation/operators (- " * : ( )
+    AND OR NEAR) can never trigger a syntax error that silently returns nothing. Empty → '' (no search)."""
+    toks = re.findall(r"\w+", q or "", flags=re.UNICODE)
+    return " ".join(f'"{t}"' for t in toks)
 
 
 def fts5_available() -> bool:
@@ -164,8 +173,8 @@ class EpisodeIndex:
         manifest/index window). Opposite scopings; pass at most one. Never raises."""
         if not self.is_active or self._con is None:
             return []
-        q = (query or "").strip()
-        if not q:
+        match = _fts_match_query(query)
+        if not match:
             return []
         try:
             lim = max(1, min(int(limit), 20))
@@ -178,7 +187,7 @@ class EpisodeIndex:
                 f"rank AS score "
                 f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
                 f"ORDER BY rank LIMIT ?",
-                (q, lim + 10),   # over-fetch so exclude_session can't starve the result
+                (match, lim + 10),   # over-fetch so exclude_session can't starve the result
             ).fetchall()
         except Exception:
             return []
@@ -201,7 +210,9 @@ class EpisodeIndex:
                 "title": r[4],
                 "note": r[5],
                 "snippet": r[6],
-                "score": float(r[7]) if r[7] is not None else 0.0,
+                # #41: FTS5 `rank` is negative (more-negative = better). Negate so callers reading `score`
+                # get an intuitive higher-is-better number; result ORDER already follows `rank` directly.
+                "score": -float(r[7]) if r[7] is not None else 0.0,
             })
             if len(out) >= lim:
                 break
