@@ -67,7 +67,16 @@ def slice_fenced_in_workspace_context():  # (c)
     user = _build("do the thing")[1]["content"]
     assert "<workspace_context>" in user and "</workspace_context>" in user, "slice must be fenced"
     assert user.index("# CURRENT REQUEST") < user.index("<workspace_context>"), "primacy request precedes the fence"
-    assert user.rstrip().endswith("</workspace_context>"), "the envelope closes the user message"
+
+
+@check
+def request_and_now_render_OUTSIDE_the_fence():  # review fix A/C — instruction must not be 'context'
+    user = _build("do the thing")[1]["content"]
+    close = user.index("</workspace_context>")
+    # the RECENCY request + the NOW footer come AFTER the fence closes (not inside the reference envelope)
+    assert user.rindex("# CURRENT REQUEST") > close, "recency request must be OUTSIDE the fence"
+    assert user.index("# NOW") > close, "the NOW instruction must be OUTSIDE the fence"
+    assert user.rstrip().endswith("make NO tool call."), "NOW is the OUTERMOST tail"
 
 
 @check

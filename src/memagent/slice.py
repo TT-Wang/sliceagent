@@ -54,6 +54,8 @@ from .pagetable import PageTable
 # unchanged. regions.py imports nothing from slice.py (one-direction import — no cycle).
 from .regions import (  # noqa: F401 — re-export shims
     _NO_CAP,
+    render_current_request,
+    render_now,
     CONVO_MSG_CHARS,
     DISCOVERY_K,
     FULL_FILE_LINES,
@@ -839,15 +841,14 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         body = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
                             hint_text, worktree, "", cache_manifest,  # repo_map now rides the cacheable SYSTEM prefix
                             max_findings=_NO_CAP)
-        # 2B / SOTA transcript construction: the verbatim request anchors the user message at BOTH ends —
-        # PRIMACY here (above the fenced context) + RECENCY via the CURRENT REQUEST tier already inside the
-        # slice — and the whole working state is fenced in a <workspace_context> envelope so the model reads it
-        # as assembled reference state, not as the ask. (Primacy+recency U-curve / instruction-sandwich; the
-        # envelope reinforces the untrusted-by-default stance. See memory: sota-transcript-construction.)
-        req = (goal or "").strip()
-        primacy = (f"# CURRENT REQUEST (what the user is asking for RIGHT NOW — your PRIMARY instruction; "
-                   f"address THIS)\n{req}\n\n") if req else ""
-        user = f"{primacy}<workspace_context>\n{body}\n</workspace_context>"
+        # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
+        # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
+        # the two copies never diverge — and the intent-aware NOW footer is the OUTERMOST tail, so the final
+        # instruction reads as an instruction, not as fenced context. (Primacy+recency U-curve / sandwich.)
+        reqblock = render_current_request(goal)
+        nowblock = render_now(render_subdir_hints(hint_text))
+        user = (f"{reqblock}<workspace_context>\n{body}\n</workspace_context>\n\n"
+                f"{reqblock}{nowblock}")
         return [{"role": "system", "content": _system()}, {"role": "user", "content": user}]
 
     return build
