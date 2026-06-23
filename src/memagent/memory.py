@@ -15,6 +15,24 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
+
+
+def _write_atomic(path: str, text: str) -> None:
+    """#39: write text atomically (temp in the same dir + os.replace) so a crash mid-write can't corrupt
+    a task file or the session index — the original stays intact and the rename is atomic on POSIX."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 from datetime import datetime, timezone
 
 from .code_index import _terms   # reuse the query-term extractor (drops stopwords/short tokens)
@@ -98,13 +116,17 @@ def _bullets(text: str) -> list[str]:
 
 
 def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
+    # #37: frontmatter is one flat `key: value` per line — a newline in a value would spill onto a line
+    # the parser drops (truncating the value). Collapse newlines to spaces for the scalar fields.
+    def _fm(v):
+        return str(v).replace("\r", " ").replace("\n", " ")
     fm = [
         "---", "type: task-state", "v: 1",
         f"session_id: {task.session_id}", f"task_id: {task.task_id}",
-        f"title: {task.title}", f"status: {task.status}",
+        f"title: {_fm(task.title)}", f"status: {_fm(task.status)}",
         f"created: {created}", f"updated: {updated}",
         f"since_edit: {task.since_edit}",
-        f"links: {','.join(task.links)}", f"tags: {task.tags}", "---",
+        f"links: {','.join(task.links)}", f"tags: {_fm(task.tags)}", "---",
     ]
     body = [
         "## Goal", task.goal,
@@ -186,8 +208,7 @@ def _upsert_session_index(vault: str, task: TaskState, updated: str) -> None:
     rows[task.task_id] = f"{task.task_id} · {task.status} · {updated} · {title}"  # title LAST
     lines = ["---", "type: session", f"session_id: {task.session_id}", "---", "## Tasks"]
     lines += [f"- {r}" for r in rows.values()]
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    _write_atomic(path, "\n".join(lines) + "\n")
 
 
 def _parse_session_index(path: str) -> list[TaskRef]:
@@ -297,6 +318,12 @@ class MememMemory:
             return redact_text(v[:h] + f"\n…[truncated {len(v)} chars]…\n" + v[-h:])
         if isinstance(v, str):
             return redact_text(v)  # (c) redact every persisted episodic string on its way to the cache
+        # #35: recurse into structured (non-string) tool outputs so str leaves inside a dict/list are
+        # still byte-bounded + redacted — a huge or secret-bearing nested payload can't slip past.
+        if isinstance(v, dict):
+            return {k: self._clamp(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [self._clamp(x) for x in v]
         return v
 
     def _clamp_record(self, rec: dict) -> dict:
@@ -317,7 +344,9 @@ class MememMemory:
             line = {"v": 1, "session_id": session_id, "task_id": task_id, "turn": turn,
                     "ts": ts, "record": clamped}
             with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f:
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+                # #36: default=str — a non-serializable value in a tool output must STRINGIFY, never raise
+                # and silently drop the whole turn (the except below would eat it = lost episode + index).
+                f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
         except Exception:
             return  # a cache write must never break a session
         self._index_episode(session_id, task_id, turn, ts, clamped)  # additive FTS5 mirror (item 12)
@@ -397,8 +426,7 @@ class MememMemory:
                     fm, _ = _split_frontmatter(f.read())
                 created = fm.get("created") or created
             updated = _now_iso()
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(_render_task_md(task, created=created, updated=updated))
+            _write_atomic(path, _render_task_md(task, created=created, updated=updated))
             _upsert_session_index(self._vault, task, updated)
         except Exception:
             pass
