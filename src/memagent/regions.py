@@ -579,5 +579,10 @@ def render_regions(ctx: dict) -> str:
     slots: dict[int, str] = {}
     for _name, _tier, render, slot in REGION_ORDER:
         slots[slot] = slots.get(slot, "") + render(ctx)
-    parts = [slots[0], slots[1], slots[2], slots[3], slots[4], "", slots[6], slots[7]]
-    return "\n".join(parts)
+    if not slots:
+        return ""
+    # #17: assemble by iterating ALL slot positions rather than a hand-synced literal index list — that
+    # list KeyError'd if a leading slot was empty and SILENTLY DROPPED any region added at a gap slot
+    # (e.g. 5). Slot 5 stays the reserved blank separator between the stable bulk (≤4, cache-leading) and
+    # the volatile high-authority tail (≥6); an empty slot renders as "" (a blank line), as before.
+    return "\n".join(slots.get(i, "") for i in range(max(slots) + 1))
