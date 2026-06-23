@@ -119,6 +119,10 @@ class DockerSandbox(BaseSandbox):
 def make_sandbox(backend: str = "local", *, image: str = "python:3.12-slim",
                  network: str = "none", scrub_secrets: bool = True) -> BaseSandbox:
     """Factory: 'local' (default) or 'docker'."""
-    if (backend or "local").lower() == "docker":
+    b = (backend or "local").lower()
+    if b == "docker":
         return DockerSandbox(image, network=network, scrub_secrets=scrub_secrets)
-    return LocalSandbox(scrub_secrets=scrub_secrets)
+    if b == "local":
+        return LocalSandbox(scrub_secrets=scrub_secrets)
+    # #27: a typo'd backend (e.g. "dokcer") must NOT silently fall back to the unisolated host — fail loud.
+    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local' or 'docker')")

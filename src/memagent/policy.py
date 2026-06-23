@@ -102,4 +102,7 @@ def make_policy(mode: str = "guard") -> PolicyChain:
         return PolicyChain(read_only)
     if mode == "ask":
         return PolicyChain(no_dangerous_commands, ask_mutations)  # dangerous→deny, rest→ask
-    return PolicyChain(no_dangerous_commands)  # guard (default)
+    if mode == "guard":
+        return PolicyChain(no_dangerous_commands)
+    # #28: a typo'd mode (e.g. "redonly") must NOT silently fall back to a weaker policy than intended.
+    raise ValueError(f"unknown policy mode {mode!r} (expected 'guard', 'readonly', 'ask', or 'allow')")
