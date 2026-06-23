@@ -37,6 +37,20 @@ HOST_ERROR_SENTINELS = (
 
 # Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action,
 # Hermes pattern). No imports needed by the model. The workspace is cwd and on sys.path,
+# Strip a leading "cat -n" line-number prefix ("   123\t") from a str_replace snippet pasted back from the
+# numbered OPEN FILES render. Only fires when EVERY non-blank line has one (clearly cat -n output, not real
+# source), so a genuine match is never altered; used as a fallback in _t_str_replace.
+_LINENO_PREFIX = re.compile(r"^[ \t]*\d+\t")
+
+
+def _strip_line_numbers(text: str) -> str:
+    lines = text.split("\n")
+    nonblank = [ln for ln in lines if ln.strip()]
+    if not nonblank or not all(_LINENO_PREFIX.match(ln) for ln in nonblank):
+        return text
+    return "\n".join(_LINENO_PREFIX.sub("", ln) if ln.strip() else ln for ln in lines)
+
+
 # so `import <workspace_module>` works for testing freshly-written code.
 _CODE_PRELUDE = '''\
 import os as _os, sys as _sys, subprocess as _sp
@@ -203,13 +217,13 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str
 TOOL_SCHEMAS = [
     _fn("read_file",
         "Read and return a file's FULL contents (whole file — no line-range args). To list a directory use "
-        "list_files; to SEARCH file contents use run_command/execute_code with grep/ripgrep (there is no search "
-        "tool). Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths "
-        "use run_command. A binary file returns a hexdump preview, not editable text.",
+        "list_files; to SEARCH file contents use the `grep` tool (ripgrep-backed, paginated) — not bash grep. "
+        "Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths use "
+        "run_command. A binary file returns a hexdump preview, not editable text.",
         {"path": {"type": "string"}}, ["path"]),
     _fn("list_files",
         "List directory entries (ignore-aware: skips .git/.venv/caches/build/node_modules noise). Use to "
-        "discover what exists; use read_file for a file's CONTENTS and run_command/execute_code (grep/rg) to "
+        "discover what exists; use read_file for a file's CONTENTS and the `grep` tool (ripgrep-backed) to "
         "SEARCH text. Pass recursive=true to map a whole subtree in ONE call (flat file paths, capped at 600 — "
         "pass a subdir to narrow) — PREFER this over shell `find` for a clean cache-free map.",
         {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, []),
@@ -226,8 +240,9 @@ TOOL_SCHEMAS = [
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
     _fn("str_replace",
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
-        "changing a file you've read. `old_string` must identify exactly ONE place: more than one occurrence is "
-        "rejected (add surrounding context); an exact match is used, else a unique whitespace-tolerant fuzzy "
+        "changing a file you've read. `old_string` should be the SMALLEST unique snippet — usually 2-4 adjacent "
+        "lines, not 10+. It must identify exactly ONE place: more than one occurrence is rejected (add "
+        "surrounding context); an exact match is used, else a unique whitespace-tolerant fuzzy "
         "match. Prefer over edit_file (whole-file overwrite). If a replace fails to match, don't retry it "
         "identically — rewrite the file with edit_file.",
         {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
@@ -645,26 +660,35 @@ class LocalToolHost:
         crlf = self._detect_crlf(full)                # preserve the file's line endings on write-back
         old = args["old_string"]
         new = args["new_string"]
-        n = cur.count(old)
-        if n == 1:
-            # Exact match stays the PRIMARY path — unchanged behavior.
-            updated = self._preserve_eol(cur.replace(old, new, 1), crlf)
-            self._atomic_write(full, updated)
-            return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
-        if n > 1:
-            return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique", ok=False)
-        # n == 0: exact match failed. Try a whitespace-tolerant UNIQUE fuzzy span before
-        # giving up. fuzzy_find_unique returns None on 0/>1 candidates, so uniqueness is
-        # preserved — we never replace an ambiguous match.
-        span = fuzzy_find_unique(cur, old)
-        if span is not None:
-            updated = self._preserve_eol(cur[:span[0]] + new + cur[span[1]:], crlf)
-            self._atomic_write(full, updated)
-            return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
-                    f"({len(cur)} → {len(updated)} bytes)")
+        # OPEN FILES renders with cat -n line numbers; if the model pasted a numbered snippet back into
+        # old_string, strip the "  N\t" prefixes so it still matches the real (unnumbered) file. Tried only
+        # as a FALLBACK after the raw text, and only when EVERY line carried a number (clearly cat -n output,
+        # not source) — so a real match is never altered.
+        candidates = [old]
+        stripped = _strip_line_numbers(old)
+        if stripped != old:
+            candidates.append(stripped)
+        # PRIMARY: exact match (raw first, then de-numbered). A >1 count is a real ambiguity — report it.
+        for cand in candidates:
+            n = cur.count(cand)
+            if n == 1:
+                updated = self._preserve_eol(cur.replace(cand, new, 1), crlf)
+                self._atomic_write(full, updated)
+                return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
+            if n > 1:
+                return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique", ok=False)
+        # FALLBACK: whitespace-tolerant UNIQUE fuzzy span (raw first, then de-numbered). fuzzy_find_unique
+        # returns None on 0/>1 candidates, so uniqueness is preserved — we never replace an ambiguous match.
+        for cand in candidates:
+            span = fuzzy_find_unique(cur, cand)
+            if span is not None:
+                updated = self._preserve_eol(cur[:span[0]] + new + cur[span[1]:], crlf)
+                self._atomic_write(full, updated)
+                return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
+                        f"({len(cur)} → {len(updated)} bytes)")
         return ToolText(f"Error: old_string not found in {args['path']} — your snippet does not match "
-                f"the file. Copy the EXACT text from OPEN FILES (the live content), or rewrite "
-                f"the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)
+                f"the file. Copy the EXACT text from OPEN FILES (the live content, WITHOUT the line-number "
+                f"prefix), or rewrite the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)
 
     def _t_ask_user(self, args: dict) -> str:
         q = (args.get("question") or "").strip()

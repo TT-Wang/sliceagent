@@ -142,7 +142,8 @@ SYSTEM_PROMPT = (
     "plan, or discuss, just reply in text and make NO tool call. If it asks you to DO something (implement, "
     "fix, refactor, run, investigate, configure, recover, solve), carry it out with tools and make the real "
     "change in the environment — do not merely describe it. Act when it is a task; "
-    "converse when it is conversation. When the request specifies an EXACT name, function signature, API, "
+    "converse when it is conversation — e.g. \"rename methodName to snake_case\" is a TASK: find it in the "
+    "code and make the edit, don't just reply with the new name. When the request specifies an EXACT name, function signature, API, "
     "or interface, honor it VERBATIM — do not rename or re-shape what the user asked for (a caller or test "
     "depends on that exact name). When the user states a STANDING requirement that must hold at the end (an "
     "exact name/signature, an output format, a rule, or a constraint added mid-task), record it with "
@@ -233,15 +234,22 @@ SYSTEM_PROMPT = (
     "verify against OPEN FILES, never established truth.\n"
     "</notes>\n\n"
     "<stop>\n"
-    "When the change is complete and verified as well as the environment allows, write the one-line summary and "
+    "When the change is complete and verified as well as the environment allows, write your final summary and "
     "make NO tool call. Do not re-run a check you have already passed.\n"
     "</stop>\n\n"
+    "<communication>\n"
+    "Write your final summary for a reader who CANNOT see your tool calls, your reasoning, or this slice: say "
+    "what you changed and the outcome in complete sentences, expand any codename/jargon/abbreviation, and lead "
+    "with the change or the answer (most important first). Be concise but COMPLETE — MATCH the depth to the "
+    "task: a one-line summary is the floor for a trivial change, NOT a ceiling for real work; a multi-file "
+    "change or an investigation deserves a few sentences (what changed and where, how you verified it, and any "
+    "limitation or concrete next step). As short as the task allows, never shorter than the reader needs.\n"
+    "</communication>\n\n"
     "<safety>\n"
     "Do NOT make unasked git mutations (commit/push/checkout/reset/rewrite history) — ask each time before changing repo state.\n"
     "Never read, print, or commit secrets — leave .env and credential files alone unless the user explicitly asks.\n"
     "Your current git state (branch + changed files) is shown LIVE in WORKSPACE STATE below, re-read every "
     "turn — trust it; the PROJECT facts in this system message are session-start static.\n"
-    "Be concise: lead with the change or the answer, not a preamble.\n"
     "</safety>"
 )
 
@@ -527,6 +535,13 @@ def _relevant_regions(s: Slice, path: str, lines: list[str], region_lines: int =
     return [(a, b) for a, b in windows]
 
 
+def _numbered(lines: list[str], start: int = 1) -> str:
+    """cat -n style line numbers (start-based) for the OPEN FILES render, so the model can cite file:line and
+    disambiguate duplicate lines in findings/summaries (SOTA file-evidence habit). The number is a PRESENTATION
+    prefix, NOT file content — str_replace tolerates it being pasted back (tools._strip_line_numbers)."""
+    return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, start))
+
+
 def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
                     read_budget: int = READ_BUDGET) -> str:
     """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap (bound ≠ size).
@@ -580,13 +595,13 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
         # the overflow-tighten floor (region_only, the physical-context fallback) collapses it.
         in_closure = (p in s.edited_files) or (p in getattr(s, "protected_deps", set()))
         if in_closure or total <= full_file_lines:
-            parts.append(f"### {p} ({total} lines — full)\n```\n{body}\n```")
+            parts.append(f"### {p} ({total} lines — full)\n```\n{_numbered(lines)}\n```")
         else:
             # huge EXPLORATORY read: the UNION of relevant symbol-regions in full (multi-focus), not one
             # window — every symbol the task references stays visible (relevance bounds it, not a size cap).
             regions = _relevant_regions(s, p, lines)
             shown_lines = sum(b - a + 1 for a, b in regions)
-            blocks = [f"# lines {a}-{b}\n" + "\n".join(lines[a - 1:b]) for a, b in regions]
+            blocks = [f"# lines {a}-{b}\n" + _numbered(lines[a - 1:b], a) for a, b in regions]
             hdr = (f"### {p} ({total} lines — {len(regions)} relevant region(s), {shown_lines} lines; "
                    f"grep to locate other parts, then edit — a failed str_replace re-aims this view)")
             parts.append(f"{hdr}\n```\n" + "\n…\n".join(blocks) + "\n```")
