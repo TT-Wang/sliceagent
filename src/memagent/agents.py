@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
 READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history")
+_READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
 # Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A
 # subagent must not stop to ask the END-USER — ambiguity is the parent's job; a child that blocks on input
@@ -45,8 +46,11 @@ class AgentSpec:
 
     @property
     def read_only(self) -> bool:
-        """A child is read-only iff its allowlist contains NO mutating tool (so it cannot change the repo)."""
-        return self.tools is not None and not (set(self.tools) & WRITE_TOOLS)
+        """A child is read-only iff EVERY tool in its allowlist is a KNOWN read-only tool. Pessimistic by
+        design: an unknown / plugin / MCP tool is NOT assumed safe (the old check only excluded the static
+        WRITE_TOOLS names, so a side-effecting plugin tool was mis-classified read-only and could be
+        scheduled as a parallel non-writer). None (full surface) is writable."""
+        return self.tools is not None and set(self.tools).issubset(_READ_ONLY_SET)
 
 
 BUILTIN_AGENTS: dict[str, AgentSpec] = {

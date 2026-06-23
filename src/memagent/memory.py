@@ -330,13 +330,11 @@ class MememMemory:
         return v
 
     def _clamp_record(self, rec: dict) -> dict:
-        def acts(lst):
-            return [{**a, "args": {k: self._clamp(v) for k, v in a["args"].items()}}
-                    if isinstance(a.get("args"), dict) else a for a in (lst or [])]
-        rec = dict(rec)
-        rec["steps"] = [{**s, "observation": [self._clamp(o) for o in s.get("observation", [])],
-                         "action": acts(s.get("action"))} for s in rec.get("steps", [])]
-        return rec
+        # Redact + byte-bound EVERY string leaf of the WHOLE record, not just steps. Earlier this clamped
+        # only steps[*].observation/action — so the top-level title/note/markdown/meta (markdown is rendered
+        # from the RAW steps + note) reached the durable cache UNREDACTED and could be surfaced by
+        # recall_history. _clamp recurses through dict/list, so one call covers the entire record uniformly.
+        return self._clamp(rec)
 
     def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
         try:
