@@ -520,6 +520,31 @@ STABLE, VOLATILE = "stable", "volatile"
 # Each region is (name, tier, render(ctx)->framed-fragment, slot). The renderer OWNS its header
 # literal + spacing and SUPPRESSES itself (returns '') when empty. `tier` documents the
 # stable-bulk/volatile-tail split (prompt-cache locality). `slot` maps the fragment onto the former
+# CURRENT REQUEST (the live user ask) and the NOW footer render OUTSIDE the <workspace_context> envelope in
+# slice.build() — NOT as REGION_ORDER entries. The envelope marks "reference STATE"; the live INSTRUCTION must
+# frame it from OUTSIDE, at both ends (primacy + recency), with NOW as the outermost tail. ONE `goal` source
+# feeds both request copies (no primacy/recency divergence).
+_CURRENT_REQUEST_HDR = ("# CURRENT REQUEST (what the user is asking for RIGHT NOW — your PRIMARY instruction; "
+                        "address THIS)\n")
+_NOW_FOOTER = ("# NOW: address the CURRENT REQUEST above. If it asks a QUESTION or for an explanation, answer "
+               "it directly (read/grep to ground the answer if useful — you need NOT edit); if it asks for a "
+               "CHANGE, make it with tools based on OPEN FILES; once the request is fully handled and verified "
+               "as well as the environment allows, write the one-line final summary and make NO tool call.")
+
+
+def render_current_request(goal: str) -> str:
+    """The live user ask, rendered OUTSIDE the workspace_context fence (used at BOTH primacy and recency from
+    one source). Empty goal → '' (no header)."""
+    g = (goal or "").strip()
+    return f"{_CURRENT_REQUEST_HDR}{g}\n\n" if g else ""
+
+
+def render_now(hints: str = "") -> str:
+    """The intent-aware NOW footer — the OUTERMOST tail (after the fence closes), so the final instruction
+    reads as an instruction, not as 'context'. `hints` = pre-framed SUBDIRECTORY CONTEXT prefix (may be '')."""
+    return (hints or "") + _NOW_FOOTER
+
+
 # parts[] grouping: fragments sharing a slot are concatenated, in order, into one "\n".join part —
 # so the iteration equals the old hand-ordered concatenation BYTE-FOR-BYTE. (Provenance framing for
 # # YOUR NOTES / the # OPEN USER REPORT blocker / the # REPEATED-FAILING header all live in the
@@ -555,12 +580,7 @@ REGION_ORDER = (
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
-    # CURRENT REQUEST — the live user ask, RE-SURFACED at the salient tail. `goal` also rides the cacheable
-    # system prefix (cache warmth), but a frontier model attends most to the END of the user message — so
-    # the actual ask must ALSO appear here, or intent recognition degrades: the request was buried ~12k chars
-    # up in the prefix while the tail just said "do the next step with tools". This is the fix for that
-    # salience loss — cheap (one short line), VOLATILE (no prefix-cache impact), leads the high-authority tail.
-    ("current_request", VOLATILE, lambda c: (f"# CURRENT REQUEST (what the user is asking for RIGHT NOW — your PRIMARY instruction; address THIS)\n{c['s'].goal}\n\n" if getattr(c['s'], 'goal', '') else ""), 6),
+    # (CURRENT REQUEST renders OUTSIDE the fence in build() — see render_current_request above — not here.)
     # WORKSPACE STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
     # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
     # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
@@ -571,8 +591,7 @@ REGION_ORDER = (
     ("error",          VOLATILE, lambda c: (f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{c['s'].last_error}\n\n" if c["s"].last_error else ""), 6),
     ("closure",        VOLATILE, lambda c: render_closure(c["s"]), 6),
     ("convergence",    VOLATILE, lambda c: render_convergence(c["s"]), 6),
-    # SUBDIRECTORY CONTEXT (pre-framed in ctx['hints']) prefixes the always-present NOW footer.
-    ("now",            VOLATILE, lambda c: c["hints"] + "# NOW: address the CURRENT REQUEST above. If it asks a QUESTION or for an explanation, answer it directly (read/grep to ground the answer if useful — you need NOT edit); if it asks for a CHANGE, make it with tools based on OPEN FILES; once the request is fully handled and verified as well as the environment allows, write the one-line final summary and make NO tool call.", 7),
+    # (NOW footer renders OUTSIDE the fence as the outermost tail in build() — see render_now above — not here.)
 )
 
 

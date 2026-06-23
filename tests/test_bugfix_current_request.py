@@ -1,59 +1,73 @@
-"""Regression test for the slice-salience fix: the live user request must appear as a first-class tier at
-the SALIENT TAIL of the user slice (not only buried in the cacheable system prefix), and the NOW footer must
-be intent-aware (converse-or-act). No model, no pytest.
+"""Request salience + intent-aware footer, asserted at the BUILD level (the request and the NOW footer
+render in build(), OUTSIDE the <workspace_context> fence — not inside render_slice). No model, no pytest.
 Run: PYTHONPATH=src python tests/test_bugfix_current_request.py
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.slice import Slice, render_slice  # noqa: E402
+from memagent.slice import Slice, make_build_slice   # noqa: E402
+from memagent.retriever import NullRetriever         # noqa: E402
+from memagent.memory import NullMemory               # noqa: E402
+import memagent.regions as regions                    # noqa: E402
 
 CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
 
+_ROOT = tempfile.mkdtemp(prefix="cr-root-")
 
-@check
-def current_request_renders_in_salient_tail():
+
+class _Tools:
+    def schemas(self): return []
+    def accesses(self, n, a): return []
+    def run(self, n, a): return ""
+    def root(self): return _ROOT
+    def read_text(self, p): raise FileNotFoundError(p)
+
+
+def _user(goal):
     s = Slice()
-    s.reset("take a look at how config parsing works and tell me whether it handles bad input safely")
-    out = render_slice(s, "(no files opened yet)")
-    assert "# CURRENT REQUEST" in out, "the live request must be a first-class user-slice tier"
-    assert "handles bad input safely" in out, "the goal text must appear in the USER slice (not just prefix)"
-    # it must be in the TAIL (after OPEN FILES near the top), i.e. salient
-    assert out.index("# CURRENT REQUEST") > out.index("# OPEN FILES"), "request belongs in the salient tail"
+    if goal:
+        s.reset(goal)
+    return make_build_slice(s, _Tools(), NullRetriever(), NullMemory(), goal)()[1]["content"]
 
 
 @check
-def now_footer_is_intent_aware():
-    s = Slice(); s.reset("explain the retry logic")
-    out = render_slice(s, "(no files)")
-    assert "# NOW" in out
-    assert "QUESTION" in out and "answer it directly" in out, "footer must offer converse, not only act/edit"
-    assert "CURRENT REQUEST" in out  # footer points back at the request
+def request_leads_and_is_outside_the_fence():
+    out = _user("take a look at how config parsing works and tell me whether it handles bad input safely")
+    assert out.startswith("# CURRENT REQUEST"), "the live request leads the user message (primacy)"
+    assert "handles bad input safely" in out
+    # both copies live OUTSIDE the reference fence
+    close = out.index("</workspace_context>")
+    assert out.index("# CURRENT REQUEST") < out.index("<workspace_context>"), "primacy before the fence"
+    assert out.rindex("# CURRENT REQUEST") > close, "recency after the fence"
 
 
 @check
-def current_request_suppressed_when_no_goal():
-    out = render_slice(Slice(), "(no files)")   # fresh slice, empty goal
-    assert "# CURRENT REQUEST" not in out, "no goal → no request tier (no empty header)"
+def now_footer_is_intent_aware_and_outermost():
+    out = _user("explain the retry logic")
+    assert "# NOW" in out and out.index("# NOW") > out.index("</workspace_context>"), "NOW is outside the fence"
+    assert "QUESTION" in out and "answer it directly" in out, "footer offers converse, not only act/edit"
+    assert "CURRENT REQUEST" in out, "footer points back at the request"
+
+
+@check
+def no_goal_suppresses_request_header():
+    out = _user("")    # fresh slice, empty goal
+    assert "# CURRENT REQUEST" not in out, "no goal → no request header (no empty tier)"
+    assert out.startswith("<workspace_context>"), "envelope still wraps the slice"
 
 
 @check
 def findings_header_not_over_hedged_but_claim_tag_kept():
     # the blanket "a note is NOT proof" distrust is gone; the per-note claim hedge (anti-ratchet) stays
-    import memagent.regions as r
-    s = Slice(); s.reset("x")
-    s.findings = ["did the thing"]
-    s.finding_source = {"did the thing": "claim"}
-    body = r.render_findings(s.findings, s.finding_source)
-    assert "UNVERIFIED claim" in body, "claim findings must still be marked unverified (anti-ratchet guard)"
-    # an observed finding carries NO hedge
-    s.finding_source = {"did the thing": "observed"}
-    assert "UNVERIFIED" not in r.render_findings(s.findings, s.finding_source)
+    src = {"did the thing": "claim"}
+    assert "UNVERIFIED claim" in regions.render_findings(["did the thing"], src), "claims stay marked unverified"
+    assert "UNVERIFIED" not in regions.render_findings(["did the thing"], {"did the thing": "observed"})
 
 
 def main():

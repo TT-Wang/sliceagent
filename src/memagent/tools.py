@@ -123,9 +123,10 @@ def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
 NOTE_PROP = {
     "note": {
         "type": "string",
-        "description": ("Optional. A durable FACT you established this turn — root cause, a confirmed fix, a "
-                        "ruled-out hypothesis, or 'task done' — in <=15 words. A conclusion, NOT the action "
-                        "you're taking. Saved across turns so you never re-derive it. Empty if nothing new."),
+        "description": ("Optional — usually leave EMPTY. Fill ONLY when this call established a NEW durable FACT "
+                        "(root cause, a confirmed fix, a ruled-out hypothesis, or 'task done'), in <=15 words — a "
+                        "conclusion, NOT the action you're taking. Saved across turns so you never re-derive it; "
+                        "routine reads/edits need no note."),
     }
 }
 
