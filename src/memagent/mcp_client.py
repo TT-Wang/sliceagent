@@ -68,12 +68,31 @@ class McpRuntime:
         self.loop.run_forever()
 
     def submit(self, coro, timeout):
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+        cf = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return cf.result(timeout)
+        except BaseException:
+            cf.cancel()   # #60: a timed-out/failed call must stop its coroutine on the loop, not leak it
+            raise
 
     def spawn(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def shutdown(self):
+        # #61/#62: cancel every task on the loop BEFORE stopping it, so each _serve()'s
+        # `async with stdio_client(...)`/`ClientSession` __aexit__ runs and its child PROCESS is
+        # terminated. Stopping the loop with tasks still pending would orphan those subprocesses.
+        async def _cancel_all():
+            tasks = [t for t in asyncio.all_tasks(self.loop) if t is not asyncio.current_task()]
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_cancel_all(), self.loop).result(timeout=5)
+        except BaseException:  # noqa: BLE001 — best-effort teardown
+            pass
         self.loop.call_soon_threadsafe(self.loop.stop)
 
 

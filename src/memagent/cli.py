@@ -376,6 +376,8 @@ def main() -> None:
     # session end: tear down background procs / PTY sessions (also atexit-guarded for crash/abort) so
     # leaked servers/shells don't outlive the agent (#5).
     base_tools.cleanup()
+    if mcp_runtime is not None:        # #61/#62: cancel MCP worker tasks → stdio child processes terminate
+        mcp_runtime.shutdown()
     # consolidate the episodic cache into long-term memory (the cache→memory loop)
     if getattr(memory, "is_durable", False):
         memory.consolidate(session.session_id)
