@@ -15,7 +15,9 @@ import os
 from dataclasses import dataclass
 
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
-READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history")
+# (No "glob" here: there is no glob tool registered — list_files(recursive) + grep's glob filter cover
+# file-name patterns. Advertising a tool that isn't in the registry is a dead/misleading allowlist entry.)
+READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "skill", "recall_history")
 _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
 # Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A
@@ -92,8 +94,8 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
             "test, then writing PASS. Reading is NOT verification; RUN it. (2) being seduced by the first 80% "
             "— a passing test suite or the happy path is not proof; your value is the last 20%.\n"
             "DO NOT MODIFY THE PROJECT: no editing/creating/deleting project files, no installing deps, no git "
-            "writes. You MAY write EPHEMERAL probe scripts under /tmp (via run_command/execute_code) and clean "
-            "up after yourself.\n"
+            "writes. You MAY write EPHEMERAL probe scripts to a temp dir WHERE THE SANDBOX ALLOWS (e.g. $TMPDIR "
+            "or /tmp, via run_command/execute_code) and clean up after yourself.\n"
             "Method: REPRODUCE the original issue/scenario; run the cheapest sufficient build/test; then RUN at "
             "least ONE adversarial probe — a boundary/empty/large input, idempotency, the EXACT property the "
             "task names, or a related path that could regress. The implementer is also an LLM, so its tests may "

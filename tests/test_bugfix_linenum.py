@@ -43,6 +43,21 @@ def str_replace_tolerates_pasted_line_numbers():
 
 
 @check
+def read_file_returns_numbered_and_editable():
+    # review2 #1: read_file's RETURN now carries cat -n numbers (immediate in-turn file:line evidence),
+    # and an edit using a snippet pasted WITH those numbers still matches (str_replace strips them).
+    wd = tempfile.mkdtemp(prefix="ln-rf-")
+    host = LocalToolHost(root=wd)
+    host._t_edit_file({"path": "m.py", "content": "def f():\n    return 1\n"})
+    out = host.run("read_file", {"path": "m.py"})
+    assert out.splitlines()[0].startswith("     1\t"), out          # numbered
+    assert _strip_line_numbers(out).startswith("def f():")          # de-numbers cleanly to the real content
+    pasted = "     2\t    return 1"                                 # copied WITH the number
+    assert "Replaced 1 occurrence" in str(host._t_str_replace(
+        {"path": "m.py", "old_string": pasted, "new_string": "    return 2"}))
+
+
+@check
 def str_replace_raw_path_unchanged():
     # the PRIMARY exact path must still work with a clean (unnumbered) snippet
     wd = tempfile.mkdtemp(prefix="ln2-")

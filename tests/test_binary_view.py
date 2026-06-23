@@ -45,7 +45,8 @@ def magic_line_present():
 def text_still_reads_normally():
     wd, h = _host()
     open(os.path.join(wd, "a.txt"), "w").write("hello world\n")
-    assert h.run("read_file", {"path": "a.txt"}).strip() == "hello world"
+    from memagent.tools import _strip_line_numbers      # read_file now returns cat -n numbered content
+    assert _strip_line_numbers(h.run("read_file", {"path": "a.txt"})).strip() == "hello world"
 
 
 @check
