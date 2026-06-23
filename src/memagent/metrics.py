@@ -15,7 +15,8 @@ with TurnEnd's cumulative `total`. Wire it into a dispatcher alongside slice_sin
 """
 from __future__ import annotations
 
-from .events import ApiRetry, Event, SliceTightened, StepEnd, ToolResult, TurnEnd
+from .events import (ApiRetry, Event, SliceTightened, StepEnd, ToolResult, TurnEnd,
+                     TurnInterrupted)
 
 
 class CostMetrics:
@@ -40,10 +41,15 @@ class CostMetrics:
         if isinstance(e, StepEnd):
             self.steps += 1
             self._add(e.usage)
-        elif isinstance(e, TurnEnd):
+        elif isinstance(e, (TurnEnd, TurnInterrupted)):
+            # #56: snapshot + reset on BOTH clean and PARKED turn-ends. Without TurnInterrupted, a parked
+            # turn's fresh tokens were dropped from the moat curve AND its accumulator bled into the next
+            # turn (double-count); turns/per_turn_fresh undercounted on every interruption.
             self.turns += 1
             self.per_turn_fresh.append(self._turn_fresh)
             self._turn_fresh = 0
+            if isinstance(e, TurnInterrupted):
+                self.errors[f"park:{e.reason}"] = self.errors.get(f"park:{e.reason}", 0) + 1
         elif isinstance(e, ToolResult):
             self.tool_calls += 1
             if e.failing:

@@ -52,6 +52,12 @@ STUCK_BLOCK_BUDGET = 3
 OVERFLOW_MSG = ("The working context overflowed and could not be compacted further. Stopping this turn — "
                 "try a narrower request, or reduce the number of files in play, and continue.")
 
+# #11: a 'length'/'content_filter' finish is NOT a clean turn — the reply was truncated/blocked, not
+# completed, so we PARK (interrupted) instead of sealing it as done.
+MAX_TOKENS_MSG = ("The response hit the output token limit and was cut off mid-answer — it is INCOMPLETE. "
+                  "Continue, or ask a narrower question.")
+FILTERED_MSG = "The response was stopped by the provider's content filter; the turn is incomplete."
+
 # Breadcrumb inserted ONCE when overflow compaction drops the oldest exchange, so the loss is never
 # silent: the model is told it happened and how to recover (the episode sink archived it losslessly).
 OVERFLOW_COMPACTED = ("[context note: the oldest step(s) of this turn were compacted out to fit the window. "
@@ -171,7 +177,9 @@ def _assistant_message(resp) -> dict:
     if resp.tool_calls:
         msg["tool_calls"] = [
             {"id": _tool_call_id(tc, i), "type": "function",
-             "function": {"name": tc.name, "arguments": json.dumps(tc.args, ensure_ascii=False)}}
+             # #13: tc.args may be None (a tool call with no args) → emit "{}", not "null" (which some
+             # providers reject as an invalid arguments payload).
+             "function": {"name": tc.name, "arguments": json.dumps(tc.args or {}, ensure_ascii=False)}}
             for i, tc in enumerate(resp.tool_calls)
         ]
     return msg
@@ -237,7 +245,9 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         messages = list(build_slice())   # SEED — built ONCE, stored RAW (prepare_messages applies per-call)
         seed_len = len(messages)         # never compact below the seed
         seed_view = _prepared(hooks, messages)  # dispatch what the model will SEE (== messages unless a hook injects)
-        dispatch(SliceBuilt(seed_view[-1]["content"], seed_view))
+        # #14: guard an empty seed (a build_slice that returns []) — index it directly and we'd IndexError
+        # into the generic 'error' park, masking the real cause.
+        dispatch(SliceBuilt(seed_view[-1]["content"] if seed_view else "", seed_view))
 
         while True:
             if signal is not None and signal.is_set():
@@ -306,6 +316,12 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     if cont and cont.get("continue"):
                         messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
                         continue
+                    if stop in ("max_tokens", "filtered"):
+                        # #11: a truncated (length) or content-filtered response is INCOMPLETE — park it as
+                        # interrupted instead of sealing a partial answer as a clean turn. Content (if any)
+                        # was already emitted + appended above; no closeout (it would truncate again too).
+                        return _park(stop, MAX_TOKENS_MSG if stop == "max_tokens" else FILTERED_MSG,
+                                     closeout=False)
                     if not said_anything:   # never end the turn truly silent (e.g. empty end_turn after tools)
                         dispatch(AssistantText("Done — no summary to add."))
                     dispatch(TurnEnd(stop, steps, total))   # the ONE clean-exit event
