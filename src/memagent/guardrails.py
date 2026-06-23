@@ -50,6 +50,11 @@ MUTATING_TOOL_NAMES = frozenset({
     "new_topic", "switch_topic", "skill",
 })
 
+# Known NON-mutating (read/search) tools. The no-progress streak treats a tool as a potential MUTATOR
+# unless it is in here — so unknown plugin/MCP tools AND mutating builtins missing from the static set
+# above (world_set, terminal_*, proc_*, update_plan, …) still drive loop detection (pessimistic).
+_NON_MUTATORS = IDEMPOTENT_TOOL_NAMES | frozenset({"grep", "glob", "ask_user"})
+
 # memagent's failing convention — kept in one place so guardrail counting agrees with
 # slice.record_action / loop.run_tool_batch / mining (all use this exact prefix test).
 _FAIL_PREFIXES = ("Error", "Exit code")
@@ -312,7 +317,7 @@ class ToolCallGuardrail:
         # never matches, an edit/run that errors) advances it. This targets the "trying to change the
         # world and nothing sticks" loop WITHOUT penalizing productive non-edit shell work (running a
         # build/test that passes is progress, not spinning). Tool-agnostic over the mutating set.
-        if tool_name in self.config.mutating_tools:
+        if tool_name not in _NON_MUTATORS:   # pessimistic: unknown/plugin tools count as mutators too
             if not failed:
                 self._mutations_since_edit = 0
                 self._calls_since_edit = 0  # a change landed → the budget floor resets

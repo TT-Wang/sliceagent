@@ -204,7 +204,7 @@ def _upsert_session_index(vault: str, task: TaskState, updated: str) -> None:
             _, body = _split_frontmatter(f.read())
         for b in _bullets(_read_sections(body).get("tasks", "")):
             rows[b.split(" · ", 1)[0].strip()] = b
-    title = (task.title or "").replace("\n", " ")
+    title = redact_text((task.title or "").replace("\n", " "))   # model-derived → redact before persisting
     rows[task.task_id] = f"{task.task_id} · {task.status} · {updated} · {title}"  # title LAST
     lines = ["---", "type: session", f"session_id: {task.session_id}", "---", "## Tasks"]
     lines += [f"- {r}" for r in rows.values()]
@@ -438,7 +438,10 @@ class MememMemory:
                     fm, _ = _split_frontmatter(f.read())
                 created = fm.get("created") or created
             updated = _now_iso()
-            _write_atomic(path, _render_task_md(task, created=created, updated=updated))
+            # redact the WHOLE rendered task state before it lands on disk — title/goal/findings/last_error/
+            # resolution/mission/world are all model/tool-derived and may carry secrets (mirrors the episodic
+            # cache redaction). Redact-the-output is future-proof: new fields are covered automatically.
+            _write_atomic(path, redact_text(_render_task_md(task, created=created, updated=updated)))
             _upsert_session_index(self._vault, task, updated)
         except Exception:
             pass
