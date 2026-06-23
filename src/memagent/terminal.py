@@ -57,17 +57,21 @@ class SessionManager:
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("TERM", "xterm")
         try:
-            if command:                       # run the given program directly on the PTY
-                popen = subprocess.Popen(command, shell=True, cwd=cwd, env=env,
-                                         stdin=slave, stdout=slave, stderr=slave,
-                                         start_new_session=True, close_fds=True)
-            else:                             # an interactive shell (holds cd/env across turns)
-                shell = os.environ.get("SHELL") or "/bin/bash"
-                popen = subprocess.Popen([shell], cwd=cwd, env=env,
-                                         stdin=slave, stdout=slave, stderr=slave,
-                                         start_new_session=True, close_fds=True)
-        finally:
-            os.close(slave)                   # parent keeps only the master end
+            try:
+                if command:                       # run the given program directly on the PTY
+                    popen = subprocess.Popen(command, shell=True, cwd=cwd, env=env,
+                                             stdin=slave, stdout=slave, stderr=slave,
+                                             start_new_session=True, close_fds=True)
+                else:                             # an interactive shell (holds cd/env across turns)
+                    shell = os.environ.get("SHELL") or "/bin/bash"
+                    popen = subprocess.Popen([shell], cwd=cwd, env=env,
+                                             stdin=slave, stdout=slave, stderr=slave,
+                                             start_new_session=True, close_fds=True)
+            finally:
+                os.close(slave)                   # parent keeps only the master end
+        except BaseException:
+            os.close(master)                      # #19: Popen failed — don't leak the master fd too
+            raise
         flags = fcntl.fcntl(master, fcntl.F_GETFL)
         fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         self._s[name] = _Session(name, command or "(shell)", master, popen)
@@ -102,7 +106,15 @@ class SessionManager:
     def wait(self, name: str, pattern: str, *, timeout: float = 10.0) -> str:
         """Drain until `pattern` (regex) appears or timeout — the reliable interaction primitive."""
         sess = self._get(name)
-        rx = re.compile(pattern)
+        # #20: bound the (model-supplied) pattern — cap its length to limit catastrophic-backtracking
+        # surface, and fail clearly on a bad regex instead of crashing the tool. (Python's re has no
+        # match timeout; the haystack is this subprocess's own output, so length-capping is the mitigation.)
+        if len(pattern) > 500:
+            raise ValueError("wait pattern too long (max 500 chars)")
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f"invalid wait pattern: {e}")
         end = time.time() + timeout
         m = None
         while time.time() < end:

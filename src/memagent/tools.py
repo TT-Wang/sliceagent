@@ -140,6 +140,8 @@ _IGNORE_NAMES = frozenset({
 })
 _IGNORE_SUFFIX = (".egg-info", ".pyc")
 _LIST_CAP = 600   # bound recursive output so a huge tree can't flood the slice
+# Credential/secret dirs the shell-path auto-grant (#31) must never widen file-tool reach into.
+_SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".config", "keyrings", ".password-store"}
 
 
 def _is_ignored(name: str) -> bool:
@@ -441,6 +443,10 @@ class LocalToolHost:
                 continue
             if d == root or root.startswith(d + os.sep):  # never an ancestor of the workspace
                 continue
+            # #31: never auto-widen file-tool reach into credential/secret dirs, even inside HOME — a path
+            # merely MENTIONED in an allowed shell command must not make ~/.ssh etc. readable by the tools.
+            if any(part in _SECRET_DIRS for part in d.split(os.sep)):
+                continue
             self.add_root(d)
 
     def _resolve(self, path: str) -> str:
@@ -679,7 +685,8 @@ class LocalToolHost:
         return self.procs.poll(args["handle"])
 
     def _t_proc_tail(self, args: dict) -> str:
-        return self.procs.tail(args["handle"], int(args.get("lines") or 40))
+        # #26: cap requested lines so a huge `lines` can't dump a chatty server's whole log into the slice.
+        return self.procs.tail(args["handle"], max(1, min(int(args.get("lines") or 40), 2000)))
 
     def _t_proc_wait(self, args: dict) -> str:
         try:
