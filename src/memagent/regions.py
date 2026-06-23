@@ -440,7 +440,7 @@ def render_convergence(s) -> str:
     return (
         f"# CONVERGENCE CHECK\n{strong}you have edited {len(s.edited_files)} file(s) and made "
         f"{s.since_edit} tool calls since your last edit with no error — the change appears complete and "
-        f"verified as well as the environment allows. Write the one-line final summary and make NO tool "
+        f"verified as well as the environment allows. Write your final summary and make NO tool "
         f"call. Continue ONLY to make a SPECIFIC new edit you have identified — do NOT re-read or re-run a "
         f"check you have already passed.\n\n"
     )
@@ -529,7 +529,7 @@ _CURRENT_REQUEST_HDR = ("# CURRENT REQUEST (what the user is asking for RIGHT NO
 _NOW_FOOTER = ("# NOW: address the CURRENT REQUEST above. If it asks a QUESTION or for an explanation, answer "
                "it directly (read/grep to ground the answer if useful — you need NOT edit); if it asks for a "
                "CHANGE, make it with tools based on OPEN FILES; once the request is fully handled and verified "
-               "as well as the environment allows, write the one-line final summary and make NO tool call.")
+               "as well as the environment allows, write your final summary and make NO tool call.")
 
 
 def render_current_request(goal: str) -> str:

@@ -35,7 +35,7 @@ def _fn_schema(name):
 
 
 # Full builtin-ish tool surface: 6 read-only-allowed, 4 mutating/shell, 1 spawn.
-_KEEP = ["read_file", "list_files", "grep", "glob", "skill", "recall_history"]
+_KEEP = ["read_file", "list_files", "grep", "skill", "recall_history"]   # no 'glob' — no such tool is registered
 _DROP = ["edit_file", "str_replace", "run_command", "execute_code", "spawn_subagent"]
 _ALL_SCHEMAS = [_fn_schema(n) for n in _KEEP + _DROP]
 

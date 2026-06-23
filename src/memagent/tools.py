@@ -51,6 +51,13 @@ def _strip_line_numbers(text: str) -> str:
     return "\n".join(_LINENO_PREFIX.sub("", ln) if ln.strip() else ln for ln in lines)
 
 
+def _numbered(text: str) -> str:
+    """cat -n line numbers for read_file's RETURN, so the model gets file:line evidence IMMEDIATELY in-turn
+    (same format as the OPEN FILES render). The number is a display prefix, NOT file content — str_replace
+    strips a pasted prefix via _strip_line_numbers, so editing from a numbered read still matches."""
+    return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(text.splitlines(), 1))
+
+
 # so `import <workspace_module>` works for testing freshly-written code.
 _CODE_PRELUDE = '''\
 import os as _os, sys as _sys, subprocess as _sp
@@ -217,8 +224,10 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str
 
 TOOL_SCHEMAS = [
     _fn("read_file",
-        "Read and return a file's FULL contents (whole file — no line-range args). To list a directory use "
-        "list_files; to SEARCH file contents use the `grep` tool (ripgrep-backed, paginated) — not bash grep. "
+        "Read and return a file's FULL contents with cat -n line numbers for reference (whole file — no "
+        "line-range args; the leading number is NOT part of the file, so don't include it in a str_replace "
+        "old_string). To list a directory use list_files; to SEARCH file contents use the `grep` tool "
+        "(ripgrep-backed, paginated) — not bash grep. "
         "Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths use "
         "run_command. A binary file returns a hexdump preview, not editable text.",
         {"path": {"type": "string"}}, ["path"]),
@@ -564,7 +573,9 @@ class LocalToolHost:
         sample = raw[:8192].decode("utf-8", errors="replace")
         if looks_binary(path, sample):
             return self._binary_view(path, raw)
-        return raw.decode("utf-8")
+        # Return WITH cat -n line numbers so the model has file:line evidence immediately this turn (matching
+        # the OPEN FILES render). Safe for editing: str_replace strips a pasted line-number prefix.
+        return _numbered(raw.decode("utf-8"))
 
     @staticmethod
     def _binary_view(path: str, raw: bytes, head_bytes: int = 256) -> str:
