@@ -270,10 +270,19 @@ class SubagentHost:
             # end-user — return a directive instead of blocking on input (which would stall the parent).
             return ("Error: a subagent cannot ask the user. Decide on a reasonable assumption, proceed, and "
                     "state the assumption in your summary; the parent will handle any real ambiguity.")
+        # #42/#43: ENFORCE the kind's allowlist at RUNTIME, not just in schemas() (which only HIDES tools).
+        # Without this a child that emits an out-of-kind tool anyway slips through to inner.run — and a
+        # read-only EXPLORER could call spawn_subagent to escalate into a WRITABLE child. spawn_* are not in
+        # the read-only allowlist, so this also blocks that escalation. (A general child has tools=None → skip.)
+        if self.spec is not None and self.spec.tools is not None and name not in self.spec.tools:
+            return f"Error: tool {name!r} is not available to the {getattr(self.spec, 'name', 'sub')!r} agent"
         if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
             return self.inner.run(name, args)
         if self.depth >= self.max_depth:
             return "Error: subagent depth limit reached"
+        task = (args.get("task") or "").strip()   # #59: missing/empty 'task' → clear error, not a KeyError
+        if not task:
+            return "Error: spawn requires a non-empty 'task' describing the self-contained sub-task"
         if name == "spawn_agent":
             spec = self.agents.get(args.get("agent", ""))
             if spec is None:
@@ -288,7 +297,7 @@ class SubagentHost:
         )
         try:
             return run_subagent(
-                args["task"], tools=child_tools, llm=self.llm, retriever=self.retriever,
+                task, tools=child_tools, llm=self.llm, retriever=self.retriever,
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
                 depth=self.depth + 1, notify=self.notify, spec=spec,
             )

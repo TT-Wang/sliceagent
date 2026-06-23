@@ -129,14 +129,19 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
     for tc in tool_calls:
         dispatch(ToolStarted(tc.name, tc.args))
         decision = hooks.authorize_tool(tc.name, tc.args)
+        # #44: `note` is the universal slice-capture seam injected by with_note onto EVERY tool — it is
+        # NOT a handler parameter. Strip it before invoking the tool so strict MCP/plugin handlers don't
+        # reject an unexpected property; it still rides the dispatched ToolResult.args (metas, below),
+        # where slice_sink folds it into FINDINGS.
+        call_args = {k: v for k, v in (tc.args or {}).items() if k != "note"} if tc.args else (tc.args or {})
         if not decision.allow:
             blocked += 1
             tasks.append(([], (lambda d=decision: ToolText(f"Error: blocked by policy: {d.reason or 'denied'}", ok=False))))
         else:
             # preserve ToolText (a str subclass carrying .ok) — coercing with str() here would strip the
             # success flag and force the failing check back onto the prose-match it is meant to replace.
-            tasks.append((tools.accesses(tc.name, tc.args),
-                          (lambda tc=tc: _as_text(tools.run(tc.name, tc.args)))))
+            tasks.append((tools.accesses(tc.name, call_args),
+                          (lambda name=tc.name, ca=call_args: _as_text(tools.run(name, ca)))))
         # real OpenAI tool_calls carry an id; synthesize a stable index-based one if absent (e.g. test
         # fakes / a provider that omits it) so accumulate's assistant.tool_calls ↔ tool messages still match.
         metas.append((_tool_call_id(tc, len(metas)), tc.name, tc.args))
