@@ -535,7 +535,7 @@ REGION_ORDER = (
     # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
     ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
-    ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this)\n" + c["artifacts"], 0),
+    ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this. Lines are numbered for citation/reference; the leading number is NOT part of the file — never include it in a str_replace old_string)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP moved to the BYTE-STABLE system prefix (make_build_slice) so it's a prompt-cache PREFIX
     # shared across every turn + subagent, instead of full-price in the volatile user slice. (Region removed.)
