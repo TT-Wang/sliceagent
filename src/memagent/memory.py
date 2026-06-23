@@ -264,6 +264,9 @@ class NullMemory:
     def consolidate(self, session_id: str) -> None:
         return None
 
+    def close(self) -> None:
+        return None
+
 
 class MememMemory:
     """Adapter over memem (lessons) + the on-disk state vault. Construction fails fast if memem
@@ -366,6 +369,17 @@ class MememMemory:
                 idx = None
             self._idx = idx
         return idx
+
+    def close(self) -> None:
+        """#33: close the cached FTS5 episode-index connection (WAL checkpoint + release the fd) at
+        session end. Idempotent — safe before the index was ever opened ('unset') or after close."""
+        idx = getattr(self, "_idx", None)
+        if idx is not None and idx != "unset":
+            try:
+                idx.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._idx = None
 
     def _index_episode(self, session_id, task_id, turn, ts, record) -> None:
         idx = self._episode_index()

@@ -382,6 +382,7 @@ def main() -> None:
     if getattr(memory, "is_durable", False):
         memory.consolidate(session.session_id)
         print("  · consolidated session memory")
+    getattr(memory, "close", lambda: None)()   # #33: close the FTS5 index connection (WAL checkpoint)
     if metrics is not None:                                 # the moat number: per-turn fresh-input curve
         s = metrics.summary()
         print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
