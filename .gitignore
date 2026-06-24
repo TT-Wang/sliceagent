@@ -24,9 +24,12 @@ scratch/
 .memagent/
 monitor/
 
-# local tooling artifacts (not part of the repo)
-.claude/          # local Claude Code session/config dir
-.coverage         # coverage.py data file
-runs/             # eval/benchmark run outputs
-*.pdf             # decks / local docs (force-add if a real doc PDF is ever needed)
-# note: evals/ is intentionally NOT ignored — it's kept local by choice, still visible to `git status`
+# local tooling artifacts (not part of the repo).
+# NOTE: gitignore has no inline comments — keep each pattern on its own line.
+# .claude/ = local Claude Code session dir · .coverage = coverage.py data · runs/ = eval outputs ·
+# *.pdf = decks/local docs (force-add if a real doc PDF is ever needed).
+# evals/ is intentionally NOT ignored — kept local by choice but still visible to `git status`.
+.claude/
+.coverage
+runs/
+*.pdf
