@@ -146,7 +146,7 @@ class LessonMiner:
             "No preamble, no markdown."
         )
         user = (
-            f"Task: {task}\nError that was hit and then resolved:\n{one_line(pitfall, 400)}\n"
+            f"Task: {task}\nError that was hit and then resolved:\n{one_line(pitfall, 2000)}\n"
             f"Files changed: {', '.join(files) or '(unknown)'}\nWrite the lesson:"
         )
         try:

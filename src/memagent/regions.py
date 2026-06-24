@@ -24,13 +24,13 @@ MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
 MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of parked topics
 MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
-MAX_FINDING_CHARS = 200  # each finding is ONE compact line — distilled, never narration
+MAX_FINDING_CHARS = 300  # each finding is ONE compact line — distilled, never narration (causal tail matters)
 MAX_REQUIREMENTS = 20    # bounded STANDING REQUIREMENTS contract (count) — the moat's no-unbounded-growth
-MAX_REQ_CHARS = 200      # each requirement is ONE compact line
+MAX_REQ_CHARS = 300      # each requirement is ONE compact line (contracts — a long signature must survive)
 MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
-MAX_PLAN_CHARS = 200     # each plan step is ONE compact line
+MAX_PLAN_CHARS = 300     # each plan step is ONE compact line (multi-file scope must survive)
 _PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
-MAX_MISSION_CHARS = 300  # the MISSION (session north-star) is ONE compact objective line
+MAX_MISSION_CHARS = 500  # the MISSION (session north-star) is ONE compact objective line (don't clip scope)
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -44,7 +44,8 @@ FULL_FILE_LINES = 1200
 REGION_LINES = 400
 DISCOVERY_K = 6
 MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — last N user<->assistant exchanges (short-range continuity)
-CONVO_MSG_CHARS = 300    # per-message cap in the conversation tier (bounded; the cache holds the full text)
+CONVO_MSG_CHARS = 800    # per-message GIST cap in the conversation tier (count-bounded by MAX_CONVERSATION;
+# the cache holds the full text and recall pages it back, so this is a display-gist size, not the only copy)
 
 
 # ── PER-REGION RENDER: UNCAPPED-BY-RELEVANCE ──────────────────────────────────
@@ -329,7 +330,7 @@ def record_action(s, name: str, args: dict, out: str, failing: bool | None = Non
     if failing is None:
         failing = out.startswith("Error") or out.startswith("Exit code")
     if failing:
-        s.last_error = out if len(out) <= 800 else out[:120] + "\n…[trace truncated]…\n" + out[-680:]
+        s.last_error = out if len(out) <= 3000 else out[:2000] + "\n…[trace truncated]…\n" + out[-900:]
     elif name in ("run_command", "execute_code"):
         s.last_error = ""  # a successful run/script clears the error (both are execution — general)
     sig = action_sig(name, args)

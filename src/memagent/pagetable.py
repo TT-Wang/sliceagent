@@ -26,9 +26,9 @@ import os
 from .interfaces import PageRef
 from .text_utils import format_ts, normalize_ws
 
-# Per-code-map preview cap (signatures are compact; bounded like every tier). Mirrors the
-# former slice.DISCOVERY_CHARS so the rendered RELATED CODE block is byte-identical.
-CODE_PREVIEW_CHARS = 4000
+# Per-code-map preview cap — a generous PHYSICAL backstop only. The real bound is BREADTH, applied ONCE
+# in graph_map (top-N ranked files, each shown complete). This must not re-cut the breadth-bounded map.
+CODE_PREVIEW_CHARS = 12000
 
 
 class PageTable:
