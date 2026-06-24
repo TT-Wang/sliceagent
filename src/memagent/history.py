@@ -19,11 +19,15 @@ from __future__ import annotations
 
 from .text_utils import format_ts
 
-INDEX_LIMIT = 40       # breadcrumbs shown by the bare index
-TRACE_MAX = 4000       # total chars for a compact-trace fetch
-FULL_MAX = 8000        # total chars for a full-slice fetch
-OBS_TAIL = 300         # per-observation tail kept in a trace
-DISTINCT_PER_TURN = 8  # generous backstop on DISTINCT turn-fetches; repeats are redirected for free
+INDEX_LIMIT = 40       # breadcrumbs shown by the bare index (a LOCATOR bound — titles/notes, not content)
+OBS_TAIL = 300         # legacy-record fallback ONLY: per-observation tail when there is no stored markdown
+DISTINCT_PER_TURN = 8  # backstop on DISTINCT turn-fetches per turn; repeats are redirected for free
+# NO read-side CONTENT cap: a fetched turn is returned IN FULL. The bound is the SEAL, not a second cut at
+# read — the archive already excerpts observations at SAVE time (episode._obs_excerpt), a fetched turn is
+# TRANSIENT (enters context for this loop only, never written back to slice state, so recall can't rebuild
+# the transcript across loops), and the physical context window + overflow is the size backstop for a
+# deliberate sweep. The old 4000/8000 caps cut the distilled CONCLUSION — the one thing recall exists to
+# return — because the conclusion is appended LAST in the markdown (bound = the seal, not a within-loop cut).
 
 CAPTURE_BACK = ("\n\n↳ Now in context. Record what you need with a `note`, then continue — and "
                 "fetch another turn from PAGED-OUT HISTORY whenever you need more.")
@@ -68,18 +72,20 @@ def render_index(lines: list[dict]) -> str:
     return "\n".join(out)
 
 
-def render_trace(lines: list[dict], cap: int = TRACE_MAX) -> str:
-    """Page a sealed turn back as its clean MARKDOWN snapshot (the seal artifact) — a smooth read, like
-    opening a readable doc. Falls back to a computed action→result trace for older records that predate
-    the stored markdown."""
+def render_trace(lines: list[dict]) -> str:
+    """Page sealed turns back as their clean MARKDOWN snapshot (the seal artifact) — returned IN FULL, no
+    read-side size cap (see the constants note: the bound is the seal + transience, not a second read cut;
+    a cap here truncated the distilled conclusion at the markdown tail). Falls back to a computed
+    action→result trace for older records that predate the stored markdown (per-observation tail only — a
+    legacy raw-obs guard; the conclusion/note is kept whole)."""
     from .tool_summary import summarize_tool_result   # fallback path only
-    out, used = [], 0
+    out = []
     for ln in lines:
         rec = ln.get("record", {})
         head = f"\n── turn {ln.get('turn')} · {_short_ts(ln.get('ts',''))} · {rec.get('title') or ''}"
         md = rec.get("markdown")
-        if md:                                   # the SEAL artifact — return it directly (smooth read)
-            chunk = head + "\n" + md
+        if md:                                   # the SEAL artifact — return it directly, in full
+            out.append(head + "\n" + md)
         else:                                    # older record without a stored markdown → compute a trace
             block = [head]
             for st in rec.get("steps", []):
@@ -88,28 +94,22 @@ def render_trace(lines: list[dict], cap: int = TRACE_MAX) -> str:
                                                     failing=bool(a.get("failing")))
                     block.append(f"  • {summary} → {_tail(o, OBS_TAIL)}")
             if rec.get("note"):
-                block.append(f"  ↳ note: {rec['note'][:200]}")
-            chunk = "\n".join(block)
-        if used + len(chunk) > cap:
-            out.append("\n…[older turns truncated — narrow with turns=[…]]")
-            break
-        out.append(chunk)
-        used += len(chunk)
+                block.append(f"  ↳ note: {rec['note']}")     # conclusion in full
+            out.append("\n".join(block))
     return "\n".join(out).strip() or "(no trace)"
 
 
-def render_full(lines: list[dict], cap: int = FULL_MAX) -> str:
-    out, used = [], 0
+def render_full(lines: list[dict]) -> str:
+    out = []
     for ln in lines:
         rec = ln.get("record", {})
         slices = [st.get("slice", "") for st in rec.get("steps", []) if st.get("slice")]
         body = (slices[-1] if slices else "")   # the turn's last reconstructed slice = its end state
+        note = rec.get("note") or ""
         chunk = f"\n══ turn {ln.get('turn')} · {_short_ts(ln.get('ts',''))} · {rec.get('title') or ''}\n{body}"
-        if used + len(chunk) > cap:
-            out.append("\n…[truncated — fetch fewer turns for full slices]")
-            break
+        if note:                                # the agent's REPLY/conclusion lives in the note, NOT the seed
+            chunk += f"\n\n## conclusion\n{note}"   # slice — without this, 'full' never returned the findings
         out.append(chunk)
-        used += len(chunk)
     return "\n".join(out).strip() or "(no slice stored)"
 
 

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.history import render_search                 # noqa: E402
 from memagent.pagetable import PageTable                   # noqa: E402
-from memagent.search_index import EpisodeIndex, fts5_available  # noqa: E402
+from memagent.search_index import EpisodeIndex, _fts_match_query, fts5_available  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -103,6 +103,48 @@ def fts5_only_session_filter_is_real():
     assert {h["turn"] for h in only} == {7}, only          # within THIS session, by content
     excl = idx.search("postgres", exclude_session="S")
     assert all(h["session_id"] != "S" for h in excl) and excl, excl   # cross drops S, keeps OTHER
+    idx.close()
+
+
+# --- OR-join + relative floor (the 'can't locate my second finding' production bug) --------------
+@check
+def query_tokens_are_or_joined_not_and_joined():
+    # AND-join meant one absent token (the ordinal 'second') zeroed the whole result. OR is recall-correct.
+    assert _fts_match_query("a b c") == '"a" OR "b" OR "c"', _fts_match_query("a b c")
+    assert _fts_match_query("solo") == '"solo"'
+    assert _fts_match_query("") == ""
+
+
+@check
+def or_join_finds_the_review_despite_ordinal_meta_terms():
+    if not fts5_available():
+        print("  (skipped: no FTS5)"); return
+    idx = EpisodeIndex(":memory:")
+    idx.index_episode(session_id="S", task_id="t", turn=7, ts="", title="review page.tsx",
+        note="Finding 2: invalid query-string archetype/coding values are blindly cast in page.tsx.",
+        text="app/page.tsx casts arrayParam to RoleArchetype; archetypeCounts missing bd finance strategy.")
+    idx.index_episode(session_id="S", task_id="t", turn=8, ts="", title="unrelated",
+        note="we discussed the deployment pipeline and CI config.", text="ci yaml deploy kube")
+    # 'second'/'your'/'is' are NOT in the review text → AND-join returned nothing (the bug); OR-join finds it
+    hits = idx.search("what is your second finding for page.tsx", only_session="S")
+    turns = [h["turn"] for h in hits]
+    assert 7 in turns and hits[0]["turn"] == 7, f"OR-join must surface + rank the review turn; got {turns}"
+    idx.close()
+
+
+@check
+def relative_floor_trims_the_weak_single_term_tail():
+    if not fts5_available():
+        print("  (skipped: no FTS5)"); return
+    idx = EpisodeIndex(":memory:")
+    idx.index_episode(session_id="S", task_id="t", turn=1, ts="", title="strong",
+                      note="alpha beta gamma delta page", text="alpha beta gamma delta page")
+    for i in range(2, 6):
+        idx.index_episode(session_id="S", task_id="t", turn=i, ts="", title=f"weak{i}",
+                          note="page", text="page sidebar layout grid")
+    hits = idx.search("alpha beta gamma delta page", only_session="S")
+    assert hits and hits[0]["turn"] == 1, "the strong multi-term match must rank first"
+    assert len(hits) < 5, f"the relative floor should trim the weak single-term tail; kept {len(hits)}"
     idx.close()
 
 

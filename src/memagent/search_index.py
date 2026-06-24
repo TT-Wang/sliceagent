@@ -40,11 +40,15 @@ _FTS_TABLE = "episodes"
 
 
 def _fts_match_query(q: str) -> str:
-    """#40: turn a free-text query into a SAFE FTS5 MATCH expression. Extract word tokens only and quote
-    each (a bag of literal terms, AND-ed — FTS5's default) so query punctuation/operators (- " * : ( )
-    AND OR NEAR) can never trigger a syntax error that silently returns nothing. Empty → '' (no search)."""
+    """Turn a free-text query into a SAFE FTS5 MATCH expression. Extract word tokens only and quote each
+    (so query punctuation/operators - " * : ( ) AND OR NEAR can never trigger a syntax error that silently
+    returns nothing), then OR-join them. OR (not AND) is the recall-correct default: a query carries terms
+    the target turn won't all contain — meta/ordinal words ("second", "finding"), the user's own framing,
+    stray operators — and AND-joining means ONE absent token zeroes the whole result (the 'can't locate my
+    second finding' bug: 'second' appeared in no review turn, so the AND failed). With OR, any term surfaces
+    the turn and BM25 rank + the relative floor in search() keep it precise. Empty → '' (no search)."""
     toks = re.findall(r"\w+", q or "", flags=re.UNICODE)
-    return " ".join(f'"{t}"' for t in toks)
+    return " OR ".join(f'"{t}"' for t in toks)
 
 
 def fts5_available() -> bool:
@@ -216,6 +220,15 @@ class EpisodeIndex:
             })
             if len(out) >= lim:
                 break
+        # RELATIVE FLOOR (counterweight to OR-breadth): keep only hits scoring within 15% of the top hit,
+        # always keeping #1. OR-join maximizes recall; this trims the long tail of turns that matched on a
+        # single weak/common term, so a precise query still returns a precise set (and a vague one degrades
+        # to "the few most relevant", not "30 loosely-related turns"). Degenerate scores (≤0) → keep all.
+        if out:
+            top = out[0]["score"]
+            if top > 0:
+                cut = top * 0.15
+                out = [out[0]] + [h for h in out[1:] if h["score"] >= cut]
         return out
 
     def close(self) -> None:
