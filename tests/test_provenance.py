@@ -10,13 +10,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from memagent.events import AssistantText, ToolResult, TurnEnd  # noqa: E402
 from memagent.mining import LessonMiner, is_self_inflicted, pitfall_signature  # noqa: E402
 from memagent.slice import (  # noqa: E402
-    Slice, is_done_claim, record_note, render_findings, render_slice, slice_sink,
+    SYSTEM_PROMPT, Slice, is_done_claim, record_note, render_findings, render_slice, slice_sink,
 )
 
 CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
+
+
+@check
+def system_prompt_forbids_narration_in_replies():
+    # REGRESSION (the reasoning-leak quality bug): the model was dumping its planning monologue into the
+    # visible reply ("Let me draft…", "Final response coming up", "I should…"). The <communication> contract
+    # must explicitly forbid narrating the process — replies are the answer, not a scratchpad.
+    comm = SYSTEM_PROMPT[SYSTEM_PROMPT.index("<communication>"):SYSTEM_PROMPT.index("</communication>")]
+    low = comm.lower()
+    assert "scratchpad" in low, "communication rule must say replies are not a scratchpad"
+    assert "silently" in low or "not shown" in low, "must tell the model to think silently"
+    assert "let me" in low and "narrate" in low, "must name the narration anti-pattern explicitly"
+    assert "preamble" in low, "must forbid preamble/postamble (lead with the answer)"
 
 
 class _Mem:
