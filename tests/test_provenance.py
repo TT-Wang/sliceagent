@@ -7,8 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import AssistantText, ToolResult, TurnEnd  # noqa: E402
-from memagent.mining import LessonMiner, is_self_inflicted, pitfall_signature  # noqa: E402
+from memagent.events import AssistantText, ToolResult  # noqa: E402
+from memagent.mining import is_self_inflicted, pitfall_signature  # noqa: E402
 from memagent.slice import (  # noqa: E402
     SYSTEM_PROMPT, Slice, is_done_claim, record_note, render_findings, render_slice, slice_sink,
 )
@@ -30,14 +30,6 @@ def system_prompt_forbids_narration_in_replies():
     assert "silently" in low or "not shown" in low, "must tell the model to think silently"
     assert "let me" in low and "narrate" in low, "must name the narration anti-pattern explicitly"
     assert "preamble" in low, "must forbid preamble/postamble (lead with the answer)"
-
-
-class _Mem:
-    is_durable = True
-    def __init__(self):
-        self.saved = []
-    def remember(self, content, *, title="", scope="default", tags=""):
-        self.saved.append((title, content))
 
 
 # --- findings come ONLY from notes on real tool calls (NOT assistant narration) ----------
@@ -130,58 +122,9 @@ def slice_tier_reframed_away_from_do_not_rederive():
     assert "verify against OPEN FILES" in user or "ground truth" in user.lower()
 
 
-# --- mining: title from PITFALL not goal; self-inflicted errors mine nothing --------------
-
-def _run_miner(state, *, fail_out, clear_error=True):
-    mem = _Mem()
-    miner = LessonMiner(mem, state, mode="deterministic", scope="test")
-    miner(ToolResult("run_command", {"command": "x"}, fail_out, True))
-    if clear_error:
-        state.last_error = ""
-    miner(TurnEnd("end_turn", 1, {}))
-    return mem
-
-
-@check
-def mined_lesson_titled_by_pitfall_not_goal():
-    s = Slice(); s.reset("ok lets create a simple news aggregator project")
-    s.edited_files = {"news_agg.py"}
-    mem = _run_miner(s, fail_out="Error: ModuleNotFoundError: No module named 'feedparser'")
-    assert len(mem.saved) == 1
-    title, content = mem.saved[0]
-    assert "feedparser" in title or "ModuleNotFoundError" in title, f"title lost the pitfall: {title!r}"
-    assert "create a simple news aggregator" not in title, f"goal leaked into the title: {title!r}"
-    # the goal survives only as inline context, never as the headline
-    assert "Pitfall:" in content and "news_agg.py" in content
-    assert content.startswith("Pitfall:"), "the lesson body must LEAD with the pitfall, not the goal"
-
-
-@check
-def confinement_error_mines_nothing():
-    # the agent hit its OWN sandbox (D2) — that is not an engineering pitfall → mine NOTHING
-    s = Slice(); s.reset("write a file outside the workspace")
-    s.edited_files = {"x.py"}
-    err = ("Error: path escapes the boundary (/repo): ~/Desktop/x.py — File tools are confined "
-           "to the workspace.")
-    mem = _run_miner(s, fail_out=err)
-    assert mem.saved == [], f"a self-inflicted confinement error mined a junk lesson: {mem.saved}"
-
-
-@check
-def real_pitfall_after_self_inflicted_still_mines():
-    # a turn with BOTH a confinement error AND a real error must mine the real one
-    s = Slice(); s.reset("fix the importer")
-    s.edited_files = {"imp.py"}
-    mem = _Mem()
-    miner = LessonMiner(mem, s, mode="deterministic", scope="test")
-    miner(ToolResult("read_file", {"path": "/etc/x"}, "Error: path escapes the boundary (/repo): /etc/x", True))
-    miner(ToolResult("run_command", {"command": "python imp.py"}, "Error: ImportError: cannot import bar", True))
-    s.last_error = ""
-    miner(TurnEnd("end_turn", 1, {}))
-    assert len(mem.saved) == 1
-    title, _ = mem.saved[0]
-    assert "ImportError" in title or "import bar" in title, f"mined the wrong pitfall: {title!r}"
-
+# --- mining behaviour (pitfall-titling, self-inflicted filtering, multi-error pick) moved to
+# test_consolidate.py: distillation is now CACHE-only (the per-turn slice-reading LessonMiner was
+# removed); promote_episodes owns it. The pure helpers below still live in mining.py. ---------
 
 @check
 def is_self_inflicted_and_signature_helpers():

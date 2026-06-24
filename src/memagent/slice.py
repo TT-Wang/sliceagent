@@ -836,7 +836,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # PageTable — the SINGLE read/retrieval entry: unifies code discovery (retriever), project notes
     # (the SubdirHints above), and cross-session episodes (memory) behind lookup(). Built ONCE per
     # closure; build() drives it. Backends emit RAW text; the renderer fences (one layer).
-    pages = PageTable(retriever, memory, hints)
+    pages = PageTable(retriever, memory, hints, session_id=session_id or None)
     swap = SwapManager(retriever)   # owns the working-set page lifecycle for this session
     # CACHE tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session (stable →
     # prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/find. Lazy
@@ -891,7 +891,10 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         goal = s.goal or task
         if goal not in recall_cache:
             # RELEVANT MEMORY through the ONE read seam (memory-lessons backend) — no sibling recall.
-            recall_cache[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6))
+            # R1: pass the files in play at topic-recall time so memem bonuses lessons tagged with them.
+            # Snapshot-at-first-recall (cached by goal) — keeps the per-topic single memem call stable.
+            _paths = sorted(set(s.edited_files) | set(s.active_files)) or None
+            recall_cache[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6, paths=_paths))
         # the render view budget tracks the LIVE adaptive budget (s.read_budget, grown on refault by
         # SwapManager); OPEN FILES/RECENT/findings are otherwise UNCAPPED (bound = relevance, not size).
         read_budget = s.read_budget

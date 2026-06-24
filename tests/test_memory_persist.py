@@ -36,7 +36,7 @@ def _install_fake_memem(fake_save: _FakeSave):
     `from memem.operations import memory_save`, so this is all the surface it needs — no real memem."""
     pkg = types.ModuleType("memem")
     ops = types.ModuleType("memem.operations")
-    def memory_save(content, *, title="", scope_id="default", tags=""):
+    def memory_save(content, *, title="", scope_id="default", tags="", paths=None):
         fake_save.calls.append((content, title, scope_id, tags))
     ops.memory_save = memory_save
     pkg.operations = ops

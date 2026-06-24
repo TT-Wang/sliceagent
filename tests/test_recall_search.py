@@ -52,7 +52,7 @@ _ROWS = [
 
 @check
 def thissession_search_returns_turn_numbered_hits_only_for_this_session():
-    pt = PageTable(memory=_FakeMem(_ROWS), exclude_session="S")   # exclude_session carries the current sid
+    pt = PageTable(memory=_FakeMem(_ROWS), session_id="S")        # the CURRENT session id
     mine = pt.lookup("database", kind="episode-search-thissession", k=6)
     # only THIS session (S) matches the content "database" — turn 7. OTHER session is filtered out.
     assert [r.handle for r in mine] == ["7"], [r.handle for r in mine]
@@ -61,7 +61,7 @@ def thissession_search_returns_turn_numbered_hits_only_for_this_session():
 
 @check
 def xsession_search_still_excludes_this_session():
-    pt = PageTable(memory=_FakeMem(_ROWS), exclude_session="S")
+    pt = PageTable(memory=_FakeMem(_ROWS), session_id="S")
     cross = pt.lookup("database", kind="episode-xsession", k=6)
     # cross-session must NOT leak THIS session's turns; only OTHER's turn 9 surfaces.
     assert cross and all("OTHER" in r.handle for r in cross), [r.handle for r in cross]
@@ -70,7 +70,7 @@ def xsession_search_still_excludes_this_session():
 
 @check
 def render_search_emits_the_exact_fetch_call_for_this_session_hits():
-    pt = PageTable(memory=_FakeMem(_ROWS), exclude_session="S")
+    pt = PageTable(memory=_FakeMem(_ROWS), session_id="S")
     mine = pt.lookup("database", kind="episode-search-thissession", k=6)
     cross = pt.lookup("database", kind="episode-xsession", k=6)
     out = render_search(mine, cross)
@@ -81,9 +81,18 @@ def render_search_emits_the_exact_fetch_call_for_this_session_hits():
 
 @check
 def empty_query_is_safe():
-    pt = PageTable(memory=_FakeMem(_ROWS), exclude_session="S")
+    pt = PageTable(memory=_FakeMem(_ROWS), session_id="S")
     assert pt.lookup("   ", kind="episode-search-thissession", k=6) == []
     assert pt.lookup(None, kind="episode-search-thissession", k=6) == []
+
+
+@check
+def thissession_search_fails_closed_without_a_session():
+    # REGRESSION (the cross-session leak the review caught): when PageTable has no current session, a
+    # "this-session" content search must return NOTHING — it must NOT fall through to only_session=None
+    # and leak EVERY session's turns. (Old code overloaded one field as both exclude & only → leaked.)
+    pt = PageTable(memory=_FakeMem(_ROWS))                  # no session_id
+    assert pt.lookup("database", kind="episode-search-thissession", k=6) == [], "within-session must fail closed"
 
 
 @check
