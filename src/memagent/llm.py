@@ -14,6 +14,25 @@ import threading
 from .context_overflow import ContextOverflow, is_context_overflow
 from .interfaces import AssistantMessage, ToolCall
 
+
+def _import_api_timeout_error():
+    """APITimeoutError moved between openai SDK versions; import defensively."""
+    try:
+        from openai import APITimeoutError
+        return APITimeoutError
+    except ImportError:
+        pass
+    try:
+        from openai.error import Timeout as APITimeoutError
+        return APITimeoutError
+    except ImportError:
+        pass
+    # Fallback: a plain retryable timeout that is_retryable will still classify.
+    class _FallbackTimeoutError(Exception):
+        pass
+    return _FallbackTimeoutError
+
+
 _CLASHX = "http://127.0.0.1:7890"  # local ClashX default for foreign endpoints (OpenAI) behind the GFW
 
 
@@ -23,6 +42,8 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
     proxy, CN-direct providers (deepseek/moonshot) go DIRECT — so picking a model 'just works' without
     juggling AGENT_PROXY. Returns a proxy URL or 'none'. (Environment/provider quirk, isolated here.)"""
     if explicit:
+        if explicit.strip().lower() in ("off", "none", "direct", "no", "false", "0"):
+            return "none"            # AGENT_PROXY=off → force a DIRECT connection (was treated as a URL → bug)
         return explicit
     base_l = (resolved_base or "").lower()
     direct = any(d in base_l for d in ("deepseek", "moonshot", "127.0.0.1", "localhost"))
@@ -92,6 +113,7 @@ class OpenAILLM:
         proxy = _choose_proxy(resolved_base, proxy or os.environ.get("AGENT_PROXY")
                               or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"))
         use_proxy = bool(proxy) and proxy != "none"
+        self.proxy_used = proxy if use_proxy else "direct"   # exposed so the CLI can announce the route (A4)
         http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
 
         # Enforce the request timeout at the SDK layer too. The openai SDK applies its OWN per-request
@@ -152,17 +174,23 @@ class OpenAILLM:
                 pass
 
     def is_retryable(self, error: Exception) -> bool:
-        from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
-
         from .errors import EmptyResponseError
-        return isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError,
-                                  InternalServerError, EmptyResponseError))
+        try:
+            from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+            openai_errors = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+        except ImportError:
+            openai_errors = ()
+        return isinstance(error, openai_errors + (EmptyResponseError,))
 
     def _on_alarm(self, signum, frame):
         """SIGALRM handler: a request blew the HARD wall-clock deadline → raise a retryable timeout."""
-        import httpx
-        from openai import APITimeoutError
-        raise APITimeoutError(request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+        APITimeoutError = _import_api_timeout_error()
+        try:
+            import httpx
+            raise APITimeoutError(request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+        except TypeError:
+            # Older SDKs don't accept `request=` in the constructor.
+            raise APITimeoutError("memagent hard timeout reached")
 
     def _create(self, kwargs: dict):
         """Call the SDK with a HARD wall-clock deadline that ALWAYS fires, on ANY thread. The httpx/SDK
@@ -192,8 +220,7 @@ class OpenAILLM:
         interpreter joins at exit) means a wedged call can NEVER block process shutdown — it dies with the
         socket whenever the SDK call finally errors on its own timeout. One thread per call; bounded."""
         import threading
-        import httpx
-        from openai import APITimeoutError
+        APITimeoutError = _import_api_timeout_error()
         box: dict = {}
 
         def _call():
@@ -206,8 +233,12 @@ class OpenAILLM:
         t.start()
         t.join(self._hard_timeout)
         if t.is_alive():   # blew the deadline — abandon the (daemon) thread, raise a retryable timeout
-            raise APITimeoutError(
-                request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+            try:
+                import httpx
+                raise APITimeoutError(
+                    request=httpx.Request("POST", (self._base_url or "http://local") + "/chat/completions"))
+            except TypeError:
+                raise APITimeoutError("memagent hard timeout reached")
         if "err" in box:
             raise box["err"]
         return box["resp"]
@@ -249,33 +280,47 @@ class OpenAILLM:
         calls: dict[int, dict] = {}          # index → {id, name, args:[fragments]}
         finish = None
         usage = None
-        for chunk in self.client.chat.completions.create(**skw):
-            if getattr(chunk, "usage", None):
-                usage = chunk.usage           # final include_usage chunk (choices may be empty here)
-            for ch in (getattr(chunk, "choices", None) or []):
-                if getattr(ch, "finish_reason", None):
-                    finish = ch.finish_reason
-                d = getattr(ch, "delta", None)
-                if d is None:
+        # E3 streaming resilience: a single MALFORMED chunk is skipped (never aborts the whole stream); a
+        # mid-stream CONNECTION error re-raises ONLY when nothing was assembled (so with_retry re-rolls) —
+        # otherwise we salvage the partial as a truncated stop, which the loop handles cleanly.
+        try:
+            for chunk in self.client.chat.completions.create(**skw):
+                try:
+                    if getattr(chunk, "usage", None):
+                        usage = chunk.usage       # final include_usage chunk (choices may be empty here)
+                    for ch in (getattr(chunk, "choices", None) or []):
+                        if getattr(ch, "finish_reason", None):
+                            finish = ch.finish_reason
+                        d = getattr(ch, "delta", None)
+                        if d is None:
+                            continue
+                        txt = getattr(d, "content", None)
+                        if txt:
+                            parts.append(txt); self._emit("content", txt)
+                        rc = getattr(d, "reasoning_content", None) or getattr(d, "reasoning", None)
+                        if rc:
+                            self._emit("reasoning", rc)
+                        for tcd in (getattr(d, "tool_calls", None) or []):
+                            slot = calls.setdefault(getattr(tcd, "index", 0), {"id": None, "name": None, "args": []})
+                            if getattr(tcd, "id", None):
+                                slot["id"] = tcd.id
+                            fn = getattr(tcd, "function", None)
+                            if fn is not None:
+                                if getattr(fn, "name", None):
+                                    slot["name"] = fn.name
+                                if getattr(fn, "arguments", None):
+                                    slot["args"].append(fn.arguments)
+                except Exception:  # noqa: BLE001 — one bad chunk must not kill the stream
                     continue
-                txt = getattr(d, "content", None)
-                if txt:
-                    parts.append(txt); self._emit("content", txt)
-                rc = getattr(d, "reasoning_content", None) or getattr(d, "reasoning", None)
-                if rc:
-                    self._emit("reasoning", rc)
-                for tcd in (getattr(d, "tool_calls", None) or []):
-                    slot = calls.setdefault(getattr(tcd, "index", 0), {"id": None, "name": None, "args": []})
-                    if getattr(tcd, "id", None):
-                        slot["id"] = tcd.id
-                    fn = getattr(tcd, "function", None)
-                    if fn is not None:
-                        if getattr(fn, "name", None):
-                            slot["name"] = fn.name
-                        if getattr(fn, "arguments", None):
-                            slot["args"].append(fn.arguments)
+        except Exception:  # noqa: BLE001 — stream broke mid-flight
+            if not parts and not calls:
+                raise                          # nothing salvageable → let with_retry re-roll
+            finish = finish or "length"        # partial assembly → treat as a truncated (incomplete) stop
+        # Drop any INCOMPLETE tool call (missing id or name) — a mid-stream break before a tool_call's
+        # name/id delta arrived would otherwise yield a ToolCall(name=None) that breaks the dispatcher.
+        # If this empties content AND tool_calls, complete() raises EmptyResponseError → with_retry re-rolls.
         tool_calls = [NS(id=c["id"], function=NS(name=c["name"], arguments="".join(c["args"])))
-                      for _, c in sorted(calls.items())]
+                      for _, c in sorted(calls.items()) if c["id"] and c["name"]]
         message = NS(content=("".join(parts) or None), tool_calls=tool_calls)
         return NS(choices=[NS(message=message, finish_reason=finish)], usage=usage)
 

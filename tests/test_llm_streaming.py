@@ -234,7 +234,8 @@ def reasoning_intent_maps_to_effort():  # #51
 def watchdog_is_daemon_and_times_out():  # #47
     import time
     llm = _stub([], on_delta=None); llm._hard_timeout = 1; llm._base_url = ""
-    from openai import APITimeoutError
+    from memagent.llm import _import_api_timeout_error
+    APITimeoutError = _import_api_timeout_error()
 
     class _Slow:
         def create(self, **kw):

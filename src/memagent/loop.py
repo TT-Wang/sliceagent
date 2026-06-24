@@ -41,6 +41,19 @@ def _as_text(out):
     return out if isinstance(out, str) else str(out)
 
 
+def _tool_timeout() -> float | None:
+    """Opt-in per-tool wall-clock deadline (seconds) from AGENT_TOOL_TIMEOUT; None/0/invalid → off (the
+    default), preserving the original wait-for-every-tool behaviour. A last-resort net above each tool's
+    own subprocess/SIGALRM timeout, for a custom/MCP tool that blocks with no internal limit."""
+    import os
+    raw = os.environ.get("AGENT_TOOL_TIMEOUT", "").strip()
+    try:
+        v = float(raw)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
 # Anti-spin floor: after this many guardrail BLOCKS in one turn the loop stops and hands control back
 # to the user (TurnInterrupted "stuck") instead of letting a weak model keep generating variants
 # against the guard. The proactive path is the ask_user tool; this is the harness backstop. Each block
@@ -124,6 +137,53 @@ def _tool_call_id(tc, i: int) -> str:
     return getattr(tc, "id", None) or f"call_{i}"
 
 
+def _try_model_fallback(llm) -> bool:
+    """On exhausted-compaction overflow, swap to AGENT_MODEL_FALLBACK ONCE (a larger-context model) and
+    return True so the loop retries; False if no fallback is configured / already used / same model. Sticky
+    for the session — once you've overflowed the primary, the bigger model is the right place to stay."""
+    import os
+    fb = os.environ.get("AGENT_MODEL_FALLBACK", "").strip()
+    if not fb or getattr(llm, "_fellback", False) or fb == getattr(llm, "model", None):
+        return False
+    llm._fellback = True
+    try:
+        llm.model = fb
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def _hook_debug(where: str, e: Exception) -> None:
+    import os as _os
+    if _os.environ.get("MEMAGENT_DEBUG_TRACE"):
+        import sys as _sys
+        import traceback as _tb
+        print(f"[hook error in {where}: {type(e).__name__}: {e}]", file=_sys.stderr)
+        _tb.print_exc(file=_sys.stderr)
+
+
+def _safe_advisory(where: str, fn, default=None):
+    """Run an ADVISORY hook (budget/oracle/plugin: before/after_step, record_step_usage, prepare_messages,
+    transform_tool_result, should_continue_after_stop). A misbehaving plugin hook must DEGRADE the turn, not
+    end it — on any exception we log (opt-in) and return `default` (= 'no opinion'), so the loop continues."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001
+        _hook_debug(where, e)
+        return default
+
+
+def _safe_authorize(hooks, name, args):
+    """authorize_tool is SECURITY, so it fails CLOSED: any exception in the permission hook DENIES the call,
+    never silently allows it. Returns the hook's ToolDecision, or a synthetic deny on error."""
+    try:
+        return hooks.authorize_tool(name, args)
+    except Exception as e:  # noqa: BLE001
+        _hook_debug("authorize_tool", e)
+        from types import SimpleNamespace
+        return SimpleNamespace(allow=False, reason=f"permission hook errored ({type(e).__name__}) — denied")
+
+
 def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
     """Authorize, schedule (safe-parallel by resource access), and report results in provider order.
     Returns (blocked_count, results): `blocked` feeds the anti-spin floor; `results` carries each call's
@@ -134,14 +194,15 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
     blocked = 0
     for tc in tool_calls:
         dispatch(ToolStarted(tc.name, tc.args))
-        decision = hooks.authorize_tool(tc.name, tc.args)
+        decision = _safe_authorize(hooks, tc.name, tc.args)   # SECURITY: fails CLOSED on hook error
         # #44: `note` is the universal slice-capture seam injected by with_note onto EVERY tool — it is
         # NOT a handler parameter. Strip it before invoking the tool so strict MCP/plugin handlers don't
         # reject an unexpected property; it still rides the dispatched ToolResult.args (metas, below),
         # where slice_sink folds it into FINDINGS.
         call_args = {k: v for k, v in (tc.args or {}).items() if k != "note"} if tc.args else (tc.args or {})
         if not decision.allow:
-            blocked += 1
+            if getattr(decision, "counts_as_stuck", True):
+                blocked += 1   # only a HARD spin counts toward STUCK; a deduped read is skipped but free
             tasks.append(([], (lambda d=decision: ToolText(f"Error: blocked by policy: {d.reason or 'denied'}", ok=False))))
         else:
             # preserve ToolText (a str subclass carrying .ok) — coercing with str() here would strip the
@@ -152,10 +213,10 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
         # fakes / a provider that omits it) so accumulate's assistant.tool_calls ↔ tool messages still match.
         metas.append((_tool_call_id(tc, len(metas)), tc.name, tc.args))
 
-    outputs = run_scheduled(tasks)
+    outputs = run_scheduled(tasks, timeout=_tool_timeout())
     results = []
     for (tcid, name, args), out in zip(metas, outputs):
-        transformed = hooks.transform_tool_result(name, args, out)  # mutating seam (plugins/redaction)
+        transformed = _safe_advisory("transform_tool_result", lambda: hooks.transform_tool_result(name, args, out))
         if transformed is not None:
             out = transformed
         # M: trust the STRUCTURED success flag the registry attached (ToolText.ok) — a tool that returned
@@ -188,12 +249,12 @@ def _assistant_message(resp) -> dict:
 def _prepared(hooks, msgs: list) -> list:
     """Pre-LLM-call hook seam (context injection, prompt-cache-safe): return the hook's rewrite, or
     `msgs` unchanged when it returns None. Note `is not None` (an empty-list rewrite is honored)."""
-    prepared = hooks.prepare_messages(msgs)
+    prepared = _safe_advisory("prepare_messages", lambda: hooks.prepare_messages(msgs))
     return prepared if prepared is not None else msgs
 
 
 def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | None = None,
-             max_steps: int = 40, signal=None) -> TurnResult:
+             max_steps: int = 40, signal=None, checkpoint=None) -> TurnResult:
     """One per-LOOP working-memory turn. The slice is the SEED, built ONCE; within the while(true) working
     memory ACCUMULATES as native assistant/tool messages — NO per-step rebuild, NO eviction. The LLM ends
     by not calling tools (Markov at the loop boundary; continuous within).
@@ -247,7 +308,11 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         seed_view = _prepared(hooks, messages)  # dispatch what the model will SEE (== messages unless a hook injects)
         # #14: guard an empty seed (a build_slice that returns []) — index it directly and we'd IndexError
         # into the generic 'error' park, masking the real cause.
-        dispatch(SliceBuilt(seed_view[-1]["content"] if seed_view else "", seed_view))
+        _rendered = seed_view[-1]["content"] if seed_view else ""
+        if isinstance(_rendered, list):   # multimodal user content (image parts) → use the TEXT part for the
+            _rendered = next((p.get("text", "") for p in _rendered                # rendered/inspection view
+                              if isinstance(p, dict) and p.get("type") == "text"), "")
+        dispatch(SliceBuilt(_rendered, seed_view))
 
         while True:
             if signal is not None and signal.is_set():
@@ -256,11 +321,13 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 return _park("max_steps", BUDGET_EXHAUSTED("max_steps"))
 
             steps += 1
-            before = hooks.before_step(steps)
+            before = _safe_advisory("before_step", lambda: hooks.before_step(steps))
             if before and before.get("block"):
                 # a hook signalled "block this step" — PARK gracefully (closeout would re-block), never crash.
                 return _park("blocked", before.get("reason") or "step blocked by a hook", closeout=False)
             dispatch(StepBegin(steps))
+            if checkpoint is not None:   # crash-recovery WAL: persist the in-flight turn BEFORE the LLM
+                _safe_advisory("checkpoint", lambda: checkpoint(messages, steps))   # call (best-effort)
 
             # The step is interrupt-guarded: ctrl-C anywhere — the blocking llm.complete OR a slow tool in
             # run_tool_batch (a hung run_command) — aborts the turn cleanly instead of crashing it.
@@ -280,6 +347,14 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     except ContextOverflow:
                         floor = seed_len + (1 if compacted else 0)  # keep the breadcrumb pinned just below the seed
                         if len(messages) <= floor or overflow_tries >= 4:
+                            # compaction is exhausted (even the seed overflows). SECONDARY net: if a bigger
+                            # context model is configured (AGENT_MODEL_FALLBACK), swap to it ONCE and retry
+                            # rather than parking — the moat's compaction stays the primary, cheaper path.
+                            if _try_model_fallback(llm):
+                                dispatch(AssistantText(f"[context overflow — switching to {llm.model} "
+                                                       "for a larger window]"))
+                                overflow_tries = 0
+                                continue
                             return _park("overflow", OVERFLOW_MSG, closeout=False)
                         end = floor + 1
                         while end < len(messages) and messages[end].get("role") == "tool":
@@ -293,7 +368,13 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
 
                 usage = resp.usage or {}
                 _account(usage)
-                budget_stop = bool((hooks.record_step_usage(usage) or {}).get("stop_turn"))
+                # record_step_usage is the BUDGET path → fail CLOSED: on a hook exception, default to
+                # stop_turn=True (a crashing accountant must STOP, never silently overspend). No downside in
+                # normal use — the built-in BudgetHook is plain arithmetic and never raises, so the default
+                # only fires on a genuinely broken (e.g. 3rd-party) usage hook, where stopping is correct.
+                budget_stop = bool((_safe_advisory("record_step_usage",
+                                                   lambda: hooks.record_step_usage(usage),
+                                                   default={"stop_turn": True}) or {}).get("stop_turn"))
                 if resp.content:
                     dispatch(AssistantText(resp.content))
                     said_anything = True
@@ -312,7 +393,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     if resp.content:
                         messages.append({"role": "assistant", "content": resp.content})
                     dispatch(StepEnd(steps, usage, stop))
-                    cont = hooks.should_continue_after_stop(stop)  # Oracle/verify: feedback rides the message channel
+                    cont = _safe_advisory("should_continue_after_stop", lambda: hooks.should_continue_after_stop(stop))
                     if cont and cont.get("continue"):
                         messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
                         continue
@@ -337,7 +418,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             except KeyboardInterrupt:
                 return _park("aborted", None, closeout=False)
 
-            after = hooks.after_step(steps, usage, "tool_use")
+            after = _safe_advisory("after_step", lambda: hooks.after_step(steps, usage, "tool_use"))
             if after and after.get("stop_turn"):
                 return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
             if total_blocked >= STUCK_BLOCK_BUDGET:

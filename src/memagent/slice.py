@@ -701,6 +701,25 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     return render_regions(ctx)
 
 
+def _attach_images(user_text: str, host):
+    """Return the user message content. Text-only → the STRING unchanged (the moat path). If the host has
+    images @-attached for this turn (host.pending_images, populated by a vision-capable model only), return
+    a multimodal parts list [text, image_url…] and consume them IN PLACE (so a forwarding SubagentHost sees
+    the clear too)."""
+    imgs = getattr(host, "pending_images", None)
+    if not imgs:
+        return user_text
+    parts = [{"type": "text", "text": user_text}]
+    for im in imgs:
+        parts.append({"type": "image_url",
+                      "image_url": {"url": f"data:{im.get('mime', 'image/png')};base64,{im.get('b64', '')}"}})
+    try:
+        imgs.clear()                       # consumed into this turn's seed (in-place: shared with the real host)
+    except Exception:  # noqa: BLE001
+        pass
+    return parts
+
+
 def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = "", system_extra: str = ""):
     """The reconstruction seam the loop calls ONCE per turn to build the SEED. Returns [system, user]
     messages; within the turn the loop accumulates native messages (no per-step rebuild).
@@ -849,7 +868,10 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         nowblock = render_now(render_subdir_hints(hint_text))
         user = (f"{reqblock}<workspace_context>\n{body}\n</workspace_context>\n\n"
                 f"{reqblock}{nowblock}")
-        return [{"role": "system", "content": _system()}, {"role": "user", "content": user}]
+        # IMAGE INPUT: text-only turns return a plain STRING (the moat path, unchanged). Only when the user
+        # @-attached image(s) for a vision-capable model does the content become a multimodal parts list.
+        return [{"role": "system", "content": _system()},
+                {"role": "user", "content": _attach_images(user, tools)}]
 
     return build
 

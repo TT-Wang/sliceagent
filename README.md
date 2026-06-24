@@ -19,13 +19,29 @@ This is the opposite of the field's default ("bigger windows + summarize"): **re
 
 Early. The **core idea is validated** in a ~250-line JS prototype (see [`prototype/`](prototype/)) through controlled experiments vs a classic transcript loop. The production build is Python (aligns with [memem](https://github.com/TT-Wang/memem)).
 
-## Run (Python core, v0.1)
+## Quickstart
 
 ```bash
-uv sync           # or: pip install -e .
-cp .env.example .env   # add LLM_API_KEY (+ LLM_BASE_URL for non-OpenAI providers)
-memagent          # or: python -m memagent.cli
+uv sync                  # or: pip install -e .
+memagent init            # guided setup: provider, API key, model → ~/.memagent/config.toml (tests your key)
+memagent                 # start the agent
 ```
+
+`init` writes the config so the next run needs no env vars. Already have them? `export LLM_API_KEY=…
+[LLM_BASE_URL=…]` and skip `init`. Discover every setting with `memagent config --list`.
+
+→ Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · reading the UI in **[docs/OUTPUT.md](docs/OUTPUT.md)**
+· **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** ·
+**[CHANGELOG.md](CHANGELOG.md)**
+
+## Proof (the moat is measured, not asserted)
+
+The "reconstruct, don't accumulate" bet is validated, not just claimed:
+
+- **JS prototype** ([`prototype/`](prototype/)) — controlled A/B vs a classic transcript loop: **−61% to −80% tokens** on long/iterative tasks at identical pass rates.
+- **Python core** — `evals/realenv_multiturn.py` plots the per-turn **fresh-input** curve: flat (~6k) for memagent vs a transcript that climbs to **~24× by turn 12**. Watch the `fresh` number in the status bar to see it live.
+
+The win shows up in **multi-turn real use** (where the transcript grows), not single-turn SWE-bench (which structurally can't show it).
 
 The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole loop is testable offline with a fake LLM. Layout under `src/memagent/`:
 

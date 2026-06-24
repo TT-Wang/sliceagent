@@ -68,10 +68,50 @@ class Config:
             return sec[key]
         return default
 
+    # --- provider (multi-provider; written by `memagent init`; ENV always wins) ---
+    # Resolution order for api_key/base_url/model: ENV → the DEFAULT provider's [providers.<id>] table →
+    # the legacy flat [provider]/[agent].model → default. So multiple named providers can coexist and
+    # `memagent config --use <id>` switches between them, while old flat configs + env keep working.
+    @property
+    def default_provider(self) -> str:
+        return self._get("agent", "default_provider", "AGENT_PROVIDER", "")
+
+    def providers(self) -> dict:
+        """All declared providers: {id: {api_key, base_url, model}}."""
+        v = self.data.get("providers", {})
+        return {k: val for k, val in v.items() if isinstance(val, dict)} if isinstance(v, dict) else {}
+
+    def _provider_table(self) -> dict:
+        """The active provider's table: the configured default, or the sole provider if exactly one exists."""
+        provs = self.providers()
+        pid = self.default_provider
+        if pid and pid in provs:
+            return provs[pid]
+        if len(provs) == 1:
+            return next(iter(provs.values()))
+        return {}
+
+    @property
+    def api_key(self) -> str:
+        env = os.environ.get("LLM_API_KEY")
+        if env is not None:
+            return env
+        return self._provider_table().get("api_key") or self._get("provider", "api_key", None, "")
+
+    @property
+    def base_url(self) -> str:
+        env = os.environ.get("LLM_BASE_URL")
+        if env is not None:
+            return env
+        return self._provider_table().get("base_url") or self._get("provider", "base_url", None, "")
+
     # --- agent ---
     @property
     def model(self) -> str:
-        return self._get("agent", "model", "AGENT_MODEL", "gpt-5.5")
+        env = os.environ.get("AGENT_MODEL")
+        if env is not None:
+            return env
+        return self._provider_table().get("model") or self._get("agent", "model", None, "gpt-5.5")
 
     @property
     def policy(self) -> str:
