@@ -309,7 +309,16 @@ class ToolCallGuardrail:
         kind = op_kind(tool_name)
         result_hash = _sha256(result or "")
         self._push_trajectory(kind, result_hash)
-        self._calls_since_edit += 1  # coarse budget floor; reset below when a change actually lands
+        # Budget floor counts NON-PROGRESS calls only. Progress = a change that lands (the mutator branch
+        # below) OR a successful call that returns NEW information (a result not already in the recent ring).
+        # A distinct, successful read IS progress: analysis / review / debugging-by-reading legitimately
+        # never edit, and must not be strangled at call_budget_warn_after. Only a re-read of the SAME output
+        # or a FAILED call advances the floor — and genuine re-reads/repeats are already caught by the
+        # result/idempotent axes. This makes the floor task-AGNOSTIC: it fires on flailing, not on reading.
+        if (not failed) and self._result_counts.get(result_hash, 0) <= 1:
+            self._calls_since_edit = 0          # new information landed → reset the floor
+        else:
+            self._calls_since_edit += 1
 
         # I3 no-edit axis — track mutating attempts that make NO observable progress. A mutating call
         # that SUCCEEDS (an edit that lands, or a clean run/script that produced a non-error result) is

@@ -88,15 +88,48 @@ def render_action_history_caps_rendered():
 
 # ---- I3 backstop: per-turn call budget ----
 @check
-def call_budget_blocks_a_no_edit_spree():
+def call_budget_blocks_a_nonprogress_spree():
+    # The floor backstops genuine FLAILING: calls that make NO progress — each FAILS (or re-observes an
+    # already-seen result). Distinct FAILING reads isolate the floor: they don't trip the per-signature
+    # exact-failure axis (each path is unique), the result axis (each error is unique), or the no-edit
+    # mutation axis (read_file is non-mutating). 18 of them = exploring in circles → block.
     g = ToolCallGuardrail()
     n = g.config.call_budget_warn_after
     for i in range(n):
-        d = g.before_call("read_file", {"path": f"f{i}.py"})
+        d = g.before_call("read_file", {"path": f"missing{i}.py"})
         assert not d.block, f"should not block before the budget (call {i})"
-        g.after_call("read_file", {"path": f"f{i}.py"}, f"distinct contents {i}")
+        g.after_call("read_file", {"path": f"missing{i}.py"}, f"Error: no such file missing{i}.py", failed=True)
     d = g.before_call("read_file", {"path": "one-more.py"})
     assert d.block and d.code == "call_budget", (d.block, d.code)
+
+
+@check
+def distinct_successful_reads_are_progress_not_circling():
+    # REGRESSION (the analysis/review-task bug): a read-only task makes MANY distinct successful reads and
+    # never edits. Each distinct read returns NEW information = progress, so the call-budget floor must NOT
+    # fire — analysis / review / debugging-by-reading is legitimate work, not "exploring in circles". Drive
+    # 2x the old floor to prove distinct reads never accumulate it.
+    g = ToolCallGuardrail()
+    for i in range(g.config.call_budget_warn_after * 2):
+        d = g.before_call("read_file", {"path": f"src/mod{i}.py"})
+        assert not d.block, f"distinct read #{i} wrongly blocked as a no-progress spree (code={d.code})"
+        g.after_call("read_file", {"path": f"src/mod{i}.py"}, f"contents of module {i}: def f{i}(): return {i}")
+
+
+@check
+def repeated_reads_still_trip_the_floor():
+    # but re-observing the SAME output IS non-progress: distinct ARGS returning an identical result (so the
+    # per-signature idempotent axis can't see it) must still accumulate the floor. (Belt-and-suspenders with
+    # the result axis, which trips earlier at result_repeat_block_after.)
+    g = ToolCallGuardrail()
+    blocked = False
+    for i in range(g.config.call_budget_warn_after + 2):
+        d = g.before_call("read_file", {"path": f"alias{i}.py"})   # distinct args …
+        if d.block:
+            blocked = True
+            break
+        g.after_call("read_file", {"path": f"alias{i}.py"}, "IDENTICAL OUTPUT EVERY TIME")  # … same result
+    assert blocked, "re-observing the same result via distinct args must still trip a no-progress block"
 
 
 @check
