@@ -2,7 +2,7 @@
 (make_build_slice → [system, user]):
   (a) goal/# TASK removed from the system message → system is byte-stable regardless of goal (cache stays warm)
   (b) the verbatim request anchors the user message at BOTH primacy (opening) and recency (tail)
-  (c) the slice is fenced in a <workspace_context> envelope
+  (c) the slice is fenced in a <context> envelope
 No model, no pytest. Run: PYTHONPATH=src python tests/test_bugfix_2b.py
 """
 import os
@@ -63,16 +63,16 @@ def request_anchors_primacy_and_recency():  # (b)
 
 
 @check
-def slice_fenced_in_workspace_context():  # (c)
+def slice_fenced_in_context():  # (c)
     user = _build("do the thing")[1]["content"]
-    assert "<workspace_context>" in user and "</workspace_context>" in user, "slice must be fenced"
-    assert user.index("# CURRENT REQUEST") < user.index("<workspace_context>"), "primacy request precedes the fence"
+    assert "<context>" in user and "</context>" in user, "slice must be fenced"
+    assert user.index("# CURRENT REQUEST") < user.index("<context>"), "primacy request precedes the fence"
 
 
 @check
 def request_and_now_render_OUTSIDE_the_fence():  # review fix A/C — instruction must not be 'context'
     user = _build("do the thing")[1]["content"]
-    close = user.index("</workspace_context>")
+    close = user.index("</context>")
     # the RECENCY request + the NOW footer come AFTER the fence closes (not inside the reference envelope)
     assert user.rindex("# CURRENT REQUEST") > close, "recency request must be OUTSIDE the fence"
     assert user.index("# NOW") > close, "the NOW instruction must be OUTSIDE the fence"
@@ -84,7 +84,7 @@ def empty_goal_suppresses_primacy():  # safety: a fresh slice with no goal shoul
     s = Slice()  # no reset → goal == ""
     user = make_build_slice(s, _Tools(), NullRetriever(), NullMemory(), "")()[1]["content"]
     assert not user.startswith("# CURRENT REQUEST"), "no goal → no primacy header"
-    assert user.startswith("<workspace_context>"), "envelope still wraps the slice"
+    assert user.startswith("<context>"), "envelope still wraps the slice"
 
 
 def main():

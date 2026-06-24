@@ -21,11 +21,32 @@ def _files_of(event: ToolResult) -> list[str]:
     return out
 
 
+_OBS_KEEP_WHOLE = 2000   # keep an observation WHOLE up to this (covers a ~120-line config / a page of
+_OBS_HEAD = 1200         # output), so a value in the MIDDLE survives; beyond it, a generous head+tail.
+_OBS_TAIL = 600          # Bounded — the archive is L2 (on disk, not the slice), and recall caps what it serves.
+
+
+def _obs_excerpt(obs: str) -> str:
+    """A BOUNDED excerpt of a tool observation, indented under its trace line, so the actual DATA a turn
+    SAW (a value, a grep match, an error) survives into the recallable markdown. The one-line summary
+    ('read_file x -> 250 chars, 8 lines') cannot answer 'what was the value?' later — this is the precision
+    the cross-slice recall channel needs. Keep the WHOLE observation up to _OBS_KEEP_WHOLE (so a value in
+    the MIDDLE of a normal file/output is not lost — the measured gap); only a truly large observation is
+    reduced to head+tail. Bounded: the archive is L2 (on disk, not in context until recalled) and
+    recall_history caps the total it serves; page-out (#74) already bounds huge tool outputs upstream."""
+    o = (obs or "").strip()
+    if not o:
+        return ""
+    body = o if len(o) <= _OBS_KEEP_WHOLE else (o[:_OBS_HEAD] + "\n…⋯…\n" + o[-_OBS_TAIL:])
+    return "  " + body.replace("\n", "\n  ")   # indent the excerpt under its "- " trace bullet
+
+
 def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
     """Render a SEALED turn as a clean, self-contained MARKDOWN snapshot — the readable artifact the
     cache holds and the next loop pages back via recall_history (the slice saved into the cache as
-    markdown). Distilled, not a raw dump: heading, changed files, outcome, the action→result trace, and
-    the turn's conclusion. Built from the buffered turn data alone (no Slice coupling — Markov)."""
+    markdown). Distilled, not a raw dump: heading, changed files, outcome, the action→result trace WITH
+    a bounded excerpt of each observation (so the data the turn saw is recallable), and the conclusion.
+    Built from the buffered turn data alone (no Slice coupling — Markov)."""
     from .tool_summary import summarize_tool_result
     files = meta.get("files") or []
     out = [f"# {title or '(turn)'}"]
@@ -38,6 +59,9 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
         for a, o in zip(st.get("action", []), st.get("observation", [])):
             trace.append("- " + summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
                                                        failing=bool(a.get("failing"))))
+            ex = _obs_excerpt(o)        # keep the actual observed DATA, bounded, so recall is USEFUL
+            if ex:
+                trace.append(ex)
     if trace:
         out.append("\n## what happened\n" + "\n".join(trace))
     if note:

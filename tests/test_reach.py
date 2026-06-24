@@ -82,7 +82,7 @@ def escape_error_is_prescriptive():
         raised = True
         msg = str(e)
         assert "run_command" in msg or "execute_code" in msg, f"escape error names no shell hatch: {msg!r}"
-        assert "escapes workspace" in msg
+        assert "escapes the boundary" in msg
     assert raised
 
 
@@ -196,9 +196,9 @@ def failed_read_not_pinned():
     h, _ = _host()
     s = Slice(); s.reset("t")
     sink = slice_sink(s)
-    # a read_file that FAILED in _resolve (path escapes workspace) -> failing=True
+    # a read_file that FAILED in _resolve (path escapes the boundary) -> failing=True
     sink(ToolResult("read_file", {"path": "/etc/hosts"},
-                    "Error: path escapes workspace ...", True))
+                    "Error: path escapes the boundary ...", True))
     assert s.active_files == [], f"failed read pinned the path: {s.active_files}"
 
 
@@ -217,7 +217,7 @@ def failed_edit_not_pinned_but_success_is():
     s = Slice(); s.reset("t")
     sink = slice_sink(s)
     sink(ToolResult("edit_file", {"path": "out/x.py", "content": "..."},
-                    "Error: path escapes workspace ...", True))
+                    "Error: path escapes the boundary ...", True))
     assert s.active_files == [], "failed edit pinned a path"
     sink(ToolResult("edit_file", {"path": "in.py", "content": "..."}, "Wrote 3 bytes to in.py", False))
     assert s.active_files == ["in.py"] and "in.py" in s.edited_files

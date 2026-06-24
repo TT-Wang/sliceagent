@@ -153,7 +153,7 @@ def main() -> None:
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route
     from .skills import make_skill_manager, make_skill_tool
-    from .slice import make_build_slice, one_line, record_user, slice_sink
+    from .slice import consolidate_checkpoint, make_build_slice, one_line, record_user, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
@@ -486,7 +486,8 @@ def main() -> None:
         _t0 = _t.monotonic()
         from . import recovery as _rec
         result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=live_dispatch,
-                          hooks=hooks, signal=signal,
+                          hooks=hooks, signal=signal, max_steps=cfg.max_steps,
+                          consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
                           checkpoint=lambda m, s, _g=text: _rec.record(root, goal=_g, messages=m, step=s))
         _rec.clear(root)                                   # clean/parked exit → drop the WAL
         _stats["last_turn_s"] = _t.monotonic() - _t0
@@ -591,6 +592,8 @@ def main() -> None:
             import time as _time
             _t0 = _time.monotonic()
             result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks,
+                              max_steps=cfg.max_steps,
+                              consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
                               checkpoint=lambda m, s, _g=line: recovery.record(root, goal=_g, messages=m, step=s))
             recovery.clear(root)                               # clean/parked exit → drop the WAL
             _stats["last_turn_s"] = _time.monotonic() - _t0   # shown as ⏲ in the status bar

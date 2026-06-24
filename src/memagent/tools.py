@@ -29,7 +29,7 @@ from .terminal import SessionManager
 # agent hitting its OWN sandbox mines nothing (D2). Lower-cased substrings, matched task-agnostically;
 # defined HERE (the source of these strings) so the denylist tracks the actual error messages.
 HOST_ERROR_SENTINELS = (
-    "path escapes workspace",
+    "path escapes the boundary",
     "file tools are confined",
     "permission denied",
     "operation not permitted",
@@ -70,7 +70,7 @@ def _confine(path):
     _p = _os.path.realpath(path)
     _root = _os.path.realpath(_os.getcwd())
     if _p != _root and not _p.startswith(_root + _os.sep):
-        raise PermissionError(f"path escapes workspace: {path} (use run_command for paths outside it)")
+        raise PermissionError(f"path escapes the boundary: {path} (use run_command for paths outside it)")
     return path
 
 def read_file(path):
@@ -162,6 +162,24 @@ _IGNORE_NAMES = frozenset({
 })
 _IGNORE_SUFFIX = (".egg-info", ".pyc")
 _LIST_CAP = 600   # bound recursive output so a huge tree can't flood the slice
+
+# Tool-output PAGE-OUT (#74): a single tool result larger than this is written to a blob under
+# .memagent/blobs and replaced inline by a BOUNDED head+tail view + a read_file reference — L1→L2 paging,
+# NOT a cut (the full output is preserved on disk and recall-on-demand). Keeps one huge run_command /
+# execute_code / terminal_read result from flooding the within-turn transcript and forcing coarse overflow.
+_OUTPUT_INLINE_CAP = 16000
+_OUTPUT_HEAD = 10000
+_OUTPUT_TAIL = 4000
+
+# Drop C0/C1 control bytes (keep \t \n \r) + DEL from a paged-out output, so (a) the blob is PLAIN TEXT
+# and read_file's binary gate won't hexdump it on page-back, and (b) a stray NUL can't break the API call
+# when the bounded head+tail rides the transcript. Only applied on the paged path (large outputs).
+_CONTROL_DROP = {c: None for c in range(0x20) if c not in (0x09, 0x0a, 0x0d)}
+_CONTROL_DROP[0x7f] = None
+
+
+def _strip_control(s: str) -> str:
+    return s.translate(_CONTROL_DROP)
 # Credential/secret dirs the shell-path auto-grant (#31) must never widen file-tool reach into.
 _SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".config", "keyrings", ".password-store"}
 
@@ -428,6 +446,7 @@ class LocalToolHost:
         # bounded — never a blanket '/'; the workspace stays the default and only the launch
         # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
         self._extra_roots: list[str] = []
+        self._focus: str | None = None   # most-recently-worked EXTERNAL dir → the active focus (slice-surfaced)
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
@@ -509,6 +528,38 @@ class LocalToolHost:
                 roots.append(r)
         return roots
 
+    def focus(self) -> tuple[str | None, list[str]]:
+        """The active focus (most-recently-worked EXTERNAL dir) + every extra root the file tools reach
+        beyond the workspace. Surfaced in the slice so the model KNOWS its file tools reach there: the
+        auto-granted reach was invisible, so the agent defaulted to the workspace frame and lost the
+        thread across turns (the hunter 'index.ts' miss). Delegated by SubagentHost via __getattr__."""
+        return self._focus, list(self._extra_roots)
+
+    def resolution_base(self) -> str:
+        """The CURRENT PROJECT a bare RELATIVE path resolves against — the frame, not the floor. Defaults
+        to the active focus (the most-recent dir worked in) when set, else the boundary root. This ONLY
+        moves the relative-path anchor + display frame; it NEVER widens reach: the result of `_resolve`
+        must still land inside `allowed_roots()`, and the immutable boundary root is unchanged. So the
+        'current project' can roam over the authorized dirs while the floor it sits on never moves."""
+        base = self._focus or self.root()
+        # defensive: the base must itself be an authorized root (focus is only ever set to a granted dir)
+        return base if base in self.allowed_roots() else self.root()
+
+    def locate(self, path: str) -> str:
+        """Resolve a working-set path for RE-READING (OPEN FILES). Base-STABLE — independent of the current
+        project: a relative path is matched against EVERY authorized root (boundary root first, then extra
+        roots) and the first EXISTING match wins, so a pin stays truthful even after `resolution_base()`
+        moves. Falls back to the boundary-root resolution when nothing exists, so the truthful
+        '(not created yet)' / 'outside reach' branch in build_artifacts still fires per exception type."""
+        expanded = os.path.expanduser(path)
+        if os.path.isabs(expanded):
+            return self._resolve(path)                       # absolute → _resolve enforces the boundary
+        for r in self.allowed_roots():
+            cand = os.path.realpath(os.path.join(r, expanded))
+            if (cand == r or cand.startswith(r + os.sep)) and os.path.exists(cand):
+                return cand
+        return os.path.join(self.root(), expanded)           # nothing exists → boundary-root path (truthful 404)
+
     def _grant_shell_paths(self, text: str) -> None:
         """I2 — reach FOLLOWS action. When the shell acts on a path outside the allowed roots,
         grant file-tool reach to its directory so a shell-written file is ALWAYS readable back via
@@ -539,6 +590,7 @@ class LocalToolHost:
             if any(part in _SECRET_DIRS for part in d.split(os.sep)):
                 continue
             self.add_root(d)
+            self._focus = d   # the most-recent external dir the shell worked on → the active focus
 
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
@@ -548,8 +600,11 @@ class LocalToolHost:
             raise ValueError("empty path")
         path = os.path.expanduser(path)  # P2 — '~' → $HOME before any join/realpath
         roots = self.allowed_roots()
-        primary = roots[0]
-        full = path if os.path.isabs(path) else os.path.join(primary, path)
+        # A bare relative path resolves against the CURRENT PROJECT (resolution_base), not always the
+        # boundary root — so when the agent moves into another authorized project, relative paths follow
+        # it. Reach is unchanged: `full` must still land inside an authorized root below.
+        base = self.resolution_base()
+        full = path if os.path.isabs(path) else os.path.join(base, path)
         full = os.path.realpath(full)
         for root in roots:
             if full == root or full.startswith(root + os.sep):
@@ -557,9 +612,9 @@ class LocalToolHost:
         # P3 — prescriptive error: name the boundary AND the escape hatch so a no-transcript
         # model recovers instead of re-deriving the dead end (and looping into shell fallback).
         raise PermissionError(
-            f"path escapes workspace ({primary}): {path} — File tools are confined to the "
-            "workspace. To act on paths outside it, use run_command/execute_code (shell is "
-            "unconfined), or re-run memagent with the workspace set to that directory.")
+            f"path escapes the boundary ({base}): {path} — File tools are confined to your "
+            "authorized directories (the boundary). To act on paths outside it, use "
+            "run_command/execute_code (shell is unconfined), or re-run memagent rooted at that directory.")
 
     # --- ToolHost projection: everything comes from the registry now ---
     def schemas(self) -> list[dict]:
@@ -602,6 +657,32 @@ class LocalToolHost:
         return [AllAccess()]
 
     # --- builtin tool handlers (args) -> str (the registry catches exceptions) ---
+    def _page_out(self, text: str, *, label: str = "output") -> str:
+        """Page a large tool output OUT to a blob and return a BOUNDED head+tail view + a read_file
+        reference, instead of inlining the whole thing into the turn transcript. Moat-coherent: the FULL
+        output is preserved on disk (recall-on-demand, the L1→L2 page-out), never cut. Best-effort — on a
+        write failure it still bounds the inline view with a hard head+tail slice."""
+        if not text or len(text) <= _OUTPUT_INLINE_CAP:
+            return text
+        text = _strip_control(text)   # paged path only: plain-text blob (read_file page-back works) + API-safe view
+        ref = None
+        try:
+            import hashlib
+            digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+            rel = os.path.join(".memagent", "blobs", f"{label.replace(' ', '-')}-{digest}.txt")
+            full = self._resolve(rel)
+            self._mkparent(full)
+            if not os.path.exists(full):
+                self._atomic_write(full, text)
+            ref = f"read_file('{rel}')"
+        except Exception:  # noqa: BLE001 — a paging failure must never fail the tool itself
+            ref = None
+        elided = len(text) - _OUTPUT_HEAD - _OUTPUT_TAIL
+        how = f"page the full {label} back with {ref}" if ref else f"the elided {label} is unavailable (blob write failed)"
+        return (f"{text[:_OUTPUT_HEAD]}\n\n"
+                f"[… {elided} of {len(text)} chars paged out — {how} …]\n\n"
+                f"{text[-_OUTPUT_TAIL:]}")
+
     def _t_read_file(self, args: dict) -> str:
         # Text files: return the content. Binary files: instead of refusing (which blanks the
         # agent on forensics/media/archive tasks), return a hexdump + size + magic so it can
@@ -864,8 +945,8 @@ class LocalToolHost:
         self._grant_shell_paths(args.get("command", ""))  # I2 reach=action: dirs the shell touched
         out = out.strip()
         if code != 0:
-            return ToolText(f"Exit code {code}\n{out or '(no output)'}", ok=False)
-        return out or "(command produced no output)"
+            return ToolText(f"Exit code {code}\n{self._page_out(out, label='command output') or '(no output)'}", ok=False)
+        return self._page_out(out, label="command output") if out else "(command produced no output)"
 
     # --- background / long-running processes (procman) ---
     def _host_only_note(self) -> str:
@@ -917,7 +998,7 @@ class LocalToolHost:
             t = float(args.get("timeout") or 1.0)
         except (TypeError, ValueError):
             t = 1.0
-        return self.terminals.read(name, timeout=max(0.05, min(t, 120.0)))
+        return self._page_out(self.terminals.read(name, timeout=max(0.05, min(t, 120.0))), label="terminal output")
 
     def _t_terminal_wait(self, args: dict) -> str:
         name = args.get("session") or "main"
@@ -1005,8 +1086,8 @@ class LocalToolHost:
             code_n, out = self.sandbox.run(cmd, cwd=root, timeout=self.timeout)
             out = out.strip()
             if code_n != 0:
-                return ToolText(f"Exit code {code_n}\n{out or '(no output)'}", ok=False)
-            return out or "(execute_code produced no output)"
+                return ToolText(f"Exit code {code_n}\n{self._page_out(out, label='execute_code output') or '(no output)'}", ok=False)
+            return self._page_out(out, label="execute_code output") if out else "(execute_code produced no output)"
         finally:
             try:
                 os.unlink(path)

@@ -87,6 +87,7 @@ from .regions import (  # noqa: F401 — re-export shims
     record_note,
     render_action_history,
     render_cache_manifest,
+    render_focus,
     render_conversation,
     render_convergence,
     render_findings,
@@ -156,6 +157,13 @@ SYSTEM_PROMPT = (
     "ask_user tool with ONE concise question (optionally up to ~4 short options) and wait for the answer — "
     "do NOT guess, and do NOT repeat a failing action hoping it changes. Asking the user a follow-up is a "
     "normal, expected move, not a failure.\n"
+    "RESOLVE BEFORE ASKING: a brief follow-up refers to what you were JUST working on — \"look into "
+    "index.ts\", \"fix it\", \"review the project\" point at the CURRENT PROJECT and the RECENT CONVERSATION, "
+    "not a blank search. Before you re-ask or cold-search: (1) resolve the referent against the CURRENT "
+    "PROJECT (your file tools reach there) and the recent turns; (2) if the details were established in an "
+    "earlier turn but aren't in front of you, recall_history(turns=[N]) to page them back; THEN act. "
+    "Re-asking what the context already answers — or searching elsewhere for a file that lives in the "
+    "current project — is the failure, not asking.\n"
     "CLARIFY BEFORE COMMITTING: before you deliver an artifact (a function, file, or design) whose "
     "CORRECTNESS depends on details the request does NOT state — exact behavior, numeric conventions, "
     "formats, ordering, edge cases — and the user is present to answer, ASK your most important clarifying "
@@ -256,7 +264,7 @@ SYSTEM_PROMPT = (
     "<safety>\n"
     "Do NOT make unasked git mutations (commit/push/checkout/reset/rewrite history) — ask each time before changing repo state.\n"
     "Never read, print, or commit secrets — leave .env and credential files alone unless the user explicitly asks.\n"
-    "Your current git state (branch + changed files) is shown LIVE in WORKSPACE STATE below, re-read every "
+    "Your current git state (branch + changed files) is shown LIVE in REPO STATE below, re-read every "
     "turn — trust it; the PROJECT facts in this system message are session-start static.\n"
     "</safety>"
 )
@@ -579,7 +587,10 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     parts = []
     for p in shown:
         try:
-            body = tools.read_text(p)
+            # OPEN FILES re-read is base-STABLE: locate() matches a relative pin against every authorized
+            # root (not just the moving current-project base), so a workspace pin stays truthful after the
+            # agent moves into another project. Absolute/out-of-reach pins still raise from _resolve.
+            body = tools.read_text(tools.locate(p) if hasattr(tools, "locate") else p)
         except FileNotFoundError:
             # genuinely absent from disk — the only case that means "not yet written"
             parts.append(f"### {p}\n(not created yet)")
@@ -685,7 +696,7 @@ def record_user(s: Slice, message: str) -> None:
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                  subdir_hints: str = "", worktree: str = "", repo_map: str = "", cache_manifest: str = "",
-                 *, max_findings: int = MAX_FINDINGS) -> str:
+                 focus: str = "", *, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
@@ -702,9 +713,43 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "worktree": worktree,
         "repo_map": repo_map,
         "cache_manifest": cache_manifest,
+        "focus": focus,
         "max_findings": max_findings,
     }
     return render_regions(ctx)
+
+
+def consolidate_checkpoint(s: "Slice", *, compact: bool = True) -> str:
+    """F1 — the CHECKPOINT: a deterministic, BOUNDED re-projection of the carried task state into ONE dense
+    'state of play' snapshot (intent · decisions · change-set · open/next, plus a findings digest in full
+    mode). Pure (no LLM) — built from the durable tiers seal() already carries, so it adds LEGIBILITY +
+    a single resume/rebuild artifact, never new state. `compact=True` is the steady-state slice tier (no
+    findings re-list — those have their own tier); `compact=False` is the FULL artifact for the overflow
+    REBUILD (where the detailed tiers are gone, so the snapshot must stand alone). Self-suppresses when
+    there is nothing to report (a fresh greeting → no bytes)."""
+    from .finding_types import RULED_OUT, classify_finding  # typed decisions read sharper in the snapshot
+    lines: list[str] = []
+    goal = (s.goal or "").strip()
+    if goal:
+        lines.append(f"intent: {one_line(goal, 240)}")
+    open_reqs = [r.get("text", "") for r in s.requirements if isinstance(r, dict) and not r.get("done")]
+    if open_reqs:
+        lines.append("requirements: " + " · ".join(one_line(t, 80) for t in open_reqs[:5]))
+    decisions = [f for f in s.findings if classify_finding(f) in ("decision", RULED_OUT)]
+    if decisions:
+        lines.append("decisions:")
+        lines += [f"  - {one_line(d, 160)}" for d in decisions[-4:]]
+    if s.edited_files:
+        ch = sorted(s.edited_files)
+        lines.append("change-set: " + ", ".join(ch[:8]) + (f" (+{len(ch) - 8})" if len(ch) > 8 else ""))
+    if not compact:                                  # FULL artifact: include the non-decision findings digest
+        facts = [f for f in s.findings if f not in decisions]
+        if facts:
+            lines.append("findings:")
+            lines += [f"  - {one_line(f, 160)}" for f in facts[-8:]]
+    if s.open_report:
+        lines.append(f"open: {one_line(s.open_report, 200)}")
+    return "\n".join(lines)
 
 
 def _attach_images(user_text: str, host):
@@ -742,9 +787,12 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     except Exception:  # noqa: BLE001 — cwd is optional; any host error falls back to "" (already set)
         pass
     env_line = (
-        f"\n\n# WORKING DIRECTORY\nEvery tool and command already runs INSIDE this workspace: {cwd}\n"
-        "Reference files by their path RELATIVE to it (e.g. 'pkg/mod.py', 'test_x.py'). Do NOT use 'cd' "
-        "or absolute paths and do NOT hunt for the directory — run_command already starts here."
+        f"\n\n# PROJECT ROOT & BOUNDARY\nYou start in: {cwd} — reference files here by their RELATIVE path "
+        "(e.g. 'pkg/mod.py', 'test_x.py'); run_command already starts here.\n"
+        "Your file tools are confined to your authorized directories — this is the BOUNDARY you cannot "
+        "cross. To act outside it, use run_command/execute_code (the shell is unconfined), or re-run "
+        "memagent rooted there. If you move into another authorized project it appears under CURRENT "
+        "PROJECT in the context, and bare relative paths resolve THERE — you are not pinned to the start dir."
     ) if cwd else ""
     # ITEM 11(B) — git/project snapshot computed ONCE per session (NOT inside build()). It is
     # deterministic per cwd within a session, so the system message stays byte-stable (prompt-cache
@@ -863,8 +911,15 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # to MANIFEST_TURNS locators (moat), self-suppresses when no durable cache (NullMemory => []).
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
         cache_manifest = render_cache_manifest(manifest_refs)
+        # ACTIVE FOCUS — surface the file-tool reach beyond the workspace (auto-granted when the shell
+        # works on an external dir, but otherwise INVISIBLE → the model defaulted to the workspace frame
+        # and lost the thread across turns). Carries naturally: the host's extra roots persist per session.
+        focus_text = ""
+        if hasattr(tools, "focus") and hasattr(tools, "root"):
+            _focus_path, _extra_roots = tools.focus()
+            focus_text = render_focus(_focus_path, _extra_roots, home=os.path.expanduser("~"), workspace=tools.root())
         body = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
-                            hint_text, worktree, "", cache_manifest,  # repo_map now rides the cacheable SYSTEM prefix
+                            hint_text, worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
                             max_findings=_NO_CAP)
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
@@ -872,7 +927,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # instruction reads as an instruction, not as fenced context. (Primacy+recency U-curve / sandwich.)
         reqblock = render_current_request(goal)
         nowblock = render_now(render_subdir_hints(hint_text))
-        user = (f"{reqblock}<workspace_context>\n{body}\n</workspace_context>\n\n"
+        user = (f"{reqblock}<context>\n{body}\n</context>\n\n"
                 f"{reqblock}{nowblock}")
         # IMAGE INPUT: text-only turns return a plain STRING (the moat path, unchanged). Only when the user
         # @-attached image(s) for a vision-capable model does the content become a multimodal parts list.

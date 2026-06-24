@@ -100,7 +100,7 @@ def slice_contains_repo_map_and_live_worktree():
     # NOT the volatile user slice; live worktree stays in the user slice.
     assert "# REPO MAP" in system and "core.py" in system, "repo map should be in the cacheable SYSTEM prefix"
     assert "# REPO MAP" not in user, "repo map must NOT be in the volatile user slice anymore"
-    assert "# WORKSPACE STATE (LIVE" in user and "modified: pkg/core.py" in user, "live worktree missing"
+    assert "# REPO STATE (LIVE" in user and "modified: pkg/core.py" in user, "live worktree missing"
     # PROJECT facts (static) live in the SYSTEM message; live git does NOT (cache stability)
     assert "# PROJECT" in system, "static project facts missing from system msg"
     # the live git DATA must not be in the cacheable system msg (the disclaimer may NAME the region)

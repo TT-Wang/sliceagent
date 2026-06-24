@@ -152,6 +152,17 @@ class Config:
         v = self._get("budget", "max_tokens", "AGENT_MAX_TOKENS", None)
         return int(v) if v else None
 
+    @property
+    def max_steps(self) -> int:
+        # Per-turn step ceiling (runaway backstop). Default raised above the old hard 40 so deep
+        # analysis/review turns aren't guillotined; overridable for heavier work (Kimi exposes a
+        # turns/tokens goal budget — this is the lean equivalent).
+        v = self._get("budget", "max_steps", "AGENT_MAX_STEPS", None)
+        try:
+            return max(1, int(v)) if v else 60
+        except (TypeError, ValueError):
+            return 60
+
     # --- extension surfaces ---
     @property
     def skills_roots(self) -> list[str] | None:

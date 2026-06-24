@@ -161,7 +161,7 @@ def confinement_error_mines_nothing():
     # the agent hit its OWN sandbox (D2) — that is not an engineering pitfall → mine NOTHING
     s = Slice(); s.reset("write a file outside the workspace")
     s.edited_files = {"x.py"}
-    err = ("Error: path escapes workspace (/repo): ~/Desktop/x.py — File tools are confined "
+    err = ("Error: path escapes the boundary (/repo): ~/Desktop/x.py — File tools are confined "
            "to the workspace.")
     mem = _run_miner(s, fail_out=err)
     assert mem.saved == [], f"a self-inflicted confinement error mined a junk lesson: {mem.saved}"
@@ -174,7 +174,7 @@ def real_pitfall_after_self_inflicted_still_mines():
     s.edited_files = {"imp.py"}
     mem = _Mem()
     miner = LessonMiner(mem, s, mode="deterministic", scope="test")
-    miner(ToolResult("read_file", {"path": "/etc/x"}, "Error: path escapes workspace (/repo): /etc/x", True))
+    miner(ToolResult("read_file", {"path": "/etc/x"}, "Error: path escapes the boundary (/repo): /etc/x", True))
     miner(ToolResult("run_command", {"command": "python imp.py"}, "Error: ImportError: cannot import bar", True))
     s.last_error = ""
     miner(TurnEnd("end_turn", 1, {}))
@@ -185,7 +185,7 @@ def real_pitfall_after_self_inflicted_still_mines():
 
 @check
 def is_self_inflicted_and_signature_helpers():
-    assert is_self_inflicted("Error: path escapes workspace (/r): /etc/x")
+    assert is_self_inflicted("Error: path escapes the boundary (/r): /etc/x")
     assert is_self_inflicted("Error: Permission denied: /root")
     assert not is_self_inflicted("Error: ImportError: no module named foo")
     # signature strips the host's 'Error:' prefix so the title leads with the real failure

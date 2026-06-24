@@ -90,6 +90,30 @@ def render_cache_manifest(refs) -> str:
     return "\n".join(lines)
 
 
+def render_focus(focus, extra_roots, *, home: str = "", workspace: str = "") -> str:
+    """CURRENT PROJECT body: the dir the agent is actively working in, when it has moved beyond the boundary
+    root. Surfaces the auto-granted file-tool reach + the moved relative-path base (otherwise INVISIBLE →
+    the model stays in the start-dir frame and can't resolve 'the project' / a bare filename to where the
+    work actually is, then re-asks or cold-searches — the hunter 'index.ts' miss). The boundary (the floor)
+    never moves; this is the frame on top of it. Self-suppresses for the common single-project case."""
+    def short(p: str) -> str:
+        return ("~" + p[len(home):]) if home and p.startswith(home) else p
+    roots = [r for r in (extra_roots or []) if r and r != workspace]
+    if not roots and not (focus and focus != workspace):
+        return ""
+    lines = []
+    if focus and focus != workspace:
+        lines.append(
+            f"You are now working in `{short(focus)}`. Bare relative paths resolve HERE, and your file "
+            f"tools — read_file, list_files, grep, edit_file — act here. Resolve a bare filename or "
+            f"\"the project\"/\"it\" against THIS and the RECENT CONVERSATION first; do NOT fall back to a "
+            f"boundary-wide search or re-ask when the referent is already clear from recent work.")
+    others = [short(r) for r in roots if r != focus]
+    if others:
+        lines.append("Also within your boundary (reachable by file tools): " + ", ".join(f"`{o}`" for o in others) + ".")
+    return "\n".join(lines)
+
+
 def render_skills(active_skills: list[dict]) -> str:
     if not active_skills:
         return wrap_untrusted("", kind="skill")
@@ -520,7 +544,7 @@ STABLE, VOLATILE = "stable", "volatile"
 # Each region is (name, tier, render(ctx)->framed-fragment, slot). The renderer OWNS its header
 # literal + spacing and SUPPRESSES itself (returns '') when empty. `tier` documents the
 # stable-bulk/volatile-tail split (prompt-cache locality). `slot` maps the fragment onto the former
-# CURRENT REQUEST (the live user ask) and the NOW footer render OUTSIDE the <workspace_context> envelope in
+# CURRENT REQUEST (the live user ask) and the NOW footer render OUTSIDE the <context> envelope in
 # slice.build() — NOT as REGION_ORDER entries. The envelope marks "reference STATE"; the live INSTRUCTION must
 # frame it from OUTSIDE, at both ends (primacy + recency), with NOW as the outermost tail. ONE `goal` source
 # feeds both request copies (no primacy/recency divergence).
@@ -533,7 +557,7 @@ _NOW_FOOTER = ("# NOW: address the CURRENT REQUEST above. If it asks a QUESTION 
 
 
 def render_current_request(goal: str) -> str:
-    """The live user ask, rendered OUTSIDE the workspace_context fence (used at BOTH primacy and recency from
+    """The live user ask, rendered OUTSIDE the context fence (used at BOTH primacy and recency from
     one source). Empty goal → '' (no header)."""
     g = (goal or "").strip()
     return f"{_CURRENT_REQUEST_HDR}{g}\n\n" if g else ""
@@ -581,10 +605,14 @@ REGION_ORDER = (
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
     # (CURRENT REQUEST renders OUTSIDE the fence in build() — see render_current_request above — not here.)
-    # WORKSPACE STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
+    # REPO STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
     # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
     # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
-    ("worktree",       VOLATILE, lambda c: (f"# WORKSPACE STATE (LIVE — current branch & changed files, re-read THIS turn; this is the up-to-date git state — trust it over any session-start project facts)\n{c['worktree']}\n\n" if c.get("worktree") else ""), 6),
+    # CURRENT PROJECT — where the agent is working RIGHT NOW (the frame on top of the immutable boundary):
+    # the moved relative-path base + auto-granted file-tool reach, otherwise invisible. Rides the salient
+    # tail so a follow-up's referent resolves HERE. Self-suppresses for the single-project case.
+    ("focus",          VOLATILE, lambda c: (f"# CURRENT PROJECT (where you are working RIGHT NOW — bare relative paths resolve here and your file tools reach here)\n{c['focus']}\n\n" if c.get("focus") else ""), 6),
+    ("worktree",       VOLATILE, lambda c: (f"# REPO STATE (LIVE — current branch & changed files, re-read THIS turn; this is the up-to-date git state — trust it over any session-start project facts)\n{c['worktree']}\n\n" if c.get("worktree") else ""), 6),
     # OPEN USER REPORT rides ABOVE the error (a stale "done" note can't outrank a user's BROKEN report);
     # both are the highest-authority, freshest tail right above NOW.
     ("user_report",    VOLATILE, lambda c: (f"# OPEN USER REPORT (the user reports this is BROKEN — treat it as an UNRESOLVED blocker; do NOT claim it is done or already working until you have VERIFIED the fix against the real artifact, e.g. run/open it and observe success)\n{c['s'].open_report}\n\n" if c["s"].open_report else ""), 6),

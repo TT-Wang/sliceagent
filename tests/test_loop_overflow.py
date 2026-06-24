@@ -234,6 +234,57 @@ def selfcheck_forces_one_verification_pass_then_accepts():
         "self-check feedback was not delivered to the model"
 
 
+@check
+def micro_compaction_clears_old_tool_bodies_before_dropping():
+    # >MICRO_KEEP_RECENT messages accumulated, then one overflow → micro clears an OLD tool BODY (keeping
+    # the message, its tool_call_id, and the assistant reasoning) rather than dropping a whole exchange.
+    from memagent.loop import MICRO_MARKER
+    script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
+    script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
+    llm = _ScriptLLM(script)
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=Hooks(), max_steps=20)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    post = llm.seen[-1]
+    assert _valid_tool_sequence(post), "micro-compaction must keep tool pairings valid"
+    assert any(m.get("content") == MICRO_MARKER for m in post), "an OLD tool body should be cleared (micro)"
+    assert sum(1 for m in post if m.get("role") == "assistant") >= 6, "reasoning skeleton preserved (no exchange dropped)"
+
+
+@check
+def overflow_breadcrumb_inserted_once_per_turn():
+    # two SEPARATE overflow steps in one turn must yield EXACTLY ONE breadcrumb (the old per-step flag
+    # stacked one per step). The breadcrumb is derived from the transcript now → idempotent.
+    from memagent.loop import OVERFLOW_COMPACTED
+    script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
+    script += ["OVERFLOW", _Resp(tool_calls=[_TC("noop", {}, "cx")])]
+    script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
+    llm = _ScriptLLM(script)
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=Hooks(), max_steps=30)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    post = llm.seen[-1]
+    crumbs = sum(1 for m in post if m.get("content") == OVERFLOW_COMPACTED)
+    assert crumbs == 1, f"breadcrumb must appear exactly once per turn, found {crumbs}"
+
+
+@check
+def overflow_breadcrumb_carries_the_checkpoint():
+    # F2: the overflow breadcrumb embeds the distilled CHECKPOINT (consolidate()), so the turn's state
+    # survives even when the oldest raw exchanges are compacted out.
+    script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
+    script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
+    llm = _ScriptLLM(script)
+    snap = "intent: build the widget\ndecisions:\n  - chose approach Q because it is idempotent"
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(), dispatch=lambda e: None,
+                   hooks=Hooks(), max_steps=20, consolidate=lambda: snap)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    post = llm.seen[-1]   # messages handed to the final (post-compaction) complete()
+    crumb = next((m for m in post if str(m.get("content", "")).startswith("[context note: the oldest")), None)
+    assert crumb is not None, "overflow breadcrumb missing"
+    assert "chose approach Q" in crumb["content"], "breadcrumb must carry the distilled checkpoint state (F2)"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

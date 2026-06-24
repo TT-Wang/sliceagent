@@ -57,7 +57,7 @@ def subagent_host_faithfully_projects_the_wrapped_host():
     assert sh.root() == wd.root(), "SubagentHost must forward root() to the wrapped host"
     s = Slice(); s.reset("hi")
     sysmsg = make_build_slice(s, sh, NullRetriever(), NullMemory(), "hi")()[0]["content"]
-    assert "# WORKING DIRECTORY" in sysmsg, "cwd/env tier must survive the SubagentHost wrapper"
+    assert "# PROJECT ROOT & BOUNDARY" in sysmsg, "cwd/env tier must survive the SubagentHost wrapper"
     assert f"Working directory (cwd): {sh.root()}" in sysmsg, "the real cwd must reach the slice"
 
 
