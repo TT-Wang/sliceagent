@@ -70,18 +70,38 @@ def log_sink(path: str = LOG_FILE):
     return sink
 
 
+def _plain_arg(args: dict) -> str:
+    """The one informative arg for a plain-mode tool line (path/command/pattern/…), whitespace-collapsed."""
+    if not isinstance(args, dict):
+        return ""
+    for k in ("path", "command", "pattern", "name", "ref", "goal", "task"):
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return " ".join(v.split())[:60]
+    v = next((x for x in args.values() if isinstance(x, str) and x.strip()), "")
+    return " ".join(v.split())[:60]
+
+
 def cli_sink(show_slice: bool = False):
+    """Plain stdout sink (AGENT_TUI=off / no tui extra / pipes / CI): no color, no spinner — one readable
+    line per tool action (✓/✗ + name + primary arg, output for commands/failures) and a delimited answer."""
+    _quiet = {"read_file", "list_files"}   # header says enough; their content is noise in a log
+
     def sink(e: Event) -> None:
         if isinstance(e, SliceBuilt) and show_slice:
             print("\n  ┌─ slice ─────────────")
             print("\n".join("  │ " + ln for ln in e.rendered.splitlines()))
             print("  └─────────────")
-        elif isinstance(e, ToolStarted):
-            print(f"  → {e.name}({json.dumps(e.args, ensure_ascii=False)})")
         elif isinstance(e, ToolResult):
-            print(f"  ← {e.output[:120]}")
+            mark = "✓" if not e.failing else "✗"
+            head = f"  {mark} {e.name} {_plain_arg(e.args)}".rstrip()
+            out = " ".join((e.output or "").split())[:140]
+            if out and (e.failing or e.name not in _quiet):
+                head += f"  — {out}"
+            print(head)
         elif isinstance(e, AssistantText):
-            print(f"\nAssistant: {e.content}")
+            if (e.content or "").strip():
+                print(f"\n{e.content}\n")
         elif isinstance(e, ApiRetry):
             print(f"  …retry #{e.attempt} ({e.error})")
         elif isinstance(e, TurnInterrupted):
@@ -89,20 +109,38 @@ def cli_sink(show_slice: bool = False):
         elif isinstance(e, LessonSaved):
             print(f"  💡 learned: {e.title}")
         elif isinstance(e, TurnEnd):
+            u = e.usage or {}            # usage is non-None from loop.py, but guard like every other sink
             print(f"  [done: {e.stop_reason} · {e.steps} steps · "
-                  f"{e.usage.get('prompt_tokens', 0) + e.usage.get('completion_tokens', 0)} tokens]")
+                  f"{u.get('prompt_tokens', 0) + u.get('completion_tokens', 0)} tokens]")
     return sink
 
 
 def main() -> None:
+    # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `memagent init` runs on a
+    # machine with nothing configured yet. A bare `memagent` (or one with non-subcommand args) falls through.
+    _argv = sys.argv[1:]
+    if _argv and _argv[0] in ("init", "config", "help", "--help", "-h", "version", "--version", "-V"):
+        from .onboarding import dispatch as _dispatch
+        sys.exit(_dispatch(_argv))
+
     _load_env()
+    # config-persisted key/endpoint (written by `memagent init`) populate the env BEFORE the gate, so a
+    # configured user never has to export anything; ENV still wins for one-off overrides.
+    from .config import load_config
+    cfg = load_config()
+    for _env, _val in (("LLM_API_KEY", cfg.api_key), ("LLM_BASE_URL", cfg.base_url)):
+        if not os.environ.get(_env) and _val:
+            os.environ[_env] = _val
     if not (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
             or os.environ.get("MOONSHOT_API_KEY")):
-        print("Set LLM_API_KEY (and optionally LLM_BASE_URL) — e.g. in a .env file.")
+        print("No API key found. Run `memagent init` for guided setup, or set LLM_API_KEY (e.g. in a .env file).")
         sys.exit(1)
+    # validate enum env vars (warn + use default; never crash) — a typo'd AGENT_POLICY is now visible.
+    from .envspec import validate_env
+    for _w in validate_env():
+        print(f"  · config warning: {_w}")
 
     from .code_index import make_code_index
-    from .config import load_config
     from .episode import make_episode_sink
     from .llm import OpenAILLM
     from .mcp_client import connect_mcp_servers
@@ -113,13 +151,13 @@ def main() -> None:
     from .plugins import load_plugins
     from .policy import make_policy
     from .sandbox import make_sandbox
-    from .session import Session, make_topic_tools, route_topic
+    from .session import Session, make_topic_tools, route
     from .skills import make_skill_manager, make_skill_tool
     from .slice import make_build_slice, one_line, record_user, slice_sink
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
-    cfg = load_config()  # memagent.toml (user → project), with ENV overriding for one-offs
+    # cfg already loaded above (for the config→env key population + the gate)
     root = os.getcwd()
     policy_mode = cfg.policy        # guard | readonly | ask | allow
     mine_mode = cfg.mine           # deterministic | llm | off
@@ -151,13 +189,21 @@ def main() -> None:
     mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
     plugin_tool_count = sum(1 for e in base_tools.registry._tools.values()
                             if e.source.startswith("plugin:"))
+    # subagent activity → ONE dynamic line (Kimi-style), not a line per child tool call. Late-bound: the
+    # renderer is set once the rich sink exists (below); plain/headless leaves it None (the spawn tool's
+    # result line carries the child's summary, so nothing is lost).
+    _sub_render: dict = {"fn": None}
+    def _notify_subagent(text):
+        fn = _sub_render["fn"]
+        if fn is not None:
+            fn(text)
     tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
         from .agents import load_agents
         # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md (Kimi-style)
         agent_roots = list(cfg.skills_roots or []) + [root, os.path.join(root, ".memagent")]
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
-                             policy=policy, max_depth=sub_depth, notify=print,
+                             policy=policy, max_depth=sub_depth, notify=_notify_subagent,
                              agents=load_agents(agent_roots))
     session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
     llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
@@ -196,9 +242,50 @@ def main() -> None:
         _tui = None
     _console = _tui.Console() if _tui else None
 
-    # wire the ask_user capability to a real prompt when interactive (TUI rich prompt, or plain
-    # input); headless/eval keeps the non-interactive default so it never hangs.
-    if _tui or sys.stdin.isatty():
+    # Decide early whether to use the full-screen Textual TUI. We need this before wiring stdin-
+    # dependent callbacks, because Textual owns stdin and synchronous prompts from worker threads
+    # would deadlock.
+    tui_env = os.environ.get("AGENT_TUI", "").strip().lower()
+    force_textual = tui_env in ("1", "on", "true", "yes", "textual")
+    disable_textual = tui_env in ("0", "off", "false", "no", "rich")
+    # DEFAULT UI = the inline rich+prompt_toolkit REPL: it stays in the NORMAL terminal buffer, so native
+    # copy / paste / scrollback work on ANY terminal (incl. macOS Terminal.app), with a pinned composer
+    # (patch_stdout, the Python analogue of Ink's <Static>+live-region that Hermes/Claude Code use) and
+    # streaming replies. The full-screen Textual app is now OPT-IN (AGENT_TUI=textual): it looks nicer but
+    # uses the alternate screen + mouse capture, which break copy/paste/scrollback on stock terminals that
+    # lack OSC-52. A wide-audience CLI must work everywhere, so inline is the default. AGENT_TUI=off → plain.
+    use_textual = (_tui is not None and not disable_textual and force_textual)
+    # AGENT_TUI=live → the always-pinned live composer: the bordered box stays at the bottom EVEN WHILE the
+    # agent streams (output prints above it in the normal buffer). Opt-in/experimental; the default REPL
+    # (box between turns) is the proven path. Falls back to the REPL if it can't start.
+    use_live = (_tui is not None and tui_env == "live")
+    if use_textual:
+        try:
+            from .tui_app import textual_available
+            use_textual = textual_available()
+        except Exception:
+            use_textual = False
+
+    # Build the Textual app BEFORE the dispatcher, so its event sink can BE the sole renderer (the app
+    # re-runs run_turn through the same dispatcher it renders from). dispatch + _hooks are injected once
+    # they exist (below). Created here (not after dispatch) to avoid the old crossed wiring where the rich
+    # sink AND the textual app both received events.
+    app = None
+    if use_textual:
+        from .tui_app import MemagentTui
+        app = MemagentTui(
+            session=session, tools=tools, retriever=retriever, memory=memory,
+            llm=llm, hooks=None, dispatch=None,
+            run_turn=run_turn, make_build_slice=make_build_slice,
+            record_user=record_user, route_topic=route,
+            stats=_stats,
+        )
+
+    # Note: in Textual mode, interactive approval and ask_user are wired to the Textual app
+    # below (after dispatch is built). Here we only set up the fallback non-Textual prompts.
+    if not use_textual and (_tui or sys.stdin.isatty()):
+        # wire the ask_user capability to a real prompt when interactive (TUI rich prompt, or plain
+        # input); headless/eval keeps the non-interactive default so it never hangs.
         def _ask_user(question, options):
             if _tui:
                 return _tui.ask_user(_console, question, options)
@@ -229,10 +316,16 @@ def main() -> None:
         from .metrics import make_metrics_sink
         metrics = make_metrics_sink()
         sinks.append(metrics)
-    if _tui:
+    # EXACTLY ONE renderer is wired: the full-screen Textual app, OR the rich+prompt_toolkit sink, OR the
+    # plain stdout sink (headless/eval). Never two — wiring the rich sink alongside Textual made rich print
+    # under the alternate screen while the Textual pane was starved of agent events.
+    if use_textual:
+        sinks.append(MemagentTui.make_sink(app))   # the Textual app IS the renderer (events → its pane)
+    elif _tui:
         _rich = _tui.make_rich_sink(_console, _stats)
         sinks.append(_rich)
-        llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the TUI spinner (Kimi-style)
+        llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner (Kimi-style)
+        _sub_render["fn"] = _rich.subagent_notify   # child agent activity → one dynamic spinner line
     else:
         sinks.append(cli_sink(cfg.show_slice))
     # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
@@ -249,10 +342,14 @@ def main() -> None:
     dispatch = make_dispatcher(*sinks)
     if miner is not None:
         miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
+    if app is not None:            # inject the dispatcher the app (created earlier) re-runs turns through
+        app._dispatch = dispatch
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     def _ask(name, args, reason):  # interactive resolver for AGENT_POLICY=ask
         detail = args.get("command") or args.get("path") or args.get("code", "")
+        if app is not None:  # Textual modal dialog (runs in worker thread, marshals to UI)
+            return app.confirm(name, args, reason)
         if _tui:  # synchronous mid-run (no pt app live) → a Rich confirm is safe
             return _tui.confirm(_console, name, str(detail), reason)
         if not sys.stdin.isatty():
@@ -264,7 +361,9 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /threads · /switch <id> · /resume <id> · /plan · /cost · /help · /exit")
+            _console.print("commands: /threads · /switch <id> · /resume <id> · /plan · /cost · /undo · "
+                           "/help · /exit\n  (say \"review my changes\" to use the code_review tool · "
+                           "@path in a message pins that file)")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -299,9 +398,45 @@ def main() -> None:
                     _console.print(f"  switched to {arg}")
                 except Exception:
                     _console.print(f"  no such topic: {arg}")
+        elif cmd == "/undo":
+            _console.print("  " + base_tools.undo_last())   # revert the last file edit
         else:
             _console.print(f"  unknown command {cmd} (/help)")
         return True
+
+    _IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+    def _expand_mentions(text):
+        """@path mentions (Aider/Claude-Code style): pin each EXISTING workspace file referenced as @path into
+        the slice's OPEN FILES; an @image is ATTACHED as a vision content part for the next turn when the model
+        supports vision (else skipped with a hint). Best-effort; leaves the text intact."""
+        if "@" not in text or session.active_id is None:
+            return
+        import re as _re
+        from .model_catalog import capability
+        from .slice import touch_file
+        vision = capability(llm.model, getattr(llm, "_base_url", "")).supports_vision
+        pinned, images, skipped = [], [], []
+        for m in _re.findall(r"@([\w./\-]+)", text):
+            rel = m.lstrip("/")
+            if ".." in rel:               # never let @../ reach outside the workspace (defense-in-depth)
+                continue
+            if not (rel and os.path.isfile(os.path.join(root, rel))):
+                continue
+            if rel.lower().endswith(_IMG_EXT):
+                if vision:
+                    base_tools.attach_image(rel); images.append(rel)
+                else:
+                    skipped.append(rel)
+            else:
+                touch_file(session.active(), rel); pinned.append(rel)
+        if _tui and _console is not None:
+            if pinned:
+                _console.print(f"  📎 pinned: {', '.join(pinned)}")
+            if images:
+                _console.print(f"  🖼  attached image: {', '.join(images)}")
+            if skipped:
+                _console.print(f"  🖼  skipped (needs a vision-capable AGENT_MODEL): {', '.join(skipped)}")
 
     # AGENT_AUTO_APPROVE: comma-separated fnmatch globs over the command, pre-approved so safe read-only
     # commands never prompt (e.g. AGENT_AUTO_APPROVE="git status*,git diff*,ls *,cat *").
@@ -315,74 +450,182 @@ def main() -> None:
         hook_list.append(BudgetHook(cfg.max_tokens))
     hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
     hooks = CompositeHooks(*hook_list)
+    if app is not None:
+        app._hooks = hooks
+        base_tools.on_ask_user = app.ask_user
 
-    info = (f"model={llm.model} · policy={policy_mode} · sandbox={cfg.sandbox_backend} · "
+    info = (f"model={llm.model} · net={getattr(llm, 'proxy_used', 'direct')} · "
+            f"policy={policy_mode} · sandbox={cfg.sandbox_backend} · "
             f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
             f"episodic={'on' if episodic is not None else 'off'} · "
             f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
             f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
+    # ── choose UI: full-screen Textual (terminal-only) or the original rich+prompt_toolkit REPL ──
     _input = _tui.TuiInput(_stats, root=root) if _tui else None
-    if _tui:
-        _tui.banner(_console, info)
-    else:
-        print("memagent · slice core (run_turn) · " + info)
-        print('type a task, or "exit" to quit\n')
-    while True:
-        if _input is not None:
-            line = _input.prompt()
-            if line is None:                               # ctrl-d / EOF
-                break
-            line = line.strip()
+
+    def _run_one_turn(text, sink, signal):
+        """One turn for the LIVE composer: route (lexical) → build slice → run_turn with a per-turn dispatch
+        that feeds the LiveSink. Runs in run_live's worker thread, so the pinned box stays responsive."""
+        if session.active_id is None:
+            session.new_topic(text)
         else:
-            try:
-                line = input("You: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-        if line in ("exit", "quit", "/exit"):
-            break
-        if not line:
-            continue
-        if _tui and line.startswith("/"):                  # navigation palette (no turn)
-            _handle_slash(line)
-            continue
-        if session.active_id is None:                      # first message bootstraps the first topic
-            session.new_topic(line)
-        else:                                              # route: continue / new / resume (no junk topic)
-            action, tid = route_topic(llm, line, session)
+            action, tid = route(llm, text, session)
             if action == "new":
-                session.new_topic(line)
+                session.new_topic(text)
             elif action == "resume":
-                session.switch_topic(tid)
-                session.continue_topic(line)
+                session.switch_topic(tid); session.continue_topic(text)
             else:
-                session.continue_topic(line)
-            if not _tui:                                   # TUI shows the topic in the status bar, not as noise
-                print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
+                session.continue_topic(text)
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
-        record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
-        build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
-        # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
-        # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
-        result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks)
-        if getattr(memory, "is_durable", False):           # durable checkpoint (no-op under NullMemory)
+        record_user(session.active(), text)
+        _expand_mentions(text)            # @path → pin the file into OPEN FILES
+        build = make_build_slice(session, tools, retriever, memory, text, session.session_id)
+        live_dispatch = make_dispatcher(slice_sink(session), sink)
+        llm.set_delta_sink(sink.on_delta)
+        import time as _t
+        _t0 = _t.monotonic()
+        from . import recovery as _rec
+        result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=live_dispatch,
+                          hooks=hooks, signal=signal,
+                          checkpoint=lambda m, s, _g=text: _rec.record(root, goal=_g, messages=m, step=s))
+        _rec.clear(root)                                   # clean/parked exit → drop the WAL
+        _stats["last_turn_s"] = _t.monotonic() - _t0
+        if getattr(memory, "is_durable", False):
             from .taskstate import slice_to_task_state
             memory.checkpoint_task(slice_to_task_state(
                 session.active(), session.active_id, session_id=session.session_id,
                 status="done" if result.stop_reason == "end_turn" else "parked"))
-        if reviewer is not None:                            # OPT-IN: critique the turn off-thread
+        if reviewer is not None:
             reviewer.review(session.session_id)
 
-    # session end: tear down background procs / PTY sessions (also atexit-guarded for crash/abort) so
-    # leaked servers/shells don't outlive the agent (#5).
-    base_tools.cleanup()
-    if mcp_runtime is not None:        # #61/#62: cancel MCP worker tasks → stdio child processes terminate
-        mcp_runtime.shutdown()
+    def _try_live() -> bool:
+        """Run the always-pinned live composer; return True if it ran (REPL below is then skipped), False to
+        fall back to the REPL on any startup failure — input is never left broken."""
+        try:
+            _tui.run_live(console=_console, stats=_stats, banner_info=info, root=root,
+                          run_one_turn=_run_one_turn, handle_slash=_handle_slash)
+            return True
+        except Exception as _e:  # noqa: BLE001
+            print(f"\n  live UI failed ({type(_e).__name__}: {_e}); using the inline REPL instead.")
+            return False
+
+    # crash recovery: a leftover WAL means the last turn in this workspace never reached a clean/parked
+    # exit (a hard crash). Surface what was in flight, then clear it (auto-loop-resume is a future step).
+    from . import recovery
+    _pend = recovery.pending(root)
+    if _pend:
+        _rg = one_line(_pend.get("goal", ""), 60)
+        _rla = one_line(recovery.last_assistant(_pend), 160)
+        _note = (f"  ⚠ recovered an interrupted turn (step {_pend.get('step', '?')}): {_rg}"
+                 + (f"\n    last said: {_rla}" if _rla else "")
+                 + "\n    its progress wasn't saved cleanly — re-send the request to continue.")
+        (_console.print(f"[yellow]{_note}[/]") if _console is not None else print(_note))
+        recovery.clear(root)
+
+    if use_textual:
+        # The Textual app was created earlier so its dialogs could be wired into hooks/tools.
+        try:
+            app.run()
+        except Exception as _e:  # noqa: BLE001 — a Textual runtime failure must not dump a traceback on the
+            # default UI; degrade with a clear, actionable message instead.
+            print(f"\n  Textual UI failed to run ({type(_e).__name__}: {_e}).\n"
+                  "  Rerun with AGENT_TUI=rich for the classic REPL, or AGENT_TUI=off for plain output.")
+    elif use_live and _try_live():
+        pass                              # the live composer ran the whole session (until ctrl-d/exit)
+    else:
+        if _tui:
+            _tui.banner(_console, info)
+        else:
+            print("memagent · slice core (run_turn) · " + info)
+            print('type a task, or "exit" to quit\n')
+        while True:
+            if _input is not None:
+                line = _input.prompt()
+                if line is None:                               # ctrl-d / EOF
+                    break
+                line = line.strip()
+            else:
+                try:
+                    line = input("You: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            if line in ("exit", "quit", "/exit"):
+                break
+            if not line:
+                continue
+            if _tui and line.startswith("/"):                  # navigation palette (no turn)
+                _handle_slash(line)
+                continue
+            # INVARIANT: echo the user's line BEFORE any blocking work (esp. route_topic's LLM round-trip),
+            # so the message paints the instant Enter is pressed — not ~0.5-2s later. The Textual path
+            # enforces the same ordering via its worker thread (tui_app.py: _append_user before _run_user_turn).
+            if _tui:                              # anchor the user turn with spacing (fixes cramped layout)
+                _tui.user_echo(_console, line)
+            if session.active_id is None:                      # first message bootstraps the first topic
+                session.new_topic(line)
+            else:                                              # route: continue / new / resume (no junk topic)
+                # route() is lexical by default (instant, zero round-trips); AGENT_ROUTER=llm restores the
+                # classifier (a provider round-trip). Cover it with a 'routing…' spinner so the llm mode has
+                # no silent freeze before run_turn's own 'thinking…' spinner (which only starts at SliceBuilt).
+                if _tui:
+                    with _console.status("[grey50]routing…[/]", spinner="dots"):
+                        action, tid = route(llm, line, session)
+                else:
+                    action, tid = route(llm, line, session)
+                if action == "new":
+                    session.new_topic(line)
+                elif action == "resume":
+                    session.switch_topic(tid)
+                    session.continue_topic(line)
+                else:
+                    session.continue_topic(line)
+                if not _tui:                                   # TUI shows the topic in the status bar, not as noise
+                    print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
+            _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
+            record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
+            _expand_mentions(line)               # @path → pin the file into OPEN FILES
+            build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
+            # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
+            # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
+            import time as _time
+            _t0 = _time.monotonic()
+            result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks,
+                              checkpoint=lambda m, s, _g=line: recovery.record(root, goal=_g, messages=m, step=s))
+            recovery.clear(root)                               # clean/parked exit → drop the WAL
+            _stats["last_turn_s"] = _time.monotonic() - _t0   # shown as ⏲ in the status bar
+            if getattr(memory, "is_durable", False):           # durable checkpoint (no-op under NullMemory)
+                from .taskstate import slice_to_task_state
+                memory.checkpoint_task(slice_to_task_state(
+                    session.active(), session.active_id, session_id=session.session_id,
+                    status="done" if result.stop_reason == "end_turn" else "parked"))
+            if reviewer is not None:                            # OPT-IN: critique the turn off-thread
+                reviewer.review(session.session_id)
+
+    # session end: tear down background procs / PTY sessions, MCP servers, and consolidate memory. Each
+    # step is GUARDED (a failure warns, never crashes the exit) and the MCP shutdown is BOUNDED by a
+    # timeout, so a stuck server or index write can never freeze the process on the way out.
+    def _safe(label, fn):
+        try:
+            fn()
+        except Exception as _e:  # noqa: BLE001
+            print(f"  · warning: {label} failed ({type(_e).__name__}: {_e})")
+
+    def _bounded(label, fn, secs=8.0):
+        import threading as _th
+        t = _th.Thread(target=lambda: _safe(label, fn), daemon=True)
+        t.start(); t.join(secs)
+        if t.is_alive():
+            print(f"  · warning: {label} timed out after {secs:.0f}s — exiting anyway")
+
+    _safe("tool cleanup", base_tools.cleanup)
+    if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
+        _bounded("MCP shutdown", mcp_runtime.shutdown)
     # consolidate the episodic cache into long-term memory (the cache→memory loop)
     if getattr(memory, "is_durable", False):
-        memory.consolidate(session.session_id)
+        _safe("memory consolidation", lambda: memory.consolidate(session.session_id))
         print("  · consolidated session memory")
-    getattr(memory, "close", lambda: None)()   # #33: close the FTS5 index connection (WAL checkpoint)
+    _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
     if metrics is not None:                                 # the moat number: per-turn fresh-input curve
         s = metrics.summary()
         print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "

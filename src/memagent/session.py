@@ -14,6 +14,7 @@ cross-session resume needs a durable vault.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 
@@ -140,6 +141,49 @@ def route_topic(llm, message: str, session: "Session") -> tuple[str, str]:
     except Exception:
         pass
     return ("continue", "")
+
+
+_RESUME_CUES = ("go back", "going back", "back to", "return to", "returning to", "resume",
+                "switch back", "switch to", "revisit", "pick up where", "pick back up")
+
+
+def route_topic_lexical(message: str, session: "Session") -> tuple[str, str]:
+    """Routing WITHOUT an LLM round-trip (the moat-aligned default): the dominant 'continue' case pays
+    nothing, and the host never *guesses* 'new' — a genuinely new task is the agent's call via its own
+    new_topic tool (make_topic_tools), which is recoverable and parks the old topic. The host only acts
+    on an UNAMBIGUOUS resume signal: an explicit parked task_id in the message, or a resume cue
+    ('go back to…') plus a title-keyword match. Everything else → continue. Same signature/return contract
+    as route_topic, so it's a drop-in. See memory route-topic-hidden-llm-call for why this exists."""
+    if session.active_id is None:
+        return ("new", "")
+    threads = session.open_threads(include_active=False)
+    if threads:
+        msg_l = message.lower()
+        for t in threads:                                  # explicit parked id mentioned → resume it
+            if t.task_id.lower() in msg_l:
+                return ("resume", t.task_id)
+        if any(cue in msg_l for cue in _RESUME_CUES):      # resume cue → best title-keyword overlap
+            msg_words = set(re.findall(r"[a-z0-9]+", msg_l))
+            best, score = "", 0
+            for t in threads:
+                kw = {w for w in re.findall(r"[a-z0-9]+", (t.title or "").lower()) if len(w) > 3}
+                overlap = len(kw & msg_words)
+                if overlap > score:
+                    best, score = t.task_id, overlap
+            if best and score >= 1:
+                return ("resume", best)
+    return ("continue", "")
+
+
+def route(llm, message: str, session: "Session") -> tuple[str, str]:
+    """The configured topic router. DEFAULT = lexical (zero LLM round-trips — moat-aligned: a follow-up
+    no longer pays a per-message provider call before the turn even starts). Set AGENT_ROUTER=llm to
+    restore the classifier (tighter automatic 'new'-task detection, at one round-trip per follow-up).
+    Measured (evals/route_accuracy.py): lexical == llm on continue+resume (15/15); they differ only on
+    'new', which lexical defers to the agent's new_topic tool. Single call site for both UI paths."""
+    if os.environ.get("AGENT_ROUTER", "lexical").strip().lower() == "llm":
+        return route_topic(llm, message, session)
+    return route_topic_lexical(message, session)
 
 
 def make_topic_tools(session: "Session"):

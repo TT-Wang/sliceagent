@@ -12,8 +12,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from openai import APITimeoutError                  # noqa: E402
-from memagent.llm import OpenAILLM                  # noqa: E402
+from memagent.llm import OpenAILLM, _import_api_timeout_error  # noqa: E402
+
+APITimeoutError = _import_api_timeout_error()
 
 CHECKS = []
 def check(fn):
@@ -77,8 +78,10 @@ def watchdog_timeout_is_retryable():
         OpenAILLM._create_watchdog(_Stub(delay=10, hard=1), {"model": "x", "messages": []})
     except APITimeoutError as e:
         err = e
-    assert err is not None
-    assert OpenAILLM.is_retryable(None, err) is True
+    assert err is not None, "watchdog did not raise a timeout error"
+    # is_retryable is an instance method; call it on an OpenAILLM instance (no network).
+    llm = OpenAILLM.__new__(OpenAILLM)
+    assert llm.is_retryable(err) is True
 
 
 def main():

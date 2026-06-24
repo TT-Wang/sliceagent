@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 from .access import AllAccess
 from .registry import ToolEntry

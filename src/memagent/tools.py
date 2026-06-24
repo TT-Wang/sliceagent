@@ -248,6 +248,12 @@ TOOL_SCHEMAS = [
         "that ADDS without touching existing content. Use str_replace to modify text already in the file, "
         "edit_file to replace the whole file. No newline is added — include a leading '\\n' yourself if needed.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+    _fn("code_review",
+        "Review code changes: returns the `git diff` for the workspace (default vs HEAD; pass `ref` for a "
+        "branch / commit / range like 'main', 'HEAD~3', or 'main...HEAD') so you can audit the changes for "
+        "correctness, security, and edge cases — cite file:line for each issue you find. Read-only; needs a "
+        "git repo. Prefer this over piecing a review together from many read_file calls.",
+        {"ref": {"type": "string"}}, []),
     _fn("str_replace",
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
         "changing a file you've read. `old_string` should be the SMALLEST unique snippet — usually 2-4 adjacent "
@@ -367,6 +373,21 @@ def _default_ask_user(question: str, options) -> str:
             "STATE it explicitly, or stop with a clear summary of what you need)")
 
 
+def _sniff_image_mime(raw: bytes) -> str | None:
+    """Identify an image by MAGIC BYTES (not extension). Returns the MIME type or None if not an image."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:2] == b"BM":
+        return "image/bmp"
+    return None
+
+
 class LocalToolHost:
     def __init__(self, root: str | None = None, *, sandbox=None, timeout: int = 30,
                  registry: ToolRegistry | None = None):
@@ -394,6 +415,8 @@ class LocalToolHost:
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
         self.on_ask_user = _default_ask_user
+        self._edit_journal: list = []   # (rel, full, prev_bytes|None) per write — powers /undo
+        self.pending_images: list = []  # images @-attached for the NEXT seed build (vision models only)
         # The registry is the single source of tools; MCP/plugin/skill tools register
         # into this same object later (Step ③). The host just projects from it.
         self.registry = registry or ToolRegistry()
@@ -427,6 +450,7 @@ class LocalToolHost:
             "require": self._t_require, "requirement_done": self._t_requirement_done,
             "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
             "set_mission": self._t_set_mission, "mission_done": self._t_mission_done,
+            "code_review": self._t_code_review,
         }
         for schema in TOOL_SCHEMAS:
             name = schema["function"]["name"]
@@ -645,6 +669,7 @@ class LocalToolHost:
         content = args["content"]
         if os.path.exists(full):                      # preserve the file's existing line endings (CRLF)
             content = self._preserve_eol(content, self._detect_crlf(full))
+        self._journal(args["path"], full)
         self._atomic_write(full, content)
         if content[:2] == "#!":          # a shebang script should be runnable (general, task-agnostic)
             self._make_executable(full)
@@ -662,6 +687,7 @@ class LocalToolHost:
     def _t_append(self, args: dict) -> str:
         full = self._resolve(args["path"])
         self._mkparent(full)
+        self._journal(args["path"], full)
         with open(full, "a", encoding="utf-8") as f:
             f.write(args["content"])
         return f"Appended {len(args['content'])} bytes to {args['path']}"
@@ -685,6 +711,7 @@ class LocalToolHost:
             n = cur.count(cand)
             if n == 1:
                 updated = self._preserve_eol(cur.replace(cand, new, 1), crlf)
+                self._journal(args["path"], full)
                 self._atomic_write(full, updated)
                 return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
             if n > 1:
@@ -695,12 +722,82 @@ class LocalToolHost:
             span = fuzzy_find_unique(cur, cand)
             if span is not None:
                 updated = self._preserve_eol(cur[:span[0]] + new + cur[span[1]:], crlf)
+                self._journal(args["path"], full)
                 self._atomic_write(full, updated)
                 return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
                         f"({len(cur)} → {len(updated)} bytes)")
         return ToolText(f"Error: old_string not found in {args['path']} — your snippet does not match "
                 f"the file. Copy the EXACT text from OPEN FILES (the live content, WITHOUT the line-number "
                 f"prefix), or rewrite the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)
+
+    # --- edit journal (powers /undo) -----------------------------------------
+    def _journal(self, rel: str, full: str) -> None:
+        """Record a file's pre-image (or None if it didn't exist) just before a write, so /undo can revert
+        the most recent edit. Bounded ring — recent edits only, never an unbounded history."""
+        try:
+            prev = open(full, "rb").read() if os.path.exists(full) else None
+        except OSError:
+            prev = None
+        self._edit_journal.append((rel, full, prev))
+        if len(self._edit_journal) > 50:
+            del self._edit_journal[:-50]
+
+    def undo_last(self) -> str:
+        """Revert the most recent journaled edit. Returns a human-readable result for the UI."""
+        if not self._edit_journal:
+            return "Nothing to undo."
+        rel, full, prev = self._edit_journal.pop()
+        try:
+            if prev is None:
+                if os.path.exists(full):
+                    os.remove(full)
+                return f"Undid: removed {rel} (it did not exist before that edit)."
+            with open(full, "wb") as f:
+                f.write(prev)
+            return f"Undid the last edit to {rel} ({len(prev)} bytes restored)."
+        except OSError as e:
+            return f"Undo failed for {rel}: {e}"
+
+    def attach_image(self, path: str) -> str:
+        """Stash a workspace image for the NEXT seed build as a vision content part. Returns a status line.
+        Gated by the caller (only called for a vision-capable model). Confined to the workspace like reads.
+        The MIME type is sniffed from MAGIC BYTES (not the extension), so a spoofed extension can't smuggle a
+        non-image through as image/png."""
+        import base64
+        try:
+            full = self._resolve(path)
+            raw = open(full, "rb").read()
+        except OSError as e:
+            return f"Error: cannot read image {path}: {e}"
+        if len(raw) > 8 * 1024 * 1024:
+            return f"Error: image {path} is {len(raw)} bytes (cap 8MB) — too large to attach"
+        mime = _sniff_image_mime(raw)
+        if mime is None:
+            return f"Error: {path} is not a recognized image (png/jpeg/gif/webp/bmp) — not attached"
+        self.pending_images.append({"path": path, "b64": base64.b64encode(raw).decode("ascii"), "mime": mime})
+        return f"attached image {path} ({len(raw)} bytes, {mime})"
+
+    def _t_code_review(self, args: dict) -> str:
+        """Return the git diff for the workspace so the model can review it (read-only; task-agnostic)."""
+        import subprocess
+        ref = (args.get("ref") or "HEAD").strip() or "HEAD"
+        try:
+            p = subprocess.run(["git", "-C", self.root(), "diff", ref],
+                               capture_output=True, text=True, timeout=30)
+        except FileNotFoundError:
+            return ToolText("Error: git is not installed.", ok=False)
+        except subprocess.SubprocessError as e:
+            return ToolText(f"Error: git diff failed ({type(e).__name__}: {e}).", ok=False)
+        if p.returncode != 0:
+            return ToolText(f"Error: `git diff {ref}` failed — {p.stderr.strip()[:300]} "
+                            "(is this a git repo? is the ref valid?)", ok=False)
+        diff = p.stdout
+        if not diff.strip():
+            return f"No changes vs {ref} — the working tree matches it. Nothing to review."
+        cap = 20000
+        body = diff if len(diff) <= cap else diff[:cap] + f"\n… (diff truncated at {cap} of {len(diff)} chars)"
+        return (f"git diff {ref} ({len(diff)} chars). Review for correctness, security, and edge cases; "
+                f"cite file:line per issue.\n\n{body}")
 
     def _t_ask_user(self, args: dict) -> str:
         q = (args.get("question") or "").strip()

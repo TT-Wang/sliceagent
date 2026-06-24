@@ -112,13 +112,28 @@ class _CaptureLast:
             self.text = event.content
 
 
+def _primary_arg(args) -> str:
+    """The one informative arg for a compact activity line (path/command/pattern/…), whitespace-collapsed."""
+    if not isinstance(args, dict):
+        return ""
+    for k in ("path", "command", "pattern", "name", "ref", "goal", "task"):
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return " ".join(v.split())[:50]
+    return ""
+
+
 def _nested_sink(notify, depth: int):
+    """Surface a child agent's progress as ONE DYNAMIC line (Kimi-style): each tool call updates a single
+    status line with the current action + a running count, instead of printing a line per call. The renderer
+    (RichSink.subagent_notify) overwrites in place; the child's final summary returns via the spawn tool's
+    result, so there's no per-assistant-text spam here."""
     pad = "    " * depth
+    state = {"n": 0}
     def sink(event):
         if isinstance(event, ToolStarted):
-            notify(f"{pad}  ↳ {event.name}({json.dumps(event.args, ensure_ascii=False)[:60]})")
-        elif isinstance(event, AssistantText) and event.content:
-            notify(f"{pad}  ↳ {event.content[:100]}")
+            state["n"] += 1
+            notify(f"{pad}↳ {event.name} {_primary_arg(event.args)} · {state['n']} calls".rstrip())
     return sink
 
 

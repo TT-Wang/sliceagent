@@ -23,6 +23,11 @@ class ToolDecision:
     allow: bool
     reason: str = ""
     ask: bool = False   # policy abstains to an interactive prompt (resolved by PermissionHook)
+    # Does this block count toward the per-turn STUCK floor (loop.py STUCK_BLOCK_BUDGET)? True for a genuine
+    # SPIN (a repeated failing call, a policy denial the model keeps retrying); FALSE for a harmless dedup
+    # (re-reading the same file → the guard just skips it). So a long, legit exploration that re-reads a file
+    # a few times is NOT killed as "stuck" — only real spinning is.
+    counts_as_stuck: bool = True
 
 
 ALLOW = ToolDecision(True)
@@ -263,7 +268,13 @@ class GuardrailHook(Hooks):
 
     def authorize_tool(self, name, args):
         d = self.guard.before_call(name, args)
-        return ToolDecision(False, d.message) if d.block else ALLOW
+        if not d.block:
+            return ALLOW
+        # Only a HARD spin counts toward STUCK: a repeated FAILING call, or no-edit-progress (failing edits).
+        # A deduped idempotent/result no-progress read is harmless — block (skip) it but DON'T kill the turn,
+        # so a long exploration that re-reads a file isn't falsely flagged as stuck.
+        hard = d.code in ("repeated_exact_failure", "no_edit_progress")
+        return ToolDecision(False, d.message, counts_as_stuck=hard)
 
     def transform_tool_result(self, name, args, output):
         self.guard.after_call(name, args, output)

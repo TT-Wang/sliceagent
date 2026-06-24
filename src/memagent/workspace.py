@@ -262,7 +262,9 @@ def git_branch_status(cwd: str) -> str:
         return ""
     branch = "(detached HEAD)" if head == "(detached)" else head
     dirty = _dirty_phrases(counts)
-    return f"{branch} ({', '.join(dirty) if dirty else 'clean'})"
+    base = f"{branch} ({', '.join(dirty) if dirty else 'clean'})"
+    last = " ".join(_git(git_root, "log", "-1", "--format=%h %s").split())[:72]   # HEAD commit (orientation)
+    return f"{base} · HEAD: {last}" if last else base
 
 
 def build_workspace_snapshot(cwd: str) -> str:

@@ -13,10 +13,25 @@ from __future__ import annotations
 import random
 import threading
 import time
+from enum import Enum
 from typing import Callable
 
 from .context_overflow import is_context_overflow
 from .events import ApiRetry, Dispatcher
+
+
+class ErrorKind(str, Enum):
+    """Typed failure taxonomy (the Pythonic form of Kimi kosong's error hierarchy). str-based so it stays
+    backward-compatible: `classify(e)["kind"] == "rate_limit"` still works, and it's JSON-serializable for
+    telemetry. ALL members let the metrics layer pre-register a counter per kind."""
+    CONTEXT_OVERFLOW = "context_overflow"
+    AUTH = "auth"
+    EMPTY_RESPONSE = "empty_response"
+    RATE_LIMIT = "rate_limit"
+    SERVER = "server"
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    UNKNOWN = "unknown"
 
 
 class EmptyResponseError(Exception):
@@ -93,21 +108,21 @@ def classify(error: Exception) -> dict:
     # Bucket the failure for telemetry (orthogonal to `retryable`; lets the metrics layer count
     # rate-limit vs timeout vs overflow vs empty — the Pythonic form of Kimi's typed error hierarchy).
     if overflow:
-        kind = "context_overflow"
+        kind = ErrorKind.CONTEXT_OVERFLOW
     elif status in (401, 403):
-        kind = "auth"
+        kind = ErrorKind.AUTH
     elif empty:
-        kind = "empty_response"
+        kind = ErrorKind.EMPTY_RESPONSE
     elif status == 429 or "rate limit" in msg or "too many requests" in msg or "overloaded" in msg:
-        kind = "rate_limit"
+        kind = ErrorKind.RATE_LIMIT
     elif (isinstance(status, int) and 500 <= status < 600) or "503" in msg:
-        kind = "server"
+        kind = ErrorKind.SERVER
     elif "timeout" in msg or "timed out" in msg:
-        kind = "timeout"
+        kind = ErrorKind.TIMEOUT
     elif "connection" in msg or "econn" in msg:
-        kind = "connection"
+        kind = ErrorKind.CONNECTION
     else:
-        kind = "unknown"
+        kind = ErrorKind.UNKNOWN
     return {"retryable": retryable, "is_context_overflow": overflow, "status": status, "kind": kind}
 
 

@@ -23,25 +23,32 @@ class ModelCapability:
     supports_reasoning_effort: bool = False
     supports_tools: bool = True
     supports_stream_options: bool = True   # OpenAI stream_options={include_usage}; set False if a provider 400s
+    supports_vision: bool = False    # accepts image content parts (multimodal); gates @image attachment
     context_window: int = 0          # 0 = unknown (no fabricated values)
 
 
 _UNKNOWN = ModelCapability()
+
+# Vision is keyed off the MODEL name (not the family) — kimi-k2.7-code is text-only but moonshot-*-vision is
+# not; gpt-4o/gpt-5/claude-3+/gemini/`*-vl`/anything with 'vision' is multimodal. Conservative allowlist.
+_VISION_HINTS = ("vision", "gpt-4o", "gpt-4.1", "gpt-5", "gpt-6", "claude-3", "claude-4",
+                 "claude-opus", "claude-sonnet", "gemini", "-vl", "qwen-vl")
 
 
 def capability(model: str, base_url: str = "") -> ModelCapability:
     """Resolve the capability record for a model (first matching rule wins; specific before general)."""
     m = (model or "").lower()
     b = (base_url or "").lower()
+    vis = any(h in m for h in _VISION_HINTS)
     if m.startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")):   # #57: future o5/o6 + gpt-6 reasoning models
         return ModelCapability("openai-reasoning", tokens_param="max_completion_tokens",
-                               supports_reasoning_effort=True)
+                               supports_reasoning_effort=True, supports_vision=vis)
     if "deepseek" in m or "deepseek" in b:
-        return ModelCapability("deepseek")                 # reasoning via extra_body.thinking, not reasoning_effort
+        return ModelCapability("deepseek", supports_vision=vis)   # reasoning via extra_body.thinking
     if "kimi" in m or "moonshot" in b:
-        return ModelCapability("moonshot")
+        return ModelCapability("moonshot", supports_vision=vis)
     if "claude" in m or "anthropic" in b:
-        return ModelCapability("anthropic")
+        return ModelCapability("anthropic", supports_vision=vis)
     if m.startswith("gpt-") or "openai" in b:
-        return ModelCapability("openai")
-    return _UNKNOWN
+        return ModelCapability("openai", supports_vision=vis)
+    return ModelCapability(supports_vision=vis)
