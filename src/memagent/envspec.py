@@ -49,6 +49,8 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_ROOT", "agent", "Workspace root override (defaults to the current directory).", ""),
     EnvVar("AGENT_ALLOW_PLUGINS", "agent", "Set truthy to load project/user plugins.", ""),
     EnvVar("AGENT_SANDBOX", "agent", "Tool sandbox backend.", "local", choices=("local", "docker"), validate=True),
+    EnvVar("AGENT_WEB", "agent", "Enable the web tools (fetch_url + web_search, DuckDuckGo, no key); set "
+           "0/off to disable network egress from the agent.", "1"),
     # ── provider / network ────────────────────────────────────────────────────────────────────
     EnvVar("LLM_API_KEY", "provider", "API key for the LLM provider (REQUIRED).", "", secret=True),
     EnvVar("LLM_BASE_URL", "provider", "OpenAI-compatible endpoint (e.g. https://api.moonshot.cn/v1).", ""),

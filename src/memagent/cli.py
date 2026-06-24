@@ -183,6 +183,12 @@ def main() -> None:
         base_tools.registry.register(skill_tool)
     from .code_grep import make_grep_tool  # guarded ripgrep: the single discovery-on-demand seam
     base_tools.registry.register(make_grep_tool(base_tools))
+    # web tools (fetch_url + web_search, DuckDuckGo, no key) — network egress, so gated by AGENT_WEB
+    # (default ON). SSRF-guarded + results fenced UNTRUSTED + large pages paged (see web.py).
+    if os.environ.get("AGENT_WEB", "1").strip().lower() not in ("0", "off", "false", "no"):
+        from .web import make_web_tools
+        for _wt in make_web_tools(base_tools):
+            base_tools.registry.register(_wt)
     # MCP: connect config + plugin-declared servers; tools register into the SAME registry
     mcp_servers, mcp_runtime = connect_mcp_servers(
         base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"))
