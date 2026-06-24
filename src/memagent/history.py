@@ -145,7 +145,7 @@ def make_history_tool(memory, session_id: str):
     guard = {"seen": -1, "served": set(), "distinct": 0}   # episode count, fetches served, drills
     # The ONE cross-session read path: PageTable's episode-xsession backend wraps
     # memory.search_episodes (the this-session read_episodes drill stays in this handler).
-    pages = PageTable(memory=memory, exclude_session=session_id)
+    pages = PageTable(memory=memory, session_id=session_id)
 
     def _handler(args: dict) -> str:
         # content-search shape: search=... runs FTS5 over THIS session's long tail (turns past the

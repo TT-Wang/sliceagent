@@ -75,6 +75,63 @@ def _skills_dir() -> str:
                               or os.path.join("~", ".memagent", "skills"))
 
 
+def write_skill_file(name: str, body: str, *, skills_dir: str | None = None) -> str | None:
+    """Persist ONE SKILL.md to the skills dir, the single guarded writer shared by auto-consolidation
+    and the foreground /learn tool. Validates the frontmatter, BLOCKS on a threat scan (a poisoned skill
+    re-injects unscanned every session), REDACTS any secret before it lands on disk, and writes
+    atomically. Returns the path written, or None if rejected. Never raises."""
+    try:
+        name = re.sub(r"[^a-z0-9._-]+", "-", (name or "").strip().lower()).strip("-")[:64] or "skill"
+        if not body.lstrip().startswith("---") or "name:" not in body[:200]:
+            return None                                  # not a valid SKILL.md (frontmatter required)
+        if scan_for_threats(body, scope="strict"):       # (a) BLOCK on write — poisoned skill
+            return None
+        d = os.path.join(skills_dir or _skills_dir(), name)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "SKILL.md")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(redact_text(body))                   # (c) redact any secret before persisting
+        os.replace(tmp, path)                            # atomic
+        return path
+    except Exception:  # noqa: BLE001 — a skill-write failure must never break the caller
+        return None
+
+
+def make_write_skill_tool():
+    """The FOREGROUND skill writer (the tool /learn drives) — the agent-callable writer memagent lacked.
+    The agent supplies name/description/body; WE own the frontmatter (provenance: user — never
+    auto-pruned) and the guarded write (validate + threat-scan + redact + atomic), so a model can't forge
+    AUTO provenance or smuggle an unscanned skill onto disk."""
+    from .registry import ToolEntry
+    from .skill_provenance import USER, frontmatter_line
+
+    def handler(args: dict) -> str:
+        name = re.sub(r"[^a-z0-9._-]+", "-", (args.get("name") or "").strip().lower()).strip("-")[:64]
+        desc = (args.get("description") or "").strip().replace("\n", " ")[:120]
+        body = (args.get("body") or "").strip()
+        if not name or not desc or not body:
+            return "write_skill: need a name, a description, and a body."
+        md = f"---\nname: {name}\ndescription: {desc}\n{frontmatter_line(USER)}\n---\n\n{body}\n"
+        path = write_skill_file(name, md)
+        if not path:
+            return "write_skill: rejected (invalid frontmatter, empty, or flagged by the security scan)."
+        return f"Skill saved to {path} (provenance: user — it will load next session)."
+
+    schema = {"type": "function", "function": {
+        "name": "write_skill",
+        "description": ("Save a REUSABLE skill (SKILL.md) authored by you, so a FUTURE session can load and "
+                        "reuse it. Provide a lowercase-hyphenated `name`, a <=60-char `description` of the "
+                        "capability, and the markdown `body` (## When to use / ## Process / ## Pitfalls / "
+                        "## Verification). This is how /learn turns what you just did into a durable skill."),
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "lowercase-hyphenated skill name (no spaces)"},
+            "description": {"type": "string", "description": "one sentence, <=60 chars, the capability"},
+            "body": {"type": "string", "description": "the skill body markdown (sections as above)"},
+        }, "required": ["name", "description", "body"]}}}
+    return ToolEntry(name="write_skill", schema=schema, handler=handler, source="builtin")
+
+
 # --- task-state markdown (de)serialization — pure module fns (no memem) -------------------
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
@@ -232,7 +289,7 @@ class NullMemory:
 
     is_durable = False
 
-    def recall(self, query: str, k: int = 6) -> list[Snippet]:
+    def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
         return []
 
     def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None:
@@ -280,15 +337,16 @@ class MememMemory:
         self._scope = os.path.basename(os.getcwd()) or "default"   # same-project soft bonus on recall
 
     # --- lessons ---
-    def recall(self, query: str, k: int = 6) -> list[Snippet]:
+    def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
         """Recall cross-session lessons, then GATE by relevance: drop hits that share no term with
         the goal (memem returns top-k with no floor → cross-domain noise). Pass scope_id so same-
-        project lessons get memem's soft bonus, and REINFORCE the surfaced (relevant) ones via
-        mark_used — so retrieval feedback tracks what we actually show, not raw top-k. Decay of the
-        unreinforced is memem's own job (compute_decay_factor over access_count)."""
+        project lessons get memem's soft bonus, and `paths` (R1, the files in play at topic-start) so
+        memem's paths_context gives lessons tagged with those files a small bonus. REINFORCE the
+        surfaced (relevant) ones via mark_used. Decay of the unreinforced is memem's own job."""
         from memem.retrieve import retrieve
         try:
-            hits = retrieve(query, k=k, log_call_type=None, writeback=False, scope_id=self._scope)
+            hits = retrieve(query, k=k, log_call_type=None, writeback=False, scope_id=self._scope,
+                            paths_context=paths or None)
         except Exception:
             return []
         terms = _terms(query)
@@ -301,7 +359,8 @@ class MememMemory:
             out.append(Snippet(path=h.get("path", ""), text=text, score=float(h.get("score", 0.0))))
         return out
 
-    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None:
+    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "",
+                 paths: list[str] | None = None) -> None:
         # (a) BLOCK on WRITE: a poisoned lesson would re-inject into the slice every turn forever.
         if scan_for_threats(f"{title}\n{content}", scope="strict"):
             return
@@ -310,7 +369,7 @@ class MememMemory:
         title = redact_text(title)
         from memem.operations import memory_save
         try:
-            memory_save(content, title=title, scope_id=scope, tags=tags)
+            memory_save(content, title=title, scope_id=scope, tags=tags, paths=paths or None)  # R1: tag with files
         except Exception:
             pass
 
@@ -460,32 +519,24 @@ class MememMemory:
         except Exception:
             return []
 
-    def consolidate(self, session_id: str) -> None:
-        """Session-end sweep: promote durable knowledge from the episodic cache, ROUTED BY TYPE —
-        FACTS (corrective lessons) → long-term memory (memem remember); PROCEDURES (repeated smooth
-        workflows) → reusable SKILL.md files the SkillManager discovers next session. Both are
-        frequency-weighted. Never raises (a consolidation failure must not break the session)."""
+    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> None:
+        """Session-end sweep: promote durable knowledge from the episodic CACHE (never the slice),
+        ROUTED BY TYPE — FACTS (corrective lessons) → memem; PROCEDURES (repeated smooth workflows) →
+        reusable SKILL.md the SkillManager discovers next session. `mode="llm"` (with an `llm`) renders
+        skill bodies via render_skill_llm (generalized) instead of render_skill (recorded); both fall
+        back to deterministic on any failure. Never raises."""
         try:
-            from .consolidate import promote_episodes, promote_procedures, render_skill
+            from .consolidate import promote_episodes, promote_procedures, render_skill, render_skill_llm
             records = self.read_episodes(session_id)
             if not records:
                 return
-            for lesson in promote_episodes(records):                 # facts → memem
+            for lesson in promote_episodes(records):                 # facts → memem (tagged with files: R1)
                 self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
-                              tags=lesson["tags"])
+                              tags=lesson["tags"], paths=lesson.get("files"))
             skills_dir = _skills_dir()
-            for proc in promote_procedures(records):                 # procedures → skill packs
-                try:
-                    body = render_skill(proc)
-                    # (a) BLOCK on WRITE: a poisoned SKILL.md re-injects unscanned every session.
-                    if scan_for_threats(body, scope="strict"):
-                        continue
-                    d = os.path.join(skills_dir, proc["name"])
-                    os.makedirs(d, exist_ok=True)
-                    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
-                        f.write(redact_text(body))   # (c) redact any secret before it lands on disk
-                except Exception:
-                    pass
+            for proc in promote_procedures(records):                 # procedures → skill packs (AUTO)
+                body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
+                write_skill_file(proc["name"], body, skills_dir=skills_dir)   # guarded writer (scan+redact)
         except Exception:
             pass
 

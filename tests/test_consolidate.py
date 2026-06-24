@@ -8,7 +8,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.consolidate import (  # noqa: E402
-    promote_episodes, promote_procedures, render_skill)
+    build_learn_prompt, promote_episodes, promote_procedures, render_skill, render_skill_llm)
+from memagent.memory import make_write_skill_tool  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -81,7 +82,7 @@ def consolidate_reads_cache_if_memem():
         return
     m._vault = tempfile.mkdtemp()
     captured = []
-    m.remember = lambda content, *, title="", scope="default", tags="": captured.append((title, content, tags))
+    m.remember = lambda content, *, title="", scope="default", tags="", paths=None: captured.append((title, content, tags))
     m.append_episode("s1", "t1", 1, {"steps": [{"slice": "", "action": [], "observation": ["Error: boom"]}],
                                      "note": "", "meta": {"failing": True, "stop_reason": "tool_use", "files": ["a.py"]}})
     m.append_episode("s1", "t1", 2, {"steps": [{"slice": "", "action": [], "observation": ["ok"]}],
@@ -150,7 +151,7 @@ def consolidate_routes_facts_and_procedures_if_memem():
     m = MememMemory(); m._vault = tempfile.mkdtemp()
     sk = tempfile.mkdtemp(); os.environ["MEMAGENT_SKILLS_DIR"] = sk
     captured = []
-    m.remember = lambda content, *, title="", scope="default", tags="": captured.append(title)
+    m.remember = lambda content, *, title="", scope="default", tags="", paths=None: captured.append(title)
     try:
         # a corrective FACT episode
         m.append_episode("s1", "t1", 1, {"title": "fix", "steps": [{"slice": "", "action": [], "observation": ["Error: boom"]}],
@@ -169,6 +170,119 @@ def consolidate_routes_facts_and_procedures_if_memem():
         assert skills, "expected a procedure skill written"
         body = open(os.path.join(sk, skills[0], "SKILL.md")).read()  # one PROCEDURE skill
         assert body.startswith("---\nname:") and "## Process" in body and "read_file" in body
+    finally:
+        os.environ.pop("MEMAGENT_SKILLS_DIR", None)
+
+
+# --- R1: lessons tagged with files (paths_context bonus) + paths threaded read-side ---------------
+@check
+def promote_episodes_tags_lesson_with_files():
+    recs = [rec("t1", 1, ["Error: boom"], failing=True, files=["pkg/core.py"]),
+            rec("t1", 2, ["ok"], note="fixed", stop="end_turn", files=["pkg/core.py"])]
+    assert promote_episodes(recs)[0]["files"] == ["pkg/core.py"], "R1: lesson must carry its files for paths"
+
+
+@check
+def lookup_threads_paths_to_recall():
+    from memagent.pagetable import PageTable
+    captured = {}
+    class _M:
+        def recall(self, query, k=6, paths=None):
+            captured["paths"] = paths
+            return []
+    PageTable(memory=_M()).lookup("fix the parser", kind="memory-lessons", k=6, paths=["a.py", "b.py"])
+    assert captured["paths"] == ["a.py", "b.py"], "R1: paths must reach recall (→ retrieve paths_context)"
+
+
+# --- R3: near-duplicate-GOAL workflows collapse to one skill (lexical cluster, no memem) ----------
+@check
+def near_dup_goal_procedures_collapse_to_one():
+    A = [act("read_file", path="a.py"), act("str_replace", path="a.py"), act("run_command", command="t")]
+    B = [act("write_file", path="a.py"), act("append_to_file", path="a.py"), act("run_command", command="t")]
+    recs = [prec("t1", 1, A, files=["a.py"], title="add pagination to the users endpoint"),
+            prec("t2", 1, B, files=["a.py"], title="add pagination to users endpoint handler")]
+    assert len(promote_procedures(recs)) == 1, "same-intent workflows (diff shapes) must collapse to one skill"
+    # distinct intents must NOT collapse
+    recs2 = [prec("t1", 1, A, files=["a.py"], title="add pagination to the users endpoint"),
+             prec("t2", 1, B, files=["b.py"], title="parse the markdown changelog into json")]
+    assert len(promote_procedures(recs2)) == 2, "distinct intents must stay separate"
+
+
+# --- mining behaviour moved from the removed live miner (now owned by promote_episodes) ----------
+@check
+def self_inflicted_episode_mines_nothing():
+    # the agent hit its OWN sandbox (confinement) — not an engineering pitfall → mine NOTHING
+    recs = [rec("t1", 1, ["Error: path escapes the boundary (/repo): /etc/x — File tools are confined"],
+                failing=True, files=["x.py"]),
+            rec("t1", 2, ["ok"], note="moved it", stop="end_turn", files=["x.py"])]
+    assert promote_episodes(recs) == [], "a self-inflicted confinement error must not mine a lesson"
+
+
+@check
+def real_pitfall_chosen_over_self_inflicted():
+    # a turn with BOTH a confinement error AND a real error must mine the REAL one
+    recs = [rec("t1", 1, ["Error: path escapes the boundary (/repo): /etc/x",
+                          "Error: ImportError: cannot import bar"], failing=True, files=["imp.py"]),
+            rec("t1", 2, ["ok"], note="added the missing import", stop="end_turn", files=["imp.py"])]
+    lessons = promote_episodes(recs)
+    assert len(lessons) == 1
+    assert "ImportError" in lessons[0]["content"], f"mined the wrong pitfall: {lessons[0]['content']!r}"
+    assert "escapes the boundary" not in lessons[0]["content"], "self-inflicted error leaked into the lesson"
+
+
+@check
+def fact_title_leads_with_note_or_pitfall_never_the_goal():
+    # the records carry no user goal; the title is the resolution NOTE (or the pitfall), body leads "Pitfall:"
+    recs = [rec("t1", 1, ["Error: ModuleNotFoundError: feedparser"], failing=True, files=["agg.py"]),
+            rec("t1", 2, ["ok"], note="installed feedparser", stop="end_turn", files=["agg.py"])]
+    lessons = promote_episodes(recs)
+    assert len(lessons) == 1
+    title, content = lessons[0]["title"], lessons[0]["content"]
+    assert "installed feedparser" in title or "ModuleNotFoundError" in title, f"weak title: {title!r}"
+    assert content.startswith("Pitfall:"), "the lesson body must LEAD with the pitfall"
+
+
+# --- B1: LLM-generalized skill body (render_skill_llm) + F1 scan-first ---------------------------
+class _StubLLM:
+    def complete(self, msgs, schemas):
+        class R:
+            content = "## When to use\nwhen parsing input\n## Process\n1. read it\n2. transform\n## Pitfalls\nnone known"
+        return R()
+
+
+@check
+def render_skill_llm_generalizes_falls_back_and_scans_first():
+    proc = {"name": "build-parser", "description": "build the parser",
+            "steps": ["read x", "edit y", "run z"], "files": ["p.py"], "freq": 2}
+    g = render_skill_llm(proc, _StubLLM())
+    assert g.startswith("---\nname:") and "## Process" in g and "Generalized" in g, "LLM body not used"
+    assert "## Process (observed)" in render_skill_llm(proc, None), "no-llm must fall back to recorded"
+    sproc = dict(proc, description="use api_key=sk-zzz123456 to build")          # F1
+    assert "## Process (observed)" in render_skill_llm(sproc, _StubLLM()), "secret must skip the LLM"
+
+
+# --- B2: /learn prompt (transcript→skill, cache-sourced) + the foreground write_skill tool --------
+@check
+def learn_prompt_drives_write_skill_from_the_cache():
+    p = build_learn_prompt("")
+    assert "write_skill" in p and "recall_history" in p and "## Process" in p
+    assert "workflow we just went through" in p                                  # default source
+    assert "deploy.md" in build_learn_prompt("the deploy steps in deploy.md")    # honors the user's source
+
+
+@check
+def write_skill_tool_writes_user_provenance_and_validates():
+    sk = tempfile.mkdtemp(); os.environ["MEMAGENT_SKILLS_DIR"] = sk
+    try:
+        tool = make_write_skill_tool()
+        out = tool.handler({"name": "Deploy Flow", "description": "deploy the app to staging",
+                            "body": "## When to use\nbefore a release\n## Process\n1. build\n2. push"})
+        assert "saved" in out.lower(), out
+        import glob
+        body = open(glob.glob(os.path.join(sk, "*", "SKILL.md"))[0]).read()
+        assert "provenance: user" in body and "deploy the app to staging" in body
+        assert "deploy-flow" in body[:80]                                        # name slugged
+        assert "need a name" in tool.handler({"name": "x"}).lower()              # validation
     finally:
         os.environ.pop("MEMAGENT_SKILLS_DIR", None)
 

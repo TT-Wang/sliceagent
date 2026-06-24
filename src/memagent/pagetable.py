@@ -36,14 +36,17 @@ class PageTable:
     backend; ``k`` is the per-kind budget (k<=0 SKIPS that backend, returning [])."""
 
     def __init__(self, retriever=None, memory=None, subdir_hints=None,
-                 *, exclude_session: str | None = None):
+                 *, session_id: str | None = None):
         self.retriever = retriever
         self.memory = memory
         self.subdir_hints = subdir_hints          # OWNED here (per-task subtree dedup lives on it)
-        self.exclude_session = exclude_session     # cross-session reads drop the current lineage
+        # ONE concept — the CURRENT session: cross-session reads EXCLUDE it, within-session reads filter
+        # ONLY to it. (Was the overloaded `exclude_session`, used as both exclude AND only — a leak waiting
+        # to happen the moment a caller left it None.)
+        self.session_id = session_id
 
     # ------------------------------------------------------------------ public
-    def lookup(self, focus, *, kind: str, k: int = 6) -> list[PageRef]:
+    def lookup(self, focus, *, kind: str, k: int = 6, paths=None) -> list[PageRef]:
         """Page in references relevant to ``focus`` from the ``kind`` backend.
 
         ``focus`` is the per-kind locator: a discovery QUERY (code), the active-file WORKING
@@ -57,7 +60,7 @@ class PageTable:
         if kind == "project-notes":
             return self._project_notes(focus)
         if kind == "memory-lessons":
-            return self._lessons(focus, k)
+            return self._lessons(focus, k, paths)
         if kind == "episode-xsession":
             return self._episodes(focus, k)
         if kind == "episode-thissession":
@@ -92,14 +95,14 @@ class PageTable:
         return [PageRef(handle="(project notes)", kind="project-notes", preview=text,
                         score=0.0, untrusted=True)]
 
-    def _lessons(self, query: str, k: int) -> list[PageRef]:
+    def _lessons(self, query: str, k: int, paths=None) -> list[PageRef]:
         """RELEVANT MEMORY: distilled cross-session LESSONS (memem's relevance-gated retrieve), the
         always-on per-turn recall. Distinct from `_episodes` (raw FTS5 episode text): lessons are the
         consolidated long-term vault, episodes are the lossless cache. Each Snippet -> one PageRef
         (preview carries the lesson text RAW; the renderer fences it). memory absent / no hits -> []."""
         if self.memory is None:
             return []
-        snippets = self.memory.recall(query, k=k)
+        snippets = self.memory.recall(query, k=k, paths=paths)   # R1: file-context bonus at topic-start
         return [PageRef(handle=sn.path, kind="memory-lessons", preview=sn.text,
                         score=sn.score, untrusted=True) for sn in snippets]
 
@@ -110,7 +113,7 @@ class PageTable:
         if self.memory is None or not isinstance(query, str) or not query.strip():
             return []
         hits = self.memory.search_episodes(query.strip(), limit=k,
-                                           exclude_session=self.exclude_session)
+                                           exclude_session=self.session_id)   # cross-session: drop my lineage
         return [_episode_pageref(h) for h in hits]
 
     def _episodes_search_thissession(self, query: str, k: int) -> list[PageRef]:
@@ -118,9 +121,9 @@ class PageTable:
         the manifest/index window). Closes the gap where an old turn was reachable only by a turn number
         nobody knew. Each hit -> a PageRef whose handle is the TURN NUMBER, so the model pages the full
         turn with recall_history(turns=[N]) — search by content, fetch by the number it just learned."""
-        if self.memory is None or not isinstance(query, str) or not query.strip():
-            return []
-        hits = self.memory.search_episodes(query.strip(), limit=k, only_session=self.exclude_session)
+        if self.memory is None or not isinstance(query, str) or not query.strip() or not self.session_id:
+            return []                              # FAIL CLOSED: no current session → no within-session search
+        hits = self.memory.search_episodes(query.strip(), limit=k, only_session=self.session_id)
         return [PageRef(handle=str(h.get("turn")), kind="episode-search-thissession",
                         preview=_pack_episode_preview(h), score=float(h.get("score") or 0.0),
                         untrusted=False) for h in hits]

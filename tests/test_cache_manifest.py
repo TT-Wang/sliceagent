@@ -148,7 +148,7 @@ def pagetable_memory_lessons_unifies_recall():
     from memagent.slice import render_memory
 
     class _LessonMem:
-        def recall(self, q, k=6):
+        def recall(self, q, k=6, paths=None):
             return [Snippet(path="mem://a", text="lesson  one", score=0.9),
                     Snippet(path="mem://b", text="lesson two", score=0.4)]
         def read_episodes(self, *a, **k): return []

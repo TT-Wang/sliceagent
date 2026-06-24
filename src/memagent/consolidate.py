@@ -14,12 +14,18 @@ body is a RECORDED procedure; LLM-distillation (generalizing the steps) is the c
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections import Counter
 
 from .finding_types import badge, classify_finding
+from .mining import is_self_inflicted   # the cache-distill path now owns self-inflicted filtering
+from .safety import redact_text, scan_for_threats   # F1: scan recorded material BEFORE the LLM call + the return
+from .skill_provenance import AUTO, frontmatter_line
 from .slice import one_line
+
+_log = logging.getLogger("memagent.consolidate")
 
 PROC_MIN_ACTIONS = 3     # a workflow worth a skill = at least this many meaningful actions
 MAX_PROCEDURES = 3       # cap skills promoted per session (avoid spam)
@@ -44,14 +50,6 @@ def _is_secret(text: str) -> bool:
     return bool(_SECRET_RE.search(text or ""))
 
 
-def _failing_obs(record: dict) -> str:
-    for st in record.get("steps", []):
-        for o in st.get("observation", []):
-            if isinstance(o, str) and (o.startswith("Error") or o.startswith("Exit code")):
-                return o
-    return ""
-
-
 def _by_task(records: list[dict]) -> list[list[dict]]:
     groups: dict[str, list[dict]] = {}
     for r in records:
@@ -71,7 +69,13 @@ def promote_episodes(records: list[dict]) -> list[dict]:
         last = rmeta[-1].get("meta", {})
         if not (had_fail and last.get("stop_reason") == "end_turn" and not last.get("failing")):
             continue
-        pitfall = next((p for m in reversed(rmeta) if (p := _failing_obs(m))), "")
+        # all failing observations across the task's turns, oldest→newest; pick the LAST NON-self-
+        # inflicted one. A turn whose only failures are the agent hitting its OWN sandbox teaches
+        # nothing, but a real error AFTER a self-inflicted one must still be mined (the removed live
+        # miner's D2 behaviour, now owned by this cache path).
+        fails = [o for m in rmeta for st in m.get("steps", []) for o in st.get("observation", [])
+                 if isinstance(o, str) and (o.startswith("Error") or o.startswith("Exit code"))]
+        pitfall = next((o for o in reversed(fails) if not is_self_inflicted(o)), "")
         if not pitfall or _is_secret(pitfall):
             continue
         note = next((m.get("note") for m in reversed(rmeta) if m.get("note")), "")
@@ -94,8 +98,59 @@ def promote_episodes(records: list[dict]) -> list[dict]:
         ftype = classify_finding(c["note"], edited=bool(c["files"]), had_error=True, resolved=True)
         title = badge(ftype) + "Lesson: " + (one_line(c["note"], 60) or one_line(c["pitfall"], 60))
         out.append({"title": title, "content": content, "tags": _tags(c["files"]),
-                    "kind": "fact", "freq": n, "finding_type": ftype})
+                    "kind": "fact", "freq": n, "finding_type": ftype, "files": c["files"]})  # files: R1 tag
     return out
+
+
+# ── B2: /learn — turn the session transcript into a reusable USER skill (Hermes pattern) ──────────
+_LEARN_STANDARDS = """\
+Author the skill to this standard:
+- name: lowercase-hyphenated, no spaces.
+- description: ONE sentence, <=60 chars, stating the CAPABILITY (not the implementation); no marketing words.
+- body sections, in order (omit one only if genuinely empty):
+  ## When to use   - concrete trigger phrases / situations.
+  ## Process       - numbered, GENERALIZED steps (declarative, NOT this session's verbatim commands).
+  ## Pitfalls      - gotchas / things that look broken but aren't (or 'none known').
+  ## Verification  - one check that proves it worked.
+- Reference memagent's own tools by name (read_file, grep, edit_file, run_command) - not raw shell utilities.
+- Be tight (~60-150 lines). Prefer exact signatures/commands/paths from the source; NEVER invent flags or APIs.
+- Do not write a skill that only points at other skills."""
+
+
+def build_learn_prompt(user_request: str = "") -> str:
+    """B2 (Hermes /learn pattern): build ONE prompt that has the LIVE agent distill a reusable skill from
+    the source the user named and save it via the `write_skill` tool. No separate distill engine + no new
+    LLM seam (llm-agnostic, works on any backend); the agent reads THIS session from the CACHE via
+    recall_history (never the slice), honoring the cache-only-distill invariant."""
+    req = (user_request or "").strip() or ("the workflow we just went through in this session - review the "
+                                            "steps taken and distill them into a reusable skill")
+    return (
+        "[/learn] Distill a REUSABLE SKILL from the source below and save it with the write_skill tool.\n\n"
+        f"WHAT TO LEARN FROM:\n{req}\n\n"
+        "Do this:\n"
+        "1. Gather the material with the tools you already have: recall_history (review THIS session's "
+        "earlier turns - the lossless cache), read_file / grep for files, the recent conversation for "
+        "'what we just did'. If the scope is ambiguous, make a reasonable choice and note it; do not stall.\n"
+        "2. Call write_skill ONCE with a name, a <=60-char description, and the body. After it succeeds, "
+        "tell the user the skill name and a one-line summary of what it captured.\n\n"
+        f"{_LEARN_STANDARDS}"
+    )
+
+
+_GOAL_STOP = frozenset("the a an to of in for and or with on at by add fix make build update create".split())
+
+
+def _goal_tokens(s: str) -> set:
+    return {t for t in re.findall(r"[a-z0-9]+", (s or "").lower()) if t not in _GOAL_STOP and len(t) > 2}
+
+
+def _near_dup_goal(a: str, b: str, thresh: float = 0.6) -> bool:
+    """R3 (EverOS cluster-before-promote, lexical): two procedure goals are the same INTENT if their
+    content-token sets overlap heavily (Jaccard). No embedder/memem dependency — task-agnostic."""
+    ta, tb = _goal_tokens(a), _goal_tokens(b)
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= thresh
 
 
 def _slug(text: str) -> str:
@@ -137,32 +192,75 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
         cand.append({"shape": "→".join(names), "goal": goal,
                      "steps": [_op_hint(a) for a in actions][:12], "files": files})
     sig_freq = Counter(c["shape"] for c in cand)
-    out, seen = [], set()
+    out, seen, kept_goals = [], set(), []
     for c in sorted(cand, key=lambda c: sig_freq[c["shape"]], reverse=True):
         if c["shape"] in seen:
             continue
-        seen.add(c["shape"])
+        if any(_near_dup_goal(c["goal"], g) for g in kept_goals):   # R3: collapse same-INTENT workflows
+            continue                                                # (keep the higher-freq one, sorted first)
+        seen.add(c["shape"]); kept_goals.append(c["goal"])
         out.append({"kind": "procedure", "name": _slug(c["goal"]), "description": one_line(c["goal"], 80),
                     "steps": c["steps"], "files": c["files"], "freq": sig_freq[c["shape"]],
                     "tags": _tags(c["files"])})
         if len(out) >= cap:
             break
+    dropped = len(sig_freq) - len(out)          # F3: surface the silent cap instead of dropping quietly
+    if dropped > 0:
+        _log.debug("promote_procedures: capped at %d; dropped %d lower-frequency procedure(s)", cap, dropped)
     return out
 
 
-def render_skill(proc: dict) -> str:
+def render_skill(proc: dict, *, origin: str = AUTO) -> str:
     """A procedure → a SKILL.md (Kimi format: name/description frontmatter + When-to-use/Process).
-    Deterministic = a RECORDED procedure; the LLM-distill upgrade (generalizing the steps) slots in
-    here without changing callers. Stamps a `provenance:` frontmatter field (item 13) marking the
-    skill consolidation-AUTHORED, so a future curator prunes ONLY auto skills, never user skills."""
-    from .skill_provenance import AUTO, frontmatter_line
+    DETERMINISTIC = a RECORDED procedure (the steps verbatim). `render_skill_llm` is the LLM-generalized
+    upgrade. Stamps a `provenance:` field (item 13: AUTO=consolidation, USER=foreground /learn) so a
+    curator prunes only auto skills."""
     steps = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(proc.get("steps", []))) or "(no steps)"
     n = proc.get("freq", 1)
-    prov = f"Auto-distilled from {n} successful run(s) this session." if n > 1 else \
-        "Auto-distilled from a successful run."
+    prov = f"Observed from {n} successful run(s) this session." if n > 1 else \
+        "Observed from a successful run."
     return (f"---\nname: {proc['name']}\ndescription: {proc['description']}\n"
-            f"{frontmatter_line(AUTO)}\n---\n\n"
+            f"{frontmatter_line(origin)}\n---\n\n"
             f"# {proc['description']}\n\n{prov}\n\n"
             f"## When to use\n{proc['description']}\n\n"
             f"## Process (observed)\n{steps}\n\n"
             f"## Files\n{', '.join(proc.get('files', [])) or 'n/a'}\n")
+
+
+# ── B1: LLM-generalized skill body (the upgrade render_skill was stubbed for) ──────────────────────
+_GENERALIZE_SYS = (
+    "You turn a RECORDED procedure (the exact steps an agent took) into a REUSABLE skill body for a "
+    "future agent. Generalize: state when to use it, the process as declarative steps (not this session's "
+    "verbatim commands), and 1-3 pitfalls. Markdown only, no preamble. Output EXACTLY these sections and "
+    "nothing else:\n## When to use\n<concrete trigger phrases>\n## Process\n<numbered, generalized steps>\n"
+    "## Pitfalls\n<gotchas, or 'none known'>"
+)
+
+
+def render_skill_llm(proc: dict, llm, *, origin: str = AUTO) -> str:
+    """B1 — render a skill whose BODY is LLM-generalized from the recorded steps (the upgrade the
+    deterministic `render_skill` was stubbed for). The frontmatter stays DETERMINISTIC (name/description/
+    provenance) so the SkillManager always parses it. F1: scan the recorded material BEFORE the LLM call —
+    never send a secret to distillation. Falls back to the deterministic `render_skill` on no-llm, a
+    threat hit, or any LLM failure, so this is a safe drop-in."""
+    if llm is None:
+        return render_skill(proc, origin=origin)
+    steps = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(proc.get("steps", []))) or "(no steps)"
+    material = f"Goal: {proc.get('description', '')}\nFiles: {', '.join(proc.get('files', []))}\nSteps:\n{steps}"
+    if _is_secret(material) or scan_for_threats(material, scope="strict"):
+        return render_skill(proc, origin=origin)            # F1: tainted → deterministic, no LLM
+    try:
+        resp = llm.complete([{"role": "system", "content": _GENERALIZE_SYS},
+                             {"role": "user", "content": material}], [])
+        body = (resp.content or "").strip()
+    except Exception:  # noqa: BLE001 — any LLM failure falls back, never breaks consolidation
+        body = ""
+    body = redact_text(body)                                 # F1 (return path): never emit a leaked secret…
+    if scan_for_threats(body, scope="strict"):              # …or an injection the LLM may have produced
+        return render_skill(proc, origin=origin)
+    if "## When to use" not in body or "## Process" not in body:
+        return render_skill(proc, origin=origin)            # invalid/empty → deterministic fallback
+    n = proc.get("freq", 1)
+    prov = f"Generalized from {n} successful run(s)." if n > 1 else "Generalized from a successful run."
+    return (f"---\nname: {proc['name']}\ndescription: {proc['description']}\n"
+            f"{frontmatter_line(origin)}\n---\n\n# {proc['description']}\n\n{prov}\n\n{body}\n")

@@ -146,7 +146,6 @@ def main() -> None:
     from .mcp_client import connect_mcp_servers
     from .loop import run_turn
     from .memory import make_memory
-    from .mining import make_miner
     from .oracle import CommandOracle
     from .plugins import load_plugins
     from .policy import make_policy
@@ -189,6 +188,10 @@ def main() -> None:
         from .web import make_web_tools
         for _wt in make_web_tools(base_tools):
             base_tools.registry.register(_wt)
+    # foreground SKILL writer — the agent-callable tool /learn drives to turn a transcript into a
+    # reusable USER-provenance skill (guarded write: validate + threat-scan + redact + atomic).
+    from .memory import make_write_skill_tool
+    base_tools.registry.register(make_write_skill_tool())
     # MCP: connect config + plugin-declared servers; tools register into the SAME registry
     mcp_servers, mcp_runtime = connect_mcp_servers(
         base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"))
@@ -220,11 +223,9 @@ def main() -> None:
         from .history import make_history_tool
         base_tools.registry.register(make_history_tool(memory, session.session_id))
 
-    # write side of the memory loop: mine a lesson per successful, error-resolving turn
-    miner = None
-    if mine_mode not in ("0", "off", "none"):
-        miner = make_miner(memory, session, llm=llm, mode=mine_mode,
-                           scope=os.path.basename(root) or "default")
+    # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
+    # memory.consolidate (reads the episodic cache, never the slice). `mine_mode` (off|deterministic|llm)
+    # gates that consolidation — see the session-end call below. No per-turn slice-coupled miner.
     # OPT-IN async background-review fork (item 16; OFF unless AGENT_BACKGROUND_REVIEW set).
     # Reads the durable episodic cache off-thread and consolidates incrementally — never
     # touches the slice/loop/prompt. None when disabled, so the default path is unchanged.
@@ -307,10 +308,9 @@ def main() -> None:
             return a or "(no answer)"
         base_tools.on_ask_user = _ask_user
 
-    # sinks: update the active slice from tool results, mine lessons, cache the turn, persist, print
+    # sinks: update the active slice from tool results, cache the turn, persist, print (no per-turn
+    # miner — distillation is cache-only at session end via memory.consolidate).
     sinks = [slice_sink(session)]
-    if miner is not None:
-        sinks.append(miner)
     if episodic is not None:
         sinks.append(episodic)
     sinks.append(log_sink())
@@ -346,8 +346,6 @@ def main() -> None:
         print(f"  · slice monitor: writing to {_monitor_dir()} — view at the persistent server "
               "(run: python -m memagent.monitor)")
     dispatch = make_dispatcher(*sinks)
-    if miner is not None:
-        miner.dispatch = dispatch  # late-bind so LessonSaved flows through log + terminal sinks
     if app is not None:            # inject the dispatcher the app (created earlier) re-runs turns through
         app._dispatch = dispatch
 
@@ -464,7 +462,7 @@ def main() -> None:
             f"policy={policy_mode} · sandbox={cfg.sandbox_backend} · "
             f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
             f"episodic={'on' if episodic is not None else 'off'} · "
-            f"mine={mine_mode if miner is not None else 'off'} · subagents={'on' if sub_depth > 0 else 'off'} · "
+            f"mine={mine_mode} · subagents={'on' if sub_depth > 0 else 'off'} · "
             f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
     # ── choose UI: full-screen Textual (terminal-only) or the original rich+prompt_toolkit REPL ──
     _input = _tui.TuiInput(_stats, root=root) if _tui else None
@@ -561,7 +559,10 @@ def main() -> None:
                 break
             if not line:
                 continue
-            if _tui and line.startswith("/"):                  # navigation palette (no turn)
+            if line == "/learn" or line.startswith("/learn "):  # transcript → reusable skill (runs as a turn)
+                from .consolidate import build_learn_prompt
+                line = build_learn_prompt(line[len("/learn"):].strip())
+            elif _tui and line.startswith("/"):                # navigation palette (no turn)
                 _handle_slash(line)
                 continue
             # INVARIANT: echo the user's line BEFORE any blocking work (esp. route_topic's LLM round-trip),
@@ -630,9 +631,11 @@ def main() -> None:
     _safe("tool cleanup", base_tools.cleanup)
     if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
         _bounded("MCP shutdown", mcp_runtime.shutdown)
-    # consolidate the episodic cache into long-term memory (the cache→memory loop)
-    if getattr(memory, "is_durable", False):
-        _safe("memory consolidation", lambda: memory.consolidate(session.session_id))
+    # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:
+    # off → skip; deterministic → recorded skills; llm → render_skill_llm generalizes (scan-first).
+    if getattr(memory, "is_durable", False) and mine_mode not in ("0", "off", "none"):
+        _safe("memory consolidation",
+              lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode))
         print("  · consolidated session memory")
     _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
     if metrics is not None:                                 # the moat number: per-turn fresh-input curve
