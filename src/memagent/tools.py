@@ -388,6 +388,23 @@ def _sniff_image_mime(raw: bytes) -> str | None:
     return None
 
 
+def _numbered_window(text: str, start_line: int, end_line: int, *, ctx: int = 4, cap: int = 40) -> str:
+    """A cat -n numbered snippet of `text` around [start_line..end_line] (0-based), ±ctx lines, capped at
+    `cap`. Edit tools echo this POST-EDIT region back in their result so the model sees the file's CURRENT
+    state in-transcript — the within-turn analog of the OPEN FILES tier (the seed is frozen mid-turn, so the
+    live view must ride the tool results). Bounded by construction; never the whole file."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]                                  # drop the trailing empty from a final newline
+    a = max(0, start_line - ctx)
+    b = min(len(lines), max(end_line + 1 + ctx, a + 1))
+    b = min(b, a + cap)
+    snippet = "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines[a:b], a + 1))  # cat -n, absolute line nums
+    if b < len(lines):
+        snippet += f"\n  … (+{len(lines) - b} more lines)"
+    return snippet
+
+
 class LocalToolHost:
     def __init__(self, root: str | None = None, *, sandbox=None, timeout: int = 30,
                  registry: ToolRegistry | None = None):
@@ -673,7 +690,12 @@ class LocalToolHost:
         self._atomic_write(full, content)
         if content[:2] == "#!":          # a shebang script should be runnable (general, task-agnostic)
             self._make_executable(full)
-        return f"Wrote {len(content)} bytes to {args['path']}"
+        msg = f"Wrote {len(content)} bytes to {args['path']}"
+        try:                             # echo the head so the model sees what landed (post-EOL-normalization)
+            n = content.replace("\r\n", "\n").rstrip("\n").count("\n") + 1 if content.strip() else 0
+            return f"{msg} ({n} lines). Head:\n" + _numbered_window(content, 0, 15, ctx=0, cap=16)
+        except Exception:  # noqa: BLE001 — the echo must never fail the write
+            return msg
 
     def _make_executable(self, full: str) -> None:
         """chmod +x a freshly-written shebang script (a script the agent declared executable via '#!'
@@ -690,7 +712,27 @@ class LocalToolHost:
         self._journal(args["path"], full)
         with open(full, "a", encoding="utf-8") as f:
             f.write(args["content"])
-        return f"Appended {len(args['content'])} bytes to {args['path']}"
+        msg = f"Appended {len(args['content'])} bytes to {args['path']}"
+        try:                             # echo the file tail so the model sees the appended content in context
+            whole = open(full, encoding="utf-8", errors="replace").read()
+            total = whole.replace("\r\n", "\n").rstrip("\n").count("\n") + 1
+            app = args["content"].replace("\r\n", "\n").rstrip("\n").count("\n") + 1
+            return f"{msg}. File tail:\n" + _numbered_window(whole, max(0, total - app), total - 1, ctx=2)
+        except Exception:  # noqa: BLE001
+            return msg
+
+    def _edit_result(self, path: str, before: str, after: str, change_offset: int, new_text: str,
+                     *, fuzzy: bool = False) -> str:
+        """str_replace result: byte delta + a numbered POST-EDIT window around the change, so the model sees
+        the file's CURRENT state in-transcript. Best-effort — falls back to the plain byte message."""
+        tag = " (normalized/fuzzy match)" if fuzzy else ""
+        msg = f"Replaced 1 occurrence{tag} in {path} ({len(before)} → {len(after)} bytes)"
+        try:
+            s0 = before[:change_offset].count("\n")             # 0-based start line (unchanged prefix ⇒ same in `after`)
+            e0 = s0 + new_text.replace("\r\n", "\n").count("\n")
+            return f"{msg}. Updated region (lines {s0 + 1}-{e0 + 1}):\n" + _numbered_window(after, s0, e0)
+        except Exception:  # noqa: BLE001 — the echo must never fail the edit
+            return msg
 
     def _t_str_replace(self, args: dict) -> str:
         full = self._resolve(args["path"])
@@ -713,7 +755,7 @@ class LocalToolHost:
                 updated = self._preserve_eol(cur.replace(cand, new, 1), crlf)
                 self._journal(args["path"], full)
                 self._atomic_write(full, updated)
-                return f"Replaced 1 occurrence in {args['path']} ({len(cur)} → {len(updated)} bytes)"
+                return self._edit_result(args["path"], cur, updated, cur.index(cand), new)
             if n > 1:
                 return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique", ok=False)
         # FALLBACK: whitespace-tolerant UNIQUE fuzzy span (raw first, then de-numbered). fuzzy_find_unique
@@ -724,8 +766,7 @@ class LocalToolHost:
                 updated = self._preserve_eol(cur[:span[0]] + new + cur[span[1]:], crlf)
                 self._journal(args["path"], full)
                 self._atomic_write(full, updated)
-                return (f"Replaced 1 occurrence (normalized/fuzzy match) in {args['path']} "
-                        f"({len(cur)} → {len(updated)} bytes)")
+                return self._edit_result(args["path"], cur, updated, span[0], new, fuzzy=True)
         return ToolText(f"Error: old_string not found in {args['path']} — your snippet does not match "
                 f"the file. Copy the EXACT text from OPEN FILES (the live content, WITHOUT the line-number "
                 f"prefix), or rewrite the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)

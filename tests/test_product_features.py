@@ -267,6 +267,50 @@ def richsink_subagent_notify_is_safe_and_quiet():
     sink._stop()
 
 
+# ---- edit-result echo: post-edit region rides the tool result (within-turn ground truth) ----
+@check
+def str_replace_echoes_post_edit_region():
+    # The critique's case: model edits `a - b` -> `a + b` but the old result was just a byte count, so it
+    # never saw `a + b`. Now the post-edit region (with line numbers) rides the result.
+    wd = tempfile.mkdtemp(prefix="echo-sr-")
+    host = LocalToolHost(root=wd)
+    host._t_edit_file({"path": "m.py", "content": "def add(a, b):\n    return a - b\n"})
+    out = host._t_str_replace({"path": "m.py", "old_string": "a - b", "new_string": "a + b"})
+    assert out.startswith("Replaced 1 occurrence in"), out                 # back-compat prefix kept
+    assert "Updated region (lines" in out, out
+    assert "return a + b" in out, "post-edit content must be in the result, not just a byte count"
+    assert "\t" in out, "echo carries cat -n line numbers (match read_file)"
+
+
+@check
+def edit_file_echoes_head_bounded():
+    wd = tempfile.mkdtemp(prefix="echo-ef-")
+    host = LocalToolHost(root=wd)
+    body = "".join(f"line{i}\n" for i in range(50))
+    out = host._t_edit_file({"path": "big.py", "content": body})
+    assert out.startswith("Wrote") and "Head:" in out, out                 # back-compat prefix kept
+    assert "line0" in out and "more lines" in out, "a 50-line write echoes a bounded head + (+N more)"
+    assert "line49" not in out, "content beyond the head window must be elided (bounded)"
+
+
+@check
+def append_echoes_tail():
+    wd = tempfile.mkdtemp(prefix="echo-ap-")
+    host = LocalToolHost(root=wd)
+    host._t_edit_file({"path": "log.txt", "content": "a\nb\nc\n"})
+    out = host._t_append({"path": "log.txt", "content": "NEW_TAIL\n"})
+    assert out.startswith("Appended") and "File tail:" in out and "NEW_TAIL" in out, out
+
+
+@check
+def edit_echo_is_best_effort_and_writes_land():
+    # the echo must NEVER prevent the write; the result is always a string and the file is correct
+    wd = tempfile.mkdtemp(prefix="echo-be-")
+    host = LocalToolHost(root=wd)
+    out = host._t_edit_file({"path": "x.py", "content": "y = 1\n"})
+    assert isinstance(out, str) and host.read_text("x.py") == "y = 1\n", out
+
+
 def main():
     failed = 0
     for fn in CHECKS:

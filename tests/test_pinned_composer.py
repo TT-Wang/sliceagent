@@ -67,6 +67,20 @@ def composer_layout_builds_with_frame_and_status():
 
 
 @check
+def composer_is_transient_to_avoid_duplicate_echo():
+    # REGRESSION: the composer box must erase on submit (erase_when_done). Otherwise the box's last frame —
+    # still showing the typed text — is left on screen AND user_echo prints "▌ you …" → the message appears
+    # twice. The echo is the persistent record; the input box is transient.
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from memagent.tui import TuiInput
+    ti = TuiInput({"model": "kimi"}, root=None)
+    with create_pipe_input() as pinp:
+        app, _ta = ti._build_composer(pt_input=pinp, pt_output=DummyOutput())
+        assert app.erase_when_done is True, "composer must erase on submit (else the message duplicates)"
+
+
+@check
 def prompt_falls_back_when_app_errors():
     # if the framed Application raises a non-exit error, prompt() must fall back to the plain prompt
     # (so input is NEVER broken). Force _pinned_prompt to raise; stub _simple_prompt to observe the fallback.
