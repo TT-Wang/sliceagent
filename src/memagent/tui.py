@@ -169,10 +169,28 @@ def _render_tool_result(e):
     return Group(*body)
 
 
+# The RichSink whose spinner / streaming Live currently owns the terminal. A mid-turn console.input()
+# (ask_user, confirm) while a Live is active does NOT echo the user's keystrokes — the Live redraws over
+# the input line, so the typed answer is invisible. `_pause_active_live()` stops it first; the next event
+# restarts a fresh region. Single point so EVERY mid-turn Rich prompt is covered (no per-call-site fix).
+_ACTIVE_RICH_SINK = None
+
+
+def _pause_active_live() -> None:
+    s = _ACTIVE_RICH_SINK
+    if s is not None:
+        try:
+            s._stop()
+        except Exception:  # noqa: BLE001 — pausing the live UI must never break the prompt
+            pass
+
+
 class RichSink:
     """An event sink that renders the live turn with Rich. Drop-in for cli_sink."""
 
     def __init__(self, console: Console, stats: dict):
+        global _ACTIVE_RICH_SINK
+        _ACTIVE_RICH_SINK = self        # so ask_user/confirm can pause the live region before reading input
         self.c = console
         self.stats = stats
         self._status = None
@@ -625,6 +643,7 @@ def confirm(console: Console, name: str, detail: str, reason: str) -> str:
     console.print(Text.assemble(
         Text("  ⚠ allow ", style=TH["warn"]), Text(name, style=TH["tool"]),
         Text(f" {_shorten(detail, 60)!r}? ", style=TH["dim"]), Text(f"({reason})", style=TH["dim"])))
+    _pause_active_live()        # stop the turn spinner so the typed answer echoes
     try:
         ans = console.input("    [y]es / [n]o / [a]lways ▸ ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -640,6 +659,7 @@ def ask_user(console: Console, question: str, options=None) -> str:
         for i, o in enumerate(options, 1):
             console.print(Text(f"     {i}. {o}", style=TH["dim"]))
         console.print(Text("     (type a number, or your own answer)", style=TH["dim"]))
+    _pause_active_live()        # stop the turn spinner so the typed answer echoes
     try:
         ans = console.input("  your answer ▸ ").strip()
     except (EOFError, KeyboardInterrupt):

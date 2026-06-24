@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.history import make_history_tool, render_index, render_trace  # noqa: E402
+from memagent.history import make_history_tool, render_full, render_index, render_trace  # noqa: E402
 from memagent.memory import NullMemory  # noqa: E402
 
 CHECKS = []
@@ -85,12 +85,28 @@ def tool_fetch_trace_and_specific_turn():
 
 
 @check
-def trace_is_bounded():
+def trace_has_no_read_cap_but_bounds_per_obs_at_the_seal():
+    # NO read-side total cap: every requested turn comes back (a cap dropped whole turns / cut conclusions).
+    # The bound is the SEAL — a legacy record's raw obs is tailed per-observation (OBS_TAIL), nothing dropped.
     lines = [{"task_id": "t", "turn": i, "ts": "2026-06-16T12:00:00",
               "record": _rec(f"turn{i}", "", [{"slice": "", "action": [{"name": "run", "args": {}, "failing": False}],
                                                "observation": ["x" * 5000]}])} for i in range(1, 20)]
-    out = render_trace(lines, cap=2000)
-    assert len(out) < 2600 and "truncated" in out                # capped regardless of N requested
+    out = render_trace(lines)
+    assert "turn 1" in out and "turn 19" in out and "truncated" not in out   # all turns, no total cap
+    assert "x" * 5000 not in out                                             # raw obs bounded per-obs at the seal
+
+
+@check
+def trace_and_full_return_the_full_conclusion_for_a_large_turn():
+    # the 'can't locate my second finding' read-side bug: a big turn's conclusion (markdown tail) must survive,
+    # and `full` must surface the note (the agent's reply lives there, NOT in the seed slice).
+    concl = "Finding 6: tab links drop string[] params."
+    big_md = "## seed\n" + ("filler " * 5000) + f"\n\n## conclusion\n{concl}"
+    line = {"task_id": "t", "turn": 7, "ts": "2026-06-16T12:00:00",
+            "record": {"title": "review page.tsx", "note": concl, "markdown": big_md,
+                       "steps": [{"slice": "seed-slice-body"}], "meta": {}}}
+    assert concl in render_trace([line]), "the conclusion at the markdown tail must survive (no read cap)"
+    assert concl in render_full([line]), "full mode must surface the note/conclusion, not just the seed slice"
 
 
 class _FakeMem:
