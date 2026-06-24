@@ -27,7 +27,8 @@ DEP_CEILING = 64   # per-symbol caller fan-out backstop — keep ALL direct call
                    # (caller-first ranked in code_index.deps); generous physical guard, not a relevance cap.
 MAX_GHOSTS = 6     # GHOST INDEX ring — pointers to recently paged-out files/skills (also the refault recency window)
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
-MAX_SKILL_CHARS = 4000   # a loaded skill body is capped before it enters the slice
+MAX_SKILL_CHARS = 12000  # a loaded skill body before it enters the slice; bounded by COUNT (MAX_ACTIVE_SKILLS=2),
+# so this is generous — a half-read skill (helpers/examples/patterns in the tail lost) misleads more than it costs
 MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
 HOT_TTL = 3              # steps a REFAULT-promoted file stays kernel-protected (self-tuning; not the model)
 HOT_CEILING = 4  # bound the kernel-granted soft-pin set — never an accumulating tier (decoupled from

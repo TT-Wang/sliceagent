@@ -72,8 +72,9 @@ def map_is_bounded():
     if _skip_no_rg():
         print("  (skip: no rg)"); return
     idx = RipgrepCodeIndex(root=_repo())
-    m = idx.graph_map("checkout", max_chars=120)
-    assert len(m) <= 130            # honored the cap (small slack for the final block boundary)
+    m = idx.graph_map("checkout", max_shown=1)
+    heads = [ln for ln in m.splitlines() if ln and not ln.startswith("  ")]   # file heads (skeleton lines indent)
+    assert len(heads) <= 1, f"breadth bound: at most max_shown files shown complete, got {len(heads)}"
 
 
 @check
@@ -121,10 +122,11 @@ def graph_surfaces_neutral_callee_that_lexical_truncates():
         print("  (skip: no rg)"); return
     idx = RipgrepCodeIndex(root=_graph_repo())
     q = "checkout discount member"
-    # tight budget: the neutral bug file has ZERO query overlap and sorts after 40 filler files,
-    # so a purely-lexical ranking would truncate it — but PageRank flows rank cart->billing and keeps it.
-    graph = idx.graph_map(q, max_chars=400)
-    assert "svc/billing.py" in graph, "PageRank should surface the called neutral file"
+    # tight breadth: the neutral bug file has ZERO query overlap and sorts after 40 filler files,
+    # so a purely-lexical ranking would drop it below the top-N — but PageRank flows rank cart->billing,
+    # so it ranks high enough to make the top-N breadth window.
+    graph = idx.graph_map(q, max_shown=6)
+    assert "svc/billing.py" in graph, "PageRank should surface the called neutral file within the top-N"
     # and it ranks ABOVE the filler (appears before any aaa_filler line)
     assert graph.index("svc/billing.py") < graph.index("aaa_filler/")
 
@@ -134,7 +136,9 @@ def graph_map_is_bounded():
     if _skip_no_rg():
         print("  (skip: no rg)"); return
     idx = RipgrepCodeIndex(root=_graph_repo())
-    assert len(idx.graph_map("checkout", max_chars=200)) <= 230
+    m = idx.graph_map("checkout", max_shown=3)
+    heads = [ln for ln in m.splitlines() if ln and not ln.startswith("  ")]
+    assert len(heads) <= 3, f"breadth bound honored regardless of repo size; got {len(heads)} files"
 
 
 @check

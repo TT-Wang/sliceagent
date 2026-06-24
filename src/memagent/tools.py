@@ -916,8 +916,9 @@ class LocalToolHost:
         diff = p.stdout
         if not diff.strip():
             return f"No changes vs {ref} — the working tree matches it. Nothing to review."
-        cap = 20000
-        body = diff if len(diff) <= cap else diff[:cap] + f"\n… (diff truncated at {cap} of {len(diff)} chars)"
+        # PAGE a large diff out (full diff preserved on disk, reachable via read_file) instead of a hard
+        # truncation that silently discarded the tail — a review/security task must not miss bugs past the cut.
+        body = self._page_out(diff, label=f"git-diff-{ref}")
         return (f"git diff {ref} ({len(diff)} chars). Review for correctness, security, and edge cases; "
                 f"cite file:line per issue.\n\n{body}")
 

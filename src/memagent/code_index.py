@@ -196,12 +196,14 @@ class RipgrepCodeIndex:
             return set()
 
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
-    def graph_map(self, query: str, max_files: int = 400, max_chars: int = 4000) -> str:
+    def graph_map(self, query: str, max_files: int = 400, max_shown: int = 20) -> str:
         """Repo map ranked by PERSONALIZED PAGERANK over the symbol def/ref graph, seeded on the
         files that match the query lexically. Rank flows along call/import edges, so a relevant file
         surfaces even with ZERO query-word overlap when a matched file references it — exactly the
         neutral-vocabulary target a purely-lexical ranking truncates on a large repo. Degrades to
-        lexical order when there is no graph signal. Bounded by max_chars, like every tier.
+        lexical order when there is no graph signal. Bounded by BREADTH — the top `max_shown` ranked
+        files, each shown COMPLETE — NOT a char cut (a char cut dropped lower-ranked files mid-list,
+        the 'where is function X?' miss, and could render a file half-shown; breadth is deterministic).
 
         The query-INDEPENDENT graph (defs/edges/skeletons) is cached on this instance and rebuilt
         only when the tree changes (see _graph), so per-turn cost is just lexical search + PageRank,
@@ -220,18 +222,15 @@ class RipgrepCodeIndex:
         # rank: structural score, then lexical strength, then path (deterministic ties)
         files.sort(key=lambda rel: (pr.get(rel, 0.0), len(matched.get(rel, ()))), reverse=True)
         blocks: list[str] = []
-        used = 0
         for rel in files:
             dlines = g["skeleton"].get(rel)
             if not dlines:
                 continue
             hit = matched.get(rel)
             head = rel + (f"   (matches: {', '.join(sorted(hit))})" if hit else "")
-            block = head + "\n" + "\n".join("  " + d for d in dlines)
-            if used + len(block) + 1 > max_chars:
+            blocks.append(head + "\n" + "\n".join("  " + d for d in dlines))
+            if len(blocks) >= max_shown:        # BREADTH bound: top-N ranked files, each shown COMPLETE
                 break
-            blocks.append(block)
-            used += len(block) + 1
         return "\n".join(blocks)
 
     def _graph(self, max_files: int) -> dict:
