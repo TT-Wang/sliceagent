@@ -1,5 +1,5 @@
 """Request salience + intent-aware footer, asserted at the BUILD level (the request and the NOW footer
-render in build(), OUTSIDE the <workspace_context> fence — not inside render_slice). No model, no pytest.
+render in build(), OUTSIDE the <context> fence — not inside render_slice). No model, no pytest.
 Run: PYTHONPATH=src python tests/test_bugfix_current_request.py
 """
 import os
@@ -42,15 +42,15 @@ def request_leads_and_is_outside_the_fence():
     assert out.startswith("# CURRENT REQUEST"), "the live request leads the user message (primacy)"
     assert "handles bad input safely" in out
     # both copies live OUTSIDE the reference fence
-    close = out.index("</workspace_context>")
-    assert out.index("# CURRENT REQUEST") < out.index("<workspace_context>"), "primacy before the fence"
+    close = out.index("</context>")
+    assert out.index("# CURRENT REQUEST") < out.index("<context>"), "primacy before the fence"
     assert out.rindex("# CURRENT REQUEST") > close, "recency after the fence"
 
 
 @check
 def now_footer_is_intent_aware_and_outermost():
     out = _user("explain the retry logic")
-    assert "# NOW" in out and out.index("# NOW") > out.index("</workspace_context>"), "NOW is outside the fence"
+    assert "# NOW" in out and out.index("# NOW") > out.index("</context>"), "NOW is outside the fence"
     assert "QUESTION" in out and "answer it directly" in out, "footer offers converse, not only act/edit"
     assert "CURRENT REQUEST" in out, "footer points back at the request"
 
@@ -59,7 +59,7 @@ def now_footer_is_intent_aware_and_outermost():
 def no_goal_suppresses_request_header():
     out = _user("")    # fresh slice, empty goal
     assert "# CURRENT REQUEST" not in out, "no goal → no request header (no empty tier)"
-    assert out.startswith("<workspace_context>"), "envelope still wraps the slice"
+    assert out.startswith("<context>"), "envelope still wraps the slice"
 
 
 @check

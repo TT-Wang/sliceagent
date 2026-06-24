@@ -76,6 +76,44 @@ FILTERED_MSG = "The response was stopped by the provider's content filter; the t
 OVERFLOW_COMPACTED = ("[context note: the oldest step(s) of this turn were compacted out to fit the window. "
                       "If you need details from an early step, re-derive them or call recall_history if it is "
                       "available — do not assume that work is undone.]")
+_CRUMB_PREFIX = "[context note: the oldest"   # stable prefix to detect the breadcrumb (with or without the checkpoint)
+
+
+def _overflow_breadcrumb(consolidate) -> dict:
+    """F2 — REBUILD-FROM-CHECKPOINT: the overflow breadcrumb carries the DISTILLED state (the deterministic
+    checkpoint), not just a generic 'oldest steps compacted' note — so when overflow sheds the oldest raw
+    exchanges, the turn's intent/decisions/change-set survive in front of the model. Best-effort: a failing
+    or empty checkpoint degrades to the plain note."""
+    snap = ""
+    if consolidate is not None:
+        try:
+            snap = (consolidate() or "").strip()
+        except Exception:  # noqa: BLE001 — a checkpoint hiccup must never break overflow handling
+            snap = ""
+    content = (OVERFLOW_COMPACTED + "\n\n# CHECKPOINT — state of play (the distilled state of the compacted "
+               "steps; recall_history for raw detail):\n" + snap) if snap else OVERFLOW_COMPACTED
+    return {"role": "user", "content": content}
+
+# Micro-compaction (borrowed from Kimi's micro.ts): on overflow, the FIRST move is to clear the BODIES of
+# OLD tool-result messages — the bulky, stale part — while keeping the assistant reasoning skeleton and the
+# recent window. Strictly better than dropping whole exchanges (which loses the reasoning too), and it keeps
+# every tool_call↔reply pairing intact so the message sequence stays valid. The full output is archived in
+# the episode cache, so this is lossless-by-default (recall_history pages it back).
+MICRO_KEEP_RECENT = 10
+MICRO_MARKER = "[old tool result cleared to fit the window — recall_history can page it back]"
+
+
+def _micro_compact(messages: list, *, floor: int, keep_recent: int = MICRO_KEEP_RECENT) -> bool:
+    """Clear the bodies of OLD tool-result messages between `floor` and the recent window (last
+    `keep_recent` messages). Returns True if it cleared at least one (the caller retries the LLM call
+    before resorting to dropping whole exchanges)."""
+    cleared = False
+    for i in range(floor, max(floor, len(messages) - keep_recent)):
+        m = messages[i]
+        if m.get("role") == "tool" and m.get("content") and m["content"] != MICRO_MARKER:
+            m["content"] = MICRO_MARKER
+            cleared = True
+    return cleared
 
 
 def _final_answer(llm, msgs: list, tools, dispatch, guidance: str) -> dict:
@@ -254,7 +292,7 @@ def _prepared(hooks, msgs: list) -> list:
 
 
 def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | None = None,
-             max_steps: int = 40, signal=None, checkpoint=None) -> TurnResult:
+             max_steps: int = 40, signal=None, checkpoint=None, consolidate=None) -> TurnResult:
     """One per-LOOP working-memory turn. The slice is the SEED, built ONCE; within the while(true) working
     memory ACCUMULATES as native assistant/tool messages — NO per-step rebuild, NO eviction. The LLM ends
     by not calling tools (Markov at the loop boundary; continuous within).
@@ -336,7 +374,6 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 # 2-window would orphan tool messages on parallel calls → invalid sequence → provider 400).
                 # If the SEED itself overflows (nothing left to compact), fail SOFT — no tighten ladder.
                 overflow_tries = 0
-                compacted = False   # have we inserted the "oldest steps compacted" breadcrumb yet?
                 while True:
                     try:
                         resp = with_retry(
@@ -345,25 +382,34 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         )
                         break
                     except ContextOverflow:
-                        floor = seed_len + (1 if compacted else 0)  # keep the breadcrumb pinned just below the seed
-                        if len(messages) <= floor or overflow_tries >= 4:
-                            # compaction is exhausted (even the seed overflows). SECONDARY net: if a bigger
-                            # context model is configured (AGENT_MODEL_FALLBACK), swap to it ONCE and retry
-                            # rather than parking — the moat's compaction stays the primary, cheaper path.
+                        # The breadcrumb (if present) is pinned at seed_len; derive its presence from the
+                        # transcript so it is inserted exactly ONCE PER TURN even across multiple overflow
+                        # steps (a per-step flag would stack duplicates). floor keeps it below the seed.
+                        has_crumb = bool(messages[seed_len:]) and str(messages[seed_len].get("content", "")).startswith(_CRUMB_PREFIX)
+                        floor = seed_len + (1 if has_crumb else 0)
+                        # MICRO-COMPACTION FIRST (Kimi-style): clear OLD tool-result BODIES — keeping the
+                        # assistant reasoning, the recent window, and valid tool pairings — before resorting
+                        # to dropping a whole exchange. Lossless-by-default (full content in the episode cache).
+                        micro = _micro_compact(messages, floor=floor)
+                        if not micro and (len(messages) <= floor or overflow_tries >= 4):
+                            # micro-clear exhausted AND nothing left to drop (even the seed overflows).
+                            # SECONDARY net: if a bigger-context model is configured (AGENT_MODEL_FALLBACK),
+                            # swap to it ONCE and retry rather than parking — the moat's compaction stays the
+                            # primary, cheaper path.
                             if _try_model_fallback(llm):
                                 dispatch(AssistantText(f"[context overflow — switching to {llm.model} "
                                                        "for a larger window]"))
                                 overflow_tries = 0
                                 continue
                             return _park("overflow", OVERFLOW_MSG, closeout=False)
-                        end = floor + 1
-                        while end < len(messages) and messages[end].get("role") == "tool":
-                            end += 1
-                        del messages[floor:end]   # drop the oldest WHOLE exchange (assistant + its tool replies)
+                        if not micro:   # micro-clear exhausted → drop the oldest WHOLE exchange (assistant + replies)
+                            end = floor + 1
+                            while end < len(messages) and messages[end].get("role") == "tool":
+                                end += 1
+                            del messages[floor:end]
                         overflow_tries += 1
-                        if not compacted:   # breadcrumb ONCE so the drop is never silent (lossless-by-default)
-                            messages.insert(seed_len, {"role": "user", "content": OVERFLOW_COMPACTED})
-                            compacted = True
+                        if not has_crumb:   # breadcrumb ONCE PER TURN, carrying the distilled CHECKPOINT (F2)
+                            messages.insert(seed_len, _overflow_breadcrumb(consolidate))
                         dispatch(SliceTightened(level=overflow_tries))
 
                 usage = resp.usage or {}

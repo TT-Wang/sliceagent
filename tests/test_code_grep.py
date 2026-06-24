@@ -34,7 +34,7 @@ class _Host:
         full = path if os.path.isabs(path) else os.path.join(self._root, path)
         full = os.path.realpath(full)
         if full != self._root and not full.startswith(self._root + os.sep):
-            raise PermissionError(f"path escapes workspace ({self._root}): {path}")
+            raise PermissionError(f"path escapes the boundary ({self._root}): {path}")
         return full
 
 
@@ -152,7 +152,7 @@ def no_rg_degrades_quietly(monkeypatch_which=None):
 def path_escaping_root_blocked():
     handler, _ = _fresh_tool({"a.py": "x\n"})
     out = handler({"pattern": "x", "path": "../../etc"})
-    assert out.startswith("Error:") and "escapes workspace" in out
+    assert out.startswith("Error:") and "escapes the boundary" in out
 
 
 @check
