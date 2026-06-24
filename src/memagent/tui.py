@@ -593,6 +593,10 @@ class TuiInput:
         app = Application(
             layout=Layout(HSplit([Frame(ta, title="message"), status]), focused_element=ta),
             key_bindings=kb, full_screen=False, mouse_support=False,
+            # erase the bordered box on submit so the composer is TRANSIENT: after Enter the box (and the text
+            # the user typed in it) is wiped, and user_echo prints the single "▌ you …" line — no duplication
+            # of the message (the box's last frame + the echo). The echo is the persistent scrollback record.
+            erase_when_done=True,
             input=pt_input, output=pt_output,
         )
         return app, ta
@@ -610,7 +614,7 @@ class TuiInput:
         msg = FormattedText([("fg:ansibrightblack", "─" * cols + "\n"), ("fg:ansicyan bold", "❯ ")])
         try:
             with patch_stdout(raw=True):
-                return self.session.prompt(msg)
+                return self.session.prompt(msg, erase_when_done=True)   # transient — user_echo is the record
         except (EOFError, KeyboardInterrupt):
             return None
 
