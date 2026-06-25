@@ -32,14 +32,29 @@ def _render(events):
     sink = tui.make_rich_sink(c, stats)
     for e in events:
         sink(e)
+    sink._flush_reads()   # a real turn always ends with TurnEnd, which flushes buffered read-only cards
     sink._stop()
     return c.file.getvalue(), stats
 
 
 @check
 def tool_result_ok_shows_check_and_header():
-    out, _ = _render([ToolResult("read_file", {"path": "src/foo.py"}, "ok", False)])
-    assert "✓" in out and "read" in out and "foo.py" in out, out
+    # a MUTATING tool renders its own ✓ card (read-only tools coalesce — see the next test)
+    out, _ = _render([ToolResult("edit_file", {"path": "src/foo.py"}, "ok", False)])
+    assert "✓" in out and "write" in out and "foo.py" in out, out
+
+
+@check
+def read_only_tools_coalesce_into_one_dim_line():
+    out, _ = _render([
+        ToolResult("read_file", {"path": "a.py"}, "ok", False),
+        ToolResult("read_file", {"path": "b.py"}, "ok", False),
+        ToolResult("grep", {"pattern": "foo"}, "matches", False),
+        TurnEnd("end_turn", 1, {}),
+    ])
+    assert "2 read" in out and "1 grep" in out, out      # one coalesced summary…
+    assert "a.py" in out and "b.py" in out, out          # …that still names the files
+    assert "✓ read" not in out, out                      # …not three separate ✓ cards
 
 
 @check

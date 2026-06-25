@@ -26,6 +26,7 @@ from rich.padding import Padding
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
+from rich.theme import Theme
 
 import shutil
 
@@ -42,6 +43,16 @@ TH = {
     "accent": "bright_cyan", "ok": "green", "fail": "red", "warn": "yellow",
     "dim": "grey50", "tool": "magenta", "add": "green", "del": "red", "user": "bright_cyan",
 }
+
+# Rich's DEFAULT markdown styles are "bold cyan on black" / "cyan on black" — so any file path or inline
+# `code` the model writes in backticks renders with a heavy BLACK-BACKGROUND highlight. Drop the bg
+# (foreground-only) so paths read cleanly in a normal terminal. inherit=True keeps every other default.
+MD_THEME = Theme({"markdown.code": "cyan", "markdown.code_block": "cyan"}, inherit=True)
+
+
+def make_console() -> Console:
+    """A Rich Console themed so inline `code` / file paths aren't highlighted on a black background."""
+    return Console(theme=MD_THEME)
 
 # per-tool emoji + a short verb + which arg is the "primary" one to show in the card header
 _TOOL = {
@@ -61,6 +72,13 @@ _TOOL = {
     "spawn_subagent": ("🤖", "agent",  "task"),
     "spawn_explore":  ("🔭", "explore", "task"),
 }
+
+
+# read-only / navigation tools — a long run of these (a review reads + greps a dozen files) is just
+# noise as one card each, so the sink COALESCES a consecutive run into ONE compact line. recall_history
+# is deliberately NOT here: it's the memory channel and stays its own visible card.
+_COALESCE = {"read_file", "list_files", "grep", "glob"}
+_READ_VERB = {"read_file": "read", "list_files": "list", "grep": "grep", "glob": "glob"}
 
 
 def _shorten(s: str, n: int = 64) -> str:
@@ -196,6 +214,7 @@ class RichSink:
         self._status = None
         self._live = None        # a transient Rich Live that streams the reply INTO content (not just a tail)
         self._stream = ""        # the assistant text streamed so far this step
+        self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
 
     def _stop(self) -> None:
         """Tear down whichever live region is active (spinner OR the streaming-content Live). The Live is
@@ -256,6 +275,21 @@ class RichSink:
             self._status.start()
             self._status.update(Text(f"writing… {' '.join(self._stream.split())[-100:]}", style=TH["dim"]))
 
+    def _flush_reads(self) -> None:
+        """Emit ONE compact dim line for a buffered run of read-only tools (📖 7 read · 🔍 3 grep · names),
+        instead of one card each — so a review that reads a dozen files doesn't bury the window."""
+        if not self._reads:
+            return
+        reads, self._reads = self._reads, []
+        from collections import Counter
+        cnt = Counter(n for n, _ in reads)
+        parts = [f"{_TOOL.get(n, ('•',))[0]} {c} {_READ_VERB.get(n, n)}" for n, c in cnt.items()]
+        names = [v for _, v in reads if v]
+        tail = ""
+        if names:
+            tail = "  " + ", ".join(_shorten(x, 30) for x in names[:5]) + (f"  +{len(names) - 5}" if len(names) > 5 else "")
+        self.c.print(Text(f"┊ {' · '.join(parts)}{tail}", style=TH["dim"]))
+
     def __call__(self, e: Event) -> None:
         if isinstance(e, SliceBuilt):
             self._spin("thinking…")
@@ -263,13 +297,19 @@ class RichSink:
             self._spin(f"{_tool_header(e.name, e.args)} …")
         elif isinstance(e, ToolResult):
             self._stop()
+            if e.name in _COALESCE and not e.failing:     # buffer a read-only run → one line on next event
+                self._reads.append((e.name, _primary(e.name, e.args)))
+                return
+            self._flush_reads()                            # a mutating/failing tool ends the read run
             self.c.print(_render_tool_result(e))
         elif isinstance(e, AssistantText):
             self._stop()
+            self._flush_reads()
             if (e.content or "").strip():
                 self.c.print(_response_panel(e.content, self.c))
         elif isinstance(e, ApiRetry):
             self._stop()
+            self._flush_reads()
             self.c.print(Text(f"  …retry #{e.attempt} ({_shorten(e.error, 60)})", style=TH["warn"]))
         elif isinstance(e, StepEnd):
             u = e.usage or {}
@@ -279,12 +319,15 @@ class RichSink:
             self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
             _accrue_cost(self.stats, u)
         elif isinstance(e, LessonSaved):
+            self._flush_reads()
             self.c.print(Text(f"  💡 learned: {_shorten(e.title, 70)}", style=TH["dim"]))
         elif isinstance(e, TurnInterrupted):
             self._stop()
+            self._flush_reads()
             self.c.print(Text(f"  ⚠ interrupted: {e.message or e.reason}", style=TH["warn"]))
         elif isinstance(e, TurnEnd):
             self._stop()
+            self._flush_reads()
             tok = (e.usage or {}).get("prompt_tokens", 0) + (e.usage or {}).get("completion_tokens", 0)
             self.c.print(Text(f"  ✓ done · {e.steps} steps · {tok} tokens", style=TH["dim"]))
 

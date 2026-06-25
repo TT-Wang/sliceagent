@@ -253,7 +253,7 @@ def main() -> None:
             _tui = _tuimod
     except Exception:
         _tui = None
-    _console = _tui.Console() if _tui else None
+    _console = _tui.make_console() if _tui else None   # themed: no black-bg highlight on inline `code`/paths
 
     # Decide early whether to use the full-screen Textual TUI. We need this before wiring stdin-
     # dependent callbacks, because Textual owns stdin and synchronous prompts from worker threads
