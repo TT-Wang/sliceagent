@@ -72,9 +72,16 @@ def promote_episodes(records: list[dict]) -> list[dict]:
         # all failing observations across the task's turns, oldest→newest; pick the LAST NON-self-
         # inflicted one. A turn whose only failures are the agent hitting its OWN sandbox teaches
         # nothing, but a real error AFTER a self-inflicted one must still be mined (the removed live
-        # miner's D2 behaviour, now owned by this cache path).
-        fails = [o for m in rmeta for st in m.get("steps", []) for o in st.get("observation", [])
-                 if isinstance(o, str) and (o.startswith("Error") or o.startswith("Exit code"))]
+        # miner's D2 behaviour, now owned by this cache path). A step's observation counts as a failure
+        # when its action carried failing=True (the STRUCTURED signal — catches ToolResult(ok=False)
+        # whose text lacks an "Error"/"Exit code" prefix) OR the text matches the prefix (back-compat).
+        fails = []
+        for m in rmeta:
+            for st in m.get("steps", []):
+                step_failed = any(a.get("failing") for a in st.get("action", []) if isinstance(a, dict))
+                for o in st.get("observation", []):
+                    if isinstance(o, str) and (step_failed or o.startswith("Error") or o.startswith("Exit code")):
+                        fails.append(o)
         pitfall = next((o for o in reversed(fails) if not is_self_inflicted(o)), "")
         if not pitfall or _is_secret(pitfall):
             continue

@@ -617,9 +617,10 @@ def main() -> None:
     # timeout, so a stuck server or index write can never freeze the process on the way out.
     def _safe(label, fn):
         try:
-            fn()
+            return fn()
         except Exception as _e:  # noqa: BLE001
             print(f"  · warning: {label} failed ({type(_e).__name__}: {_e})")
+            return None
 
     def _bounded(label, fn, secs=8.0):
         import threading as _th
@@ -634,9 +635,14 @@ def main() -> None:
     # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:
     # off → skip; deterministic → recorded skills; llm → render_skill_llm generalizes (scan-first).
     if getattr(memory, "is_durable", False) and mine_mode not in ("0", "off", "none"):
-        _safe("memory consolidation",
-              lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode))
-        print("  · consolidated session memory")
+        st = _safe("memory consolidation",
+                   lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode)) or {}
+        if st.get("lessons") or st.get("skills"):        # report the TRUTH, not a blind 'success'
+            print(f"  · consolidated: {st.get('lessons', 0)} lesson(s), {st.get('skills', 0)} skill(s)"
+                  + (f", {st['skills_rejected']} rejected" if st.get("skills_rejected") else "")
+                  + (f", {st['errors']} error(s)" if st.get("errors") else ""))
+        elif st.get("skills_rejected") or st.get("errors"):
+            print(f"  · consolidation: {st.get('skills_rejected', 0)} rejected, {st.get('errors', 0)} error(s)")
     _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
     if metrics is not None:                                 # the moat number: per-turn fresh-input curve
         s = metrics.summary()

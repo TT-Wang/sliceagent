@@ -318,8 +318,8 @@ class NullMemory:
     def mark_used(self, memory_id: str) -> None:
         return None
 
-    def consolidate(self, session_id: str) -> None:
-        return None
+    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> dict:
+        return {"lessons": 0, "skills": 0, "skills_rejected": 0, "errors": 0}
 
     def close(self) -> None:
         return None
@@ -472,7 +472,10 @@ class MememMemory:
             path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
             if not os.path.exists(path):
                 return []
-            out = []
+            # limit set → keep only the last N parsed dicts via a bounded deque (don't hold the whole
+            # session in memory just to slice the tail); limit unset (consolidate) reads all by design.
+            from collections import deque
+            out = deque(maxlen=limit) if limit else []
             with open(path, encoding="utf-8") as f:
                 for ln in f:
                     ln = ln.strip()
@@ -481,7 +484,7 @@ class MememMemory:
                             out.append(json.loads(ln))
                         except ValueError:
                             continue
-            return out[-limit:] if limit else out
+            return list(out)
         except Exception:
             return []
 
@@ -519,26 +522,39 @@ class MememMemory:
         except Exception:
             return []
 
-    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> None:
+    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> dict:
         """Session-end sweep: promote durable knowledge from the episodic CACHE (never the slice),
         ROUTED BY TYPE — FACTS (corrective lessons) → memem; PROCEDURES (repeated smooth workflows) →
         reusable SKILL.md the SkillManager discovers next session. `mode="llm"` (with an `llm`) renders
         skill bodies via render_skill_llm (generalized) instead of render_skill (recorded); both fall
-        back to deterministic on any failure. Never raises."""
+        back to deterministic on any failure. RETURNS a stats dict so the caller reports the truth (never a
+        blind 'success'); each item is guarded so one bad lesson/skill can't abort the batch. Never raises."""
+        stats = {"lessons": 0, "skills": 0, "skills_rejected": 0, "errors": 0}
         try:
             from .consolidate import promote_episodes, promote_procedures, render_skill, render_skill_llm
             records = self.read_episodes(session_id)
             if not records:
-                return
+                return stats
             for lesson in promote_episodes(records):                 # facts → memem (tagged with files: R1)
-                self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
-                              tags=lesson["tags"], paths=lesson.get("files"))
+                try:
+                    self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
+                                  tags=lesson["tags"], paths=lesson.get("files"))
+                    stats["lessons"] += 1
+                except Exception:  # noqa: BLE001 — one bad lesson must not sink the rest
+                    stats["errors"] += 1
             skills_dir = _skills_dir()
             for proc in promote_procedures(records):                 # procedures → skill packs (AUTO)
-                body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
-                write_skill_file(proc["name"], body, skills_dir=skills_dir)   # guarded writer (scan+redact)
-        except Exception:
-            pass
+                try:
+                    body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
+                    if write_skill_file(proc["name"], body, skills_dir=skills_dir):   # guarded; None = rejected
+                        stats["skills"] += 1
+                    else:
+                        stats["skills_rejected"] += 1                # validate/threat-scan rejected it
+                except Exception:  # noqa: BLE001
+                    stats["errors"] += 1
+        except Exception:  # noqa: BLE001 — promote_*/read failures never break teardown
+            stats["errors"] += 1
+        return stats
 
     # --- declared now; implemented in step 5 (loud-but-safe so a premature wire is caught) ---
     def mark_used(self, memory_id: str) -> None:

@@ -104,26 +104,21 @@ class BackgroundReviewer:
             lessons = promote_episodes(records)
             for lesson in lessons:
                 try:
-                    self.memory.remember(lesson["content"], title=lesson["title"],
-                                         scope=self.scope, tags=lesson["tags"])
+                    self.memory.remember(lesson["content"], title=lesson["title"], scope=self.scope,
+                                         tags=lesson["tags"], paths=lesson.get("files"))  # file-context parity
                 except Exception:
                     pass
             procs = promote_procedures(records)
             if procs:
-                from .memory import _skills_dir   # reuse the session-end skill-write location
-                from .safety import redact_text   # redact before persisting (parity with memory.consolidate)
+                from .memory import _skills_dir, write_skill_file   # SAME guarded writer as session-end
                 from .skill_provenance import AUTO, reset_authoring_origin, set_authoring_origin
                 skills_dir = _skills_dir()
                 token = set_authoring_origin(AUTO)   # mark fork-authored skills curator-prunable
                 try:
                     for proc in procs:
-                        try:
-                            d = os.path.join(skills_dir, proc["name"])
-                            os.makedirs(d, exist_ok=True)
-                            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
-                                f.write(redact_text(render_skill(proc)))   # secrets must not land on disk
-                        except Exception:
-                            pass
+                        # guarded writer: validate frontmatter + strict threat-scan + redact + ATOMIC replace
+                        # (parity with memory.consolidate; closes the bypass + non-atomic-write bugs)
+                        write_skill_file(proc["name"], render_skill(proc), skills_dir=skills_dir)
                 finally:
                     reset_authoring_origin(token)
             self._log(f"background review: {len(lessons)} lesson(s), {len(procs)} skill(s)")

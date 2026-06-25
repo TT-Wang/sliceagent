@@ -23,8 +23,8 @@ class _Mem:
         self.saved = []
     def read_episodes(self, session_id, *, limit=None):
         return self._records
-    def remember(self, content, *, title="", scope="default", tags=""):
-        self.saved.append((title, content))
+    def remember(self, content, *, title="", scope="default", tags="", paths=None):
+        self.saved.append((title, content, paths))
 
 
 def _corrective_records():
@@ -77,8 +77,9 @@ def enabled_writes_lesson_off_thread():
         r.review("s")
         r.join(5.0)
         assert len(mem.saved) == 1
-        title, content = mem.saved[0]
+        title, content, paths = mem.saved[0]
         assert "parser.py" in content
+        assert paths and "parser.py" in " ".join(paths)   # fix #1: file-context tag now flows through
     finally:
         os.environ.pop("AGENT_BACKGROUND_REVIEW", None)
 
