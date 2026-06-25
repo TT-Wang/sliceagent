@@ -115,6 +115,18 @@ def cli_sink(show_slice: bool = False):
     return sink
 
 
+def _reasoning_note(llm) -> str:
+    """One-line hint on whether the chosen reasoning effort will actually take effect, so /model isn't a
+    silent no-op (gpt-5 high/max needs /v1/responses; non-reasoning models have no effort knob)."""
+    from .model_catalog import capability
+    eff = (getattr(llm, "reasoning", "full") or "full").lower()
+    if eff == "full":
+        return ""
+    if not capability(llm.model, getattr(llm, "_base_url", "")).supports_reasoning_effort:
+        return f"note: {llm.model} has no reasoning-effort knob — it runs at the provider default."
+    return "high/max run WITH tools via /v1/responses." if eff in ("high", "max") else ""
+
+
 def main() -> None:
     # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `memagent init` runs on a
     # machine with nothing configured yet. A bare `memagent` (or one with non-subcommand args) falls through.
@@ -162,7 +174,13 @@ def main() -> None:
     mine_mode = cfg.mine           # deterministic | llm | off
     sub_depth = cfg.subagent_depth  # 0 disables delegation
     policy = make_policy(policy_mode)
-    llm = OpenAILLM(model=cfg.model)
+    # model + reasoning resolution: explicit env wins, then the saved /model choice (prefs), then config.
+    from .config import load_prefs, save_prefs
+    _prefs = load_prefs()
+    _model = os.environ.get("AGENT_MODEL") or _prefs.get("model") or cfg.model
+    llm = OpenAILLM(model=_model)
+    if _prefs.get("reasoning") and not (os.environ.get("AGENT_REASONING") or os.environ.get("AGENT_THINKING")):
+        llm.reasoning = str(_prefs["reasoning"]).lower()   # apply the saved /reasoning choice
     retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
 
@@ -194,7 +212,8 @@ def main() -> None:
     base_tools.registry.register(make_write_skill_tool())
     # MCP: connect config + plugin-declared servers; tools register into the SAME registry
     mcp_servers, mcp_runtime = connect_mcp_servers(
-        base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"))
+        base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"),
+        page_out=base_tools._page_out)   # big MCP results → blob + head/tail view, not inlined whole
     mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
     plugin_tool_count = sum(1 for e in base_tools.registry._tools.values()
                             if e.source.startswith("plugin:"))
@@ -371,9 +390,9 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /threads · /switch <id> · /resume <id> · /plan · /cost · /undo · "
-                           "/help · /exit\n  (say \"review my changes\" to use the code_review tool · "
-                           "@path in a message pins that file)")
+            _console.print("commands: /model · /reasoning · /threads · /switch <id> · /resume <id> · /plan · "
+                           "/cost · /undo · /help · /exit\n  (say \"review my changes\" to use the code_review "
+                           "tool · @path in a message pins that file)")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -410,6 +429,39 @@ def main() -> None:
                     _console.print(f"  no such topic: {arg}")
         elif cmd == "/undo":
             _console.print("  " + base_tools.undo_last())   # revert the last file edit
+        elif cmd == "/model":
+            if not arg:
+                _console.print(f"  model: [bold]{llm.model}[/]  ·  reasoning: [bold]{llm.reasoning}[/]"
+                               f"  ·  net: {getattr(llm, 'proxy_used', 'direct')}")
+                known = ("gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat",
+                         "kimi-k2-0905-preview", "claude-sonnet-4-6")
+                _console.print("  switch:  /model <name> [fast|full|high|max]   ·   /reasoning <level>")
+                _console.print("  known:   " + ", ".join(known))
+                provs = cfg.providers()
+                if provs:
+                    _console.print("  providers (use `config --use <id>` to change endpoint): "
+                                   + ", ".join(f"{k}={v.get('model', '?')}" for k, v in provs.items()))
+            else:
+                name, *rest = arg.split()
+                eff = rest[0].lower() if rest else None
+                if eff and eff not in ("fast", "full", "high", "max"):
+                    _console.print("  effort must be one of: fast | full | high | max"); return True
+                llm.switch(model=name, reasoning=eff)
+                _stats["model"] = llm.model
+                save_prefs({"model": llm.model, "reasoning": llm.reasoning})
+                note = _reasoning_note(llm)
+                _console.print(f"  ✓ model → [bold]{llm.model}[/]"
+                               + (f" · reasoning [bold]{llm.reasoning}[/]" if eff else "")
+                               + " (saved)" + (f"\n  {note}" if note else ""))
+        elif cmd == "/reasoning":
+            if arg.lower() not in ("fast", "full", "high", "max"):
+                _console.print("  usage: /reasoning <fast|full|high|max>"
+                               "   (full = provider default; high/max use /v1/responses for gpt-5)")
+            else:
+                llm.switch(reasoning=arg)
+                save_prefs({"reasoning": llm.reasoning})
+                note = _reasoning_note(llm)
+                _console.print(f"  ✓ reasoning → [bold]{llm.reasoning}[/] (saved)" + (f"\n  {note}" if note else ""))
         else:
             _console.print(f"  unknown command {cmd} (/help)")
         return True

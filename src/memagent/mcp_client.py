@@ -33,7 +33,9 @@ def qualify(server: str, tool: str) -> str:
     return name
 
 
-_MCP_MAX_OUTPUT = 100_000   # cap one MCP tool result so a runaway payload can't blow up the slice (Kimi)
+_MCP_SAFETY_CAP = 2_000_000   # last-resort OOM guard if a server streams megabytes. The REAL bounding is
+                              # the host page-out applied in the handler: a big MCP result (browser/DB/
+                              # Playwright payloads) goes to a blob + head/tail view, not inlined whole.
 
 
 def _result_to_text(result) -> str:
@@ -42,9 +44,25 @@ def _result_to_text(result) -> str:
         t = getattr(block, "text", None)
         parts.append(t if t is not None else f"[{getattr(block, 'type', 'content')}]")
     text = "\n".join(parts).strip() or "(no content)"
-    if len(text) > _MCP_MAX_OUTPUT:           # bound an oversized result (server returning a huge blob)
-        text = text[:_MCP_MAX_OUTPUT] + f"\n…[truncated {len(text) - _MCP_MAX_OUTPUT} chars of MCP output]"
+    if len(text) > _MCP_SAFETY_CAP:           # last-resort OOM guard; page-out (handler) does normal bounding
+        text = text[:_MCP_SAFETY_CAP] + f"\n…[truncated {len(text) - _MCP_SAFETY_CAP} chars of MCP output]"
     return f"Error: {text}" if getattr(result, "isError", False) else text
+
+
+def _mcp_handler(server, tool, page_out):
+    """Tool handler that pages a LARGE MCP result OUT to a blob (a head/tail view + a read_file ref) rather
+    than inlining the whole payload — browser/DB/Playwright results can be hundreds of KB. The full output
+    is preserved on disk and paged back on demand (the moat's L1→L2 page-out), so nothing is lost. With no
+    host page_out (eval/headless), returns the raw text (already OOM-capped by _result_to_text)."""
+    def _handle(args):
+        out = server.call(tool, args)
+        if page_out:
+            try:
+                return page_out(out, label=f"mcp-{tool}")
+            except Exception:  # noqa: BLE001 — paging must never fail the tool call
+                return out
+        return out
+    return _handle
 
 
 def _function_schema(qname: str, tool) -> dict:
@@ -179,7 +197,7 @@ def _params_from_conf(conf: dict):
 
 
 def connect_mcp_servers(registry, servers: dict, runtime: McpRuntime | None = None,
-                        *, timeout: float = 30, on_log=None):
+                        *, timeout: float = 30, on_log=None, page_out=None):
     """Connect each declared server and register its tools into `registry` (namespaced).
     Returns (connected_servers, runtime). Returns ([], None) when nothing is configured."""
     def log(m):
@@ -211,7 +229,7 @@ def connect_mcp_servers(registry, servers: dict, runtime: McpRuntime | None = No
                 continue
             registry.register(ToolEntry(
                 name=qname, schema=_function_schema(qname, tool),
-                handler=(lambda args, s=server, t=tool.name: s.call(t, args)),
+                handler=_mcp_handler(server, tool.name, page_out),
                 source="mcp",
             ))
             n += 1

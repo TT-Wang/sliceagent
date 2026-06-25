@@ -33,6 +33,40 @@ def _config_files() -> list[str]:
     ]
 
 
+# ── runtime preferences (the /model switch persists here) ───────────────────────────────────────
+# A tiny JSON sidecar, NOT config.toml: stdlib has no TOML WRITER (tomllib is read-only), so writing
+# back to config.toml would need a new dep or a fragile hand-rolled serializer. JSON is safe + atomic.
+# Precedence (resolved in cli): explicit env (AGENT_MODEL/AGENT_REASONING) > prefs > config.toml > default.
+def _prefs_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".memagent", "prefs.json")
+
+
+def load_prefs() -> dict:
+    """The user's last /model + /reasoning choice (or {} if none/unreadable)."""
+    try:
+        import json
+        with open(_prefs_path(), encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:  # noqa: BLE001 — missing/corrupt prefs must never break startup
+        return {}
+
+
+def save_prefs(updates: dict) -> None:
+    """Merge non-empty `updates` into the prefs sidecar (atomic write). Best-effort; never raises."""
+    try:
+        import json
+        path = _prefs_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cur = load_prefs()
+        cur.update({k: v for k, v in updates.items() if v})
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cur, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 — persistence is a nicety, not a hard requirement
+        pass
+
+
 def _deep_merge(a: dict, b: dict) -> dict:
     out = dict(a)
     for k, v in b.items():

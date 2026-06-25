@@ -483,6 +483,8 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
 
 # ── input layer (prompt_toolkit) ─────────────────────────────────────────────────────────────
 _SLASH = {
+    "/model":   "show/switch model + reasoning (/model <name> [fast|full|high|max])",
+    "/reasoning": "set reasoning effort (/reasoning <fast|full|high|max>)",
     "/plan":    "show the agent's current PLAN + mission",
     "/cost":    "show per-turn cost / token metrics (needs AGENT_METRICS=1)",
     "/switch":  "switch to a parked topic by id (/switch <id>)",
