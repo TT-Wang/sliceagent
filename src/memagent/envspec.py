@@ -45,6 +45,7 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),
     EnvVar("AGENT_MAX_TOKENS", "agent", "Per-session token budget (parks the turn when exhausted).", ""),
     EnvVar("AGENT_MAX_STEPS", "agent", "Per-turn step ceiling (runaway backstop); raise for deep analysis.", "60"),
+    EnvVar("AGENT_SELFCHECK_MAX", "agent", "Max grounded done-gate verification rounds before accepting 'done'.", "3"),
     EnvVar("AGENT_TOOL_TIMEOUT", "agent", "Per-tool wall-clock deadline in seconds (0/unset = off).", ""),
     EnvVar("AGENT_ROOT", "agent", "Workspace root override (defaults to the current directory).", ""),
     EnvVar("AGENT_ALLOW_PLUGINS", "agent", "Set truthy to load project/user plugins.", ""),

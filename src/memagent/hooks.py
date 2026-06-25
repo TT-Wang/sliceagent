@@ -147,7 +147,7 @@ class OracleHook(Hooks):
 
 
 _SELF_CHECK = (
-    "STOP — definition-of-done check (required, ONE time). Before you finish, verify your work against "
+    "STOP — definition-of-done check (required). Before you finish, verify your work against "
     "the task's REAL acceptance criteria:\n"
     "1) List EVERY concrete requirement: start from your STANDING REQUIREMENTS contract if you have one "
     "(each open '[ ]' item is binding), and ALSO re-read the task for anything not yet recorded — the exact "
@@ -164,23 +164,40 @@ _SELF_CHECK = (
 
 
 class SelfCheckHook(Hooks):
-    """Structural definition-of-done gate for AUTONOMOUS runs (no human to catch a premature 'done').
-    On the FIRST time the model declares done, force exactly ONE verification pass: re-derive the task's
-    requirements and confirm each against the REAL end-state. Fires once per turn then accepts the next
-    'done', so it can never loop. Moat-safe: it only appends a message (the proven feedback channel) — the
-    agent does the real tool calls to verify. The no-oracle cousin of OracleHook: with no external
-    AGENT_VERIFY_CMD, the agent self-sources its acceptance check instead of declaring done blind."""
+    """GROUNDED definition-of-done gate for AUTONOMOUS runs (no human to catch a premature 'done'). When the
+    model declares done, force a verification round: re-derive the task's real acceptance criteria and
+    CONFIRM each against the actual end-state by RUNNING tools (not asserting). Crucially it accepts 'done'
+    only once the model has actually done verification WORK (a tool step) since the gate fired — a bare
+    re-assertion of 'done' re-fires the gate. Bounded to `max_fires` rounds (env AGENT_SELFCHECK_MAX) so it
+    can never loop. Moat-safe: appends a message (the proven feedback channel) + observes tool activity; the
+    agent does the real work. The no-oracle cousin of OracleHook — the agent self-sources its acceptance
+    check instead of declaring done blind. (Targets the measured premature-stop losses: produced-no-output,
+    incomplete sweeps, symptom-not-root fixes — make it verify before it is allowed to finish.)"""
 
-    def __init__(self):
-        self._fired = False
+    def __init__(self, max_fires: int = 3):
+        import os
+        self._max = max(1, int(os.environ.get("AGENT_SELFCHECK_MAX") or max_fires))
+        self._fires = 0
+        self._acted = False   # did the model run a tool since the gate last fired?
 
     def reset_for_turn(self):
-        self._fired = False
+        self._fires = 0
+        self._acted = False
+
+    def after_step(self, step: int, usage: dict, stop_reason: str):
+        if stop_reason == "tool_use":   # the model actually ran verification/fix tools this round
+            self._acted = True
+        return None
 
     def should_continue_after_stop(self, stop_reason):
-        if stop_reason != "end_turn" or self._fired:
+        if stop_reason != "end_turn":
             return None
-        self._fired = True
+        if self._fires > 0 and self._acted:
+            return None                  # verified-by-doing after a nudge → honest done, accept
+        if self._fires >= self._max:
+            return None                  # bounded → never loop
+        self._fires += 1
+        self._acted = False
         return {"continue": True, "feedback": _SELF_CHECK}
 
 

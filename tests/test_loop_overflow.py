@@ -221,17 +221,29 @@ def throwing_build_slice_parks_not_crashes():
 
 
 @check
-def selfcheck_forces_one_verification_pass_then_accepts():
-    # SelfCheckHook: first 'done' -> forced verification feedback (rides messages); second 'done' accepted.
+def selfcheck_accepts_after_model_actually_verifies():
+    # GROUNDED gate: 'done' -> forced verification feedback -> model RUNS a tool (real verify) -> 'done' accepted.
     from memagent.hooks import SelfCheckHook
     llm = _ScriptLLM([_Resp(content="done", finish_reason="stop"),
+                      _Resp(tool_calls=[_TC("noop", {}, "c1")]),         # the model does verification work
                       _Resp(content="verified, done", finish_reason="stop")])
     res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
                    dispatch=lambda e: None, hooks=SelfCheckHook(), max_steps=10)
     assert res.stop_reason == "end_turn", res.stop_reason
-    assert len(llm.seen) == 2, f"expected done->self-check->done (2 calls), got {len(llm.seen)}"
+    assert len(llm.seen) == 3, f"expected done->gate->verify-tool->done (3 calls), got {len(llm.seen)}"
     assert any("definition-of-done" in (m.get("content") or "") for m in llm.seen[1]), \
         "self-check feedback was not delivered to the model"
+
+
+@check
+def selfcheck_is_bounded_when_model_never_verifies():
+    # A bare re-assertion of 'done' (no tool work) re-fires the gate, but only up to max_fires — never loops.
+    from memagent.hooks import SelfCheckHook
+    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop")] * 8)
+    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                   dispatch=lambda e: None, hooks=SelfCheckHook(max_fires=2), max_steps=20)
+    assert res.stop_reason == "end_turn", res.stop_reason
+    assert len(llm.seen) == 3, f"max_fires=2 → 2 fires then accept (3 calls), got {len(llm.seen)}"
 
 
 @check
