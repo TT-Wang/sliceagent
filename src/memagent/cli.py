@@ -235,7 +235,13 @@ def main() -> None:
     # episodic cache: lossless turn log (None for NullMemory → eval path untouched)
     episodic = make_episode_sink(memory, session_id=session.session_id,
                                  task_id_fn=lambda: session.active_id or "t-none",
-                                 title_fn=lambda: one_line(session.active().goal, 80) if session.active_id else "")
+                                 title_fn=lambda: one_line(session.active().goal, 80) if session.active_id else "",
+                                 # task-outcome signal for consolidation: how many STANDING REQUIREMENTS
+                                 # were still open at turn end (0 = none declared OR all met). promote_procedures
+                                 # won't mine a "successful workflow" skill from a task that left some unmet.
+                                 outcome_fn=lambda: {"requirements_open": sum(
+                                     1 for r in session.active().requirements
+                                     if isinstance(r, dict) and not r.get("done"))} if session.active_id else {})
 
     # optional rich TUI (the `tui` extra). Output via Rich, input via prompt_toolkit — temporally
     # separate from the synchronous run_turn, so no patch_stdout/threading. Off when piped (eval).

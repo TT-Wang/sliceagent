@@ -27,12 +27,15 @@ def act(name, **args):
     return {"name": name, "args": args, "failing": False}
 
 
-def prec(task, turn, actions, *, stop="end_turn", failing=False, files=None, title=""):
+def prec(task, turn, actions, *, stop="end_turn", failing=False, files=None, title="", requirements_open=0):
     """A procedure-shaped record: a turn with real actions."""
+    meta = {"failing": failing, "stop_reason": stop, "files": files or []}
+    if requirements_open:
+        meta["requirements_open"] = requirements_open
     return {"task_id": task, "turn": turn, "record": {
         "title": title,
         "steps": [{"slice": "", "action": actions, "observation": ["ok"] * len(actions)}],
-        "note": "", "meta": {"failing": failing, "stop_reason": stop, "files": files or []}}}
+        "note": "", "meta": meta}}
 
 
 @check
@@ -114,6 +117,19 @@ def procedure_from_clean_multistep_workflow():
     assert "calculator" in procs[0]["name"] and len(procs[0]["steps"]) == 3
     md = render_skill(procs[0])
     assert md.startswith("---\nname:") and "## Process" in md and "read_file" in md and "calc.py" in md
+
+
+@check
+def incomplete_task_with_open_requirements_no_procedure():
+    # a clean multistep workflow, but the task DECLARED standing requirements and left one OPEN at its
+    # final turn → an incomplete task, so no skill is mined from it (task-outcome gate, #3).
+    workflow = [act("read_file", path="calc.py"), act("str_replace", path="calc.py", old_string="x"),
+                act("run_command", command="python calc.py")]
+    assert promote_procedures([prec("t1", 1, workflow, files=["calc.py"], title="add sub()",
+                                    requirements_open=1)]) == []
+    # all requirements met (==0 / absent) → still promoted (the gate is the OPEN count, not mere presence)
+    assert len(promote_procedures([prec("t1", 1, workflow, files=["calc.py"], title="add sub()",
+                                        requirements_open=0)])) == 1
 
 
 @check

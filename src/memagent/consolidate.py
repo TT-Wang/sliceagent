@@ -187,6 +187,12 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
         last = rmeta[-1].get("meta", {})
         if last.get("stop_reason") != "end_turn":
             continue                                   # smooth SUCCESS only
+        if last.get("requirements_open", 0) > 0:
+            continue                                   # the task DECLARED standing requirements and left
+                                                       # some unmet at its final turn → an INCOMPLETE task.
+                                                       # A skill claims a workflow that WORKS, so don't mine
+                                                       # one from unfinished work (task-outcome gate, #3).
+                                                       # Absent/0 (no contract, or all met) → not suppressed.
         actions = [a for m in rmeta for st in m.get("steps", []) for a in st.get("action", [])
                    if not a.get("failing") and a.get("name") in _SKILL_OPS]
         names = [a.get("name") for a in actions]

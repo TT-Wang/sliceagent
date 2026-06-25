@@ -72,11 +72,12 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
 class EpisodeSink:
     """Buffers a turn's events; flushes one lossless record on TurnEnd OR TurnInterrupted."""
 
-    def __init__(self, memory, *, session_id: str, task_id_fn, title_fn=lambda: ""):
+    def __init__(self, memory, *, session_id: str, task_id_fn, title_fn=lambda: "", outcome_fn=lambda: {}):
         self.memory = memory
         self.session_id = session_id
         self.task_id_fn = task_id_fn   # () -> current task_id (host supplies; Step 3 seam)
         self.title_fn = title_fn       # () -> human title (goal one-liner) for cheap trace-back
+        self.outcome_fn = outcome_fn   # () -> {} of task-OUTCOME signals (e.g. requirements_open) for meta
         self._turn = 0
         self._reset()
 
@@ -121,10 +122,15 @@ class EpisodeSink:
                 title = self.title_fn() or ""
             except Exception:   # noqa: BLE001 — a title hiccup must not lose the record
                 title = ""
+            try:
+                outcome = self.outcome_fn() or {}   # task-OUTCOME signals (requirements_open) — what
+            except Exception:   # noqa: BLE001       # consolidation gates promotion on; never lose a record
+                outcome = {}
             meta = {**self._meta, "stop_reason": stop_reason,
                     "ptok": usage.get("prompt_tokens", 0),
                     "ctok": usage.get("completion_tokens", 0),
-                    "files": sorted(set(self._meta["files"]))}
+                    "files": sorted(set(self._meta["files"])),
+                    **outcome}
             record = {
                 "title": title,            # human breadcrumb for cheap trace-back (topic is task_id)
                 "steps": self._steps,      # lossless raw events (full=true / step recall)
@@ -139,8 +145,9 @@ class EpisodeSink:
             self._reset()  # reset regardless, so a turn can never bleed into the next
 
 
-def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: ""):
+def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: "", outcome_fn=lambda: {}):
     """None for non-durable memory (NullMemory) → host skips it → evals untouched."""
     if not getattr(memory, "is_durable", False):
         return None
-    return EpisodeSink(memory, session_id=session_id, task_id_fn=task_id_fn, title_fn=title_fn)
+    return EpisodeSink(memory, session_id=session_id, task_id_fn=task_id_fn, title_fn=title_fn,
+                       outcome_fn=outcome_fn)
