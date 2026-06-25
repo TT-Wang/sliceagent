@@ -286,7 +286,9 @@ TOOL_SCHEMAS = [
         "failure). Pass timeout (seconds, default 30, max 600) for slow builds. Use for one-shot commands that "
         "finish; for a process that must STAY alive use proc_start, for an interactive REPL use terminal_open, "
         "to chain several edits + a test in one turn use execute_code. No cwd arg — prepend `cd DIR &&`. The "
-        "shell is unconfined (can reach outside the workspace, unlike the file tools).",
+        "shell is unconfined (can reach outside the workspace, unlike the file tools). If a command could "
+        "emit a LARGE dump (disassembly, a long log, a dataset), FILTER it in the command itself — pipe "
+        "through grep/head/tail/sed -n or target a range — so only the relevant slice returns.",
         {"command": {"type": "string"}, "timeout": {"type": "number"}}, ["command"]),
     _fn("execute_code",
         "Run a Python script that does SEVERAL file/shell steps in ONE turn (e.g. multiple edits + a test). Use "
