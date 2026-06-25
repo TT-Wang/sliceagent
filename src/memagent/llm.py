@@ -77,6 +77,90 @@ def _usage_dict(raw) -> dict | None:
     return usage
 
 
+def _as_text(content) -> str:
+    """Flatten a chat `content` (str OR a multimodal parts list) to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content
+                       if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
+    return "" if content is None else str(content)
+
+
+def _to_responses_content(content):
+    """Map a chat message `content` to the Responses-API content shape: a plain string passes through;
+    a multimodal parts list is converted (text→input_text, image_url→input_image)."""
+    if not isinstance(content, list):
+        return content if content is not None else ""
+    parts = []
+    for p in content:
+        if not isinstance(p, dict):
+            parts.append({"type": "input_text", "text": str(p)}); continue
+        t = p.get("type")
+        if t in ("text", "input_text"):
+            parts.append({"type": "input_text", "text": p.get("text", "")})
+        elif t in ("image_url", "input_image"):
+            u = p.get("image_url")
+            url = u.get("url") if isinstance(u, dict) else u
+            parts.append({"type": "input_image", "image_url": url})
+        else:
+            parts.append(p)
+    return parts
+
+
+def _to_responses_input(messages: list[dict]) -> list[dict]:
+    """Convert chat/completions `messages` → Responses-API `input` items. The Responses API has no
+    `tool` role and no nested `tool_calls`: an assistant tool call becomes a flat {type:function_call}
+    item and a tool result a {type:function_call_output} item; plain system/user/assistant stay as
+    {role, content}. Pure — testable offline."""
+    out: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":                                   # tool result → function_call_output
+            out.append({"type": "function_call_output",
+                        "call_id": m.get("tool_call_id", ""), "output": _as_text(m.get("content"))})
+        elif role == "assistant" and m.get("tool_calls"):    # assistant turn that called tools
+            txt = _as_text(m.get("content"))
+            if txt:
+                out.append({"role": "assistant", "content": txt})
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                out.append({"type": "function_call", "call_id": tc.get("id", ""),
+                            "name": fn.get("name", ""), "arguments": fn.get("arguments") or "{}"})
+        else:                                                # plain text (system/user/assistant)
+            out.append({"role": role or "user", "content": _to_responses_content(m.get("content"))})
+    return out
+
+
+def _to_responses_tools(tools: list[dict]) -> list[dict]:
+    """chat tool schema {type:function, function:{name,description,parameters}} → Responses flat
+    {type:function, name, description, parameters}."""
+    out = []
+    for t in (tools or []):
+        fn = t.get("function") if isinstance(t, dict) else None
+        if fn:
+            out.append({"type": "function", "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters") or {"type": "object", "properties": {}}})
+        elif isinstance(t, dict) and t.get("type") == "function" and "name" in t:
+            out.append(t)                                    # already Responses-shaped
+    return out
+
+
+def _responses_usage(u):
+    """Adapt a Responses `usage` (input_tokens / output_tokens / input_tokens_details.cached_tokens) to
+    the chat-usage attribute names `_usage_dict` reads, so token telemetry/cost is unchanged. None→None."""
+    if not u:
+        return None
+    from types import SimpleNamespace as NS
+    det = getattr(u, "input_tokens_details", None)
+    cached = (getattr(det, "cached_tokens", 0) if det else 0) or 0
+    return NS(prompt_tokens=getattr(u, "input_tokens", 0) or 0,
+              completion_tokens=getattr(u, "output_tokens", 0) or 0,
+              prompt_tokens_details=NS(cached_tokens=cached),
+              cached_tokens=cached, cache_creation_input_tokens=0)
+
+
 class OpenAILLM:
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  base_url: str | None = None, proxy: str | None = None, timeout: float | None = None):
@@ -154,6 +238,17 @@ class OpenAILLM:
         # thereafter reasoning_effort is dropped when tools are present (graceful degrade, no re-400).
         self._drop_reasoning_effort = False
 
+    def switch(self, *, model: str | None = None, reasoning: str | None = None) -> None:
+        """Live-switch the model id and/or reasoning intent for SUBSEQUENT turns (mutates in place — the
+        loop passes this same llm object every turn, so the change applies from the next turn on). Resets
+        the reasoning_effort+tools degrade memory since a different model may support the pairing. Same
+        endpoint/client; switching to a DIFFERENT PROVIDER (base_url/key) is `memagent config --use`."""
+        if model:
+            self.model = model
+            self._drop_reasoning_effort = False
+        if reasoning:
+            self.reasoning = reasoning.strip().lower()
+
     def set_cache_key(self, key: str | None) -> None:
         """Pin a session-scoped prompt-cache routing key (typically the session_id). Cheapest cache
         lever there is: raises cache-hit rate, adds no tokens. Safe to call repeatedly."""
@@ -192,7 +287,7 @@ class OpenAILLM:
             # Older SDKs don't accept `request=` in the constructor.
             raise APITimeoutError("memagent hard timeout reached")
 
-    def _create(self, kwargs: dict):
+    def _create(self, kwargs: dict, caller=None):
         """Call the SDK with a HARD wall-clock deadline that ALWAYS fires, on ANY thread. The httpx/SDK
         read-timeout only bounds the gap BETWEEN bytes, so a connection that goes silent mid-response can
         hang far past `timeout` (observed: a stalled read wedging the loop 10+ min). On the main thread a
@@ -201,19 +296,20 @@ class OpenAILLM:
         enforces the SAME deadline (the abandoned SDK call is left to die on its socket while control
         returns). Without this, a wedged connection in a worker thread hangs the turn FOREVER, since the
         SDK timeout alone misses silent mid-response stalls. Task/provider-agnostic reliability."""
+        caller = caller or (lambda kw: self.client.chat.completions.create(**kw))
         import signal as _signal
         try:
             prev = _signal.signal(_signal.SIGALRM, self._on_alarm)
             _signal.alarm(self._hard_timeout)
         except (ValueError, AttributeError, OSError):
-            return self._create_watchdog(kwargs)  # not the main thread → enforce the deadline via a thread
+            return self._create_watchdog(kwargs, caller)  # not the main thread → deadline via a thread
         try:
-            return self.client.chat.completions.create(**kwargs)
+            return caller(kwargs)
         finally:
             _signal.alarm(0)
             _signal.signal(_signal.SIGALRM, prev)
 
-    def _create_watchdog(self, kwargs: dict):
+    def _create_watchdog(self, kwargs: dict, caller=None):
         """Off-main-thread hard deadline: run the SDK call in a DAEMON worker and abandon it if it blows
         the wall-clock budget (raise a RETRYABLE timeout so with_retry can retry, then the loop parks
         gracefully instead of hanging). #47: a daemon thread (vs a ThreadPoolExecutor, whose worker the
@@ -221,11 +317,12 @@ class OpenAILLM:
         socket whenever the SDK call finally errors on its own timeout. One thread per call; bounded."""
         import threading
         APITimeoutError = _import_api_timeout_error()
+        caller = caller or (lambda kw: self.client.chat.completions.create(**kw))
         box: dict = {}
 
         def _call():
             try:
-                box["resp"] = self.client.chat.completions.create(**kwargs)
+                box["resp"] = caller(kwargs)
             except BaseException as e:  # noqa: BLE001 — propagate to the caller thread
                 box["err"] = e
 
@@ -392,7 +489,88 @@ class OpenAILLM:
             else:
                 kwargs[key] = value
 
+    def _effort(self) -> str | None:
+        """The Responses-API reasoning effort for THIS call ('low'/'high'/'xhigh'), or None when the
+        intent is the provider default ('full') or the model has no effort knob. This is the routing key:
+        gpt-5.5 REJECTS reasoning_effort + function tools on /v1/chat/completions, so any explicit effort
+        goes through /v1/responses (which supports the pairing). Default 'full' → None → chat path."""
+        from .model_catalog import capability
+        if not capability(self.model, self._base_url).supports_reasoning_effort:
+            return None
+        return {"fast": "low", "high": "high", "max": "xhigh"}.get(self.reasoning)
+
+    def _complete_responses(self, messages: list[dict], tools: list[dict], effort: str) -> AssistantMessage:
+        """The /v1/responses path: lets the gpt-5 family reason at `effort` WITH function tools (the pairing
+        chat/completions 400s on). Same AssistantMessage contract, same hard-deadline + live-streaming
+        behaviour as the chat path. Isolated provider quirk — the loop/slice/moat never see it."""
+        kwargs: dict = {"model": self.model, "input": _to_responses_input(messages),
+                        "reasoning": {"effort": effort}}
+        rtools = _to_responses_tools(tools)
+        if rtools:
+            kwargs["tools"] = rtools
+            kwargs["tool_choice"] = "auto"
+        if self.max_tokens:
+            kwargs["max_output_tokens"] = self.max_tokens
+        ck = self._cache_routing_kwargs()                    # prompt_cache_key is valid on Responses too
+        if ck.get("prompt_cache_key"):
+            kwargs["prompt_cache_key"] = ck["prompt_cache_key"]
+        _stream = (getattr(self, "_on_delta", None) is not None
+                   and threading.current_thread() is threading.main_thread())
+        resp = (self._responses_stream(kwargs) if _stream
+                else self._create(kwargs, caller=lambda kw: self.client.responses.create(**kw)))
+        return self._parse_responses(resp)
+
+    def _responses_stream(self, kwargs: dict):
+        """Stream a Responses call, emit content/reasoning deltas live, return the final Response (parsed
+        downstream identically to the blocking path). Hard-deadline wrapped; on ANY stream hiccup it falls
+        back to a single blocking call (a render path must never kill the turn)."""
+        def _drain(kw):
+            with self.client.responses.stream(**kw) as stream:
+                for ev in stream:
+                    try:
+                        t = getattr(ev, "type", "")
+                        if t == "response.output_text.delta":
+                            self._emit("content", getattr(ev, "delta", "") or "")
+                        elif t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+                            self._emit("reasoning", getattr(ev, "delta", "") or "")
+                    except Exception:  # noqa: BLE001 — one bad event must not abort the stream
+                        continue
+                return stream.get_final_response()
+        try:
+            return self._create(kwargs, caller=_drain)
+        except Exception:  # noqa: BLE001 — streaming unavailable/broke → blocking call (identical result)
+            return self._create(kwargs, caller=lambda kw: self.client.responses.create(**kw))
+
+    def _parse_responses(self, resp) -> AssistantMessage:
+        """Map a Responses Response → AssistantMessage (content / tool_calls / usage / finish_reason)."""
+        content = (getattr(resp, "output_text", None) or "").strip() or None
+        calls: list[ToolCall] = []
+        for item in (getattr(resp, "output", None) or []):
+            if getattr(item, "type", None) == "function_call":
+                try:
+                    args = json.loads(getattr(item, "arguments", "") or "{}")
+                except Exception:  # noqa: BLE001
+                    args = {}
+                calls.append(ToolCall(id=getattr(item, "call_id", "") or getattr(item, "id", ""),
+                                      name=getattr(item, "name", ""), args=args))
+        status = getattr(resp, "status", None)               # finish_reason from Responses status
+        if status == "incomplete":
+            reason = getattr(getattr(resp, "incomplete_details", None), "reason", "")
+            finish = "length" if reason == "max_output_tokens" else "stop"
+        else:
+            finish = "tool_calls" if calls else "stop"
+        if not content and not calls:
+            from .errors import EmptyResponseError
+            raise EmptyResponseError(f"empty responses completion (status={status})")
+        return AssistantMessage(content=content, tool_calls=calls,
+                                usage=_usage_dict(_responses_usage(getattr(resp, "usage", None))),
+                                finish_reason=finish)
+
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
+        effort = self._effort()
+        if effort and hasattr(self.client, "responses"):   # explicit effort → /v1/responses (chat 400s on
+            return self._complete_responses(messages, tools, effort)   # effort+tools). No responses API on
+        # an old SDK / a provider that only has chat → fall through; the chat 400→drop below degrades it.
         kwargs: dict = dict(model=self.model, messages=messages, tools=tools, tool_choice="auto")
         if self.max_tokens:
             # Provider quirk (now sourced from the model catalog — gpt-5/o-series renamed this param to

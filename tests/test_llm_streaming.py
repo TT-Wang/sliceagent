@@ -165,6 +165,46 @@ def reasoning_effort_with_tools_400_degrades_and_sticks():
 
 
 @check
+def switch_mutates_model_and_reasoning_live():
+    # the /model switch: mutate model + reasoning in place (the loop reuses this llm every turn) and reset
+    # the effort+tools degrade memory, so a new model re-evaluates routing.
+    llm = _stub([], on_delta=None)
+    llm.model = "gpt-5.5"; llm.reasoning = "full"; llm._drop_reasoning_effort = True
+    assert llm._effort() is None                       # full → chat path
+    llm.switch(model="gpt-5", reasoning="max")
+    assert llm.model == "gpt-5" and llm.reasoning == "max"
+    assert llm._drop_reasoning_effort is False         # reset for the new model
+    assert llm._effort() == "xhigh"                    # max → /v1/responses routing
+
+
+@check
+def explicit_effort_with_tools_routes_to_responses():
+    # the FIX: when the SDK has /v1/responses, an explicit effort + tools goes through Responses (which
+    # supports the pairing) instead of degrading. Verify it calls responses.create (not chat) with the
+    # right reasoning/input/tools and parses the Response.
+    seen = {"responses": 0, "chat": 0}
+    fake = NS(output_text="hi", output=[], status="completed",
+              usage=NS(input_tokens=5, output_tokens=2, input_tokens_details=NS(cached_tokens=0)))
+    class _Resp:
+        def create(self, **kw):
+            seen["responses"] += 1
+            assert kw.get("reasoning") == {"effort": "low"}, kw.get("reasoning")
+            assert "input" in kw and "tools" in kw, list(kw)
+            return fake
+    class _Chat:
+        def create(self, **kw):
+            seen["chat"] += 1
+            return NS(choices=[NS(message=NS(content="x", tool_calls=[]), finish_reason="stop")], usage=None)
+    llm = _stub([], on_delta=None)
+    llm.model = "gpt-5.5"; llm.reasoning = "fast"           # effort=low
+    llm.client = NS(responses=_Resp(), chat=NS(completions=_Chat()))
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+    msg = llm.complete([{"role": "user", "content": "x"}], tools)
+    assert msg.content == "hi", msg.content
+    assert seen == {"responses": 1, "chat": 0}, f"effort+tools must use /v1/responses, not chat: {seen}"
+
+
+@check
 def typed_usage_splits_cache_read_from_other():
     # borrowed Kimi TokenUsage: input split into other / cache-read / cache-creation, output kept.
     from memagent.llm import _usage_dict
