@@ -58,15 +58,7 @@ class SessionManager:
         env.setdefault("TERM", "xterm")
         try:
             try:
-                if command:                       # run the given program directly on the PTY
-                    popen = subprocess.Popen(command, shell=True, cwd=cwd, env=env,
-                                             stdin=slave, stdout=slave, stderr=slave,
-                                             start_new_session=True, close_fds=True)
-                else:                             # an interactive shell (holds cd/env across turns)
-                    shell = os.environ.get("SHELL") or "/bin/bash"
-                    popen = subprocess.Popen([shell], cwd=cwd, env=env,
-                                             stdin=slave, stdout=slave, stderr=slave,
-                                             start_new_session=True, close_fds=True)
+                popen = self._spawn_pty(command, cwd, env, slave)
             finally:
                 os.close(slave)                   # parent keeps only the master end
         except BaseException:
@@ -76,6 +68,18 @@ class SessionManager:
         fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         self._s[name] = _Session(name, command or "(shell)", master, popen)
         return name
+
+    def _spawn_pty(self, command, cwd, env, slave):
+        """Launch the PTY-attached process. OVERRIDABLE SEAM: a container variant relaunches the same
+        command through `docker exec -it` so the session lives INSIDE the task container (host path here)."""
+        if command:                               # run the given program directly on the PTY
+            return subprocess.Popen(command, shell=True, cwd=cwd, env=env,
+                                    stdin=slave, stdout=slave, stderr=slave,
+                                    start_new_session=True, close_fds=True)
+        shell = os.environ.get("SHELL") or "/bin/bash"   # interactive shell (holds cd/env across turns)
+        return subprocess.Popen([shell], cwd=cwd, env=env,
+                                stdin=slave, stdout=slave, stderr=slave,
+                                start_new_session=True, close_fds=True)
 
     def send(self, name: str, keys: str, *, enter: bool = True) -> str:
         sess = self._get(name)

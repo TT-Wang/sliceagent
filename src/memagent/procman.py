@@ -54,13 +54,18 @@ class ProcManager:
         log_fh = os.fdopen(fd, "wb")
         env = _scrub_env() if self.scrub_secrets else dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
-        popen = subprocess.Popen(
+        popen = self._spawn_proc(command, cwd, env, log_fh)
+        self._procs[handle] = _Proc(handle, command, popen, log_path, log_fh)
+        return handle
+
+    def _spawn_proc(self, command, cwd, env, log_fh):
+        """Launch the background process. OVERRIDABLE SEAM: a container variant relaunches via
+        `docker exec` so the process runs INSIDE the task container, streaming to this host logfile."""
+        return subprocess.Popen(
             command, shell=True, cwd=cwd, env=env,
             stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        self._procs[handle] = _Proc(handle, command, popen, log_path, log_fh)
-        return handle
 
     def poll(self, handle: str) -> str:
         rc = self._get(handle).popen.poll()
