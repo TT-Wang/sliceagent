@@ -106,6 +106,42 @@ def inactive_index_is_a_noop():
 
 
 @check
+def recency_breaks_ties_among_comparable_hits():
+    # the live-use bug: "no.3 findings for memagent" recalled the OLDER 'investigate memagent' turn over
+    # the NEWER 'core loop review' turn because BM25 is purely lexical. Among comparably-relevant hits the
+    # recency blend must now prefer the more recent turn (the latest review).
+    with tempfile.TemporaryDirectory() as d:
+        idx = make_episode_index(os.path.join(d, "idx.db"))
+        sid = "s-1"
+        idx.index_episode(session_id=sid, task_id="t", turn=3, ts="2026-06-25T11:49:00Z",
+                          title="investigate the memagent project", note="findings about memagent",
+                          text="memagent findings investigation memagent project findings notable")
+        idx.index_episode(session_id=sid, task_id="t", turn=8, ts="2026-06-25T11:55:00Z",
+                          title="close review of the core agent loop", note="memagent loop findings",
+                          text="memagent findings review core agent loop memagent guardrail findings")
+        hits = idx.search("memagent findings", only_session=sid, limit=5)
+        assert hits and hits[0]["turn"] == 8, [h["turn"] for h in hits]   # newest review wins the tie
+        idx.close()
+
+
+@check
+def recency_does_not_override_stronger_relevance():
+    # the moat guard: recency is only a tie-break WITHIN the relevance band — a clearly stronger (but
+    # older) lexical match must still beat a weak recent one, so recency can never smuggle in noise.
+    with tempfile.TemporaryDirectory() as d:
+        idx = make_episode_index(os.path.join(d, "idx.db"))
+        sid = "s-1"
+        idx.index_episode(session_id=sid, task_id="t", turn=1, ts="2026-06-20T10:00:00Z",
+                          title="jwt auth", note="jwt refresh",
+                          text="jwt auth token refresh jwt rotation jwt secret findings jwt jwt")
+        idx.index_episode(session_id=sid, task_id="t", turn=2, ts="2026-06-25T10:00:00Z",
+                          title="css padding", note="header", text="padding header findings")
+        hits = idx.search("jwt findings", only_session=sid, limit=5)
+        assert hits[0]["turn"] == 1, [h["turn"] for h in hits]   # strong OLD match beats weak recent
+        idx.close()
+
+
+@check
 def memory_search_episodes_noop_without_index():
     # NullMemory must expose search_episodes returning [] (contract parity)
     from memagent.memory import NullMemory

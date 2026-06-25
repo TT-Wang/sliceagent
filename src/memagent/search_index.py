@@ -37,6 +37,11 @@ import os
 import re
 
 _FTS_TABLE = "episodes"
+# Recency tie-break weight for search() — how much a hit's age can re-order it WITHIN the relevance band
+# the floor keeps (bounded by the top lexical score, so it never overrides a clearly-stronger match). At
+# 0.25 a recent hit scoring within ~25% of the top lexical can edge ahead — enough that "the latest review"
+# wins over a stale turn that merely shares more keywords, without recency dominating relevance.
+_RECENCY_W = 0.25
 
 
 def _fts_match_query(q: str) -> str:
@@ -218,8 +223,7 @@ class EpisodeIndex:
                 # get an intuitive higher-is-better number; result ORDER already follows `rank` directly.
                 "score": -float(r[7]) if r[7] is not None else 0.0,
             })
-            if len(out) >= lim:
-                break
+            # collect ALL candidates (no early break) — the floor + recency re-rank below need them.
         # RELATIVE FLOOR (counterweight to OR-breadth): keep only hits scoring within 15% of the top hit,
         # always keeping #1. OR-join maximizes recall; this trims the long tail of turns that matched on a
         # single weak/common term, so a precise query still returns a precise set (and a vague one degrades
@@ -229,7 +233,22 @@ class EpisodeIndex:
             if top > 0:
                 cut = top * 0.15
                 out = [out[0]] + [h for h in out[1:] if h["score"] >= cut]
-        return out
+        # RECENCY RE-RANK: among the comparably-relevant survivors the floor kept, prefer the more RECENT
+        # turn — a fresh discussion of a topic should win over a stale one ("the findings" = the latest
+        # review, not an older mention that shares more keywords). The bonus is bounded by the TOP lexical
+        # score, so recency only re-orders WITHIN the relevance band; it can never pull in a turn the floor
+        # rejected (relevance stays the gate, recency is the tie-break — this is the recall channel, so the
+        # moat's "relevant push" stays primary). Age order = ts then turn.
+        if len(out) > 1:
+            tops = out[0]["score"] or 1.0
+            by_age = sorted(out, key=lambda h: ((h.get("ts") or ""), (h.get("turn") or 0)))   # oldest→newest
+            n = len(by_age)
+            for k, h in enumerate(by_age):
+                h["_blend"] = h["score"] + _RECENCY_W * tops * (k / (n - 1))
+            out.sort(key=lambda h: h["_blend"], reverse=True)
+            for h in out:
+                h.pop("_blend", None)
+        return out[:lim]
 
     def close(self) -> None:
         if self._con is not None:
