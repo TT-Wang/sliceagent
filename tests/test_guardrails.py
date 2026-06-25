@@ -28,6 +28,7 @@ from memagent.guardrails import (                          # noqa: E402
     guardrail_blocked_result,
     is_failing_output,
 )
+from memagent.registry import ToolText
 
 CHECKS = []
 def check(fn):
@@ -63,6 +64,24 @@ def different_real_args_distinct_signatures():
     sa = ToolCallSignature.from_call("run_command", {"command": "ls", "note": "x"})
     sb = ToolCallSignature.from_call("run_command", {"command": "pwd", "note": "x"})
     assert sa != sb
+
+
+@check
+def failing_output_prefers_structured_ok_flag():
+    assert is_failing_output(ToolText("denied", ok=False)) is True
+    assert is_failing_output(ToolText("Error: appears in successful output", ok=True)) is False
+
+
+@check
+def exact_failure_counts_non_prefix_tooltext_failure():
+    g = ToolCallGuardrail()
+    args = {"command": "custom"}
+    for i in range(3):
+        assert g.before_call("run_command", args).block is False, f"blocked too early at {i}"
+        g.after_call("run_command", args, ToolText("denied", ok=False))
+    d = g.before_call("run_command", args)
+    assert d.block is True
+    assert d.code == "repeated_exact_failure"
 
 
 # --- exact-failure block --------------------------------------------------------

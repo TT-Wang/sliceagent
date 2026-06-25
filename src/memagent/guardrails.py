@@ -55,13 +55,22 @@ MUTATING_TOOL_NAMES = frozenset({
 # above (world_set, terminal_*, proc_*, update_plan, …) still drive loop detection (pessimistic).
 _NON_MUTATORS = IDEMPOTENT_TOOL_NAMES | frozenset({"grep", "glob", "ask_user"})
 
-# memagent's failing convention — kept in one place so guardrail counting agrees with
-# slice.record_action / loop.run_tool_batch / mining (all use this exact prefix test).
+# memagent's failing convention — kept in one place for plain-string fallback.
+# Structured tool results (ToolText) carry `.ok`; guardrail accounting must respect
+# that before prose matching so it agrees with loop.run_tool_batch.
 _FAIL_PREFIXES = ("Error", "Exit code")
 
 
 def is_failing_output(output: str | None) -> bool:
-    """memagent's standard failing-result test (loop.py:68, slice.py:228, mining.py)."""
+    """Return whether a tool result failed.
+
+    Prefer a structured `.ok` flag when present (ToolText and compatible plugin
+    results); fall back to memagent's historical prose-prefix convention for
+    plain strings.
+    """
+    ok = getattr(output, "ok", None)
+    if ok is not None:
+        return not bool(ok)
     return bool(output) and (output.startswith("Error") or output.startswith("Exit code"))
 
 
