@@ -760,6 +760,23 @@ def saved_dollars_accrue_and_reprice():
     assert stats["saved_cached_tok"] == stats["saved_cached_tok"]  # tokens unchanged by repricing
 
 
+# ── FEATURE: typing "/" pops a command menu — completer yields commands AND the composer has a menu float ─
+@check
+def slash_command_menu_renders():
+    import memagent.tui as t
+    from prompt_toolkit.document import Document
+    cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
+    assert "/model" in cmds and "/cost" in cmds and len(cmds) >= 5, cmds          # palette populated
+    assert [c.text for c in t._InputCompleter().get_completions(Document("/mo"), None)] == ["/model"]
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.layout.menus import CompletionsMenu
+    with create_pipe_input() as pin:                                              # the menu must be IN the layout
+        app, _ = t.TuiInput({"model": "x"}, root=".")._build_composer(pt_input=pin, pt_output=DummyOutput())
+        assert any(isinstance(f.content, CompletionsMenu) for f in app.layout.container.floats), \
+            "composer has no CompletionsMenu float → '/' computes matches but draws nothing"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

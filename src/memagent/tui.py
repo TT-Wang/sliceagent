@@ -397,8 +397,9 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
     from prompt_toolkit.application import Application
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.menus import CompletionsMenu
     from prompt_toolkit.widgets import Frame, TextArea
 
     state = {"status": "", "running": False, "signal": None, "last": None, "threads": []}
@@ -473,8 +474,12 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
         ev.app.exit()
 
     app = Application(
-        layout=Layout(HSplit([Frame(ta, title="message"), Window(FormattedTextControl(_status_line),
-                              height=1)]), focused_element=ta),
+        layout=Layout(FloatContainer(
+            content=HSplit([Frame(ta, title="message"),
+                            Window(FormattedTextControl(_status_line), height=1)]),
+            floats=[Float(xcursor=True, ycursor=True,
+                          content=CompletionsMenu(max_height=12, scroll_offset=1))],
+        ), focused_element=ta),
         key_bindings=kb, full_screen=False, mouse_support=False, input=pt_input, output=pt_output)
     return app, state
 
@@ -669,8 +674,9 @@ class TuiInput:
         drive it with a pipe input + DummyOutput (verify Enter→submit / ctrl-c→quit without a real tty)."""
         from prompt_toolkit.application import Application
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.widgets import Frame, TextArea
 
         ta = TextArea(prompt="❯ ", multiline=False, wrap_lines=True,
@@ -692,8 +698,16 @@ class TuiInput:
         def _(ev):
             ev.app.exit(result=None)
 
+        # Wrap the composer in a FloatContainer with a CompletionsMenu float so the slash-command palette
+        # (and file completions) actually RENDER as a dropdown at the cursor — a bare custom Application
+        # computes completions but, unlike PromptSession, has no built-in menu to draw them.
+        body = FloatContainer(
+            content=HSplit([Frame(ta, title="message"), status]),
+            floats=[Float(xcursor=True, ycursor=True,
+                          content=CompletionsMenu(max_height=12, scroll_offset=1))],
+        )
         app = Application(
-            layout=Layout(HSplit([Frame(ta, title="message"), status]), focused_element=ta),
+            layout=Layout(body, focused_element=ta),
             key_bindings=kb, full_screen=False, mouse_support=False,
             # erase the bordered box on submit so the composer is TRANSIENT: after Enter the box (and the text
             # the user typed in it) is wiped, and user_echo prints the single "▌ you …" line — no duplication
