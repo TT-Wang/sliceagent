@@ -53,7 +53,9 @@ def _sig(args: dict):
         try:
             return ("last", int(args["last"]), bool(args.get("full")))
         except (TypeError, ValueError):
-            return ("index",)
+            return ("last", 5, bool(args.get("full")))   # MATCH the handler's non-numeric fallback (n=5) — else
+            #                                              a malformed `last` records sig ('index',) and poisons
+            #                                              the real index-fetch slot for the rest of the turn
     return ("index",)
 
 

@@ -122,8 +122,9 @@ class SubdirHints:
                 p = Path(os.path.realpath(p))
             except (OSError, ValueError):
                 continue
-            # Treat as a file path -> use its directory.
-            if p.suffix or (p.exists() and p.is_file()):
+            # Treat as a file path -> use its directory. But a REAL directory whose name contains a dot
+            # (src/my.module, v1.2) must stay a directory so its OWN convention file still surfaces.
+            if not (p.exists() and p.is_dir()) and (p.suffix or (p.exists() and p.is_file())):
                 p = p.parent
             # Walk up ancestors, stopping at an already-surfaced dir or the root.
             for _ in range(self.MAX_ANCESTOR_WALK):

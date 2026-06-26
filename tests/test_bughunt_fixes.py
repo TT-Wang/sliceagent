@@ -724,6 +724,26 @@ def episode_files_only_real_edits():
     assert _files_of(ToolResult("edit_file", {"path": "e.py"}, "Wrote", False)) == ["e.py"] # a real edit is
 
 
+# ── R19 MED: a self-closing <svg .../> with '>' inside a quoted attr keeps the rest of the page ────────
+@check
+def html_svg_quoted_gt_keeps_page():
+    from memagent.web import html_to_text
+    out = html_to_text('<p>before</p><svg role="img" aria-label="a > b"/><p>AFTER</p>')
+    assert "before" in out and "AFTER" in out, repr(out)
+
+
+# ── R19 LOW: a real directory whose name has a dot still surfaces its own convention file ──────────────
+@check
+def subdir_hints_dotted_directory():
+    import os
+    from memagent.subdir_hints import SubdirHints
+    root = tempfile.mkdtemp(prefix="sdh2-")
+    d = os.path.join(root, "my.module"); os.makedirs(d)
+    open(os.path.join(d, "AGENTS.md"), "w").write("dotted-dir convention")
+    hint = SubdirHints(root).hints_for([d])
+    assert "dotted-dir convention" in hint, "a real dotted directory must surface its own convention file"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

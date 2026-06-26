@@ -324,9 +324,10 @@ def main() -> None:
 
     # Note: in Textual mode, interactive approval and ask_user are wired to the Textual app
     # below (after dispatch is built). Here we only set up the fallback non-Textual prompts.
-    if not use_textual and (_tui or sys.stdin.isatty()):
+    if not use_textual and not use_live and (_tui or sys.stdin.isatty()):
         # wire the ask_user capability to a real prompt when interactive (TUI rich prompt, or plain
-        # input); headless/eval keeps the non-interactive default so it never hangs.
+        # input); headless/eval — AND live mode, where a worker-thread console.input() would contend with
+        # the pinned prompt_toolkit app for stdin and HANG — keep the non-interactive default.
         def _ask_user(question, options):
             if _tui:
                 return _tui.ask_user(_console, question, options)
@@ -393,6 +394,8 @@ def main() -> None:
         detail = args.get("command") or args.get("path") or args.get("code", "")
         if app is not None:  # Textual modal dialog (runs in worker thread, marshals to UI)
             return app.confirm(name, args, reason)
+        if use_live:  # the pinned prompt_toolkit app owns stdin → a Rich confirm would hang; deny (safe default)
+            return "no"
         if _tui:  # synchronous mid-run (no pt app live) → a Rich confirm is safe
             return _tui.confirm(_console, name, str(detail), reason)
         if not sys.stdin.isatty():

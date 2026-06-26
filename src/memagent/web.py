@@ -90,6 +90,23 @@ _TAG_RE = re.compile(r"(?s)<[^>]+>")
 _DROP_OPEN_RE = re.compile(r"(?is)<(script|style|noscript|template|svg|head)\b")
 
 
+def _tag_end(html: str, start: int) -> int:
+    """Index of the opening tag's real end '>' at/after `start`, skipping any '>' inside a quoted attribute
+    value. Single forward scan (no backtracking) so the linear/anti-ReDoS guarantee holds."""
+    i, n, q = start, len(html), ""
+    while i < n:
+        c = html[i]
+        if q:
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        elif c == ">":
+            return i
+        i += 1
+    return -1
+
+
 def _strip_drop_tags(html: str) -> str:
     """Remove <tag>…</tag> spans (content included) for the DROP tags. LINEAR: finditer scans the openers
     once; the close is located with str.find (which only advances). A backtracking regex (`<tag\\b.*?</tag>`
@@ -105,7 +122,7 @@ def _strip_drop_tags(html: str) -> str:
             continue                                   # opener sits inside an already-dropped span
         tag = m.group(1).lower()
         close = low.find("</" + tag, m.end())
-        open_gt = low.find(">", m.end())
+        open_gt = _tag_end(html, m.end())   # first UNQUOTED '>' — a '>' inside a quoted attr isn't the tag end
         # Only <svg> may legitimately self-close; script/style/noscript/template/head ALWAYS need an end
         # tag. And an unquoted attribute value can end in '/' (a path/URL), so a '/' before '>' is "self-
         # closing" only when no real close tag precedes it — else we'd drop just the opener and leak the body.
