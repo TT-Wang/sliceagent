@@ -410,9 +410,9 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /model · /reasoning · /mode · /learn · /plan · /cost · /threads · /switch <id> · "
-                           "/resume <id> · /undo · /plugins · /mcp · /help · /exit\n  (type / for the menu · "
-                           "say \"review my changes\" to use code_review · @path pins that file)")
+            _console.print("commands: /model · /mode · /learn · /plan · /cost · /threads · /plugins · /mcp · "
+                           "/help · /exit\n  (type / for the menu · Esc = undo last turn · "
+                           "say \"review my changes\" for code_review · @path pins a file)")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -471,29 +471,50 @@ def main() -> None:
                 _console.print(f"  configured servers: {', '.join(configured) or '(none)'}")
                 _console.print(f"  connected tools ({len(mtools)}): {', '.join(mtools) or '(none — check startup logs)'}")
         elif cmd == "/mode":
-            if not arg:
+            _menu_ok = sys.stdin.isatty() and not use_live
+            chosen = None
+            if not arg and _menu_ok:                       # no arg + interactive → open the picker menu
+                from .tui import run_selector
+                order = ["babysitter", "teenager", "letitgo"]
+                rows = [("baby-sitter", "confirm every edit + command"),
+                        ("teenager", "auto edits, confirm commands"),
+                        ("let-it-go", "auto-run — still blocks catastrophic moves")]
+                cur = next((i for i, k in enumerate(order) if policy_label(k) == _stats.get("policy")), -1)
+                pick = run_selector("Permission mode", rows, current=cur)
+                chosen = order[pick] if pick is not None else None
+            elif arg:                                      # typed: /mode teenager
+                chosen = resolve_policy_mode(arg)
+                if chosen not in ("babysitter", "teenager", "letitgo"):
+                    _console.print("  unknown mode — use: baby-sitter | teenager | let-it-go"); return True
+            else:                                          # no arg, non-interactive → just show current
                 _console.print(f"  mode: [bold]{_stats.get('policy', '?')}[/]   options: baby-sitter · teenager · let-it-go")
                 _console.print("    baby-sitter = confirm every edit + command · teenager = auto edits, confirm "
                                "commands · let-it-go = auto (blocks catastrophic)")
-            else:
-                c = resolve_policy_mode(arg)
-                if c not in ("babysitter", "teenager", "letitgo"):
-                    _console.print("  unknown mode — use: baby-sitter | teenager | let-it-go")
-                else:
-                    eff = c if (sys.stdin.isatty() and not use_live) or not CONFIRMS.get(c) else "letitgo"
-                    perm_hook.policy = make_policy(eff)
-                    perm_hook.on_ask = _ask if CONFIRMS.get(eff) else None
-                    _stats["policy"] = policy_label(eff)
-                    save_prefs({"policy": eff})   # remember the choice for next launch
-                    _console.print(f"  → [bold]{policy_label(eff)}[/]"
-                                   + ("" if eff == c else "  (no interactive prompt here → running as let-it-go)"))
+            if chosen:
+                eff = chosen if (sys.stdin.isatty() and not use_live) or not CONFIRMS.get(chosen) else "letitgo"
+                perm_hook.policy = make_policy(eff)
+                perm_hook.on_ask = _ask if CONFIRMS.get(eff) else None
+                _stats["policy"] = policy_label(eff)
+                save_prefs({"policy": eff})   # remember the choice for next launch
+                _console.print(f"  → [bold]{policy_label(eff)}[/]"
+                               + ("" if eff == chosen else "  (no interactive prompt here → running as let-it-go)"))
         elif cmd == "/model":
-            if not arg:
+            if not arg and sys.stdin.isatty() and not use_live:   # open the two-tier model→reasoning menu
+                from .tui import select_model_reasoning
+                choice = select_model_reasoning(llm, cfg)
+                if choice:
+                    llm.switch(model=choice[0], reasoning=choice[1])
+                    _stats["model"] = llm.model
+                    save_prefs({"model": llm.model, "reasoning": llm.reasoning})
+                    note = _reasoning_note(llm)
+                    _console.print(f"  ✓ model → [bold]{llm.model}[/] · reasoning [bold]{llm.reasoning}[/] (saved)"
+                                   + (f"\n  {note}" if note else ""))
+            elif not arg:
                 _console.print(f"  model: [bold]{llm.model}[/]  ·  reasoning: [bold]{llm.reasoning}[/]"
                                f"  ·  net: {getattr(llm, 'proxy_used', 'direct')}")
                 known = ("gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat",
                          "kimi-k2-0905-preview", "claude-sonnet-4-6")
-                _console.print("  switch:  /model <name> [fast|full|high|max]   ·   /reasoning <level>")
+                _console.print("  switch:  /model <name> [fast|full|high|max]")
                 _console.print("  known:   " + ", ".join(known))
                 provs = cfg.providers()
                 if provs:

@@ -766,9 +766,11 @@ def slash_command_menu_renders():
     import memagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
-    assert {"/model", "/cost", "/learn", "/undo", "/plugins", "/mcp", "/mode"} <= set(cmds), cmds  # incl. new cmds
+    assert {"/model", "/mode", "/cost", "/learn", "/plugins", "/mcp"} <= set(cmds), cmds   # core palette
+    # trimmed from the palette per the menu redesign (undo is now Esc; reasoning folded into /model):
+    assert not ({"/reasoning", "/switch", "/resume", "/undo"} & set(cmds)), cmds
     assert set(c.text for c in t._InputCompleter().get_completions(Document("/mod"), None)) == {"/model", "/mode"}
-    assert [c.text for c in t._InputCompleter().get_completions(Document("/rea"), None)] == ["/reasoning"]
+    assert [c.text for c in t._InputCompleter().get_completions(Document("/le"), None)] == ["/learn"]
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.layout.menus import MultiColumnCompletionsMenu
@@ -776,6 +778,46 @@ def slash_command_menu_renders():
         app, _ = t.TuiInput({"model": "x"}, root=".")._build_composer(pt_input=pin, pt_output=DummyOutput())
         assert any(isinstance(f.content, MultiColumnCompletionsMenu) for f in app.layout.container.floats), \
             "composer has no completions-menu float → '/' computes matches but draws nothing"
+
+
+# ── FEATURE: two-tier selector menus (model→reasoning, mode) Kimi-style ────────────────────────────────
+@check
+def selector_menu_navigates_and_returns():
+    import memagent.tui as t
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    rows = [("a", "first"), ("b", "second"), ("c", "third")]
+    with create_pipe_input() as pin:
+        pin.send_text("\x1b[B\r")          # Down, Enter → index 1
+        idx = t.run_selector("pick", rows, current=0, pt_input=pin, pt_output=DummyOutput())
+    assert idx == 1, idx
+    with create_pipe_input() as pin:
+        pin.send_text("\x1b")              # bare Esc → cancel → None
+        assert t.run_selector("pick", rows, pt_input=pin, pt_output=DummyOutput()) is None
+
+
+@check
+def model_menu_is_provider_aware():
+    import memagent.tui as t
+    # reasoning levels are derived per-model: effort-capable (gpt-5/o-series) gets 4, others only fast/full
+    assert [n for n, _ in t._reasoning_levels("gpt-5.5", "")] == ["fast", "full", "high", "max"]
+    assert [n for n, _ in t._reasoning_levels("o3", "")] == ["fast", "full", "high", "max"]
+    assert [n for n, _ in t._reasoning_levels("deepseek-chat", "")] == ["fast", "full"]
+    assert [n for n, _ in t._reasoning_levels("kimi-k2-0905-preview", "")] == ["fast", "full"]
+
+    class _LLM:
+        model, reasoning, _base_url = "deepseek-chat", "full", ""
+
+    class _CFG:
+        def providers(self):
+            return {}
+
+    cands = t._model_candidates(_LLM(), _CFG())
+    models = [m for m, _ in cands]
+    assert "deepseek-chat" in models and "gpt-5.5" in models      # current + known both present
+    assert len(models) == len(set(models))                        # deduped
+    fams = [fam for _, fam in cands]
+    assert fams == sorted(fams)                                   # grouped (sorted) by provider family
 
 
 # ── FEATURE: three permission modes, all sharing the catastrophic floor ───────────────────────────────

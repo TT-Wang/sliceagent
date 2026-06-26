@@ -99,8 +99,10 @@ def interrupt_renders_warning():
 def slash_completer_offers_navigation_commands():
     from prompt_toolkit.document import Document
     comp = tui._InputCompleter()   # no repo files wired → behaves slash-only here
-    got = [c.text for c in comp.get_completions(Document("/sw", len("/sw")), None)]
-    assert "/switch" in got, got
+    got = [c.text for c in comp.get_completions(Document("/mo", len("/mo")), None)]
+    assert "/model" in got and "/mode" in got, got
+    # /switch was removed from the palette in the menu redesign (parked-topic resume dropped)
+    assert "/switch" not in [c.text for c in comp.get_completions(Document("/sw", len("/sw")), None)]
     # a non-slash line offers nothing when no repo files are wired
     assert list(comp.get_completions(Document("hello", 5), None)) == []
 

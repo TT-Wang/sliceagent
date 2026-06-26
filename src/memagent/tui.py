@@ -473,6 +473,15 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
     def _(ev):
         ev.app.exit()
 
+    @kb.add("escape")
+    def _(ev):                             # Esc clears a half-typed line; Esc on an EMPTY idle line = undo
+        if state["running"]:
+            return                         # never undo mid-turn
+        if ta.text.strip():
+            ta.text = ""
+        elif handle_slash is not None:
+            handle_slash("/undo")
+
     app = Application(
         layout=Layout(FloatContainer(
             content=HSplit([Frame(ta, title="message"),
@@ -497,21 +506,135 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
         app.run()
 
 
+# ── modal selectors (Kimi-style second-tier menus) ───────────────────────────────────────────
+def run_selector(title, rows, *, current=-1, hint="↑↓ move · Enter select · Esc cancel",
+                 pt_input=None, pt_output=None):
+    """A modal single-choice list (Kimi's ChoicePicker, adapted to prompt_toolkit). ``rows`` is a list of
+    (label, description); returns the chosen INDEX, or None if cancelled. Non-full-screen + transient
+    (erases on close), so it overlays the scrollback like the composer. Safe to call ONLY between turns
+    (no other pt Application live) — the REPL slash path satisfies that; live mode falls back to typed args."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.widgets import Frame
+
+    if not rows:
+        return None
+    state = {"cur": current if 0 <= current < len(rows) else 0}
+
+    def render():
+        out = []
+        for i, (label, desc) in enumerate(rows):
+            sel, cur = i == state["cur"], i == current
+            prefix = ("✓" if cur else " ") + ("❯" if sel else " ") + " "
+            style = "fg:ansibrightcyan bold" if sel else ("fg:ansigreen" if cur else "")
+            out.append((style, prefix + str(label) + "\n"))
+            if desc:
+                out.append(("fg:ansibrightblack", "       " + str(desc) + "\n"))
+        return out
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _(ev):
+        state["cur"] = (state["cur"] - 1) % len(rows)
+
+    @kb.add("down")
+    @kb.add("c-n")
+    def _(ev):
+        state["cur"] = (state["cur"] + 1) % len(rows)
+
+    @kb.add("enter")
+    def _(ev):
+        ev.app.exit(result=state["cur"])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(ev):
+        ev.app.exit(result=None)
+
+    header = Window(FormattedTextControl(
+        lambda: [("fg:ansicyan bold", f" {title}\n"), ("fg:ansibrightblack", f" {hint}")]), height=2)
+    body = Frame(HSplit([header, Window(FormattedTextControl(render))]))
+    app = Application(layout=Layout(body), key_bindings=kb, full_screen=False, mouse_support=False,
+                      erase_when_done=True, input=pt_input, output=pt_output)
+    with patch_stdout(raw=True):
+        return app.run()
+
+
+def _model_candidates(llm, cfg):
+    """Models to offer in the /model menu: the current model + any configured providers' models + a known
+    set, deduped and grouped by inferred provider family. Returns [(model, family)] sorted by family."""
+    from .model_catalog import capability
+    known = ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat", "kimi-k2-0905-preview", "claude-sonnet-4-6"]
+    prov = []
+    try:
+        for tbl in (cfg.providers() or {}).values():
+            m = tbl.get("model") if isinstance(tbl, dict) else None
+            if m:
+                prov.append(m)
+    except Exception:  # noqa: BLE001 — a malformed providers table must not break the menu
+        pass
+    out, seen = [], set()
+    for m in [llm.model] + prov + known:
+        if m and m not in seen:
+            seen.add(m)
+            base = getattr(llm, "_base_url", "") if m == llm.model else ""
+            out.append((m, capability(m, base).family))
+    out.sort(key=lambda mf: (mf[1], mf[0]))
+    return out
+
+
+def _reasoning_levels(model, base_url):
+    """Reasoning levels valid for a model, derived from its capability (provider-aware). Effort-capable
+    models (gpt-5/o-series) expose all four; others only fast/full (high/max would degrade to default)."""
+    from .model_catalog import capability
+    full4 = [("fast", "minimal reasoning — fastest, cheapest"),
+             ("full", "provider default reasoning"),
+             ("high", "deeper reasoning (effort=high, /v1/responses)"),
+             ("max", "deepest reasoning (effort=xhigh)")]
+    if capability(model, base_url).supports_reasoning_effort:
+        return full4
+    return full4[:2]   # fast | full only — the model has no effort knob
+
+
+def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
+    """Two-tier picker: choose a model (grouped by provider) then its reasoning level (only the levels that
+    model supports). Returns (model, reasoning) to apply, or None if the model step was cancelled."""
+    cands = _model_candidates(llm, cfg)
+    rows = [(m, f"provider: {fam}") for m, fam in cands]
+    cur_idx = next((i for i, (m, _) in enumerate(cands) if m == llm.model), -1)
+    pick = run_selector("Select model", rows, current=cur_idx,
+                        hint="↑↓ move · Enter choose model → reasoning · Esc cancel",
+                        pt_input=pt_input, pt_output=pt_output)
+    if pick is None:
+        return None
+    model = cands[pick][0]
+    base = getattr(llm, "_base_url", "") if model == llm.model else ""
+    levels = _reasoning_levels(model, base)
+    lvl_rows = [(name, desc) for name, desc in levels]
+    lvl_cur = next((i for i, (n, _) in enumerate(levels) if n == llm.reasoning), -1)
+    lpick = run_selector(f"Reasoning for {model}", lvl_rows, current=lvl_cur,
+                         hint="↑↓ move · Enter select · Esc keep current",
+                         pt_input=pt_input, pt_output=pt_output)
+    reasoning = levels[lpick][0] if lpick is not None else llm.reasoning   # Esc on step 2 = keep current
+    return (model, reasoning)
+
+
 # ── input layer (prompt_toolkit) ─────────────────────────────────────────────────────────────
 _SLASH = {
-    "/model":   "show/switch model + reasoning (/model <name> [fast|full|high|max])",
-    "/reasoning": "set reasoning effort (/reasoning <fast|full|high|max>)",
-    "/mode":    "permission mode: baby-sitter | teenager | let-it-go (/mode <name>)",
+    "/model":   "switch model + reasoning — opens a menu (or /model <name> [fast|full|high|max])",
+    "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN + mission",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",
     "/threads": "list open/parked topics",
-    "/switch":  "switch to a parked topic by id (/switch <id>)",
-    "/resume":  "resume a parked topic by id (/resume <id>)",
-    "/undo":    "revert the last file edit",
     "/plugins": "list loaded plugins + their tools",
     "/mcp":     "list configured MCP servers + connection status",
-    "/help":    "show commands",
+    "/help":    "show commands  ·  Esc = undo last turn",
     "/exit":    "quit",
 }
 
@@ -539,9 +662,21 @@ def _repo_files(root: str, cap: int = 4000) -> list:
     return out
 
 
+# Argument suggestions so the menu fills in the VALUE, not just the command. (Suggestions only — you can
+# still type any model.) Keep the model list roughly in sync with cli's /model "known" hint.
+_REASONING = (("fast", "minimal reasoning, fastest"), ("full", "provider default"),
+              ("high", "deeper (gpt-5: /v1/responses)"), ("max", "deepest (gpt-5: xhigh)"))
+_KNOWN_MODELS = ("gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat", "kimi-k2-0905-preview", "claude-sonnet-4-6")
+_SLASH_ARGS = {
+    "/reasoning": list(_REASONING),
+    "/mode": [("baby-sitter", "confirm every edit + command"), ("teenager", "auto edits, confirm commands"),
+              ("let-it-go", "auto-run, still blocks catastrophic")],
+}
+
+
 class _InputCompleter(Completer):
-    """Slash-command completion at line start (Kimi-style palette) + filename completion on the current
-    word anywhere (Aider-style), so referencing a file is a tab away."""
+    """Slash-command completion at line start (Kimi-style palette) + ARGUMENT suggestions for /model,
+    /reasoning, /mode + filename completion on the current word anywhere (Aider-style)."""
 
     def __init__(self, files=None):
         self._files = files or []
@@ -552,6 +687,18 @@ class _InputCompleter(Completer):
             for cmd, desc in _SLASH.items():
                 if cmd.startswith(text):
                     yield Completion(cmd, start_position=-len(text), display_meta=desc)
+            return
+        if text.startswith("/"):                               # ARGUMENT of an already-typed slash command
+            parts = text.split(" ")
+            cmd, cur = parts[0], parts[-1]
+            if cmd == "/model":                                # 1st arg = model name, 2nd = reasoning effort
+                opts = [(m, "model") for m in _KNOWN_MODELS] if len(parts) == 2 else (
+                    list(_REASONING) if len(parts) == 3 else [])
+            else:
+                opts = _SLASH_ARGS.get(cmd, [])
+            for val, meta in opts:
+                if val.lower().startswith(cur.lower()):
+                    yield Completion(val, start_position=-len(cur), display_meta=meta)
             return
         words = text.split()
         word = words[-1] if (words and not text.endswith(" ")) else ""
@@ -702,6 +849,13 @@ class TuiInput:
         @kb.add("c-d")
         def _(ev):
             ev.app.exit(result=None)
+
+        @kb.add("escape")
+        def _(ev):                         # Esc clears a half-typed line; Esc on an EMPTY line = undo last turn
+            if ta.text.strip():
+                ta.text = ""
+            else:
+                ev.app.exit(result="/undo")
 
         # Wrap the composer in a FloatContainer with a CompletionsMenu float so the slash-command palette
         # (and file completions) actually RENDER as a dropdown at the cursor — a bare custom Application
