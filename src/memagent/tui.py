@@ -573,16 +573,38 @@ def _price(model: str):
 
 
 def _accrue_cost(stats: dict, usage: dict) -> None:
-    """Add this step's $ to stats['cost'] using the model's list price + the typed token split (fresh input,
-    cached input, output). No-op when the model's price is unknown — the toolbar then shows tokens only."""
+    """Per step: accrue actual $ spend (stats['cost']) AND the MOAT savings in TOKENS (model-independent, so
+    a /model switch re-prices them for free — see _saved_dollars).
+
+    Savings model: a full-transcript agent re-reads the WHOLE prior history every step (a growing cache-read)
+    while the bounded slice re-reads only its small cached prefix. The saving is that cache-read DIFFERENTIAL;
+    the fresh cost of genuinely-new content is the same for both agents, so it cancels. We track the naive
+    transcript size (`_transcript_tok`, grown by each step's fresh-input + output) and bank, per step, the
+    tokens the naive agent would re-read that the slice didn't (prefix − this step's actual cache-read)."""
+    if not usage:
+        return
+    prefix = stats.get("_transcript_tok", 0)
+    actual_cache_read = usage.get("input_cache_read", 0) or 0
+    stats["saved_cached_tok"] = stats.get("saved_cached_tok", 0) + max(0, prefix - actual_cache_read)
+    stats["_transcript_tok"] = prefix + (usage.get("input_other", 0) or 0) + (usage.get("output", 0) or 0)
+
     pr = _price(stats.get("model", ""))
-    if not pr or not usage:
+    if not pr:
         return
     pin, pcached, pout = pr
     stats["cost"] = stats.get("cost", 0.0) + (
         usage.get("input_other", 0) * pin
         + usage.get("input_cache_read", 0) * pcached
         + usage.get("output", 0) * pout) / 1_000_000
+
+
+def _saved_dollars(stats: dict):
+    """$ the slice saved vs a full-transcript agent, priced at the CURRENT model's cached rate (the rate for
+    re-read history). Token-based, so switching /model re-prices the same savings. None if price unknown."""
+    pr = _price(stats.get("model", ""))
+    if not pr:
+        return None
+    return stats.get("saved_cached_tok", 0) * pr[1] / 1_000_000
 
 
 def _toolbar(stats: dict):
@@ -599,8 +621,13 @@ def _toolbar(stats: dict):
             sep, (_dim, topic),
             sep, (_dim, f"Σ {stats.get('tokens', 0)} tok · {stats.get('fresh', 0)} fresh"),
         ]
-        if stats.get("cost"):
-            ft += [sep, (_dim, f"${stats['cost']:.4f}")]   # live spend (when the model's price is known)
+        # Headline the MOAT number — $ SAVED vs a full-transcript agent (priced at the current model; flips
+        # automatically on /model switch). Falls back to token-savings when the model price is unknown.
+        saved = _saved_dollars(stats)
+        if saved:
+            ft += [sep, ("fg:ansigreen bold", f"💰 ${saved:.4f} saved")]
+        elif stats.get("saved_cached_tok"):
+            ft += [sep, (_dim, f"💰 {stats['saved_cached_tok'] // 1000}k tok saved")]
         t = stats.get("last_turn_s")
         if t is not None:
             ft += [sep, (_dim, f"⏲ {t:.0f}s")]

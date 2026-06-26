@@ -744,6 +744,22 @@ def subdir_hints_dotted_directory():
     assert "dotted-dir convention" in hint, "a real dotted directory must surface its own convention file"
 
 
+# ── FEATURE: "$ saved" moat meter — savings accrue as model-independent tokens, re-price on /model switch ─
+@check
+def saved_dollars_accrue_and_reprice():
+    from memagent.tui import _accrue_cost, _saved_dollars
+    stats = {"model": "deepseek-chat"}
+    for _ in range(12):   # flat slice (bounded cache-read) while the naive transcript grows underneath
+        _accrue_cost(stats, {"input_other": 400, "input_cache_read": 3000, "output": 600})
+    assert stats["saved_cached_tok"] > 0, "savings (cache-read differential) must accrue"
+    d_deepseek = _saved_dollars(stats)
+    assert d_deepseek and d_deepseek > 0
+    stats["model"] = "claude-opus"           # /model switch → SAME tokens, repriced at the new model
+    d_claude = _saved_dollars(stats)
+    assert d_claude > d_deepseek, "claude's higher cached rate must yield a larger $ for the same tokens"
+    assert stats["saved_cached_tok"] == stats["saved_cached_tok"]  # tokens unchanged by repricing
+
+
 def main():
     failed = 0
     for fn in CHECKS:

@@ -423,8 +423,15 @@ def main() -> None:
                 for it in plan:
                     _console.print(f"  {mark.get(it.get('status'), '○')} {it.get('step', '')}")
         elif cmd == "/cost":
+            from .tui import _saved_dollars
+            saved = _saved_dollars(_stats)
+            spent = _stats.get("cost", 0.0)
+            head = (f"  💰 saved ${saved:.4f} vs full-history (@ {_stats.get('model','?')}, cache-aware)"
+                    f"  ·  spent ${spent:.4f}" if saved is not None
+                    else f"  💰 {_stats.get('saved_cached_tok', 0):,} tokens saved vs full-history (model price unknown)")
+            _console.print(head)
             if metrics is None:
-                _console.print("  (cost metrics off — start with AGENT_METRICS=1 to track per-turn cost)")
+                _console.print("  (per-turn curve off — start with AGENT_METRICS=1 to track it)")
             else:
                 s = metrics.summary()
                 _console.print(f"  per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
