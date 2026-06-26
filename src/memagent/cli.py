@@ -407,9 +407,9 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /model · /reasoning · /threads · /switch <id> · /resume <id> · /plan · "
-                           "/cost · /undo · /help · /exit\n  (say \"review my changes\" to use the code_review "
-                           "tool · @path in a message pins that file)")
+            _console.print("commands: /model · /reasoning · /learn · /plan · /cost · /threads · /switch <id> · "
+                           "/resume <id> · /undo · /plugins · /mcp · /help · /exit\n  (type / for the menu · "
+                           "say \"review my changes\" to use code_review · @path pins that file)")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -453,6 +453,20 @@ def main() -> None:
                     _console.print(f"  no such topic: {arg}")
         elif cmd == "/undo":
             _console.print("  " + base_tools.undo_last())   # revert the last file edit
+        elif cmd == "/plugins":
+            tools = sorted(e.name for e in base_tools.registry._tools.values()
+                           if getattr(e, "source", "") == "plugin")
+            _console.print(f"  plugin dirs: {', '.join(cfg.plugin_dirs) or '(none configured)'}")
+            _console.print(f"  plugin tools ({len(tools)}): {', '.join(tools) or '(none loaded)'}")
+        elif cmd == "/mcp":
+            configured = list(cfg.mcp_servers.keys())
+            mtools = sorted(e.name for e in base_tools.registry._tools.values()
+                            if getattr(e, "source", "") == "mcp")
+            if not configured and not mtools:
+                _console.print("  no MCP servers configured — add [mcp_servers.<name>] to ~/.memagent/config.toml")
+            else:
+                _console.print(f"  configured servers: {', '.join(configured) or '(none)'}")
+                _console.print(f"  connected tools ({len(mtools)}): {', '.join(mtools) or '(none — check startup logs)'}")
         elif cmd == "/model":
             if not arg:
                 _console.print(f"  model: [bold]{llm.model}[/]  ·  reasoning: [bold]{llm.reasoning}[/]"

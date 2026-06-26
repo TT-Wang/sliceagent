@@ -399,7 +399,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.layout.menus import CompletionsMenu
+    from prompt_toolkit.layout.menus import MultiColumnCompletionsMenu
     from prompt_toolkit.widgets import Frame, TextArea
 
     state = {"status": "", "running": False, "signal": None, "last": None, "threads": []}
@@ -478,7 +478,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
             content=HSplit([Frame(ta, title="message"),
                             Window(FormattedTextControl(_status_line), height=1)]),
             floats=[Float(xcursor=True, ycursor=True,
-                          content=CompletionsMenu(max_height=12, scroll_offset=1))],
+                          content=MultiColumnCompletionsMenu(min_rows=3, show_meta=True))],
         ), focused_element=ta),
         key_bindings=kb, full_screen=False, mouse_support=False, input=pt_input, output=pt_output)
     return app, state
@@ -501,11 +501,15 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
 _SLASH = {
     "/model":   "show/switch model + reasoning (/model <name> [fast|full|high|max])",
     "/reasoning": "set reasoning effort (/reasoning <fast|full|high|max>)",
+    "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN + mission",
-    "/cost":    "show per-turn cost / token metrics (needs AGENT_METRICS=1)",
+    "/cost":    "show $ saved vs full-history + per-turn token metrics",
+    "/threads": "list open/parked topics",
     "/switch":  "switch to a parked topic by id (/switch <id>)",
     "/resume":  "resume a parked topic by id (/resume <id>)",
-    "/threads": "list open/parked topics",
+    "/undo":    "revert the last file edit",
+    "/plugins": "list loaded plugins + their tools",
+    "/mcp":     "list configured MCP servers + connection status",
     "/help":    "show commands",
     "/exit":    "quit",
 }
@@ -676,7 +680,7 @@ class TuiInput:
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
-        from prompt_toolkit.layout.menus import CompletionsMenu
+        from prompt_toolkit.layout.menus import MultiColumnCompletionsMenu
         from prompt_toolkit.widgets import Frame, TextArea
 
         ta = TextArea(prompt="❯ ", multiline=False, wrap_lines=True,
@@ -704,7 +708,7 @@ class TuiInput:
         body = FloatContainer(
             content=HSplit([Frame(ta, title="message"), status]),
             floats=[Float(xcursor=True, ycursor=True,
-                          content=CompletionsMenu(max_height=12, scroll_offset=1))],
+                          content=MultiColumnCompletionsMenu(min_rows=3, show_meta=True))],
         )
         app = Application(
             layout=Layout(body, focused_element=ta),

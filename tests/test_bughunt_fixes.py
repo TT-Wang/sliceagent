@@ -766,15 +766,15 @@ def slash_command_menu_renders():
     import memagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
-    assert "/model" in cmds and "/cost" in cmds and len(cmds) >= 5, cmds          # palette populated
+    assert {"/model", "/cost", "/learn", "/undo", "/plugins", "/mcp"} <= set(cmds), cmds   # palette incl. new cmds
     assert [c.text for c in t._InputCompleter().get_completions(Document("/mo"), None)] == ["/model"]
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.layout.menus import CompletionsMenu
+    from prompt_toolkit.layout.menus import MultiColumnCompletionsMenu
     with create_pipe_input() as pin:                                              # the menu must be IN the layout
         app, _ = t.TuiInput({"model": "x"}, root=".")._build_composer(pt_input=pin, pt_output=DummyOutput())
-        assert any(isinstance(f.content, CompletionsMenu) for f in app.layout.container.floats), \
-            "composer has no CompletionsMenu float → '/' computes matches but draws nothing"
+        assert any(isinstance(f.content, MultiColumnCompletionsMenu) for f in app.layout.container.floats), \
+            "composer has no completions-menu float → '/' computes matches but draws nothing"
 
 
 def main():
