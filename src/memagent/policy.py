@@ -76,6 +76,14 @@ def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
     return None
 
 
+def ask_commands(name: str, args: dict) -> Optional[ToolDecision]:
+    """'teenager' middle ground: auto-allow known file EDITS + reads, but confirm anything that RUNS a
+    command (EXEC tools) or is an unknown tool that might. Edits flow; running code pauses for a yes."""
+    if name in _READERS or name in WRITE_TOOLS:
+        return None
+    return ToolDecision(False, f"{name} runs a command — confirm before it executes", ask=True)
+
+
 def no_dangerous_commands(name: str, args: dict) -> Optional[ToolDecision]:
     """Deny shell commands (or execute_code bodies) matching a narrow catastrophic list.
     Scanning arbitrary Python is best-effort — it catches obvious run('rm -rf /')-style
@@ -104,17 +112,45 @@ class PolicyChain:
         return ALLOW
 
 
-def make_policy(mode: str = "guard") -> PolicyChain:
-    """Factory: 'guard' (block catastrophic commands), 'readonly' (no writes/exec),
-    'ask' (block catastrophic + confirm every write/exec), or 'allow' (permissive)."""
-    mode = (mode or "guard").lower()
-    if mode == "allow":
-        return PolicyChain()
-    if mode == "readonly":
-        return PolicyChain(read_only)
-    if mode == "ask":
-        return PolicyChain(no_dangerous_commands, ask_mutations)  # dangerous→deny, rest→ask
-    if mode == "guard":
-        return PolicyChain(no_dangerous_commands)
-    # #28: a typo'd mode (e.g. "redonly") must NOT silently fall back to a weaker policy than intended.
-    raise ValueError(f"unknown policy mode {mode!r} (expected 'guard', 'readonly', 'ask', or 'allow')")
+# Three USER-FACING modes, all sharing the catastrophic-command floor (no fully-unrestricted UI mode).
+# `allow`/`readonly` remain as LEGACY/eval escapes, not advertised. Friendly + legacy names both resolve.
+USER_MODES = ("baby-sitter", "teenager", "let-it-go")
+_MODE_ALIASES = {
+    "baby-sitter": "babysitter", "babysitter": "babysitter", "baby": "babysitter", "ask": "babysitter",
+    "teenager": "teenager", "teen": "teenager",
+    "let-it-go": "letitgo", "letitgo": "letitgo", "letgo": "letitgo", "yolo": "letitgo", "guard": "letitgo",
+    "allow": "allow", "readonly": "readonly",                       # legacy escapes
+}
+_MODE_LABELS = {"babysitter": "baby-sitter", "teenager": "teenager", "letitgo": "let-it-go",
+                "allow": "allow", "readonly": "readonly"}
+# canonical → True if the mode confirms (needs an interactive resolver; downgrade to let-it-go when headless)
+CONFIRMS = {"babysitter": True, "teenager": True, "letitgo": False, "allow": False, "readonly": False}
+
+
+def resolve_policy_mode(name: str) -> Optional[str]:
+    """Friendly/legacy mode name → canonical key, or None if unrecognized (the caller warns + defaults)."""
+    return _MODE_ALIASES.get((name or "").strip().lower().replace("_", "-").replace(" ", "-"))
+
+
+def policy_label(canonical: str) -> str:
+    """Canonical key → friendly display name for the toolbar/help."""
+    return _MODE_LABELS.get(canonical, canonical)
+
+
+def make_policy(mode: str = "teenager") -> PolicyChain:
+    """Three modes, ALL with the catastrophic-command floor:
+      baby-sitter — confirm every edit + command;  teenager — auto edits, confirm commands;
+      let-it-go   — auto everything except catastrophic.  (legacy: allow=permissive, readonly=no writes.)"""
+    canonical = resolve_policy_mode(mode)
+    if canonical == "babysitter":
+        return PolicyChain(no_dangerous_commands, ask_mutations)   # catastrophic→deny, every write/exec→ask
+    if canonical == "teenager":
+        return PolicyChain(no_dangerous_commands, ask_commands)    # catastrophic→deny, commands→ask, edits auto
+    if canonical == "letitgo":
+        return PolicyChain(no_dangerous_commands)                  # catastrophic→deny, everything else auto
+    if canonical == "allow":
+        return PolicyChain()                                       # LEGACY: fully permissive (eval)
+    if canonical == "readonly":
+        return PolicyChain(read_only)                              # LEGACY: no writes/exec
+    # #28: a typo'd mode must NOT silently fall back to a weaker policy than intended.
+    raise ValueError(f"unknown policy mode {mode!r} (expected one of {USER_MODES})")

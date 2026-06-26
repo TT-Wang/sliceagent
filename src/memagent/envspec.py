@@ -31,8 +31,11 @@ REGISTRY: list[EnvVar] = [
            "even after compaction (secondary net; the bounded slice is the primary).", ""),
     EnvVar("AGENT_PROVIDER", "agent", "Default provider id to use from the config's [providers.<id>] tables "
            "(overrides [agent].default_provider).", ""),
-    EnvVar("AGENT_POLICY", "agent", "Permission policy for mutating/dangerous tools.",
-           "guard", choices=("guard", "allow", "readonly", "ask"), validate=True),
+    EnvVar("AGENT_POLICY", "agent", "Permission mode: baby-sitter (confirm all) | teenager (auto edits, "
+           "confirm commands) | let-it-go (auto, blocks catastrophic). All block catastrophic moves.",
+           "teenager", choices=("baby-sitter", "teenager", "let-it-go"),
+           aliases=("guard", "allow", "readonly", "ask", "babysitter", "teen", "letgo", "letitgo", "yolo", "baby"),
+           validate=True),
     EnvVar("AGENT_ROUTER", "agent", "Topic router: lexical (instant, no LLM) or llm (classifier round-trip).",
            "lexical", choices=("lexical", "llm"), validate=True),
     EnvVar("AGENT_REASONING", "agent", "Reasoning effort: full=provider default, fast=minimal, high/max=more.",

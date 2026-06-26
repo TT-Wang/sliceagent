@@ -766,8 +766,9 @@ def slash_command_menu_renders():
     import memagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
-    assert {"/model", "/cost", "/learn", "/undo", "/plugins", "/mcp"} <= set(cmds), cmds   # palette incl. new cmds
-    assert [c.text for c in t._InputCompleter().get_completions(Document("/mo"), None)] == ["/model"]
+    assert {"/model", "/cost", "/learn", "/undo", "/plugins", "/mcp", "/mode"} <= set(cmds), cmds  # incl. new cmds
+    assert set(c.text for c in t._InputCompleter().get_completions(Document("/mod"), None)) == {"/model", "/mode"}
+    assert [c.text for c in t._InputCompleter().get_completions(Document("/rea"), None)] == ["/reasoning"]
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.layout.menus import MultiColumnCompletionsMenu
@@ -775,6 +776,28 @@ def slash_command_menu_renders():
         app, _ = t.TuiInput({"model": "x"}, root=".")._build_composer(pt_input=pin, pt_output=DummyOutput())
         assert any(isinstance(f.content, MultiColumnCompletionsMenu) for f in app.layout.container.floats), \
             "composer has no completions-menu float → '/' computes matches but draws nothing"
+
+
+# ── FEATURE: three permission modes, all sharing the catastrophic floor ───────────────────────────────
+@check
+def policy_three_modes():
+    from memagent.policy import make_policy, resolve_policy_mode
+
+    def verdict(p, name, args):
+        d = p(name, args)
+        return "ask" if (d and d.ask) else ("deny" if (d and not d.allow) else "auto")
+
+    baby, teen, letgo = make_policy("baby-sitter"), make_policy("teenager"), make_policy("let-it-go")
+    # baby-sitter confirms everything; teenager auto-edits but confirms commands; let-it-go auto-runs both
+    assert verdict(baby, "edit_file", {"path": "a"}) == "ask"
+    assert verdict(teen, "edit_file", {"path": "a"}) == "auto"
+    assert verdict(teen, "run_command", {"command": "pytest"}) == "ask"
+    assert verdict(letgo, "run_command", {"command": "pytest"}) == "auto"
+    # ALL THREE block catastrophic moves (the shared floor)
+    for p in (baby, teen, letgo):
+        assert verdict(p, "run_command", {"command": "rm -rf /"}) == "deny"
+    # legacy names still resolve (back-compat)
+    assert resolve_policy_mode("guard") == "letitgo" and resolve_policy_mode("ask") == "babysitter"
 
 
 def main():

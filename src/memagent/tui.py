@@ -501,6 +501,7 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
 _SLASH = {
     "/model":   "show/switch model + reasoning (/model <name> [fast|full|high|max])",
     "/reasoning": "set reasoning effort (/reasoning <fast|full|high|max>)",
+    "/mode":    "permission mode: baby-sitter | teenager | let-it-go (/mode <name>)",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN + mission",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",

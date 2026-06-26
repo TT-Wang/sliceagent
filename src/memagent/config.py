@@ -149,7 +149,7 @@ class Config:
 
     @property
     def policy(self) -> str:
-        return self._get("agent", "policy", "AGENT_POLICY", "guard")
+        return self._get("agent", "policy", "AGENT_POLICY", "teenager")
 
     @property
     def mine(self) -> str:

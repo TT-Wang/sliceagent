@@ -163,7 +163,7 @@ def main() -> None:
     from .memory import make_memory
     from .oracle import CommandOracle
     from .plugins import load_plugins
-    from .policy import make_policy
+    from .policy import CONFIRMS, make_policy, policy_label, resolve_policy_mode
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route
     from .skills import make_skill_manager, make_skill_tool
@@ -173,13 +173,16 @@ def main() -> None:
 
     # cfg already loaded above (for the config→env key population + the gate)
     root = os.getcwd()
-    policy_mode = cfg.policy        # guard | readonly | ask | allow
-    mine_mode = cfg.mine           # deterministic | llm | off
-    sub_depth = cfg.subagent_depth  # 0 disables delegation
-    policy = make_policy(policy_mode)
-    # model + reasoning resolution: explicit env wins, then the saved /model choice (prefs), then config.
     from .config import load_prefs, save_prefs
     _prefs = load_prefs()
+    # mode resolution: explicit env wins, then the saved /mode choice, then config (default teenager).
+    canonical = resolve_policy_mode(os.environ.get("AGENT_POLICY") or _prefs.get("policy") or cfg.policy) or "teenager"
+    mine_mode = cfg.mine           # deterministic | llm | off
+    sub_depth = cfg.subagent_depth  # 0 disables delegation
+    # SUBAGENT/base policy never prompts (no human in a spawned turn) → a confirm-mode runs as let-it-go for
+    # them (still blocks catastrophic). The MAIN agent's confirming policy is built at the hook below.
+    policy = make_policy("letitgo" if CONFIRMS.get(canonical) else canonical)
+    # model + reasoning resolution: explicit env wins, then the saved /model choice (prefs), then config.
     _model = os.environ.get("AGENT_MODEL") or _prefs.get("model") or cfg.model
     llm = OpenAILLM(model=_model)
     if _prefs.get("reasoning") and not (os.environ.get("AGENT_REASONING") or os.environ.get("AGENT_THINKING")):
@@ -268,7 +271,7 @@ def main() -> None:
     # optional rich TUI (the `tui` extra). Output via Rich, input via prompt_toolkit — temporally
     # separate from the synchronous run_turn, so no patch_stdout/threading. Off when piped (eval).
     _tui = None
-    _stats = {"model": llm.model, "policy": policy_mode, "topic": "", "tokens": 0}
+    _stats = {"model": llm.model, "policy": policy_label(canonical), "topic": "", "tokens": 0}
     try:
         from . import tui as _tuimod
         if _tuimod.tui_enabled():
@@ -407,7 +410,7 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /model · /reasoning · /learn · /plan · /cost · /threads · /switch <id> · "
+            _console.print("commands: /model · /reasoning · /mode · /learn · /plan · /cost · /threads · /switch <id> · "
                            "/resume <id> · /undo · /plugins · /mcp · /help · /exit\n  (type / for the menu · "
                            "say \"review my changes\" to use code_review · @path pins that file)")
         elif cmd == "/plan":
@@ -467,6 +470,23 @@ def main() -> None:
             else:
                 _console.print(f"  configured servers: {', '.join(configured) or '(none)'}")
                 _console.print(f"  connected tools ({len(mtools)}): {', '.join(mtools) or '(none — check startup logs)'}")
+        elif cmd == "/mode":
+            if not arg:
+                _console.print(f"  mode: [bold]{_stats.get('policy', '?')}[/]   options: baby-sitter · teenager · let-it-go")
+                _console.print("    baby-sitter = confirm every edit + command · teenager = auto edits, confirm "
+                               "commands · let-it-go = auto (blocks catastrophic)")
+            else:
+                c = resolve_policy_mode(arg)
+                if c not in ("babysitter", "teenager", "letitgo"):
+                    _console.print("  unknown mode — use: baby-sitter | teenager | let-it-go")
+                else:
+                    eff = c if (sys.stdin.isatty() and not use_live) or not CONFIRMS.get(c) else "letitgo"
+                    perm_hook.policy = make_policy(eff)
+                    perm_hook.on_ask = _ask if CONFIRMS.get(eff) else None
+                    _stats["policy"] = policy_label(eff)
+                    save_prefs({"policy": eff})   # remember the choice for next launch
+                    _console.print(f"  → [bold]{policy_label(eff)}[/]"
+                                   + ("" if eff == c else "  (no interactive prompt here → running as let-it-go)"))
         elif cmd == "/model":
             if not arg:
                 _console.print(f"  model: [bold]{llm.model}[/]  ·  reasoning: [bold]{llm.reasoning}[/]"
@@ -542,7 +562,14 @@ def main() -> None:
     # AGENT_AUTO_APPROVE: comma-separated fnmatch globs over the command, pre-approved so safe read-only
     # commands never prompt (e.g. AGENT_AUTO_APPROVE="git status*,git diff*,ls *,cat *").
     _auto = [r.strip() for r in (os.environ.get("AGENT_AUTO_APPROVE") or "").split(",") if r.strip()]
-    hook_list = [PermissionHook(policy, on_ask=_ask if policy_mode == "ask" else None, auto_approve=_auto)]
+    # MAIN agent's policy: the canonical mode, but a confirm-mode needs a human — with no interactive prompt
+    # (headless/piped, or the live composer that owns stdin) fall back to let-it-go (auto, still catastrophic-gated).
+    _can_confirm = sys.stdin.isatty() and not use_live
+    _eff_mode = canonical if (_can_confirm or not CONFIRMS.get(canonical)) else "letitgo"
+    _stats["policy"] = policy_label(_eff_mode)
+    perm_hook = PermissionHook(make_policy(_eff_mode),
+                               on_ask=_ask if CONFIRMS.get(_eff_mode) else None, auto_approve=_auto)
+    hook_list = [perm_hook]
     hook_list.append(GuardrailHook())  # cross-step loop guard (per-turn counters, reset each task)
     if cfg.verify_cmd:
         oracle = CommandOracle(cfg.verify_cmd)
