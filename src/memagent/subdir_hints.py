@@ -168,9 +168,12 @@ class SubdirHints:
         for filename in self.HINT_FILENAMES:
             hint_path = directory / filename
             try:
-                if not hint_path.is_file():
+                # confine the RESOLVED target, not just the dir — a symlinked AGENTS.md pointing OUTSIDE the
+                # root would otherwise be read verbatim into the slice (out-of-workspace secret disclosure).
+                real = Path(os.path.realpath(hint_path))
+                if not self._within_root(real) or not real.is_file():
                     continue
-                content = hint_path.read_text(encoding="utf-8", errors="replace").strip()
+                content = real.read_text(encoding="utf-8", errors="replace").strip()
             except (OSError, ValueError):
                 continue
             if not content:

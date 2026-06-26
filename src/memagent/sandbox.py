@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from typing import Protocol, runtime_checkable
 
 # env var names whose values are secrets the child shouldn't see by default
@@ -28,7 +29,9 @@ _SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 
-_OUTPUT_CAP = 100_000  # chars; head+tail kept, middle elided
+_OUTPUT_CAP = 1_000_000  # chars; head+tail kept, middle elided. Sized ABOVE realistic logs/diffs so the
+#                          page-out blob (the recall-on-demand promise) captures the FULL output for normal
+#                          large results; this is only the last-resort OOM/disk ceiling for pathological dumps.
 
 
 @runtime_checkable
@@ -92,12 +95,16 @@ class DockerSandbox(BaseSandbox):
                  env: dict | None = None, scrub_secrets: bool = True):
         super().__init__(scrub_secrets=scrub_secrets)
         self.image = image
-        self.network = network
+        # fail CLOSED: blank/whitespace network → "none" (no networking), not "drop the flag" (which gives
+        # the container default bridge networking — an isolation hole).
+        self.network = (network or "none").strip() or "none"
         self.docker = docker
         self.env = env or {}
 
-    def docker_args(self, command: str, *, cwd: str) -> list[str]:
+    def docker_args(self, command: str, *, cwd: str, name: str | None = None) -> list[str]:
         args = [self.docker, "run", "--rm", "-v", f"{cwd}:{cwd}", "-w", cwd]
+        if name:
+            args += ["--name", name]
         if self.network:
             args += ["--network", self.network]
         for k, v in self.env.items():
@@ -106,10 +113,18 @@ class DockerSandbox(BaseSandbox):
         return args
 
     def _exec(self, command: str, *, cwd: str, timeout: float) -> tuple[int, str]:
+        # Name the container so a timeout can reap it: subprocess.run only SIGKILLs the local `docker run`
+        # CLI; the daemon-side container keeps running. With a name we can `docker kill` it (and --rm then
+        # removes it), instead of leaking an orphan container per timeout.
+        name = f"memagent-{uuid.uuid4().hex[:12]}"
         try:
-            r = subprocess.run(self.docker_args(command, cwd=cwd),
+            r = subprocess.run(self.docker_args(command, cwd=cwd, name=name),
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
+            try:
+                subprocess.run([self.docker, "kill", name], capture_output=True, timeout=10)
+            except Exception:  # noqa: BLE001 — best-effort reap; never mask the timeout result
+                pass
             return 124, f"Command timed out after {timeout:g}s"
         except OSError as e:
             return 127, f"Could not run docker: {e}"

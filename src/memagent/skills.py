@@ -15,7 +15,7 @@ import re
 import shlex
 from dataclasses import dataclass
 
-from .registry import ToolEntry
+from .registry import ToolEntry, ToolText
 from .text_utils import one_line
 
 _MAX_SCAN_DEPTH = 8   # bound skill-root walk depth (Kimi MAX_SKILL_SCAN_DEPTH) — defensive vs deep trees
@@ -194,7 +194,9 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
     def handler(args: dict) -> str:
         body = manager.load(args.get("name", ""))
         if body is None:
-            return f"Error: no skill named {args.get('name')!r}. Available: {', '.join(names)}"
+            # ok=False ⟺ genuine failure → event.failing is True → slice_sink does NOT fold this error
+            # string into the ACTIVE SKILLS tier as a persistent fake skill (it would survive every rebuild).
+            return ToolText(f"Error: no skill named {args.get('name')!r}. Available: {', '.join(names)}", ok=False)
         # expand $ARGUMENTS / $N placeholders (no-op for skills without them); slice_sink folds the
         # result into the ACTIVE SKILL tier (persists across turns).
         return expand_skill_args(body, args.get("arguments") or "")

@@ -28,16 +28,28 @@ def _path(root: str) -> str:
 
 
 def _sanitize(messages: list) -> list:
-    """Strip heavy image base64 from WAL messages — recovery only needs text + structure, and writing a
-    per-step b64 image would bloat the WAL (and add nothing to the recovery notice). Replace image_url parts
-    with a small placeholder; keep everything else."""
+    """Strip heavy image base64 from WAL messages AND redact secrets — the WAL persists in-flight tool
+    output to disk after a hard crash, so it must honor the same redact-on-persist boundary as the episodic
+    cache / debug log (every other durable store redacts). Replace image_url parts with a placeholder."""
+    from .safety import redact_text
     out = []
     for m in messages or []:
-        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        c = m.get("content")
         if isinstance(c, list):
-            parts = [{"type": "text", "text": "[image attached]"} if isinstance(p, dict)
-                     and p.get("type") == "image_url" else p for p in c]
+            parts = []
+            for p in c:
+                if isinstance(p, dict) and p.get("type") == "image_url":
+                    parts.append({"type": "text", "text": "[image attached]"})
+                elif isinstance(p, dict) and isinstance(p.get("text"), str):
+                    parts.append({**p, "text": redact_text(p["text"])})
+                else:
+                    parts.append(p)
             out.append({**m, "content": parts})
+        elif isinstance(c, str):
+            out.append({**m, "content": redact_text(c)})
         else:
             out.append(m)
     return out
@@ -47,7 +59,8 @@ def record(root: str, *, goal: str, messages: list, step: int) -> None:
     """Atomically write the in-flight turn. Best-effort — never raises into the loop."""
     tmp = None
     try:
-        body = json.dumps({"goal": goal, "step": step, "ts": time.time(),
+        from .safety import redact_text
+        body = json.dumps({"goal": redact_text(goal or ""), "step": step, "ts": time.time(),
                            "root": os.path.realpath(root), "messages": _sanitize(messages)},
                           ensure_ascii=False)
         p = _path(root)

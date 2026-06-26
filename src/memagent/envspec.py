@@ -32,7 +32,7 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_PROVIDER", "agent", "Default provider id to use from the config's [providers.<id>] tables "
            "(overrides [agent].default_provider).", ""),
     EnvVar("AGENT_POLICY", "agent", "Permission policy for mutating/dangerous tools.",
-           "guard", choices=("guard", "allow", "readonly"), validate=True),
+           "guard", choices=("guard", "allow", "readonly", "ask"), validate=True),
     EnvVar("AGENT_ROUTER", "agent", "Topic router: lexical (instant, no LLM) or llm (classifier round-trip).",
            "lexical", choices=("lexical", "llm"), validate=True),
     EnvVar("AGENT_REASONING", "agent", "Reasoning effort: full=provider default, fast=minimal, high/max=more.",
@@ -44,6 +44,7 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_AUTO_APPROVE", "agent", "Comma-separated globs of pre-approved safe commands (skip prompt).", ""),
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),
     EnvVar("AGENT_MAX_TOKENS", "agent", "Per-session token budget (parks the turn when exhausted).", ""),
+    EnvVar("AGENT_COMPLETION_TOKENS", "agent", "Per-REQUEST completion cap (max output tokens); distinct from the AGENT_MAX_TOKENS turn budget.", "8192"),
     EnvVar("AGENT_MAX_STEPS", "agent", "Per-turn step ceiling (runaway backstop); raise for deep analysis.", "60"),
     EnvVar("AGENT_SELFCHECK_MAX", "agent", "Max grounded done-gate verification rounds before accepting 'done'.", "3"),
     EnvVar("AGENT_TOOL_TIMEOUT", "agent", "Per-tool wall-clock deadline in seconds (0/unset = off).", ""),

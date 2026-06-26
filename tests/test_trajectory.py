@@ -59,15 +59,27 @@ def result_hash_loop_trips_across_distinct_shell_commands():
 
 @check
 def result_hash_loop_spans_execute_code_and_run_command():
-    # the same OUTPUT produced via run_command AND execute_code is still ONE no-progress signal
+    # the same REAL OUTPUT produced via run_command AND execute_code is still ONE no-progress signal.
+    # (Uses a non-empty output: an information-FREE "(produced no output)" sentinel is intentionally NOT a
+    # loop signal — distinct successful silent commands legitimately all return it; see guardrails after_call.)
     g = ToolCallGuardrail()
-    out = "(command produced no output)"
+    out = "total 5\n-rw-r--r-- 1 a b 0 file.txt"
     g.after_call("run_command", {"command": "ls a"}, out)
     g.after_call("execute_code", {"code": "x"}, out)
     g.after_call("run_command", {"command": "ls -l a"}, out)
     assert g.before_call("run_command", {"command": "ls a/"}).block is False  # only 3 so far
     g.after_call("run_command", {"command": "ls a/"}, out)                    # 4th identical
     assert g.before_call("execute_code", {"code": "y"}).block is True
+
+
+@check
+def distinct_silent_successful_commands_are_not_a_loop():
+    # R12: distinct successful commands that each produce the no-output sentinel must NOT be hard-blocked
+    g = ToolCallGuardrail()
+    out = "(command produced no output)"
+    for cmd in ("mkdir build", "touch a.txt", "cp a.txt b.txt", "git add -A", "chmod +x run.sh"):
+        assert g.before_call("run_command", {"command": cmd}).block is False, f"{cmd!r} wrongly blocked"
+        g.after_call("run_command", {"command": cmd}, out)
 
 
 @check

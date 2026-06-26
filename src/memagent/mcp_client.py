@@ -19,7 +19,7 @@ import os
 import re
 import threading
 
-from .registry import ToolEntry
+from .registry import ToolEntry, ToolText
 
 _QUALIFY_MAX = 64
 
@@ -46,7 +46,9 @@ def _result_to_text(result) -> str:
     text = "\n".join(parts).strip() or "(no content)"
     if len(text) > _MCP_SAFETY_CAP:           # last-resort OOM guard; page-out (handler) does normal bounding
         text = text[:_MCP_SAFETY_CAP] + f"\n…[truncated {len(text) - _MCP_SAFETY_CAP} chars of MCP output]"
-    return f"Error: {text}" if getattr(result, "isError", False) else text
+    # isError must propagate as ok=False so the loop's failing-detection + the anti-loop guardrail
+    # (repeated_exact_failure) actually see the failure — a plain "Error: …" string gets wrapped ok=True.
+    return ToolText(f"Error: {text}", ok=False) if getattr(result, "isError", False) else text
 
 
 def _mcp_handler(server, tool, page_out):
@@ -56,12 +58,13 @@ def _mcp_handler(server, tool, page_out):
     host page_out (eval/headless), returns the raw text (already OOM-capped by _result_to_text)."""
     def _handle(args):
         out = server.call(tool, args)
+        ok = getattr(out, "ok", True)   # preserve a failure flag (isError/unavailable) through page-out
         if page_out:
             try:
-                return page_out(out, label=f"mcp-{tool}")
+                out = page_out(out, label=f"mcp-{tool}")
             except Exception:  # noqa: BLE001 — paging must never fail the tool call
-                return out
-        return out
+                pass
+        return out if ok else ToolText(str(out), ok=False)
     return _handle
 
 
@@ -168,7 +171,7 @@ class McpServer:
 
     def call(self, tool: str, args: dict, timeout: float = 60) -> str:
         if self.error:
-            return f"Error: MCP server {self.name!r} unavailable: {self.error}"
+            return ToolText(f"Error: MCP server {self.name!r} unavailable: {self.error}", ok=False)
 
         async def _do():
             fut = self.runtime.loop.create_future()
@@ -178,7 +181,7 @@ class McpServer:
         try:
             return _result_to_text(self.runtime.submit(_do(), timeout))
         except Exception as e:  # noqa: BLE001
-            return f"Error: MCP call {self.name}.{tool} failed: {e}"
+            return ToolText(f"Error: MCP call {self.name}.{tool} failed: {e}", ok=False)
 
     def close(self):
         try:

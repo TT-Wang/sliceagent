@@ -18,8 +18,8 @@ def _read_toml(path: str) -> dict:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
+        return {}   # a corrupt / non-UTF-8 config must degrade to defaults, not crash startup
 
 
 def _config_files() -> list[str]:
@@ -128,14 +128,14 @@ class Config:
     @property
     def api_key(self) -> str:
         env = os.environ.get("LLM_API_KEY")
-        if env is not None:
+        if env:   # empty string ("" exported) means UNSET → fall through to config, don't return ""
             return env
         return self._provider_table().get("api_key") or self._get("provider", "api_key", None, "")
 
     @property
     def base_url(self) -> str:
         env = os.environ.get("LLM_BASE_URL")
-        if env is not None:
+        if env:   # empty string → unset (use provider default), not a literal empty base_url
             return env
         return self._provider_table().get("base_url") or self._get("provider", "base_url", None, "")
 
@@ -143,7 +143,7 @@ class Config:
     @property
     def model(self) -> str:
         env = os.environ.get("AGENT_MODEL")
-        if env is not None:
+        if env:   # empty string → unset → fall through to config/default model, not ""
             return env
         return self._provider_table().get("model") or self._get("agent", "model", None, "gpt-5.5")
 
@@ -157,7 +157,11 @@ class Config:
 
     @property
     def subagent_depth(self) -> int:
-        return int(self._get("agent", "subagent_depth", "AGENT_SUBAGENT_DEPTH", 1))
+        v = self._get("agent", "subagent_depth", "AGENT_SUBAGENT_DEPTH", 1)
+        try:
+            return max(0, int(v))                 # 0 = off; a malformed value falls back to the default
+        except (TypeError, ValueError):
+            return 1
 
     @property
     def show_slice(self) -> bool:
@@ -184,7 +188,11 @@ class Config:
     @property
     def max_tokens(self) -> int | None:
         v = self._get("budget", "max_tokens", "AGENT_MAX_TOKENS", None)
-        return int(v) if v else None
+        try:
+            n = int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None                            # garbage budget → no budget (don't crash startup)
+        return n if (n is not None and n > 0) else None   # discard a nonsensical <=0 budget
 
     @property
     def max_steps(self) -> int:
@@ -193,16 +201,22 @@ class Config:
         # turns/tokens goal budget — this is the lean equivalent).
         v = self._get("budget", "max_steps", "AGENT_MAX_STEPS", None)
         try:
-            return max(1, int(v)) if v else 60
+            n = int(v) if v not in (None, "") else None
         except (TypeError, ValueError):
             return 60
+        return n if (n is not None and n >= 1) else 60   # <=0 (incl. the env STRING "0") → default, consistent across env/TOML
 
     # --- extension surfaces ---
     @property
     def skills_roots(self) -> list[str] | None:
         sec = self.data.get("skills", {})
         dirs = sec.get("dirs") if isinstance(sec, dict) else None
-        return [os.path.expanduser(d) for d in dirs] if dirs else None
+        if isinstance(dirs, str):                  # a scalar `dirs = "..."` must not iterate char-by-char
+            dirs = [dirs]
+        if not isinstance(dirs, list):
+            return None
+        roots = [os.path.expanduser(d) for d in dirs if isinstance(d, str)]   # skip non-str entries (don't crash startup)
+        return roots or None
 
     @property
     def mcp_servers(self) -> dict:
@@ -215,7 +229,11 @@ class Config:
         """Extra plugin directories (consumed in ③.4)."""
         sec = self.data.get("plugins", {})
         dirs = sec.get("dirs", []) if isinstance(sec, dict) else []
-        return [os.path.expanduser(d) for d in dirs]
+        if isinstance(dirs, str):                  # scalar `dirs = "..."` → single entry, not char iteration
+            dirs = [dirs]
+        if not isinstance(dirs, list):
+            return []
+        return [os.path.expanduser(d) for d in dirs if isinstance(d, str)]   # skip non-str entries (don't crash startup)
 
 
 def load_config() -> Config:

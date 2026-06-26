@@ -17,6 +17,8 @@ redirect, so 'encourage recall' can never rebuild the transcript. Registered whe
 """
 from __future__ import annotations
 
+import threading
+
 from .text_utils import format_ts
 
 INDEX_LIMIT = 40       # breadcrumbs shown by the bare index (a LOCATOR bound — titles/notes, not content)
@@ -37,9 +39,21 @@ def _sig(args: dict):
     """Identity of a fetch, so an exact REPEAT can be redirected (the loop) while DISTINCT fetches
     (a real search — each returns new info) are allowed."""
     if args.get("turns"):
-        return ("turns", frozenset(int(t) for t in args["turns"]), bool(args.get("full")))
+        turns = args["turns"]
+        if isinstance(turns, (str, int)):
+            turns = [turns]   # a scalar/string turn id is ONE number, not a char/digit iterable
+        nums = set()
+        for t in turns:
+            try:
+                nums.add(int(t))
+            except (TypeError, ValueError):
+                pass
+        return ("turns", frozenset(nums), bool(args.get("full")))
     if args.get("last"):
-        return ("last", int(args["last"]), bool(args.get("full")))
+        try:
+            return ("last", int(args["last"]), bool(args.get("full")))
+        except (TypeError, ValueError):
+            return ("index",)
     return ("index",)
 
 
@@ -142,12 +156,13 @@ def make_history_tool(memory, session_id: str):
     drills (turns=/last=) count toward the backstop. Each served result carries a capture-back nudge."""
     from .pagetable import PageTable
     from .registry import ToolEntry
-    guard = {"seen": -1, "served": set(), "distinct": 0}   # episode count, fetches served, drills
+    _guards: dict = {}   # thread_id -> rein state; parallel explorers share this closure → isolate per thread
     # The ONE cross-session read path: PageTable's episode-xsession backend wraps
     # memory.search_episodes (the this-session read_episodes drill stays in this handler).
     pages = PageTable(memory=memory, session_id=session_id)
 
     def _handler(args: dict) -> str:
+        guard = _guards.setdefault(threading.get_ident(), {"seen": -1, "served": set(), "distinct": 0})
         # content-search shape: search=... runs FTS5 over THIS session's long tail (turns past the
         # manifest/index window — reachable by content, not just by a turn number nobody knows) AND
         # past sessions. Checked first, no rein (each query is a real search returning new info).
@@ -180,10 +195,21 @@ def make_history_tool(memory, session_id: str):
             guard["served"].add(sig)
             return render_index(lines[-INDEX_LIMIT:]) + CAPTURE_BACK
         if turns:
-            want = {int(t) for t in turns}
+            if isinstance(turns, (str, int)):
+                turns = [turns]   # a scalar/string turn id is ONE number, never split into its digits ("23"→23)
+            want = set()
+            for t in turns:
+                try:
+                    want.add(int(t))
+                except (TypeError, ValueError):
+                    pass
             sel = [ln for ln in lines if ln.get("turn") in want]
         else:
-            sel = lines[-int(last):]
+            try:
+                n = int(last)
+            except (TypeError, ValueError):
+                n = 5   # a non-numeric `last` must not raise — fall back to a small recent window
+            sel = lines[-max(1, n):]   # clamp: a negative `last` would slice a too-broad window
         if not sel:
             return "No matching turns. Call recall_history() with no args for the index."
         guard["served"].add(sig)

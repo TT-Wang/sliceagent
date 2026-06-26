@@ -87,6 +87,8 @@ class SliceMonitor:
                 system = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
                 user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"),
                             e.rendered)
+                if isinstance(user, list):     # multimodal turn (text+image parts) → use the rendered text
+                    user = e.rendered           # (mirrors loop.py) so detail render doesn't choke on a list
                 ctx = self._ctx()
                 self._cur = {
                     "i": self._steps_total - 1, "turn": self._turn, "step": self._step_in_turn,
@@ -109,7 +111,10 @@ class SliceMonitor:
                         "output": _clip(e.output, _MAX_OUTPUT), "failing": e.failing})
             elif isinstance(e, StepEnd):
                 if self._cur is not None:
-                    self._cur["usage"] = e.usage or {}
+                    cu = self._cur.setdefault("usage", {})   # ACCUMULATE across steps (don't overwrite, else the
+                    for _k, _v in (e.usage or {}).items():    # turn snapshot shows only the LAST step's usage)
+                        if isinstance(_v, (int, float)):
+                            cu[_k] = cu.get(_k, 0) + _v
                     self._cur["stop_reason"] = e.stop_reason
                     u = e.usage or {}
                     self._tokens += u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
@@ -255,6 +260,9 @@ class _SnapshotWriter:
                 self._write(snap)
                 with self._lock:
                     self._busy = False
+            if self._stop and self._pending is None:
+                return   # flushed the last pending after close() → exit now; the wake edge was consumed,
+                         # so looping back to wake.wait() would park the thread forever (flush-then-stop).
             # debounce: pause so a burst of hot-path events coalesces into the NEXT single write.
             # A flush skips the pause so settle points (StepEnd/TurnEnd) land without added latency.
             if not flush and not self._stop:
@@ -317,7 +325,10 @@ def _session_files(d: str):
     try:
         for fn in os.listdir(d):
             if fn.endswith(".json"):
-                out.append((fn[:-5], os.path.getmtime(os.path.join(d, fn))))
+                try:
+                    out.append((fn[:-5], os.path.getmtime(os.path.join(d, fn))))
+                except OSError:
+                    continue   # a file vanished mid-enumeration → skip it, don't truncate the session list
     except OSError:
         pass
     return sorted(out, key=lambda x: x[1], reverse=True)   # most-recently-active first
@@ -374,6 +385,8 @@ class _PersistentHandler(_Handler):
         try:
             with open(path, encoding="utf-8") as fh:
                 snap = json.load(fh)
+            if not isinstance(snap, dict):   # a valid but non-dict JSON (list/number) would crash snap[...]=
+                snap = dict(base)
             age = time.time() - os.path.getmtime(path)
         except Exception:
             snap, age = dict(base), IDLE_SECONDS + 1

@@ -43,7 +43,7 @@ def gating():
 def one_turn_one_record():
     d = DurableDouble(); s = _sink(d)
     s(SliceBuilt("SLICE-A"))
-    s(tr("read_file", "contents", path="a.py"))
+    s(tr("edit_file", "Wrote 8 bytes to a.py", path="a.py"))   # an EDIT → meta['files'] captures it
     s(tr("run_command", "1 passed", note="tests pass"))
     s(TurnEnd("end_turn", 2, {"prompt_tokens": 100, "completion_tokens": 20}))
     assert len(d.records) == 1
@@ -61,8 +61,8 @@ def one_turn_one_record():
 @check
 def per_turn_reset():
     d = DurableDouble(); s = _sink(d)
-    s(SliceBuilt("A")); s(tr(out="x", path="a.py")); s(TurnEnd("end_turn", 1, {}))
-    s(SliceBuilt("B")); s(tr(out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
+    s(SliceBuilt("A")); s(tr("edit_file", out="x", path="a.py")); s(TurnEnd("end_turn", 1, {}))
+    s(SliceBuilt("B")); s(tr("edit_file", out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
     assert len(d.records) == 2
     r2 = d.records[1][3]
     assert r2["meta"]["files"] == ["b.py"]              # no a.py bleed
@@ -78,10 +78,10 @@ def lossless_observation():
 @check
 def aborted_turn_flushes():
     d = DurableDouble(); s = _sink(d)
-    s(SliceBuilt("A")); s(tr(out="x", path="a.py"))
+    s(SliceBuilt("A")); s(tr("edit_file", out="x", path="a.py"))
     s(TurnInterrupted("aborted"))                       # loop returns WITHOUT TurnEnd
     assert len(d.records) == 1 and d.records[0][3]["meta"]["stop_reason"] == "aborted"
-    s(SliceBuilt("B")); s(tr(out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
+    s(SliceBuilt("B")); s(tr("edit_file", out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
     assert len(d.records) == 2 and d.records[1][3]["meta"]["files"] == ["b.py"]
 
 @check

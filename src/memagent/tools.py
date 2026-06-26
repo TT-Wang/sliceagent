@@ -560,7 +560,13 @@ class LocalToolHost:
             cand = os.path.realpath(os.path.join(r, expanded))
             if (cand == r or cand.startswith(r + os.sep)) and os.path.exists(cand):
                 return cand
-        return os.path.join(self.root(), expanded)           # nothing exists → boundary-root path (truthful 404)
+        # nothing exists under any root → a boundary-SAFE truthful-404 path. realpath + confine so a relative
+        # '../x' can't resolve to a real file OUTSIDE the boundary when read_file opens it (confinement).
+        root = self.root()
+        fallback = os.path.realpath(os.path.join(root, expanded))
+        if fallback == root or fallback.startswith(root + os.sep):
+            return fallback
+        return self._resolve(path)                           # escapes the boundary → raise (same as the file tools)
 
     def _grant_shell_paths(self, text: str) -> None:
         """I2 — reach FOLLOWS action. When the shell acts on a path outside the allowed roots,
@@ -589,10 +595,25 @@ class LocalToolHost:
                 continue
             # #31: never auto-widen file-tool reach into credential/secret dirs, even inside HOME — a path
             # merely MENTIONED in an allowed shell command must not make ~/.ssh etc. readable by the tools.
-            if any(part in _SECRET_DIRS for part in d.split(os.sep)):
+            if any(part.lower() in _SECRET_DIRS for part in d.split(os.sep)):   # casefold: ~/.SSH == ~/.ssh on a case-insensitive FS (macOS)
                 continue
             self.add_root(d)
             self._focus = d   # the most-recent external dir the shell worked on → the active focus
+
+    def resolve_read(self, path: str) -> str:
+        """Resolution shared by read_file AND the OPEN FILES display so they never diverge. Prefer the
+        current-project (focus) copy; if nothing exists there, fall back to a base-STABLE search of every
+        authorized root (locate). Keeps focus-relative semantics while making a paged-out blob — or any file
+        under a root that isn't the current focus — reachable regardless of where focus now points (the
+        blob's read_file('.memagent/blobs/…') ref was minted against a possibly-different base)."""
+        try:
+            full = self._resolve(path)
+        except (ValueError, PermissionError):
+            return self.locate(path)
+        if os.path.exists(full):
+            return full
+        alt = self.locate(path)
+        return alt if os.path.exists(alt) else full
 
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
@@ -618,6 +639,22 @@ class LocalToolHost:
             "authorized directories (the boundary). To act on paths outside it, use "
             "run_command/execute_code (shell is unconfined), or re-run memagent rooted at that directory.")
 
+    def _resolve_for_access(self, path: str) -> str | None:
+        """Canonical PHYSICAL path for SCHEDULING conflict detection only — NOT a security check (the real
+        _resolve enforces the boundary at run time). Mirrors _resolve's expanduser + base-join + realpath
+        so 'foo.py', './foo.py', and the absolute spelling collapse to ONE key, and the scheduler then
+        serializes concurrent writes to the same inode (otherwise a parallel edit_file + str_replace via
+        different spellings race → lost update). Returns None on empty/bad input → caller falls back."""
+        if not path:
+            return None
+        try:
+            p = os.path.expanduser(path)
+            base = self.resolution_base()
+            full = p if os.path.isabs(p) else os.path.join(base, p)
+            return os.path.realpath(full)
+        except Exception:  # noqa: BLE001 — access declaration must never fail the call
+            return None
+
     # --- ToolHost projection: everything comes from the registry now ---
     def schemas(self) -> list[dict]:
         # inject the 'note' arg into every tool so the model's per-turn conclusion rides on the
@@ -630,7 +667,7 @@ class LocalToolHost:
     def run(self, name: str, args: dict) -> str:
         return self.registry.run(name, args)  # registry wraps the handler in try/except
 
-    def read_text(self, path: str) -> str:
+    def read_text(self, path: str, *, lossy: bool = True) -> str:
         # Read bytes first so the binary gate runs BEFORE we trust the file as text.
         # A NUL byte / mostly-control-char head means "not text" — feeding it through
         # OPEN FILES would corrupt the slice and burn tokens. ValueError flows through
@@ -641,17 +678,26 @@ class LocalToolHost:
         sample = raw[:8192].decode("utf-8", errors="replace")
         if looks_binary(path, sample):
             raise ValueError(f"{path} appears to be binary; not shown")
-        return raw.decode("utf-8")
+        # DISPLAY callers (read_file / OPEN FILES render) pass lossy=True: a stray invalid UTF-8 byte PAST
+        # the 8192-byte sniff sample must not crash an otherwise-text file's read. The READ-MODIFY-WRITE
+        # caller (str_replace) passes lossy=False: strict decode RAISES on any invalid byte so the call
+        # aborts cleanly (file untouched) instead of writing back a U+FFFD-mangled whole file — silent
+        # corruption of bytes the edit never touched.
+        return raw.decode("utf-8", errors="replace" if lossy else "strict")
 
     def _builtin_accesses(self, name: str, args: dict) -> list:
         """Declare what each builtin call touches so the scheduler can safely parallelize."""
         p = args.get("path")
+        # resolve to the physical path so two spellings of one file conflict (and serialize) correctly
         if name == "read_file":
-            return [FileAccess("read", p)] if p else []
+            rp = self._resolve_for_access(p)
+            return [FileAccess("read", rp)] if rp else []
         if name == "list_files":
-            return [FileAccess("search", args.get("path") or ".", recursive=True)]
+            d = args.get("path") or "."
+            return [FileAccess("search", self._resolve_for_access(d) or d, recursive=True)]
         if name in ("edit_file", "append_to_file", "str_replace"):
-            return [FileAccess("readwrite", p)] if p else [AllAccess()]
+            rp = self._resolve_for_access(p)
+            return [FileAccess("readwrite", rp)] if rp else [AllAccess()]
         if name in ("run_command", "execute_code", "proc_start", "proc_poll",
                     "proc_tail", "proc_wait", "proc_kill", "terminal_open", "terminal_send",
                     "terminal_read", "terminal_wait", "terminal_close"):
@@ -665,8 +711,13 @@ class LocalToolHost:
         output is preserved on disk (recall-on-demand, the L1→L2 page-out), never cut. Best-effort — on a
         write failure it still bounds the inline view with a hard head+tail slice."""
         if not text or len(text) <= _OUTPUT_INLINE_CAP:
+            return _strip_control(text)   # strip C0/NUL on the SMALL path too — a NUL is valid UTF-8 (errors='replace' won't drop it) and breaks the LLM JSON request
+        text = _strip_control(text)   # paged path: plain-text blob (read_file page-back works) + API-safe view
+        if len(text) <= _OUTPUT_INLINE_CAP:
+            # control-heavy output can drop below the cap AFTER stripping — return it inline rather than
+            # computing head/tail/elided on the now-short text (which gave a negative elided + duplicated
+            # head==tail content + a false "paged out" banner). The full clean output still rides the turn.
             return text
-        text = _strip_control(text)   # paged path only: plain-text blob (read_file page-back works) + API-safe view
         ref = None
         try:
             import hashlib
@@ -691,7 +742,7 @@ class LocalToolHost:
         # inspect structure and pick the right CLI. str_replace still uses read_text() (which
         # raises on binary) — you can't text-edit a binary, so that path stays a hard error.
         path = args["path"]
-        full = self._resolve(path)
+        full = self.resolve_read(path)   # focus copy if present, else search all roots (paged-out blob recall)
         with open(full, "rb") as f:
             raw = f.read()
         sample = raw[:8192].decode("utf-8", errors="replace")
@@ -699,7 +750,7 @@ class LocalToolHost:
             return self._binary_view(path, raw)
         # Return WITH cat -n line numbers so the model has file:line evidence immediately this turn (matching
         # the OPEN FILES render). Safe for editing: str_replace strips a pasted line-number prefix.
-        return _numbered(raw.decode("utf-8"))
+        return _numbered(raw.decode("utf-8", errors="replace"))   # consistent with read_text's gate decode
 
     @staticmethod
     def _binary_view(path: str, raw: bytes, head_bytes: int = 256) -> str:
@@ -764,7 +815,7 @@ class LocalToolHost:
         return body
 
     def _t_edit_file(self, args: dict) -> str:
-        full = self._resolve(args["path"])
+        full = self.resolve_read(args["path"])   # I2: target the SAME file read_file shows (existing match across roots); new files still land at the focus base
         self._mkparent(full)
         content = args["content"]
         if os.path.exists(full):                      # preserve the file's existing line endings (CRLF)
@@ -790,11 +841,11 @@ class LocalToolHost:
             pass
 
     def _t_append(self, args: dict) -> str:
-        full = self._resolve(args["path"])
+        full = self.resolve_read(args["path"])   # I2: append to the SAME file read_file shows; new files still land at the focus base
         self._mkparent(full)
         self._journal(args["path"], full)
-        with open(full, "a", encoding="utf-8") as f:
-            f.write(args["content"])
+        with open(full, "ab") as f:   # byte-exact (like write_file's "wb") — text mode would translate newlines, corrupting CRLF
+            f.write(args["content"].encode("utf-8"))
         msg = f"Appended {len(args['content'])} bytes to {args['path']}"
         try:                             # echo the file tail so the model sees the appended content in context
             whole = open(full, encoding="utf-8", errors="replace").read()
@@ -818,8 +869,15 @@ class LocalToolHost:
             return msg
 
     def _t_str_replace(self, args: dict) -> str:
-        full = self._resolve(args["path"])
-        cur = self.read_text(args["path"])
+        full = self.resolve_read(args["path"])   # I2: edit the SAME file read_file shows (search all roots), not a focus-relative phantom
+        try:
+            cur = self.read_text(full, lossy=False)  # read the resolved target; strict: abort on invalid UTF-8, never write back a mangled file
+        except UnicodeDecodeError as ex:
+            # actionable error (not an opaque codec traceback) — read_file shows the file as editable, so name
+            # the cause + the fallback rather than half-disagreeing with the display path.
+            return ToolText(f"Error: {args['path']} contains a non-UTF-8 byte ({ex}); str_replace can't safely "
+                            "edit it (a whole-file write-back would corrupt the other bytes). Use edit_file to "
+                            "rewrite the file, or fix its encoding first.", ok=False)
         crlf = self._detect_crlf(full)                # preserve the file's line endings on write-back
         old = args["old_string"]
         new = args["new_string"]
@@ -905,8 +963,14 @@ class LocalToolHost:
         """Return the git diff for the workspace so the model can review it (read-only; task-agnostic)."""
         import subprocess
         ref = (args.get("ref") or "HEAD").strip() or "HEAD"
+        # SECURITY: `ref` is model-controlled. An option-shaped ref (e.g. --output=/path, -O, --ext-diff)
+        # would be parsed by git as a FLAG → arbitrary out-of-workspace file write / command exec, bypassing
+        # the file-tool confinement. Reject leading-dash refs (a real ref/range never starts with '-') and
+        # pass `--` so the ref can never be read as an option. Valid ranges (main...HEAD, HEAD~3) still work.
+        if ref.startswith("-"):
+            return ToolText(f"Error: invalid ref {ref!r} (a ref must not start with '-').", ok=False)
         try:
-            p = subprocess.run(["git", "-C", self.root(), "diff", ref],
+            p = subprocess.run(["git", "-C", self.root(), "diff", ref, "--"],
                                capture_output=True, text=True, timeout=30)
         except FileNotFoundError:
             return ToolText("Error: git is not installed.", ok=False)
@@ -969,7 +1033,11 @@ class LocalToolHost:
 
     def _t_proc_tail(self, args: dict) -> str:
         # #26: cap requested lines so a huge `lines` can't dump a chatty server's whole log into the slice.
-        return self.procs.tail(args["handle"], max(1, min(int(args.get("lines") or 40), 2000)))
+        try:
+            n = int(args.get("lines") or 40)
+        except (TypeError, ValueError):
+            n = 40   # a non-numeric `lines` arg must not crash the tool
+        return self.procs.tail(args["handle"], max(1, min(n, 2000)))
 
     def _t_proc_wait(self, args: dict) -> str:
         try:
@@ -1109,11 +1177,17 @@ class LocalToolHost:
         intact (the rename is atomic on POSIX); the temp is unlinked on any failure. The
         temp must share the target's filesystem for os.replace to be atomic, hence
         dir=os.path.dirname(full) (full is already _resolve()'d)."""
+        import stat as _stat
         d = os.path.dirname(full)
+        # preserve the target's permission bits across the replace — else a str_replace/edit_file on an
+        # existing 0755 script silently resets it to the mkstemp 0600 (drops the executable + group/other bits).
+        mode = _stat.S_IMODE(os.stat(full).st_mode) if os.path.exists(full) else None
         fd, tmp = tempfile.mkstemp(prefix=".memagent-tmp-", dir=d)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
+            if mode is not None:
+                os.chmod(tmp, mode)
             os.replace(tmp, full)
         except BaseException:
             try:

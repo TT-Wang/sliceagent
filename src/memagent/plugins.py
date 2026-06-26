@@ -102,7 +102,12 @@ def load_plugins(registry, skills, dirs: list[str] | None = None, *, root: str, 
     search = list(dict.fromkeys((dirs or []) + _default_dirs()))
     mcp_servers: dict = {}
     hooks: list = []
-    found = [os.path.join(r, e) for r in search if os.path.isdir(r) for e in sorted(os.listdir(r))
+    def _ls(r):
+        try:
+            return sorted(os.listdir(r))
+        except OSError:        # an unreadable plugin search dir must not crash the whole host
+            return []
+    found = [os.path.join(r, e) for r in search if os.path.isdir(r) for e in _ls(r)
              if os.path.isfile(os.path.join(r, e, "plugin.toml"))
              and os.path.isfile(os.path.join(r, e, "__init__.py"))]
     # SECURITY (#6/#7): a plugin's __init__.py executes with FULL host privileges, and a plugin hook can

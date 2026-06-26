@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 
 from .access import FileAccess
-from .registry import ToolEntry
+from .registry import ToolEntry, ToolText
 
 # {host_id: {"last_key": tuple | None, "consecutive": int}} — module-level, per-host.
 # Mirrors Hermes' per-task _read_tracker shape. Not a transcript: a tiny durable counter.
@@ -68,6 +69,9 @@ def _norm_int(value, default: int) -> int:
 
 def _bump_guard(host_id, key) -> int:
     """Update the consecutive-identical counter for this host; return the run length."""
+    if host_id not in GREP_GUARD and len(GREP_GUARD) > 256:
+        GREP_GUARD.clear()   # bound the per-host map (no host-teardown hook + id() reuse) — resetting the
+        #                      consecutive counter is harmless (worst case: one missed back-to-back warning)
     data = GREP_GUARD.setdefault(host_id, {"last_key": None, "consecutive": 0})
     if data["last_key"] == key:
         data["consecutive"] += 1
@@ -93,7 +97,7 @@ def make_grep_tool(host) -> ToolEntry:
 
         # Consecutive-identical guard. Key includes offset so paging never trips it.
         key = (pattern, path, glob, limit, offset)
-        count = _bump_guard(id(host), key)
+        count = _bump_guard((id(host), threading.get_ident()), key)   # per-THREAD: parallel explorers share the host but must not cross-contaminate the consecutive-grep counter
         if count >= _BLOCK_AFTER:
             return (
                 f"BLOCKED: you have run this exact grep {count} times in a row and the results "
@@ -105,7 +109,7 @@ def make_grep_tool(host) -> ToolEntry:
         try:
             target = host._resolve(path)
         except (PermissionError, ValueError) as e:
-            return f"Error: {e}"
+            return ToolText(f"Error: {e}", ok=False)   # ok=False so a repeated boundary-escape is seen by the failure guardrail
 
         rg = shutil.which("rg")
         if not rg:

@@ -54,7 +54,17 @@ class ProcManager:
         log_fh = os.fdopen(fd, "wb")
         env = _scrub_env() if self.scrub_secrets else dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
-        popen = self._spawn_proc(command, cwd, env, log_fh)
+        try:
+            popen = self._spawn_proc(command, cwd, env, log_fh)
+        except BaseException:   # spawn failed (bad cwd, exec error, container-seam failure) — release the fd + temp file
+            try:
+                log_fh.close()
+            finally:
+                try:
+                    os.unlink(log_path)
+                except OSError:
+                    pass
+            raise
         self._procs[handle] = _Proc(handle, command, popen, log_path, log_fh)
         return handle
 
@@ -68,7 +78,14 @@ class ProcManager:
         )
 
     def poll(self, handle: str) -> str:
-        rc = self._get(handle).popen.poll()
+        p = self._get(handle)
+        rc = p.popen.poll()
+        if rc is not None and p.log_fh is not None:   # self-exited proc: release the write fd now (don't leak it to cleanup)
+            try:
+                p.log_fh.close()
+            except Exception:  # noqa: BLE001
+                pass
+            p.log_fh = None
         return "running" if rc is None else f"exited {rc}"
 
     def tail(self, handle: str, lines: int = 40) -> str:
@@ -97,7 +114,18 @@ class ProcManager:
                     p.popen.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-        return f"killed {handle} ({self.poll(handle)})"
+        status = self.poll(handle)
+        # Release the open FD now (the process is dead, so nothing more writes the log) — a long session that
+        # starts/kills many procs would otherwise leak one fd per cycle, marching toward EMFILE. Keep the
+        # registry entry + on-disk log so proc_poll/proc_tail still work after a kill (the confirm-after-kill
+        # UX); cleanup() unlinks the temp file at session end.
+        if p.log_fh is not None:
+            try:
+                p.log_fh.close()
+            except Exception:  # noqa: BLE001
+                pass
+            p.log_fh = None
+        return f"killed {handle} ({status})"
 
     def list(self) -> str:
         if not self._procs:

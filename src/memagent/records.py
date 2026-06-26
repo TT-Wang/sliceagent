@@ -40,7 +40,7 @@ class Journal:
         if not os.path.exists(self.path):
             return []
         out: list[dict] = []
-        with open(self.path, encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8", errors="replace") as f:   # truncated multibyte → replacement char (then json.loads skips it); never crash replay
             for line in f:
                 line = line.strip()
                 if not line:
@@ -80,10 +80,13 @@ class UsageRecorder:
             # prefer the per-step accumulator; fall back to a typed field carried on the TurnEnd usage
             # itself (back-compat for callers that pass the full breakdown there).
             typed = {k: (self._acc[k] or u.get(k, 0) or 0) for k in self._acc}
+            # On a PARKED turn (TurnInterrupted carries no usage) the prompt/completion totals would record
+            # as 0 — fall back to the per-step accumulator so the journal isn't undercounted.
+            acc_prompt = self._acc["input_other"] + self._acc["input_cache_read"] + self._acc["input_cache_creation"]
             self.journal.record(
                 "usage", turn=self._turn, model=self.model,
-                prompt_tokens=u.get("prompt_tokens", 0),
-                completion_tokens=u.get("completion_tokens", 0),
+                prompt_tokens=u.get("prompt_tokens") or acc_prompt,
+                completion_tokens=u.get("completion_tokens") or self._acc["output"],
                 **typed,
             )
             self._acc = {k: 0 for k in self._acc}

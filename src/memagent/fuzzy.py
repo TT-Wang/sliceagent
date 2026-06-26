@@ -39,7 +39,7 @@ def fuzzy_find_unique(content: str, old: str) -> Tuple[int, int] | None:
     replacement ``new``, ``content[:start] + new + content[end:]`` is the
     edited content. This function never replaces text itself.
     """
-    if not old:
+    if not old or not old.strip():   # an all-whitespace old has no anchor (matches every blank line → zero-width insert)
         return None
 
     for strategy in (_strategy_line_trimmed, _strategy_indentation_flexible):

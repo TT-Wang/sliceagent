@@ -9,15 +9,27 @@ captured once (step 1) plus the turn's accumulated (action, observation) units; 
 from __future__ import annotations
 
 from .events import AssistantText, Event, SliceBuilt, ToolResult, TurnEnd, TurnInterrupted
-from .slice import paths_in_code
+from .slice import edited_paths_in_code, paths_in_code  # noqa: F401  (paths_in_code kept for back-compat callers)
+
+
+_EDIT_TOOL_NAMES = ("edit_file", "append_to_file", "str_replace", "write_file")
 
 
 def _files_of(event: ToolResult) -> list[str]:
+    """CHANGED files for meta['files'] — mirror slice_sink: only SUCCESSFUL edit tools (and the mutated
+    paths of a successful execute_code). A read, a dir-scope grep, or a FAILED edit changed nothing, so
+    labeling those 'changed/edited' misled recall + mis-classified consolidated lessons (FILE_TOUCHED)."""
+    if event.failing:
+        return []
     out = []
-    p = event.args.get("path")
-    if p and event.name != "list_files":   # list_files' path is a dir to browse, not a working file
-        out.append(p)
-    out += paths_in_code(event.args.get("code", ""))
+    args = event.args if isinstance(event.args, dict) else {}   # raw model args may be a non-dict (list/str/number)
+    if event.name in _EDIT_TOOL_NAMES:
+        p = args.get("path")
+        if isinstance(p, str) and p:
+            out.append(p)
+    if event.name == "execute_code":
+        code = args.get("code", "")
+        out += edited_paths_in_code(code if isinstance(code, str) else "")   # mutate-only (write/open-w), not reads
     return out
 
 
@@ -100,9 +112,10 @@ class EpisodeSink:
                 self._note = event.content.strip()
         elif isinstance(event, ToolResult):
             st = self._cur()
-            st["action"].append({"name": event.name, "args": event.args, "failing": event.failing})
+            args = event.args if isinstance(event.args, dict) else {}   # coerce: persist a dict so downstream
+            st["action"].append({"name": event.name, "args": args, "failing": event.failing})   # (search_index/consolidate) never read a non-dict from the episode
             st["observation"].append(event.output)        # VERBATIM — lossless (not observe()'d)
-            note = event.args.get("note", "")             # reasoning models' note (empty content)
+            note = args.get("note", "")                   # reasoning models' note (empty content)
             if note:
                 self._note = note
             if event.failing:

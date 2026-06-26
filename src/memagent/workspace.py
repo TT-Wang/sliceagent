@@ -124,6 +124,7 @@ def _git(cwd: Path, *args: str) -> str:
             ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
+            errors="replace",   # a non-UTF-8 commit subject (%s) must not raise UnicodeDecodeError out of "never raises"
             timeout=_GIT_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
@@ -369,15 +370,19 @@ def git_worktree_state(cwd: str, *, max_files: int = 20) -> str:
     changed: list[tuple[str, str]] = []
     for line in porcelain.splitlines():
         if line.startswith(("1 ", "2 ")):
-            parts = line.split(maxsplit=8)
+            # porcelain v2 type-2 (rename/copy) has an extra <X><score> field AND joins the path as
+            # "<path>\t<origpath>" — so split at maxsplit=9 and drop the tab-joined origpath, else the
+            # reported path is mangled (origpath leaks in / the new path is truncated).
+            n = 9 if line.startswith("2 ") else 8
+            parts = line.split(maxsplit=n)
             if len(parts) >= 2 and len(parts[1]) >= 2:
                 xy = parts[1]
                 tag = "staged" if xy[0] != "." else "modified"
-                changed.append((tag, parts[-1]))
+                changed.append((tag, parts[-1].split("\t", 1)[0]))
         elif line.startswith("u "):
             changed.append(("conflict", line.split(maxsplit=10)[-1]))
         elif line.startswith("? "):
-            changed.append(("untracked", line[2:].strip()))
+            changed.append(("untracked", line[2:]))   # exact path (splitlines already dropped the newline); .strip() ate significant leading/trailing spaces
     if not changed:
         return f"branch {branch} · working tree clean"
     lines = [f"branch {branch} · {len(changed)} changed file(s)"]

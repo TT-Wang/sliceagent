@@ -78,9 +78,15 @@ def promote_episodes(records: list[dict]) -> list[dict]:
         fails = []
         for m in rmeta:
             for st in m.get("steps", []):
-                step_failed = any(a.get("failing") for a in st.get("action", []) if isinstance(a, dict))
-                for o in st.get("observation", []):
-                    if isinstance(o, str) and (step_failed or o.startswith("Error") or o.startswith("Exit code")):
+                # Decide PER OBSERVATION using its paired action's failing flag (a step can mix a failing
+                # call with successful ones — a whole-step `step_failed` flag would tag a SUCCESS line as
+                # the durable pitfall). Pair by index; fall back to the prose prefix when the observation
+                # has no paired action (non-tool steps record observations with action=[]).
+                actions = st.get("action", [])
+                for i, o in enumerate(st.get("observation", [])):
+                    a = actions[i] if i < len(actions) else None
+                    failing = isinstance(a, dict) and a.get("failing")
+                    if isinstance(o, str) and (failing or o.startswith("Error") or o.startswith("Exit code")):
                         fails.append(o)
         pitfall = next((o for o in reversed(fails) if not is_self_inflicted(o)), "")
         if not pitfall or _is_secret(pitfall):
@@ -166,7 +172,8 @@ def _slug(text: str) -> str:
 
 
 def _op_hint(action: dict) -> str:
-    a = action.get("args", {}) or {}
+    a = action.get("args")
+    a = a if isinstance(a, dict) else {}   # a truthy non-dict (list/str) would crash a.get(); skip it, don't abort the whole batch
     tgt = a.get("path") or a.get("command") or ""
     if not tgt and a.get("code"):
         tgt = next((ln.strip() for ln in str(a["code"]).splitlines() if ln.strip()), "")
@@ -205,14 +212,20 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
         cand.append({"shape": "→".join(names), "goal": goal,
                      "steps": [_op_hint(a) for a in actions][:12], "files": files})
     sig_freq = Counter(c["shape"] for c in cand)
-    out, seen, kept_goals = [], set(), []
+    out, seen, kept_goals, used_names = [], set(), [], set()
     for c in sorted(cand, key=lambda c: sig_freq[c["shape"]], reverse=True):
         if c["shape"] in seen:
             continue
         if any(_near_dup_goal(c["goal"], g) for g in kept_goals):   # R3: collapse same-INTENT workflows
             continue                                                # (keep the higher-freq one, sorted first)
         seen.add(c["shape"]); kept_goals.append(c["goal"])
-        out.append({"kind": "procedure", "name": _slug(c["goal"]), "description": one_line(c["goal"], 80),
+        # distinct goals can slugify identically (the on-disk skill name) → disambiguate so one doesn't
+        # overwrite the other's SKILL.md (data loss) and the stats don't overcount.
+        name = base = _slug(c["goal"]); _i = 2
+        while name in used_names:
+            name = f"{base}-{_i}"; _i += 1
+        used_names.add(name)
+        out.append({"kind": "procedure", "name": name, "description": one_line(c["goal"], 80),
                     "steps": c["steps"], "files": c["files"], "freq": sig_freq[c["shape"]],
                     "tags": _tags(c["files"])})
         if len(out) >= cap:

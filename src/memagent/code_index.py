@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 
 from .interfaces import Snippet
 
@@ -67,22 +68,29 @@ def _terms(query: str, limit: int = 12) -> list[str]:
 
 
 _TS = {"tried": False, "parser": None}
+_TS_LOCK = threading.Lock()
 
 
 def _ts_python():
     """Lazily build a tree-sitter Python parser; None if tree-sitter isn't installed (→ regex)."""
-    if not _TS["tried"]:
-        _TS["tried"] = True
+    if _TS["tried"]:
+        return _TS["parser"]
+    with _TS_LOCK:   # parallel explorers can hit first-use concurrently — build under a lock so a second
+        if _TS["tried"]:   # thread can't read parser=None in the window between tried=True and parser=<...>
+            return _TS["parser"]
+        parser = None
         try:                                          # convenience bundle (prebuilt grammars)
             from tree_sitter_languages import get_parser
-            _TS["parser"] = get_parser("python")
+            parser = get_parser("python")
         except Exception:                             # noqa: BLE001 — fall back to the split packages
             try:
                 import tree_sitter_python as _tspy
                 from tree_sitter import Language, Parser
-                _TS["parser"] = Parser(Language(_tspy.language()))
+                parser = Parser(Language(_tspy.language()))
             except Exception:                         # noqa: BLE001 — not installed → regex path
-                _TS["parser"] = None
+                parser = None
+        _TS["parser"] = parser
+        _TS["tried"] = True                           # set tried AFTER parser is populated (no torn read)
     return _TS["parser"]
 
 
@@ -96,14 +104,15 @@ def _ts_def_names(path: str, src: str):
     if parser is None:
         return None
     try:
-        tree = parser.parse(src.encode("utf-8", "replace"))
+        data = src.encode("utf-8", "replace")   # tree-sitter offsets are BYTE offsets — slice the bytes, not the str
+        tree = parser.parse(data)
         names, stack = set(), [tree.root_node]
         while stack:
             node = stack.pop()
             if node.type in ("function_definition", "class_definition"):
                 nm = node.child_by_field_name("name")
                 if nm is not None:
-                    names.add(src[nm.start_byte:nm.end_byte])
+                    names.add(data[nm.start_byte:nm.end_byte].decode("utf-8", "replace"))
             stack.extend(node.children)
         return names
     except Exception:                                 # noqa: BLE001 — any TS hiccup → regex
@@ -129,6 +138,7 @@ class RipgrepCodeIndex:
         self.max_chars = max_chars
         self._graph_cache: dict | None = None   # query-independent def/ref graph (see _graph)
         self._graph_builds = 0                   # rebuild counter (observability + tests)
+        self._graph_lock = threading.Lock()      # parallel explorers share this index → serialize rebuilds
 
     # --- Retriever contract -------------------------------------------------
     def retrieve(self, query: str, k: int = 6) -> list[Snippet]:
@@ -140,15 +150,15 @@ class RipgrepCodeIndex:
         Ranking is STRUCTURAL (personalized PageRank over the def/ref graph, seeded by the lexical
         matches), so a relevant file surfaces even with zero query-word overlap when a matched file
         calls it — the case a purely-lexical ranking truncates on a large repo (see graph_map)."""
-        text = self.graph_map(query)
-        matches = text.count("(matches:") if text else 0
-        if matches == 0:
-            # No lexical SEED matched this query, so the map would be generic centrality (the biggest
-            # files), NOT code related to the query — pure noise on a greeting/chat/non-code turn. The
-            # graph map is only meaningful when seeded by ≥1 lexical match (it then expands structurally),
-            # so with zero seeds we render NOTHING rather than dump a 0-score repo map. (Fixes "hi" -> map.)
+        text, seeded = self.graph_map(query, _return_seeds=True)
+        if not text or not seeded:
+            # Gate on the REAL seed signal (≥1 lexical match in the graph), not the rendered "(matches:"
+            # count: a legitimately-seeded query whose matched file has NO def-skeleton (a config/constants
+            # file) still expands structurally to related files, and that map must NOT be dropped. With zero
+            # seeds we render NOTHING (the "hi" -> map noise case stays fixed).
             return []
-        return [Snippet(path="(repo map)", text=text, score=float(matches))]
+        matches = text.count("(matches:")
+        return [Snippet(path="(repo map)", text=text, score=float(matches or seeded))]
 
     def deps(self, path: str, limit: int = 6) -> list[str]:
         """Files structurally COUPLED to `path`, from the cached def/ref graph: reverse deps (files
@@ -196,7 +206,7 @@ class RipgrepCodeIndex:
             return set()
 
     # --- structural map: rank by personalized PageRank over the def/ref graph ---
-    def graph_map(self, query: str, max_files: int = 400, max_shown: int = 20) -> str:
+    def graph_map(self, query: str, max_files: int = 400, max_shown: int = 20, *, _return_seeds: bool = False):
         """Repo map ranked by PERSONALIZED PAGERANK over the symbol def/ref graph, seeded on the
         files that match the query lexically. Rank flows along call/import edges, so a relevant file
         surfaces even with ZERO query-word overlap when a matched file references it — exactly the
@@ -211,13 +221,14 @@ class RipgrepCodeIndex:
         g = self._graph(max_files)
         files = list(g["files"])
         if not files:
-            return ""
+            return ("", 0) if _return_seeds else ""
         terms = _terms(query)
         matched: dict[str, set] = {}
         if terms:
             for path, info in self._search(terms).items():
                 matched[os.path.relpath(path, self.root)] = info["terms"]
         seeds = {rel: float(len(t)) for rel, t in matched.items() if rel in g["fileset"]}
+        n_seeds = len(seeds)                 # real seed signal returned to retrieve()'s gate (no shared read-back race)
         pr = self._pagerank(files, g["edges"], seeds)
         # rank: structural score, then lexical strength, then path (deterministic ties)
         files.sort(key=lambda rel: (pr.get(rel, 0.0), len(matched.get(rel, ()))), reverse=True)
@@ -231,7 +242,8 @@ class RipgrepCodeIndex:
             blocks.append(head + "\n" + "\n".join("  " + d for d in dlines))
             if len(blocks) >= max_shown:        # BREADTH bound: top-N ranked files, each shown COMPLETE
                 break
-        return "\n".join(blocks)
+        text = "\n".join(blocks)
+        return (text, n_seeds) if _return_seeds else text
 
     def _graph(self, max_files: int) -> dict:
         """Build (or reuse) the query-INDEPENDENT def/ref graph. Cached on this instance and
@@ -241,26 +253,30 @@ class RipgrepCodeIndex:
         files = self._code_files(max_files)
         sig = self._fingerprint(files)
         c = self._graph_cache
-        if c is not None and c["sig"] == sig:
+        if c is not None and c["sig"] == sig:   # lock-free fast path (reference read is atomic in CPython)
             return c
-        defs: dict[str, set] = {}
-        sym2file: dict[str, set] = {}
-        skeleton: dict[str, list] = {}
-        tokens: dict[str, set] = {}
-        for rel in files:
-            names, lines, toks = self._scan_file(rel)
-            if lines:
-                skeleton[rel] = lines
-            tokens[rel] = toks
-            if names:
-                defs[rel] = names
-                for n in names:
-                    sym2file.setdefault(n, set()).add(rel)
-        edges = self._edges_from_tokens(files, defs, sym2file, tokens)
-        self._graph_builds += 1
-        self._graph_cache = {"sig": sig, "files": files, "fileset": set(files),
-                             "skeleton": skeleton, "edges": edges, "defs": defs, "tokens": tokens}
-        return self._graph_cache
+        with self._graph_lock:                  # serialize rebuilds so parallel explorers don't double-build / tear a read
+            c = self._graph_cache
+            if c is not None and c["sig"] == sig:
+                return c
+            defs: dict[str, set] = {}
+            sym2file: dict[str, set] = {}
+            skeleton: dict[str, list] = {}
+            tokens: dict[str, set] = {}
+            for rel in files:
+                names, lines, toks = self._scan_file(rel)
+                if lines:
+                    skeleton[rel] = lines
+                tokens[rel] = toks
+                if names:
+                    defs[rel] = names
+                    for n in names:
+                        sym2file.setdefault(n, set()).add(rel)
+            edges = self._edges_from_tokens(files, defs, sym2file, tokens)
+            self._graph_builds += 1
+            self._graph_cache = {"sig": sig, "files": files, "fileset": set(files),
+                                 "skeleton": skeleton, "edges": edges, "defs": defs, "tokens": tokens}
+            return self._graph_cache
 
     def _fingerprint(self, files: list[str]) -> tuple:
         """Cheap staleness key: (rel, mtime_ns, size) per file. Stat-only — no reads — so computing
@@ -278,8 +294,8 @@ class RipgrepCodeIndex:
         """One read per file → (def names, skeleton lines, ref tokens). Names use tree-sitter when
         available (precise), else a regex; skeleton lines and tokens are regex (display + refs)."""
         try:
-            with open(os.path.join(self.root, rel), "r", errors="replace") as fh:
-                src = fh.read()
+            with open(os.path.join(self.root, rel), "r", encoding="utf-8", errors="replace") as fh:
+                src = fh.read()   # pin utf-8 (like every other read): a non-utf-8 locale would mis-decode the def/ref graph
         except OSError:
             return set(), [], set()
         ts = _ts_def_names(os.path.join(self.root, rel), src)

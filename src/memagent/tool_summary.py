@@ -66,7 +66,9 @@ def summarize_tool_result(name: str, args: dict, output: str, *, failing: bool =
         return f"[{name}] {verb} {_clip(args.get('path', '?'))} ({wl} lines){fail}"
 
     if name in ("edit_file", "str_replace"):
-        ok = "no-op" if (not failing and ("No changes" in out or "0 " in out[:20])) else \
+        # "0 " anywhere in the first 20 chars false-matched the byte count of a normal write ("Wrote 100
+        # bytes" contains "0 bytes"); use precise no-op signals so a real edit is never summarized as no-op.
+        ok = "no-op" if (not failing and ("No changes" in out or "Wrote 0 bytes" in out)) else \
             ("failed" if failing else "applied")
         return f"[{name}] {_clip(args.get('path', '?'))} -> {ok}{fail}"
 

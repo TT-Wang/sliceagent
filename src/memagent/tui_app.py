@@ -335,8 +335,8 @@ class DiffScreen(Screen):
         if new_lines and not new_lines[-1].endswith("\n"):
             new_lines[-1] += "\n"
         return "".join(difflib.unified_diff(
-            old_lines, new_lines, fromfile=f"a/{self._path}", tofile=f"b/{self._path}", lineterm=""
-        ))
+            old_lines, new_lines, fromfile=f"a/{self._path}", tofile=f"b/{self._path}", lineterm="\n"
+        ))   # content lines keep their '\n' → control lines (---/+++/@@) must too, else the diff is garbled
 
     def on_key(self, event: textual_events.Key) -> None:
         if event.key == "escape":
@@ -404,6 +404,10 @@ class MemagentTui(App):
         record_user: Callable | None = None,
         route_topic: Callable | None = None,
         stats: dict | None = None,
+        max_steps: int = 60,
+        checkpoint: Callable | None = None,
+        consolidate: Callable | None = None,
+        clear_recovery: Callable | None = None,
     ):
         super().__init__()
         self._session = session
@@ -417,6 +421,10 @@ class MemagentTui(App):
         self._make_build_slice = make_build_slice
         self._record_user = record_user
         self._route_topic = route_topic
+        self._max_steps = max_steps          # else run_turn defaults to 40, ignoring cfg.max_steps (60)
+        self._checkpoint = checkpoint        # crash-recovery WAL writer (None → no recovery in this UI)
+        self._consolidate = consolidate      # overflow-breadcrumb distiller
+        self._clear_recovery = clear_recovery
         self._stats = stats or {}
         self._abort_event = threading.Event()
         self._current_worker: Worker | None = None
@@ -496,6 +504,10 @@ class MemagentTui(App):
         self.push_screen(PaletteScreen())
 
     def action_new_topic(self) -> None:
+        w = getattr(self, "_current_worker", None)
+        if w is not None and not getattr(w, "is_finished", True):
+            self.notify("A turn is running — finish it before starting a new topic.", severity="warning")
+            return   # mutating the Session mid-turn races the worker thread
         self._session.new_topic("")
         self._record_user and self._record_user(self._session.active(), "new topic")
         self._refresh_all()
@@ -519,6 +531,18 @@ class MemagentTui(App):
         arg = parts[1].strip() if len(parts) > 1 else ""
         log = self._conversation()
         s = self._session.active() if self._session.active_id else None
+
+        # Commands that mutate the Session/Slice (switch/resume reassign active_id; add/drop edit
+        # active_files; diff iterates edited_files) must NOT run mid-turn — they'd race the worker thread
+        # (fold events into the wrong slice, or "set changed size during iteration"). Same guard as new_topic.
+        # /context and /threads READ in-place-mutated slice/session collections (edited_files set,
+        # active_files, tasks) that the worker thread is concurrently changing → "set changed size during
+        # iteration"; they join the mutating commands in the mid-turn guard (no lock around the slice).
+        w = getattr(self, "_current_worker", None)
+        if cmd in ("/switch", "/resume", "/add", "/drop", "/diff", "/context", "/threads") and w is not None and not getattr(w, "is_finished", True):
+            log.write(f"a turn is running — wait for it to finish before {cmd}")
+            self.query_one("#input", TextArea).text = ""
+            return
 
         if cmd == "/help":
             log.write("commands: /plan /cost /threads /switch /resume /add /drop /diff /undo /tokens /context /clear /exit")
@@ -679,7 +703,7 @@ class MemagentTui(App):
                         self._session.new_topic(line)
                     elif action == "resume":
                         self._session.switch_topic(tid)
-                        self._session.continue_topic(line)
+                        self._session.continue_topic(line, resume=True)   # a resume cue must not overwrite the topic goal
                     else:
                         self._session.continue_topic(line)
                 self._record_user and self._record_user(self._session.active(), line)
@@ -695,7 +719,12 @@ class MemagentTui(App):
                     dispatch=self._dispatch,
                     hooks=self._hooks,
                     signal=self._abort_event,
+                    max_steps=self._max_steps,        # honor cfg.max_steps (not the 40 default)
+                    checkpoint=self._checkpoint,      # write the crash-recovery WAL (was dead in Textual)
+                    consolidate=self._consolidate,    # distilled overflow breadcrumb
                 )   # run_turn is synchronous (returns TurnResult); no event-loop juggling needed
+                if self._clear_recovery is not None:
+                    self._clear_recovery()            # clean turn end → drop the WAL (mirror the REPL path)
                 if getattr(self._memory, "is_durable", False):
                     from .taskstate import slice_to_task_state
                     self._memory.checkpoint_task(
@@ -793,7 +822,7 @@ class MemagentTui(App):
     def _diff_card(self, name: str, args: dict):
         if name != "str_replace" or not isinstance(args, dict):
             return None
-        old, new = args.get("old_string", ""), args.get("new_string", "")
+        old, new = str(args.get("old_string") or ""), str(args.get("new_string") or "")  # tolerate non-str model args
         if not old and not new:
             return None
         lines = []
@@ -861,7 +890,16 @@ class MemagentTui(App):
             widget.update(Panel(Group(*lines), title="plan & mission", border_style="bright_cyan"))
 
     def _update_header(self) -> None:
-        topic = _shorten(self._stats.get("topic") or "—", 40)
+        # Derive the active topic from the session directly — the Textual path never populates
+        # _stats['topic'] (only the REPL/live paths do), so the header otherwise showed a permanent "topic —".
+        topic = self._stats.get("topic") or ""
+        if not topic:
+            try:
+                if self._session.active_id:
+                    topic = self._session.active().goal or ""
+            except Exception:  # noqa: BLE001
+                topic = ""
+        topic = _shorten(topic or "—", 40)
         self.sub_title = (
             f"{self._stats.get('model','?')} · "
             f"{self._stats.get('policy','?')} · "

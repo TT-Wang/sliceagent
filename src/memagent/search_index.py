@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 
 _FTS_TABLE = "episodes"
 # Recency tie-break weight for search() — how much a hit's age can re-order it WITHIN the relevance band
@@ -98,20 +99,21 @@ def episode_searchable_text(record: dict) -> str:
     note = record.get("note") or ""
     if note:
         parts.append(note)
-    for st in record.get("steps", []):
-        for a in st.get("action", []):
+    for st in record.get("steps", []) or []:
+        for a in st.get("action", []) or []:
             name = a.get("name") or ""
-            args = a.get("args") or {}
+            args = a.get("args")
+            args = args if isinstance(args, dict) else {}   # tolerate a non-dict in an OLD persisted episode
             hint = ""
             for k in ("path", "command", "query", "goal"):
                 if args.get(k):
                     hint = str(args[k])[:120]
                     break
             parts.append(f"{name} {hint}".strip())
-        for o in st.get("observation", []):
+        for o in st.get("observation", []) or []:
             if isinstance(o, str) and o:
                 parts.append(o[:500])   # bounded — head of each observation
-    meta = record.get("meta", {})
+    meta = record.get("meta", {}) or {}
     for f in meta.get("files", []) or []:
         parts.append(str(f))
     return "\n".join(p for p in parts if p)
@@ -129,6 +131,9 @@ class EpisodeIndex:
         self.db_path = db_path
         self.is_active = False
         self._con = None
+        # the connection is shared (check_same_thread=False) across parallel explorer subagents — sqlite
+        # connections are NOT safe for concurrent cursors, so serialize every statement+fetch/commit.
+        self._lock = threading.Lock()
         if not fts5_available():
             return
         try:
@@ -157,19 +162,20 @@ class EpisodeIndex:
         if not self.is_active or self._con is None:
             return
         try:
-            # turn is stored as TEXT (FTS5 UNINDEXED preserves the exact type), so the DELETE
-            # must bind the SAME str — int 2 != stored '2' and the row would never be removed.
-            self._con.execute(
-                f"DELETE FROM {_FTS_TABLE} WHERE session_id = ? AND turn = ?",
-                (session_id, str(turn)),
-            )
-            self._con.execute(
-                f"INSERT INTO {_FTS_TABLE} "
-                "(session_id, task_id, turn, ts, title, note, body) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (session_id, task_id, str(turn), ts, title or "", note or "", text or ""),
-            )
-            self._con.commit()
+            with self._lock:   # serialize the write txn vs concurrent reads on the shared connection
+                # turn is stored as TEXT (FTS5 UNINDEXED preserves the exact type), so the DELETE
+                # must bind the SAME str — int 2 != stored '2' and the row would never be removed.
+                self._con.execute(
+                    f"DELETE FROM {_FTS_TABLE} WHERE session_id = ? AND turn = ?",
+                    (session_id, str(turn)),
+                )
+                self._con.execute(
+                    f"INSERT INTO {_FTS_TABLE} "
+                    "(session_id, task_id, turn, ts, title, note, body) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, task_id, str(turn), ts, title or "", note or "", text or ""),
+                )
+                self._con.commit()
         except Exception:
             pass
 
@@ -189,15 +195,25 @@ class EpisodeIndex:
             lim = max(1, min(int(limit), 20))
         except (TypeError, ValueError):
             lim = 5
+        sel = (f"SELECT session_id, task_id, turn, ts, title, note, "
+               f"snippet({_FTS_TABLE}, 6, '«', '»', ' … ', 12) AS snip, "
+               f"rank AS score "
+               f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? ")
         try:
-            rows = self._con.execute(
-                f"SELECT session_id, task_id, turn, ts, title, note, "
-                f"snippet({_FTS_TABLE}, 6, '«', '»', ' … ', 12) AS snip, "
-                f"rank AS score "
-                f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
-                f"ORDER BY rank LIMIT ?",
-                (match, lim + 10),   # over-fetch so exclude_session can't starve the result
-            ).fetchall()
+            with self._lock:   # serialize cursor use on the shared connection (parallel explorers)
+                if only_session:
+                    # session_id is an UNINDEXED FTS5 column → push the filter into SQL. A globally-ranked
+                    # over-fetch + Python post-filter STARVES to [] when other sessions out-rank the target
+                    # (the long-tail recall this serves is exactly that case). No +10 needed: nothing dropped.
+                    rows = self._con.execute(
+                        sel + "AND session_id = ? ORDER BY rank LIMIT ?",
+                        (match, only_session, lim),
+                    ).fetchall()
+                else:
+                    rows = self._con.execute(
+                        sel + "ORDER BY rank LIMIT ?",
+                        (match, lim + 10),   # over-fetch so exclude_session can't starve the result
+                    ).fetchall()
         except Exception:
             return []
         out: list[dict] = []
@@ -241,7 +257,14 @@ class EpisodeIndex:
         # moat's "relevant push" stays primary). Age order = ts then turn.
         if len(out) > 1:
             tops = out[0]["score"] or 1.0
-            by_age = sorted(out, key=lambda h: ((h.get("ts") or ""), (h.get("turn") or 0)))   # oldest→newest
+            def _age_key(h):
+                t = h.get("turn") or 0
+                try:
+                    t = int(t)
+                except (TypeError, ValueError):
+                    t = 0   # a str/None turn must not make sort compare str vs int (TypeError)
+                return ((h.get("ts") or ""), t)
+            by_age = sorted(out, key=_age_key)   # oldest→newest
             n = len(by_age)
             for k, h in enumerate(by_age):
                 h["_blend"] = h["score"] + _RECENCY_W * tops * (k / (n - 1))
@@ -251,13 +274,14 @@ class EpisodeIndex:
         return out[:lim]
 
     def close(self) -> None:
-        if self._con is not None:
-            try:
-                self._con.close()
-            except Exception:
-                pass
-        self._con = None
-        self.is_active = False
+        with self._lock:   # serialize close vs an in-flight index_episode/search on the shared connection
+            if self._con is not None:
+                try:
+                    self._con.close()
+                except Exception:
+                    pass
+            self._con = None
+            self.is_active = False
 
 
 def make_episode_index(db_path: str | None = None) -> EpisodeIndex:

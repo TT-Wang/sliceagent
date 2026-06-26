@@ -93,7 +93,7 @@ def classify(error: Exception) -> dict:
     overflow = is_context_overflow(error)
     empty = isinstance(error, EmptyResponseError)
     retryable = False
-    if status == 429 or "rate limit" in msg or "overloaded" in msg or "503" in msg:
+    if status == 429 or "rate limit" in msg or "too many requests" in msg or "overloaded" in msg or "503" in msg:
         retryable = True
     if isinstance(status, int) and 500 <= status < 600:
         retryable = True

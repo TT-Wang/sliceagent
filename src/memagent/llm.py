@@ -41,10 +41,11 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
     HTTP_PROXY) ALWAYS wins. Otherwise: foreign endpoints (OpenAI/gpt) route through the local ClashX
     proxy, CN-direct providers (deepseek/moonshot) go DIRECT — so picking a model 'just works' without
     juggling AGENT_PROXY. Returns a proxy URL or 'none'. (Environment/provider quirk, isolated here.)"""
-    if explicit:
-        if explicit.strip().lower() in ("off", "none", "direct", "no", "false", "0"):
+    if explicit and explicit.strip():            # a whitespace-only env var is NOT an explicit setting
+        s = explicit.strip()
+        if s.lower() in ("off", "none", "direct", "no", "false", "0"):
             return "none"            # AGENT_PROXY=off → force a DIRECT connection (was treated as a URL → bug)
-        return explicit
+        return s
     base_l = (resolved_base or "").lower()
     direct = any(d in base_l for d in ("deepseek", "moonshot", "127.0.0.1", "localhost"))
     return "none" if direct else _CLASHX
@@ -223,7 +224,13 @@ class OpenAILLM:
         # Cap the completion generously. Providers default low (deepseek ~4096); a response that
         # exceeds it truncates mid-edit → the agent retries the broken edit → step/time blowup. A
         # generous explicit cap avoids that. Standard param (provider-agnostic). 0 → leave default.
-        self.max_tokens = int(os.environ.get("AGENT_MAX_TOKENS") or 8192)
+        # per-REQUEST completion cap — its OWN env var, decoupled from AGENT_MAX_TOKENS (which is the
+        # per-turn BudgetHook budget; sharing the key made one value drive two quantities orders of
+        # magnitude apart). Guarded so a malformed value degrades to the default instead of crashing init.
+        try:
+            self.max_tokens = int(os.environ.get("AGENT_COMPLETION_TOKENS") or 8192)
+        except (TypeError, ValueError):
+            self.max_tokens = 8192
         # Provider-AGNOSTIC prompt-cache routing key (OpenAI `prompt_cache_key`, accepted/ignored
         # harmlessly elsewhere). A session-stable key keeps every turn's requests on the same cached
         # prefix → higher cache-hit rate at ZERO added prompt tokens. Set via set_cache_key(); the
@@ -265,6 +272,8 @@ class OpenAILLM:
         if sink and text:
             try:
                 sink(kind, text)
+            except _import_api_timeout_error():
+                raise   # the SIGALRM hard-deadline must not be swallowed by the sink wrapper
             except Exception:  # noqa: BLE001 — a render error must NEVER break the LLM call
                 pass
 
@@ -275,7 +284,12 @@ class OpenAILLM:
             openai_errors = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
         except ImportError:
             openai_errors = ()
-        return isinstance(error, openai_errors + (EmptyResponseError,))
+        try:
+            import httpx
+            transport = (httpx.TransportError,)   # a raw mid-STREAM drop (SDK doesn't wrap stream-iter errors) must retry like the blocking path
+        except ImportError:
+            transport = ()
+        return isinstance(error, openai_errors + transport + (EmptyResponseError,))
 
     def _on_alarm(self, signum, frame):
         """SIGALRM handler: a request blew the HARD wall-clock deadline → raise a retryable timeout."""
@@ -377,6 +391,7 @@ class OpenAILLM:
         calls: dict[int, dict] = {}          # index → {id, name, args:[fragments]}
         finish = None
         usage = None
+        _timeout_err = _import_api_timeout_error()   # the SIGALRM hard-deadline exception (must not be swallowed)
         # E3 streaming resilience: a single MALFORMED chunk is skipped (never aborts the whole stream); a
         # mid-stream CONNECTION error re-raises ONLY when nothing was assembled (so with_retry re-rolls) —
         # otherwise we salvage the partial as a truncated stop, which the loop handles cleanly.
@@ -398,7 +413,10 @@ class OpenAILLM:
                         if rc:
                             self._emit("reasoning", rc)
                         for tcd in (getattr(d, "tool_calls", None) or []):
-                            slot = calls.setdefault(getattr(tcd, "index", 0), {"id": None, "name": None, "args": []})
+                            _ix = getattr(tcd, "index", None)
+                            if _ix is None:                       # provider omitted index → don't collapse parallel
+                                _ix = getattr(tcd, "id", None) or len(calls)   # calls onto one slot; key by id/position
+                            slot = calls.setdefault(_ix, {"id": None, "name": None, "args": []})
                             if getattr(tcd, "id", None):
                                 slot["id"] = tcd.id
                             fn = getattr(tcd, "function", None)
@@ -407,6 +425,8 @@ class OpenAILLM:
                                     slot["name"] = fn.name
                                 if getattr(fn, "arguments", None):
                                     slot["args"].append(fn.arguments)
+                except _timeout_err:
+                    raise   # SIGALRM hard-deadline fired mid-chunk → propagate (one-shot alarm won't re-arm); the outer handler salvages the partial
                 except Exception:  # noqa: BLE001 — one bad chunk must not kill the stream
                     continue
         except Exception:  # noqa: BLE001 — stream broke mid-flight
@@ -417,7 +437,8 @@ class OpenAILLM:
         # name/id delta arrived would otherwise yield a ToolCall(name=None) that breaks the dispatcher.
         # If this empties content AND tool_calls, complete() raises EmptyResponseError → with_retry re-rolls.
         tool_calls = [NS(id=c["id"], function=NS(name=c["name"], arguments="".join(c["args"])))
-                      for _, c in sorted(calls.items()) if c["id"] and c["name"]]
+                      for _, c in sorted(calls.items(), key=lambda kv: kv[0] if isinstance(kv[0], int) else 0)
+                      if c["id"] and c["name"]]   # robust sort: a None/str stream index must not crash assembly
         message = NS(content=("".join(parts) or None), tool_calls=tool_calls)
         return NS(choices=[NS(message=message, finish_reason=finish)], usage=usage)
 
@@ -516,8 +537,15 @@ class OpenAILLM:
             kwargs["prompt_cache_key"] = ck["prompt_cache_key"]
         _stream = (getattr(self, "_on_delta", None) is not None
                    and threading.current_thread() is threading.main_thread())
-        resp = (self._responses_stream(kwargs) if _stream
-                else self._create(kwargs, caller=lambda kw: self.client.responses.create(**kw)))
+        try:
+            resp = (self._responses_stream(kwargs) if _stream
+                    else self._create(kwargs, caller=lambda kw: self.client.responses.create(**kw)))
+        except Exception as e:  # noqa: BLE001
+            # route a provider context overflow into the SAME slice-tighten recovery the chat path uses
+            # (llm.py chat except) — otherwise an overflow on the responses path crashes the turn instead.
+            if is_context_overflow(e):
+                raise ContextOverflow(e, status_code=getattr(e, "status_code", None)) from e
+            raise
         return self._parse_responses(resp)
 
     def _responses_stream(self, kwargs: dict):
@@ -533,12 +561,20 @@ class OpenAILLM:
                             self._emit("content", getattr(ev, "delta", "") or "")
                         elif t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
                             self._emit("reasoning", getattr(ev, "delta", "") or "")
+                    except _import_api_timeout_error():
+                        raise   # SIGALRM hard-deadline fired mid-event → propagate (one-shot alarm won't re-arm), mirroring the chat path
                     except Exception:  # noqa: BLE001 — one bad event must not abort the stream
                         continue
                 return stream.get_final_response()
         try:
             return self._create(kwargs, caller=_drain)
-        except Exception:  # noqa: BLE001 — streaming unavailable/broke → blocking call (identical result)
+        except Exception as e:  # noqa: BLE001 — streaming unavailable/broke → blocking call (identical result)
+            # but NOT on a deterministic request-level failure (a hard-deadline timeout or a context
+            # overflow): re-issuing the SAME request as a blocking call just doubles a guaranteed failure
+            # (and overflow must reach _complete_responses' converter to drive recovery). Re-raise those;
+            # only fall back for a genuine transport/streaming-unsupported hiccup.
+            if isinstance(e, _import_api_timeout_error()) or is_context_overflow(e):
+                raise
             return self._create(kwargs, caller=lambda kw: self.client.responses.create(**kw))
 
     def _parse_responses(self, resp) -> AssistantMessage:
@@ -554,12 +590,15 @@ class OpenAILLM:
                 calls.append(ToolCall(id=getattr(item, "call_id", "") or getattr(item, "id", ""),
                                       name=getattr(item, "name", ""), args=args))
         status = getattr(resp, "status", None)               # finish_reason from Responses status
+        reason = ""
         if status == "incomplete":
             reason = getattr(getattr(resp, "incomplete_details", None), "reason", "")
-            finish = "length" if reason == "max_output_tokens" else "stop"
+            finish = "length" if reason == "max_output_tokens" else ("content_filter" if reason == "content_filter" else "stop")
         else:
             finish = "tool_calls" if calls else "stop"
-        if not content and not calls:
+        # content_filter is a TERMINAL provider stop, not an empty-response hiccup: exempt it from the raise
+        # (mirrors the chat path) so the loop PARKS it instead of re-rolling forever on a filtered completion.
+        if not content and not calls and finish != "content_filter":
             from .errors import EmptyResponseError
             raise EmptyResponseError(f"empty responses completion (status={status})")
         return AssistantMessage(content=content, tool_calls=calls,
@@ -607,6 +646,9 @@ class OpenAILLM:
                 resp = _creator(kwargs)
             else:
                 raise
+        if not resp.choices:   # some OpenAI-compatible proxies emit {"choices": []} on filter/transient errors
+            from .errors import EmptyResponseError
+            raise EmptyResponseError("empty completion (no choices)")   # RETRYABLE → with_retry re-rolls (not a raw IndexError)
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []

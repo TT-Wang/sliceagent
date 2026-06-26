@@ -73,8 +73,16 @@ class BackgroundReviewer:
         t = threading.Thread(
             target=self._run, args=(session_id,),
             name="memagent-bg-review", daemon=True)
+        # publish self._thread only AFTER a successful start: otherwise a start() failure both latches
+        # _busy=True forever (no more reviews) AND leaves join() calling .join() on a never-started thread.
+        try:
+            t.start()
+        except Exception:  # noqa: BLE001 — a thread-spawn failure must not escape into the foreground caller
+            with self._lock:
+                self._busy = False
+            self._log("background review: thread start failed")
+            return
         self._thread = t
-        t.start()
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the in-flight review (for deterministic tests / clean shutdown)."""

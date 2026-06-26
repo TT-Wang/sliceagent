@@ -259,7 +259,7 @@ def render_requirements(requirements: list[dict]) -> str:
     turns stay byte-identical (warm STABLE prefix). Bounded by MAX_REQUIREMENTS (folded in slice_sink)."""
     if not requirements:
         return ""
-    return "\n".join(f"- [{'x' if r.get('done') else ' '}] {r['text']}" + (" (done)" if r.get("done") else "")
+    return "\n".join(f"- [{'x' if r.get('done') else ' '}] {r.get('text', '')}" + (" (done)" if r.get("done") else "")
                      for r in requirements)
 
 
@@ -270,7 +270,7 @@ def render_plan(plan: list[dict]) -> str:
     REQUIREMENTS (acceptance criteria): this is the step sequence and the agent's live progress through it."""
     if not plan:
         return ""
-    return "\n".join(f"{i}. [{_PLAN_MARK.get(it.get('status'), ' ')}] {it['step']}"
+    return "\n".join(f"{i}. [{_PLAN_MARK.get(it.get('status'), ' ')}] {it.get('step', '')}"
                      for i, it in enumerate(plan, 1))
 
 
@@ -302,6 +302,8 @@ def observe(out, n: int = 260) -> str:
     o = normalize_ws(out)
     if len(o) <= n:
         return o
+    if n < 8:                            # too small to split head+sep+tail; a plain head-cut is the bound
+        return o[:n]                     # (else tail = n-head-3 <= 0 and o[-0:] returns the WHOLE string)
     head = n // 4
     tail = n - head - 3                  # 3 = len(" … "); head + sep + tail == n
     return o[:head] + " … " + o[-tail:]
@@ -485,7 +487,7 @@ _USER_REPORT_RE = re.compile(
     r"\b(?:doesn'?t|does not|don'?t|do not|won'?t|will not|can'?t|cannot|can ?not)\b\s*"
     r"(?:\w+\s+){0,3}?(?:work|works|run|runs|play|plays|load|loads|open|opens|start|starts|build|builds|compile|compiles)\b"
     r"|\b(?:not|isn'?t|aren'?t|wasn'?t)\s+(?:\w+\s+){0,2}?(?:work|working|run|running|play|playing|load|loading|right|correct)\b"
-    r"|\b(?:still\s+)?(?:broken|failing|fails|failed|crash(?:es|ed|ing)?|error(?:s|ed)?|bug(?:gy|ged)?|not working)\b"
+    r"|\b(?:still\s+)?(?:broken|failing|fails|failed|crash(?:es|ed|ing)?|errored|buggy|not working)\b"  # bare 'error'/'bug' dropped (dev vocabulary, not a report); re-admitted with context below
     r"|\b(?:it|this|that)\s+(?:still\s+)?(?:doesn'?t|does not|won'?t|can'?t|cannot)\b"
     # a pasted terminal/runtime diagnostic the user is reporting
     r"|\b(?:no such file|command not found|traceback|exception|permission denied|"
@@ -499,7 +501,7 @@ _USER_REPORT_RE = re.compile(
     r"|\b(?:failing|red|broken)\s+(?:tests?|build|ci)\b"
     r"|\bdid(?:n'?t|\s+not)\b(?:\s+\w+){0,2}?\s*fix\b"
     r"|\b(?:still|same)\b(?:\s+\w+){0,3}?\s+(?:error|issue|problem|bug|failure|failing|broken)\b"
-    r"|\bhttp\s*[45]\d\d\b|\b[45]\d\d\s+(?:error|status|response|not found|internal server)\b"
+    r"|\bhttp\s*[45]\d\d\b|\b[45]\d\d\s+(?:error|not found|internal server)\b"  # dropped bare 'status'/'response' (feature-spec phrasing, e.g. 'return a 404 status')
     r"|\b(?:return(?:s|ed|ing)?|get(?:s|ting)?|got|throw(?:s|n|ing)?|give[sn]?)\s+(?:an?\s+)?(?:http\s*)?[45]\d\d\b"
     r"|\bmodulenotfounderror\b"
     r")",

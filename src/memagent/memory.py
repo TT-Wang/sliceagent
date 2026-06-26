@@ -16,6 +16,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 
 
 def _write_atomic(path: str, text: str) -> None:
@@ -57,6 +58,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _safe_vault_id(x: str) -> str | None:
+    """A task_id / session_id is model- and user-controllable (switch_topic, /resume) and is joined into a
+    vault path, so reject anything that could traverse out (`..`, separators, nul). Returns the id or None."""
+    x = (x or "").strip()
+    if not x or not re.fullmatch(r"[A-Za-z0-9._-]+", x) or ".." in x:
+        return None
+    return x
+
+
 def _vault_root() -> str:
     """memagent-owned vault root. Prefers a dedicated var; then a document-vault var; NEVER
     MEMEM_DIR (that is memem's state/db dir, not a vault). Falls back to ~/.memagent/vault."""
@@ -81,7 +91,7 @@ def write_skill_file(name: str, body: str, *, skills_dir: str | None = None) -> 
     re-injects unscanned every session), REDACTS any secret before it lands on disk, and writes
     atomically. Returns the path written, or None if rejected. Never raises."""
     try:
-        name = re.sub(r"[^a-z0-9._-]+", "-", (name or "").strip().lower()).strip("-")[:64] or "skill"
+        name = re.sub(r"[^a-z0-9._-]+", "-", (name or "").strip().lower()).strip("-").strip(".")[:64] or "skill"  # strip(".") rejects '.'/'..' dir escape
         if not body.lstrip().startswith("---") or "name:" not in body[:200]:
             return None                                  # not a valid SKILL.md (frontmatter required)
         if scan_for_threats(body, scope="strict"):       # (a) BLOCK on write — poisoned skill
@@ -89,10 +99,9 @@ def write_skill_file(name: str, body: str, *, skills_dir: str | None = None) -> 
         d = os.path.join(skills_dir or _skills_dir(), name)
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, "SKILL.md")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(redact_text(body))                   # (c) redact any secret before persisting
-        os.replace(tmp, path)                            # atomic
+        # _write_atomic uses a per-writer mkstemp temp (not a fixed `path + ".tmp"`), so two concurrent
+        # skill writes can't clobber each other's temp and corrupt SKILL.md — each rename is isolated.
+        _write_atomic(path, redact_text(body))           # (c) redact any secret before persisting
         return path
     except Exception:  # noqa: BLE001 — a skill-write failure must never break the caller
         return None
@@ -107,7 +116,7 @@ def make_write_skill_tool():
     from .skill_provenance import USER, frontmatter_line
 
     def handler(args: dict) -> str:
-        name = re.sub(r"[^a-z0-9._-]+", "-", (args.get("name") or "").strip().lower()).strip("-")[:64]
+        name = re.sub(r"[^a-z0-9._-]+", "-", (args.get("name") or "").strip().lower()).strip("-").strip(".")[:64]  # strip(".") rejects '.'/'..' dir escape
         desc = (args.get("description") or "").strip().replace("\n", " ")[:120]
         body = (args.get("body") or "").strip()
         if not name or not desc or not body:
@@ -148,6 +157,33 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     return fm, text
 
 
+_BODY_HDR_ESC = "⁣"  # invisible separator: prefix a VERBATIM line that begins with '## ' so
+                          # _read_sections doesn't mistake it for a section header (model-written markdown
+                          # in goal/mission/last_error/resolution otherwise truncates/misroutes on resume).
+
+
+def _esc_body(t: str) -> str:
+    # escape a line that starts with '## ' OR already starts with the sentinel (so verbatim content that
+    # natively begins with the sentinel round-trips exactly — _unesc peels exactly one layer).
+    if not t or ("## " not in t and _BODY_HDR_ESC not in t):
+        return t
+    return "\n".join(_BODY_HDR_ESC + ln if (ln.startswith("## ") or ln.startswith(_BODY_HDR_ESC)) else ln
+                     for ln in t.split("\n"))
+
+
+def _unesc_body(t: str) -> str:
+    if not t or _BODY_HDR_ESC not in t:
+        return t
+    return "\n".join(ln[1:] if ln.startswith(_BODY_HDR_ESC) else ln for ln in t.split("\n"))
+
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _read_sections(body: str) -> dict:
     """Split a body into {lower-header: verbatim text} by '## ' headers (preserves multi-line)."""
     out, cur, buf = {}, None, []
@@ -186,21 +222,26 @@ def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
         f"links: {','.join(task.links)}", f"tags: {_fm(task.tags)}", "---",
     ]
     body = [
-        "## Goal", task.goal,
+        "## Goal", _esc_body(task.goal),
         "## Findings", "\n".join(f"- {f}" for f in task.findings),
+        # provenance per finding (JSON bullet, like World) — else cross-session resume drops it and a
+        # 'claim'-tier finding silently reads back at the higher 'tool-note' trust tier.
+        "## Finding sources", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}"
+                                        for k, v in task.finding_source.items()),
         # carried slice tiers — JSON-per-bullet so dict items round-trip EXACTLY (no markdown-escape
         # hazard). Without these, resuming a task silently dropped the standing contract / todo / north-
         # star / world model (data loss). Mission is a single verbatim line like Status.
         "## Requirements", "\n".join(f"- {json.dumps(r, ensure_ascii=False)}" for r in task.requirements),
         "## Plan", "\n".join(f"- {json.dumps(p, ensure_ascii=False)}" for p in task.plan),
-        "## Mission", task.mission,
+        "## Mission", _esc_body(task.mission),
+        "## Open report", _esc_body(getattr(task, "open_report", "")),
         "## World", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}" for k, v in task.world.items()),
         "## Working set", "\n".join(f"- {p}" for p in task.active_files),
         "## Edited", "\n".join(f"- {p}" for p in sorted(task.edited_files)),
         # anchor is TAB-separated (a path never contains TAB; anchors may contain ' :: ' etc.)
         "## Anchors", "\n".join(f"- {p}\t{a}" for p, a in task.edit_anchor.items()),
-        "## Status", task.last_error,            # verbatim, may be empty/multi-line
-        "## Resolution", task.resolution,
+        "## Status", _esc_body(task.last_error),   # verbatim, may be empty/multi-line
+        "## Resolution", _esc_body(task.resolution),
     ]
     return "\n".join(fm) + "\n" + "\n".join(body) + "\n"
 
@@ -228,25 +269,28 @@ def _parse_task_md(path: str) -> TaskState | None:
 
     world = {}
     for kv in _json_bullets("world"):
-        if isinstance(kv, list) and len(kv) == 2:
+        if isinstance(kv, list) and len(kv) == 2 and isinstance(kv[0], str):   # non-str key is unhashable → skip the bullet, not the whole task
             world[kv[0]] = kv[1]
     return TaskState(
         task_id=fm.get("task_id", ""), session_id=fm.get("session_id", ""),
         title=fm.get("title", ""), status=fm.get("status", "active"),
-        goal=sec.get("goal", ""),
+        goal=_unesc_body(sec.get("goal", "")),
         findings=_bullets(sec.get("findings", "")),
+        finding_source={kv[0]: kv[1] for kv in _json_bullets("finding sources")
+                        if isinstance(kv, list) and len(kv) == 2 and isinstance(kv[0], str)},
         requirements=[r for r in _json_bullets("requirements") if isinstance(r, dict)],
         plan=[p for p in _json_bullets("plan") if isinstance(p, dict)],
-        mission=sec.get("mission", ""),
+        mission=_unesc_body(sec.get("mission", "")),
+        open_report=_unesc_body(sec.get("open report", "")),
         world=world,
         active_files=_bullets(sec.get("working set", "")),
         edited_files=_bullets(sec.get("edited", "")),
         edit_anchor=anchors,
-        last_error=sec.get("status", ""),
-        since_edit=int(fm.get("since_edit", "0") or 0),
+        last_error=_unesc_body(sec.get("status", "")),
+        since_edit=_safe_int(fm.get("since_edit"), 0),   # corrupt counter → 0, don't abort the whole load
         links=[x for x in fm.get("links", "").split(",") if x],
         tags=fm.get("tags", ""),
-        resolution=sec.get("resolution", ""),
+        resolution=_unesc_body(sec.get("resolution", "")),
     )
 
 
@@ -262,7 +306,9 @@ def _upsert_session_index(vault: str, task: TaskState, updated: str) -> None:
         for b in _bullets(_read_sections(body).get("tasks", "")):
             rows[b.split(" · ", 1)[0].strip()] = b
     title = redact_text((task.title or "").replace("\n", " "))   # model-derived → redact before persisting
-    rows[task.task_id] = f"{task.task_id} · {task.status} · {updated} · {title}"  # title LAST
+    # title LAST — but OMIT the trailing " · title" when empty, else _bullets strips the trailing field
+    # and the row parses to 3 parts and is silently dropped from the session index.
+    rows[task.task_id] = f"{task.task_id} · {task.status} · {updated}" + (f" · {title}" if title else "")
     lines = ["---", "type: session", f"session_id: {task.session_id}", "---", "## Tasks"]
     lines += [f"- {r}" for r in rows.values()]
     _write_atomic(path, "\n".join(lines) + "\n")
@@ -273,9 +319,10 @@ def _parse_session_index(path: str) -> list[TaskRef]:
         _, body = _split_frontmatter(f.read())
     out: list[TaskRef] = []
     for b in _bullets(_read_sections(body).get("tasks", "")):
-        parts = b.split(" · ", 3)  # task_id · status · updated · title  (title may contain ' · ')
-        if len(parts) == 4:
-            tid, status, updated, title = parts
+        parts = b.split(" · ", 3)  # task_id · status · updated · title  (title optional / may contain ' · ')
+        if len(parts) >= 3:
+            tid, status, updated = parts[0], parts[1], parts[2]
+            title = parts[3] if len(parts) == 4 else ""
             out.append(TaskRef(task_id=tid.strip(), title=title.strip(),
                                status=status.strip(), updated=updated.strip()))
     return out
@@ -292,7 +339,8 @@ class NullMemory:
     def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
         return []
 
-    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "") -> None:
+    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "",
+                 paths: list[str] | None = None) -> None:
         return None
 
     def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
@@ -300,6 +348,9 @@ class NullMemory:
 
     def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
         return []
+
+    def episode_manifest(self, session_id: str, k: int) -> tuple[list[dict], int]:
+        return [], 0
 
     def search_episodes(self, query: str, *, limit: int = 5,
                         exclude_session: str | None = None,
@@ -335,6 +386,7 @@ class MememMemory:
         import memem.retrieve  # noqa: F401  — fail fast if memem is absent
         self._vault = _vault_root()
         self._scope = os.path.basename(os.getcwd()) or "default"   # same-project soft bonus on recall
+        self._idx_lock = threading.Lock()   # serialize the lazy FTS-index open across parallel explorers
 
     # --- lessons ---
     def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
@@ -376,8 +428,9 @@ class MememMemory:
     # --- episodic cache (lossless, cold) ---
     def _clamp(self, v):
         if isinstance(v, str) and len(v.encode("utf-8")) > _MAX_RECORD_VALUE_BYTES:
-            h = _MAX_RECORD_VALUE_BYTES // 2
-            return redact_text(v[:h] + f"\n…[truncated {len(v)} chars]…\n" + v[-h:])
+            b = v.encode("utf-8"); h = _MAX_RECORD_VALUE_BYTES // 2   # slice on BYTES (cap is a byte budget);
+            head = b[:h].decode("utf-8", "ignore"); tail = b[-h:].decode("utf-8", "ignore")  # char-slicing let multibyte overshoot ~4x
+            return redact_text(head + f"\n…[truncated {len(v)} chars]…\n" + tail)
         if isinstance(v, str):
             return redact_text(v)  # (c) redact every persisted episodic string on its way to the cache
         # #35: recurse into structured (non-string) tool outputs so str leaves inside a dict/list are
@@ -416,15 +469,19 @@ class MememMemory:
         """Lazily open the FTS5 episode index (cached). Returns None if FTS5 is
         unavailable — every caller treats None as 'index off' and falls back."""
         idx = getattr(self, "_idx", "unset")
-        if idx == "unset":
-            try:
-                from .search_index import make_episode_index
-                idx = make_episode_index()
-                if not idx.is_active:
+        if idx != "unset":
+            return idx                       # fast path: already opened (lock-free)
+        with self._idx_lock:                 # double-checked: exactly ONE connection is opened + tracked by close()
+            idx = getattr(self, "_idx", "unset")
+            if idx == "unset":
+                try:
+                    from .search_index import make_episode_index
+                    idx = make_episode_index()
+                    if not idx.is_active:
+                        idx = None
+                except Exception:
                     idx = None
-            except Exception:
-                idx = None
-            self._idx = idx
+                self._idx = idx
         return idx
 
     def close(self) -> None:
@@ -475,7 +532,7 @@ class MememMemory:
             # limit set → keep only the last N parsed dicts via a bounded deque (don't hold the whole
             # session in memory just to slice the tail); limit unset (consolidate) reads all by design.
             from collections import deque
-            out = deque(maxlen=limit) if limit else []
+            out = deque(maxlen=limit) if limit is not None else []   # limit=0 ⇒ deque(maxlen=0) keeps ZERO (was: read all)
             with open(path, encoding="utf-8") as f:
                 for ln in f:
                     ln = ln.strip()
@@ -487,6 +544,39 @@ class MememMemory:
             return list(out)
         except Exception:
             return []
+
+    def episode_manifest(self, session_id: str, k: int) -> tuple[list[dict], int]:
+        """(last_k_dicts, total_count) for the PAGED-OUT HISTORY manifest. Reads only the file TAIL and
+        parses only ~k records, so the per-turn slice build stays O(k) instead of re-parsing the whole
+        session JSONL every turn (which was O(n²) over a long session). Never raises."""
+        try:
+            path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
+            if not os.path.exists(path):
+                return [], 0
+            size = os.path.getsize(path)
+            total = 0
+            window = min(size, max(65536, (k + 1) * 4096))
+            with open(path, "rb") as f:
+                for line in f:                 # cheap newline count (no JSON parse) for the '…older' flag
+                    if line.strip():
+                        total += 1
+                f.seek(max(0, size - window))
+                tail = f.read()
+            rows = tail.splitlines()
+            if size > window and rows:
+                rows = rows[1:]                # the window may start mid-line → drop the partial leader
+            out: list[dict] = []
+            for ln in rows:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln.decode("utf-8", "replace")))
+                except ValueError:
+                    continue
+            return out[-k:], total
+        except Exception:
+            return [], 0
 
     # --- task state / resume ---
     def checkpoint_task(self, task: TaskState) -> None:
@@ -509,15 +599,21 @@ class MememMemory:
             pass
 
     def load_task(self, task_id: str) -> TaskState | None:
+        tid = _safe_vault_id(task_id)
+        if tid is None:
+            return None   # reject path-traversal in a model/user-controlled id
         try:
-            path = os.path.join(self._vault, "tasks", f"{task_id}.md")
+            path = os.path.join(self._vault, "tasks", f"{tid}.md")
             return _parse_task_md(path) if os.path.exists(path) else None
         except Exception:
             return None
 
     def list_session_tasks(self, session_id: str) -> list[TaskRef]:
+        sid = _safe_vault_id(session_id)
+        if sid is None:
+            return []
         try:
-            path = os.path.join(self._vault, "sessions", f"{session_id}.md")
+            path = os.path.join(self._vault, "sessions", f"{sid}.md")
             return _parse_session_index(path) if os.path.exists(path) else []
         except Exception:
             return []

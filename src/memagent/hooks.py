@@ -81,12 +81,14 @@ class CompositeHooks(Hooks):
         return None
 
     def record_step_usage(self, usage):
-        stop = any((h.record_step_usage(usage) or {}).get("stop_turn") for h in self.hooks)
-        return {"stop_turn": True} if stop else None
+        # materialize ALL results first — these callbacks have side effects (e.g. BudgetHook.spent +=), so a
+        # generator-fed any() that short-circuits on the first stop_turn would skip trailing hooks' observation.
+        flags = [(h.record_step_usage(usage) or {}).get("stop_turn") for h in self.hooks]
+        return {"stop_turn": True} if any(flags) else None
 
     def after_step(self, step, usage, stop_reason):
-        stop = any((h.after_step(step, usage, stop_reason) or {}).get("stop_turn") for h in self.hooks)
-        return {"stop_turn": True} if stop else None
+        flags = [(h.after_step(step, usage, stop_reason) or {}).get("stop_turn") for h in self.hooks]
+        return {"stop_turn": True} if any(flags) else None
 
     def should_continue_after_stop(self, stop_reason):
         for h in self.hooks:
@@ -136,7 +138,10 @@ class OracleHook(Hooks):
     def should_continue_after_stop(self, stop_reason):
         if stop_reason != "end_turn":
             return None
-        ok, output = self.oracle.verify()
+        try:
+            ok, output = self.oracle.verify()
+        except Exception as e:  # noqa: BLE001 — a verify ERROR must FORCE another turn, never silently pass the done-gate
+            ok, output = False, f"verification could not run: {type(e).__name__}: {e}"
         if ok:
             return None
         self.on_feedback(output)   # also record into the slice (for the NEXT turn's seed / durable cache)
@@ -176,7 +181,10 @@ class SelfCheckHook(Hooks):
 
     def __init__(self, max_fires: int = 3):
         import os
-        self._max = max(1, int(os.environ.get("AGENT_SELFCHECK_MAX") or max_fires))
+        try:
+            self._max = max(1, int(os.environ.get("AGENT_SELFCHECK_MAX") or max_fires))
+        except (TypeError, ValueError):
+            self._max = max(1, max_fires)   # a non-numeric env value must not crash hook construction
         self._fires = 0
         self._acted = False   # did the model run a tool since the gate last fired?
 
@@ -214,7 +222,7 @@ class PermissionHook(Hooks):
     gated by policy) are remembered by name. `auto_approve` pre-seeds fnmatch rules matched
     against the command (e.g. ["git status*", "ls *"]) so safe read-only commands never prompt."""
 
-    _CMD_TOOLS = ("run_command", "execute_code")
+    _CMD_TOOLS = ("run_command", "execute_code", "proc_start", "terminal_open", "terminal_send")
 
     def __init__(self, policy, on_ask=None, auto_approve=None):
         self.policy = policy
@@ -226,13 +234,13 @@ class PermissionHook(Hooks):
     def _key(cls, name: str, args: dict) -> str:
         # command-SPECIFIC for the dangerous tools — approving `npm test` must not auto-allow `rm -rf`.
         if name in cls._CMD_TOOLS:
-            return f"{name}:{(args.get('command') or args.get('code') or '').strip()}"
+            return f"{name}:{(args.get('command') or args.get('code') or args.get('input') or '').strip()}"
         return name                             # name-level for the rest (policy already gates them)
 
     def _pre_allowed(self, name: str, args: dict, key: str) -> bool:
         if key in self._approved:
             return True
-        cmd = (args.get("command") or args.get("code") or "").strip()
+        cmd = (args.get("command") or args.get("code") or args.get("input") or "").strip()
         if cmd and self._rules:
             import fnmatch
             return any(fnmatch.fnmatch(cmd, rule) for rule in self._rules)
@@ -294,5 +302,10 @@ class GuardrailHook(Hooks):
         return ToolDecision(False, d.message, counts_as_stuck=hard)
 
     def transform_tool_result(self, name, args, output):
+        # NEVER feed a guardrail/policy BLOCK back into the counters: a blocked call never ran, so counting
+        # its synthetic "Error: blocked by policy:" result as a real failure would advance the failing /
+        # no-edit-progress axes and falsely escalate a harmless soft-block into a hard 'stuck' turn-kill.
+        if isinstance(output, str) and output.startswith("Error: blocked by policy:"):
+            return None
         self.guard.after_call(name, args, output)
         return None

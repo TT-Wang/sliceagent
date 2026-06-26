@@ -27,9 +27,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime, timezone
 
 _USAGE_FILE = ".usage.json"
+_BUMP_LOCK = threading.Lock()   # the skill tool declares no access → concurrent skill() calls run in parallel
+#                                 threads; serialize load→increment→save so an increment isn't lost.
 
 
 def usage_path(skills_dir: str) -> str:
@@ -85,14 +88,15 @@ def bump_use(skills_dir: str, name: str) -> None:
     if not name:
         return
     try:
-        data = load_usage(skills_dir)
-        rec = data.get(name)
-        if not isinstance(rec, dict):
-            rec = _empty_record()
-        rec["use_count"] = int(rec.get("use_count") or 0) + 1
-        rec["last_used_at"] = _now_iso()
-        data[name] = rec
-        _save_usage(skills_dir, data)
+        with _BUMP_LOCK:   # atomic read-modify-write so parallel skill() threads don't lose an increment
+            data = load_usage(skills_dir)
+            rec = data.get(name)
+            if not isinstance(rec, dict):
+                rec = _empty_record()
+            rec["use_count"] = int(rec.get("use_count") or 0) + 1
+            rec["last_used_at"] = _now_iso()
+            data[name] = rec
+            _save_usage(skills_dir, data)
     except Exception:
         pass
 

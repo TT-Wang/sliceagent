@@ -47,13 +47,26 @@ IDEMPOTENT_TOOL_NAMES = frozenset({"read_file", "list_files", "recall_history"})
 MUTATING_TOOL_NAMES = frozenset({
     "edit_file", "append_to_file", "str_replace",
     "run_command", "execute_code",
+    "terminal_open", "terminal_send", "proc_start",   # live-process EXEC tools also change state → count toward the no-edit floor
     "new_topic", "switch_topic", "skill",
 })
+
+# result_no_progress must never block the EDIT/ask actions its own message tells the model to take (else the
+# axis is an inescapable trap). Command/read repeats ARE still blocked — only these genuine-progress escapes
+# are exempt. (Narrower than MUTATING_TOOL_NAMES: a run_command/execute_code loop is still a no-progress loop.)
+_RESULT_AXIS_ESCAPE = frozenset({"edit_file", "append_to_file", "str_replace", "write_file", "ask_user"})
 
 # Known NON-mutating (read/search) tools. The no-progress streak treats a tool as a potential MUTATOR
 # unless it is in here — so unknown plugin/MCP tools AND mutating builtins missing from the static set
 # above (world_set, terminal_*, proc_*, update_plan, …) still drive loop detection (pessimistic).
 _NON_MUTATORS = IDEMPOTENT_TOOL_NAMES | frozenset({"grep", "glob", "ask_user"})
+
+# Same-step exact-call dedup eligibility: pure read-only QUERY tools whose identical re-execution within
+# ONE LLM step yields a byte-identical, side-effect-free result, so a duplicate can reuse the first call's
+# output instead of running the tool twice (lossless). Excludes ask_user (a real interaction even when the
+# prompt repeats) and every mutating/unknown/plugin/MCP tool — those are never deduped, since a repeat may
+# be intentional or carry side effects.
+DEDUP_SAFE_TOOL_NAMES = IDEMPOTENT_TOOL_NAMES | frozenset({"grep", "glob"})
 
 # memagent's failing convention — kept in one place for plain-string fallback.
 # Structured tool results (ToolText) carry `.ok`; guardrail accounting must respect
@@ -259,7 +272,12 @@ class ToolCallGuardrail:
         # changing — a no-progress loop the exact-(tool,args) axis cannot see (different command text,
         # same result). Soft "you've seen this output N times — act or stop". Pure read of the ring.
         top_hash, top_count = self._hottest_result()
-        if top_count >= self.config.result_repeat_block_after:
+        # Block a re-observation repeat (incl. command loops with identical output — the real moat defense),
+        # but NEVER the EDIT/ask escape the message itself tells the model to take. Without this exemption the
+        # axis was an inescapable per-turn trap (blocked calls never advance the ring → permanent block →
+        # burns max_steps), blocking the very edit/ask that would make progress.
+        if (top_count >= self.config.result_repeat_block_after
+                and tool_name not in _RESULT_AXIS_ESCAPE):
             return GuardrailDecision(
                 block=True,
                 code="result_no_progress",
@@ -278,7 +296,9 @@ class ToolCallGuardrail:
         # successful change landing means the agent is exploring in circles — the slice rebuilds each turn
         # so it cannot see its own spin. A productive mutating call resets the budget, so real multi-step
         # work is never throttled; only a pure read/failed-mutation spree trips it. Soft "act or answer".
-        if self._calls_since_edit >= self.config.call_budget_warn_after:
+        if self._calls_since_edit >= self.config.call_budget_warn_after and tool_name not in _RESULT_AXIS_ESCAPE:
+            # same escape exemption as result_no_progress: never block the edit/ask the message recommends
+            # (a blocked call never runs → never resets the floor → otherwise an inescapable per-turn trap).
             return GuardrailDecision(
                 block=True,
                 code="call_budget",
@@ -317,7 +337,15 @@ class ToolCallGuardrail:
         # still a no-progress loop.
         kind = op_kind(tool_name)
         result_hash = _sha256(result or "")
-        self._push_trajectory(kind, result_hash)
+        # An INFORMATION-FREE result (empty, or a "(… produced no output)" / "(no output)" sentinel) carries
+        # no observable state, so identical empties from DISTINCT successful silent commands (mkdir; touch;
+        # git add; chmod …) are NOT a re-observation loop — feeding them to the result-repeat ring would
+        # hard-block legitimate multi-step setup/build sequences at result_repeat_block_after. Skip them here;
+        # a genuine loop is still caught by the SIGNATURE axis (same call repeated) and the call-budget floor.
+        _r = (result or "").strip()
+        _info_free = (not _r) or _r.endswith("produced no output)") or _r in ("(no output)", "(empty)")
+        if not _info_free:
+            self._push_trajectory(kind, result_hash)
         # Budget floor counts NON-PROGRESS calls only. Progress = a change that lands (the mutator branch
         # below) OR a successful call that returns NEW information (a result not already in the recent ring).
         # A distinct, successful read IS progress: analysis / review / debugging-by-reading legitimately
@@ -406,4 +434,5 @@ __all__ = [
     "op_kind",
     "IDEMPOTENT_TOOL_NAMES",
     "MUTATING_TOOL_NAMES",
+    "DEDUP_SAFE_TOOL_NAMES",
 ]

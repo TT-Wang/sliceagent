@@ -135,17 +135,26 @@ class PageTable:
         entry (mirrors ``_episodes`` for cross-session) so the slice has ONE retrieval seam. Locators
         only — turn/title/breadcrumb, NEVER step bodies; content pages in solely when the model calls
         recall_history(turns=[N]). Bounded to ``k``; a trailing '…older' ref flags that more exist."""
-        read = getattr(self.memory, "read_episodes", None)
-        if read is None or not session_id:
+        if not session_id:
             return []
-        lines = read(session_id)        # whole-session read (same source recall_history uses)
-        if not lines:
+        # Use the TAIL-only manifest read (O(k)/turn) when available, so a long session doesn't re-parse the
+        # whole JSONL every slice build — that was O(n²)/session, eroding the flat-per-turn-cost moat.
+        manifest = getattr(self.memory, "episode_manifest", None)
+        if manifest is not None:
+            shown, total = manifest(session_id, k)
+            older = max(0, total - len(shown))
+        else:
+            read = getattr(self.memory, "read_episodes", None)
+            if read is None:
+                return []
+            lines = read(session_id)        # fallback: whole-session read
+            shown = lines[-k:]
+            older = len(lines) - len(shown)
+        if not shown:
             return []
-        shown = lines[-k:]
         refs = [PageRef(handle=str(ln.get("turn")), kind="episode-thissession",
                         preview=_pack_thissession_preview(ln),
                         score=float(ln.get("turn") or 0), untrusted=False) for ln in shown]
-        older = len(lines) - len(shown)
         if older:
             refs.append(PageRef(handle="…older", kind="episode-thissession",
                                 preview=(f"{older} earlier turn(s) not shown — recall_history() for the full "

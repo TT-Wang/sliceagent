@@ -15,6 +15,7 @@ cleanly). Children run in their own process group so ``close`` takes down the wh
 """
 from __future__ import annotations
 
+import codecs
 import fcntl
 import os
 import pty
@@ -31,7 +32,7 @@ _BUF_CAP = 200_000  # keep the tail of a chatty session bounded
 
 
 class _Session:
-    __slots__ = ("name", "cmd", "master", "popen", "buf")
+    __slots__ = ("name", "cmd", "master", "popen", "buf", "_decoder")
 
     def __init__(self, name, cmd, master, popen):
         self.name = name
@@ -39,6 +40,9 @@ class _Session:
         self.master = master
         self.popen = popen
         self.buf = ""  # output accumulated since the last read/wait returned it
+        # STATEFUL utf-8 decoder: a multibyte char split across two os.read() boundaries must not decode to
+        # U+FFFD on both halves — the decoder holds the partial sequence until its continuation bytes arrive.
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
 
 class SessionManager:
@@ -64,8 +68,16 @@ class SessionManager:
         except BaseException:
             os.close(master)                      # #19: Popen failed — don't leak the master fd too
             raise
-        flags = fcntl.fcntl(master, fcntl.F_GETFL)
-        fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:   # a fcntl failure AFTER spawn must tear down both the master fd AND the orphaned child (#19)
+            flags = fcntl.fcntl(master, fcntl.F_GETFL)
+            fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        except BaseException:
+            try:
+                os.killpg(os.getpgid(popen.pid), signal.SIGKILL)
+            except Exception:  # noqa: BLE001
+                pass
+            os.close(master)
+            raise
         self._s[name] = _Session(name, command or "(shell)", master, popen)
         return name
 
@@ -81,11 +93,26 @@ class SessionManager:
                                 stdin=slave, stdout=slave, stderr=slave,
                                 start_new_session=True, close_fds=True)
 
-    def send(self, name: str, keys: str, *, enter: bool = True) -> str:
+    def send(self, name: str, keys: str, *, enter: bool = True, timeout: float = 30.0) -> str:
         sess = self._get(name)
         data = (keys + ("\n" if enter else "")).encode("utf-8", errors="replace")
+        # The master fd is O_NONBLOCK: one os.write may write only PART of a large payload (the rest would be
+        # silently dropped), and a FULL buffer raises BlockingIOError (EAGAIN) — back-pressure, not a dead
+        # session. Loop until every byte is written, waiting for writability on EAGAIN — but under an OVERALL
+        # deadline, so a child that has stopped reading stdin can't wedge the (possibly inline) loop thread
+        # forever. Reserve the "may have exited" error for a genuine OSError.
+        view = memoryview(data)
+        deadline = time.time() + timeout
         try:
-            os.write(sess.master, data)
+            while view:
+                try:
+                    view = view[os.write(sess.master, view):]
+                except BlockingIOError:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        raise ValueError(f"session {name!r} not writable within {timeout:g}s; the program "
+                                         "isn't reading its input (stdin) or its output buffer is full") from None
+                    select.select([], [sess.master], [], min(remaining, 5))   # wait for the PTY to drain, then retry
         except OSError as e:
             raise ValueError(f"session {name!r} is not writable ({e}); it may have exited") from None
         # peek (NON-consuming) so the response is still there for a following read/wait — otherwise
@@ -120,8 +147,11 @@ class SessionManager:
         except re.error as e:
             raise ValueError(f"invalid wait pattern: {e}")
         end = time.time() + timeout
-        m = None
-        while time.time() < end:
+        # inspect already-buffered output at least once BEFORE the timeout loop — so timeout<=0 still polls
+        # (matches a buffered hit instead of false-negativing it and then clearing the buffer below).
+        self._drain(sess, hard=min(0.4, timeout) if timeout > 0 else 0.0)
+        m = rx.search(sess.buf)
+        while m is None and time.time() < end:
             self._drain(sess, hard=0.4)
             m = rx.search(sess.buf)
             if m:
@@ -196,7 +226,7 @@ class SessionManager:
                 break  # master closed / child gone
             if not chunk:
                 break  # EOF
-            sess.buf += chunk.decode("utf-8", errors="replace")
+            sess.buf += sess._decoder.decode(chunk)   # incremental: holds a partial multibyte tail across reads
             if len(sess.buf) > _BUF_CAP:
                 sess.buf = "…[earlier output elided]…\n" + sess.buf[-_BUF_CAP:]
 

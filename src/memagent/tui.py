@@ -18,6 +18,7 @@ Design (borrowed from Hermes' rich+prompt_toolkit stack and Kimi's TUI UX):
 from __future__ import annotations
 
 import os
+import threading
 
 from rich import box as _box
 from rich.console import Console, Group
@@ -104,7 +105,7 @@ def _diff(name: str, args: dict):
     """A compact inline diff for a str_replace (old → new). Returns a Rich renderable or None."""
     if name != "str_replace" or not isinstance(args, dict):
         return None
-    old, new = args.get("old_string", ""), args.get("new_string", "")
+    old, new = str(args.get("old_string") or ""), str(args.get("new_string") or "")  # tolerate non-str model args
     if not old and not new:
         return None
     lines = []
@@ -211,6 +212,8 @@ class RichSink:
         _ACTIVE_RICH_SINK = self        # so ask_user/confirm can pause the live region before reading input
         self.c = console
         self.stats = stats
+        self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
+        #                                  all _status/_live spinner transitions (rich Status is not thread-safe)
         self._status = None
         self._live = None        # a transient Rich Live that streams the reply INTO content (not just a tail)
         self._stream = ""        # the assistant text streamed so far this step
@@ -219,31 +222,35 @@ class RichSink:
     def _stop(self) -> None:
         """Tear down whichever live region is active (spinner OR the streaming-content Live). The Live is
         TRANSIENT, so stopping it erases the in-progress render — the canonical panel then prints once."""
-        if self._status is not None:
-            self._status.stop()
-            self._status = None
-        if self._live is not None:
-            try:
-                self._live.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self._live = None
+        with self._lock:   # serialize vs parallel subagent_notify on _status/_live
+            if self._status is not None:
+                self._status.stop()
+                self._status = None
+            if self._live is not None:
+                try:
+                    self._live.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._live = None
 
     def _spin(self, label: str) -> None:
         self._stop()
-        self._stream = ""        # new step → reset the streamed reply
-        self._status = self.c.status(Text(label, style=TH["dim"]), spinner="dots")
-        self._status.start()
+        with self._lock:   # serialize vs parallel subagent_notify on _status
+            self._stream = ""        # new step → reset the streamed reply
+            self._status = self.c.status(Text(label, style=TH["dim"]), spinner="dots")
+            self._status.start()
 
     def subagent_notify(self, text: str) -> None:
         """A child agent's CURRENT activity → ONE dynamic spinner line (overwrites in place), so a subagent
-        doing 80 reads shows a single updating line, not 80. Updates the active spinner; starts one if none."""
+        doing 80 reads shows a single updating line, not 80. Updates the active spinner; starts one if none.
+        Called from PARALLEL explorer worker threads → guarded by self._lock (rich Status isn't thread-safe)."""
         try:
-            if self._status is not None:
-                self._status.update(Text(text, style=TH["dim"]))
-            elif self._live is None:
-                self._status = self.c.status(Text(text, style=TH["dim"]), spinner="dots")
-                self._status.start()
+            with self._lock:
+                if self._status is not None:
+                    self._status.update(Text(text, style=TH["dim"]))
+                elif self._live is None:
+                    self._status = self.c.status(Text(text, style=TH["dim"]), spinner="dots")
+                    self._status.start()
         except Exception:  # noqa: BLE001 — a progress indicator must never break the run
             pass
 
@@ -428,7 +435,10 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
             return
         if text in ("exit", "quit", "/exit"):
             ev.app.exit(); return
-        if text.startswith("/") and handle_slash is not None:
+        if text == "/learn" or text.startswith("/learn "):   # transcript → reusable skill, runs as a TURN (mirror the REPL)
+            from .consolidate import build_learn_prompt
+            text = build_learn_prompt(text[len("/learn"):].strip())
+        elif text.startswith("/") and handle_slash is not None:
             handle_slash(text); return
         user_echo(console, text)           # echo ABOVE the box (instant), THEN run the turn
         state["last"] = text
@@ -444,6 +454,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
             finally:
                 state["running"] = False; state["signal"] = None
                 set_status(None)
+        state["threads"] = [t for t in state["threads"] if t.is_alive()]   # prune finished workers (no unbounded growth)
         th = threading.Thread(target=_work, daemon=True)
         state["threads"].append(th)
         th.start()
@@ -538,7 +549,8 @@ class _InputCompleter(Completer):
             return
         wl = word.lower()
         starts = [p for p in self._files if os.path.basename(p).lower().startswith(wl)]
-        subs = [p for p in self._files if wl in p.lower() and p not in starts]
+        starts_set = set(starts)   # O(1) membership — `p not in starts` (a list) was O(n) per file → O(n²)/keystroke
+        subs = [p for p in self._files if wl in p.lower() and p not in starts_set]
         for p in (starts + subs)[:20]:                          # basename-prefix first, then substring
             yield Completion(p, start_position=-len(word), display_meta="file")
 
@@ -677,7 +689,7 @@ class TuiInput:
         msg = FormattedText([("fg:ansibrightblack", "─" * cols + "\n"), ("fg:ansicyan bold", "❯ ")])
         try:
             with patch_stdout(raw=True):
-                return self.session.prompt(msg, erase_when_done=True)   # transient — user_echo is the record
+                return self.session.prompt(msg)   # PromptSession.prompt has no erase_when_done kwarg → it raised TypeError, crashing the input fallback
         except (EOFError, KeyboardInterrupt):
             return None
 

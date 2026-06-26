@@ -165,7 +165,10 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         # EXPLORER_READ_BUDGET + Slice.explore_mode. max_steps bounds the explorer.
         child_state.read_budget = child_state.read_ceiling = EXPLORER_READ_BUDGET
         child_state.explore_mode = True
-    child_llm = _profile_llm(llm, spec.reasoning)   # per-kind reasoning via a per-child llm view (no mutation)
+    # per-kind reasoning via a per-child llm view (no mutation). The explorer kind honors the documented
+    # AGENT_EXPLORER_REASONING knob (EXPLORER_REASONING) instead of its hard-wired "fast", so the env var works.
+    child_reasoning = EXPLORER_REASONING if spec.name == "explorer" else spec.reasoning
+    child_llm = _profile_llm(llm, child_reasoning)
     build = make_build_slice(child_state, tools, retriever, memory, task, system_extra=spec.system_prompt)
 
     cap = _CaptureLast()
@@ -187,10 +190,12 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                       hooks=hooks, max_steps=max_steps)
 
     files = ", ".join(child_state.active_files) or "(none)"
-    # A READ-ONLY explorer's deliverable is its summary; a stray failed read (lingering last_error) must NOT
-    # flag the whole review as "did not finish cleanly". Only a WRITABLE child's last_error matters (it may
-    # have left the task broken). end_turn means it produced a final summary either way.
-    success = result.stop_reason == "end_turn" and (read_only or not child_state.last_error)
+    # A READ-ONLY explorer's deliverable is its summary; so is a verifier's verdict (summary_is_deliverable),
+    # whose LAST check is often a deliberate failing repro. A lingering last_error must NOT flag those as "did
+    # not finish cleanly". Only a genuinely WRITABLE worker's last_error matters (it may have left the task
+    # broken). end_turn means it produced a final summary either way.
+    summary_is_deliverable = read_only or getattr(spec, "summary_is_deliverable", False)
+    success = result.stop_reason == "end_turn" and (summary_is_deliverable or not child_state.last_error)
     status = "ok" if success else result.stop_reason
     label = {"explorer": "explore", "general": "subagent"}.get(spec.name, spec.name)  # named-kind label
     summary = f"[{label} {status} · {result.steps} steps · files: {files}]"
@@ -244,7 +249,14 @@ class SubagentHost:
             s = [x for x in s if x.get("function", {}).get("name") not in SUBAGENT_EXCLUDED_TOOLS]
             if self.spec.tools is not None:
                 allow = set(self.spec.tools)
-                return [x for x in s if x.get("function", {}).get("name") in allow]
+                s = [x for x in s if x.get("function", {}).get("name") in allow]
+                # spawn_* tools are appended below for the unrestricted path — but an allowlist that NAMES a
+                # spawn tool would otherwise have it filtered out here. Offer the allowed ones (depth-gated).
+                if self.depth < self.max_depth:
+                    for sch in (_SUBAGENT_SCHEMA, _EXPLORE_SCHEMA, self._agent_schema()):
+                        if sch.get("function", {}).get("name") in allow:
+                            s.append(sch)
+                return s
         if self.depth < self.max_depth:  # parent (or a general child) — offer delegation while depth remains
             s.append(_SUBAGENT_SCHEMA)
             s.append(_EXPLORE_SCHEMA)

@@ -79,7 +79,7 @@ class Session:
                                status="active" if tid == self.active_id else "parked"))
         return out
 
-    def continue_topic(self, message: str) -> Slice:
+    def continue_topic(self, message: str, *, resume: bool = False) -> Slice:
         """Continue the active topic with a NEW directive: set the goal, start a fresh action epoch
         but KEEP the durable context — findings and the working set — so the follow-up builds on
         what's already done.
@@ -99,7 +99,8 @@ class Session:
         # the raw trajectory (recent/step-cache/exploratory reads → recall-on-demand). This is what keeps
         # per-turn cost flat across a long session (the moat) while within-loop info stays complete.
         s.seal()
-        s.goal = message
+        if not resume:
+            s.goal = message   # a RESUME cue ("go back to the auth task") must NOT replace the topic's defining goal
         s.last_error = ""
         # demote (don't clear): keep counts, drop the failing flag — see WS2 above
         for sig, a in s.action_log.items():

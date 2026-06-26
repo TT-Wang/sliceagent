@@ -53,31 +53,29 @@ def _toml_val(v) -> str:
     return _toml_str(str(v))
 
 
+def _emit_section(prefix: str, d: dict, lines: list) -> None:
+    """Emit one TOML table RECURSIVELY. Scalars first (TOML requires them before any sub-table header),
+    then each nested dict as a sub-table at ANY depth — so a nested dict like mcp_servers.<id>.env
+    becomes a proper [mcp_servers.<id>.env] sub-table instead of being stringified into a corrupt value
+    (the old code only handled two levels). A pure container of sub-tables (e.g. `providers`) gets no
+    header of its own; the sub-table headers imply it."""
+    scalars = [(k, v) for k, v in d.items() if not isinstance(v, dict)]
+    subtables = [(k, v) for k, v in d.items() if isinstance(v, dict)]
+    if prefix and (scalars or not subtables):
+        lines.append(f"\n[{prefix}]")
+    for k, v in scalars:
+        lines.append(f"{_toml_key(k)} = {_toml_val(v)}")
+    for k, v in subtables:
+        child = f"{prefix}.{_toml_key(k)}" if prefix else _toml_key(k)
+        _emit_section(child, v, lines)
+
+
 def _emit_toml(data: dict) -> str:
-    """Minimal TOML emitter for memagent's config shape (scalars, sections, and a table-of-tables for
-    [providers.<id>]). Round-trips a tomllib-parsed dict so editing one provider preserves the rest."""
+    """Minimal TOML emitter for memagent's config shape (scalars, sections, table-of-tables for
+    [providers.<id>], and arbitrarily-nested sub-tables like [mcp_servers.<id>.env]). Round-trips a
+    tomllib-parsed dict so editing one provider/server preserves the rest."""
     lines = ["# memagent config — managed by `memagent init` / `config`. ENV overrides any value here."]
-    for k, v in data.items():                                  # top-level scalars (rare)
-        if not isinstance(v, dict):
-            lines.append(f"{k} = {_toml_val(v)}")
-    for k, v in data.items():
-        if not isinstance(v, dict):
-            continue
-        if v and all(isinstance(x, dict) for x in v.values()):  # table-of-tables, e.g. [providers.moonshot]
-            for sub, subv in v.items():
-                lines.append(f"\n[{k}.{_toml_key(sub)}]")        # quote a non-bare provider id (e.g. "my.host")
-                for kk, vv in subv.items():
-                    lines.append(f"{kk} = {_toml_val(vv)}")
-        elif v:                                                 # a normal [section]: scalars first, then nested
-            lines.append(f"\n[{k}]")
-            for kk, vv in v.items():
-                if not isinstance(vv, dict):
-                    lines.append(f"{kk} = {_toml_val(vv)}")
-            for kk, vv in v.items():
-                if isinstance(vv, dict):
-                    lines.append(f"\n[{k}.{_toml_key(kk)}]")
-                    for k3, v3 in vv.items():
-                        lines.append(f"{k3} = {_toml_val(v3)}")
+    _emit_section("", data, lines)
     return "\n".join(lines) + "\n"
 
 
@@ -125,11 +123,15 @@ def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: s
     """Merge a provider into the config: add/update [providers.<pid>], set it as the default, keep the rest."""
     data = _read_config(path)
     provs = data.setdefault("providers", {})
+    if not isinstance(provs, dict):              # a corrupt non-dict providers must not crash on provs[pid]=
+        provs = data["providers"] = {}
     entry = {"api_key": api_key, "model": model}
     if base_url:
         entry["base_url"] = base_url
     provs[pid] = entry
     agent = data.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        agent = data["agent"] = {}
     agent["default_provider"] = pid
     agent["model"] = model                                     # keep top-level model in sync (back-compat)
     _atomic_write(path, _emit_toml(data))
@@ -137,11 +139,16 @@ def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: s
 
 def _test_key(model: str, api_key: str, base_url: str, llm_factory) -> tuple[bool, str]:
     """One cheap completion to confirm the key/endpoint work. Returns (ok, message)."""
-    prev = {k: os.environ.get(k) for k in ("LLM_API_KEY", "LLM_BASE_URL")}
+    prev = {k: os.environ.get(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "OPENAI_BASE_URL")}
     try:
         os.environ["LLM_API_KEY"] = api_key
         if base_url:
             os.environ["LLM_BASE_URL"] = base_url
+        else:
+            # empty preset base_url ⇒ provider default; clear BOTH aliases (OpenAILLM also resolves
+            # OPENAI_BASE_URL) so a stale exported endpoint can't hijack the key-test probe.
+            os.environ.pop("LLM_BASE_URL", None)
+            os.environ.pop("OPENAI_BASE_URL", None)
         llm = llm_factory(model)
         resp = llm.complete([{"role": "user", "content": "Reply with the single word: ok"}], [])
         txt = (getattr(resp, "content", "") or "").strip()
@@ -225,11 +232,14 @@ def run_config(argv=None, *, home=None, env=None) -> int:
             out(f"  usage: memagent config --use <provider>  "
                 f"(configured: {', '.join(provs) or 'none — run `memagent init`'})")
             return 1
-        data.setdefault("agent", {})["default_provider"] = pid
+        agent = data.setdefault("agent", {})
+        if not isinstance(agent, dict):                 # a corrupt non-dict [agent] must not crash on item-assign
+            agent = data["agent"] = {}
+        agent["default_provider"] = pid
         if isinstance(provs[pid], dict) and provs[pid].get("model"):
-            data["agent"]["model"] = provs[pid]["model"]
+            agent["model"] = provs[pid]["model"]
         _atomic_write(path, _emit_toml(data))
-        out(f"  default provider → {pid} (model {(provs[pid] or {}).get('model', '?')})")
+        out(f"  default provider → {pid} (model {provs[pid].get('model', '?') if isinstance(provs[pid], dict) else '?'})")
         return 0
     if "--list" in argv:
         out("\n  memagent environment variables (ENV overrides config file):")
@@ -248,7 +258,8 @@ def run_config(argv=None, *, home=None, env=None) -> int:
     data = _read_config(path)
     provs = data.get("providers", {}) if isinstance(data.get("providers"), dict) else {}
     if provs:
-        default = (data.get("agent", {}) or {}).get("default_provider", "")
+        _agent = data.get("agent")
+        default = _agent.get("default_provider", "") if isinstance(_agent, dict) else ""
         out("  providers (* = default · `config --use <id>` to switch):")
         for pid, p in provs.items():
             mark = "*" if pid == default else " "

@@ -32,7 +32,10 @@ def _load_env(path: str = ".env") -> None:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                        v = v[1:-1]   # drop surrounding quotes (common .env convention) so the key isn't literal-quoted
+                    os.environ.setdefault(k.strip(), v)
     except FileNotFoundError:
         pass
 
@@ -305,12 +308,18 @@ def main() -> None:
     app = None
     if use_textual:
         from .tui_app import MemagentTui
+        from . import recovery as _rec
         app = MemagentTui(
             session=session, tools=tools, retriever=retriever, memory=memory,
             llm=llm, hooks=None, dispatch=None,
             run_turn=run_turn, make_build_slice=make_build_slice,
             record_user=record_user, route_topic=route,
             stats=_stats,
+            max_steps=cfg.max_steps,   # else Textual turns are guillotined at run_turn's 40 default
+            consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
+            checkpoint=lambda m, s: _rec.record(
+                root, goal=(session.active().goal if session.active_id else ""), messages=m, step=s),
+            clear_recovery=lambda: _rec.clear(root),
         )
 
     # Note: in Textual mode, interactive approval and ask_user are wired to the Textual app
@@ -356,18 +365,23 @@ def main() -> None:
         _rich = _tui.make_rich_sink(_console, _stats)
         sinks.append(_rich)
         llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner (Kimi-style)
-        _sub_render["fn"] = _rich.subagent_notify   # child agent activity → one dynamic spinner line
+        # child agent activity → one dynamic spinner line. NOT in live mode: a rich console Status would
+        # fight the pinned prompt_toolkit Application for the screen (garbled output) — let the spawn tool's
+        # result line carry the child summary instead, as the plain/headless path does.
+        _sub_render["fn"] = None if use_live else _rich.subagent_notify
     else:
         sinks.append(cli_sink(cfg.show_slice))
     # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
     # snapshots to the shared monitor dir; view them in the STANDING server (python -m memagent.monitor),
     # which stays up across sessions and goes idle when none is running.
+    monitor_sink = None
     if os.environ.get("AGENT_MONITOR"):
         from .monitor import _monitor_dir, make_file_monitor_sink
-        sinks.append(make_file_monitor_sink(
+        monitor_sink = make_file_monitor_sink(
             session.session_id,
             context_fn=lambda: {"goal": session.active().goal if session.active_id else "",
-                                "topic": session.active_id or ""}))
+                                "topic": session.active_id or ""})
+        sinks.append(monitor_sink)
         print(f"  · slice monitor: writing to {_monitor_dir()} — view at the persistent server "
               "(run: python -m memagent.monitor)")
     dispatch = make_dispatcher(*sinks)
@@ -487,7 +501,8 @@ def main() -> None:
                 continue
             if rel.lower().endswith(_IMG_EXT):
                 if vision:
-                    base_tools.attach_image(rel); images.append(rel)
+                    res = base_tools.attach_image(rel)   # only claim "attached" if it actually worked
+                    (skipped if isinstance(res, str) and res.startswith("Error") else images).append(rel)
                 else:
                     skipped.append(rel)
             else:
@@ -535,14 +550,25 @@ def main() -> None:
             if action == "new":
                 session.new_topic(text)
             elif action == "resume":
-                session.switch_topic(tid); session.continue_topic(text)
+                session.switch_topic(tid); session.continue_topic(text, resume=True)
             else:
                 session.continue_topic(text)
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
         record_user(session.active(), text)
         _expand_mentions(text)            # @path → pin the file into OPEN FILES
         build = make_build_slice(session, tools, retriever, memory, text, session.session_id)
-        live_dispatch = make_dispatcher(slice_sink(session), sink)
+        # live mode must wire the SAME host sinks as the REPL path (episodic cache, durable log, metrics) —
+        # not just slice+renderer — else the cache→memory loop and /cost produce NOTHING in live mode.
+        _live_sinks = [slice_sink(session)]
+        if episodic is not None:
+            _live_sinks.append(episodic)
+        _live_sinks.append(log_sink())
+        if metrics is not None:
+            _live_sinks.append(metrics)
+        if monitor_sink is not None:        # live mode must feed the web monitor too (was silently omitted)
+            _live_sinks.append(monitor_sink)
+        _live_sinks.append(sink)
+        live_dispatch = make_dispatcher(*_live_sinks)
         llm.set_delta_sink(sink.on_delta)
         import time as _t
         _t0 = _t.monotonic()
@@ -643,7 +669,7 @@ def main() -> None:
                     session.new_topic(line)
                 elif action == "resume":
                     session.switch_topic(tid)
-                    session.continue_topic(line)
+                    session.continue_topic(line, resume=True)
                 else:
                     session.continue_topic(line)
                 if not _tui:                                   # TUI shows the topic in the status bar, not as noise
@@ -688,6 +714,8 @@ def main() -> None:
             print(f"  · warning: {label} timed out after {secs:.0f}s — exiting anyway")
 
     _safe("tool cleanup", base_tools.cleanup)
+    if reviewer is not None:           # let an in-flight background review finish (bounded) before consolidating
+        _safe("bg-review join", lambda: reviewer.join(timeout=10))
     if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
         _bounded("MCP shutdown", mcp_runtime.shutdown)
     # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:

@@ -499,10 +499,20 @@ def _history_mark(args: dict) -> str:
     """A short label for a recall_history lookback, so the slice records WHAT was already reviewed."""
     if not isinstance(args, dict):
         return ""
+    full = "·full" if args.get("full") else ""
     if args.get("turns"):
-        return f"turns={sorted(int(t) for t in args['turns'])}" + ("·full" if args.get("full") else "")
+        nums = []
+        for t in (args["turns"] if isinstance(args["turns"], (list, tuple)) else []):
+            try:
+                nums.append(int(t))
+            except (TypeError, ValueError):
+                pass   # a malformed turn id is just a bad display label — never abort the slice fold
+        return f"turns={sorted(nums)}" + full
     if args.get("last"):
-        return f"last={int(args['last'])}" + ("·full" if args.get("full") else "")
+        try:
+            return f"last={int(args['last'])}" + full
+        except (TypeError, ValueError):
+            return "index"
     return "index"
 
 
@@ -579,9 +589,16 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     # files) is ALWAYS shown. At level 0 read_budget IS the live budget SwapManager.evict already enforces,
     # so this keeps every resident read (a no-op); an overflow tighten passes a smaller read_budget to
     # shrink the view. Pure presentation — s.active_files (the durable working set) is untouched.
-    reads = [p for p in s.active_files if p not in s.edited_files]
+    # protected deps (the dependency closure of the change set) are kept RESIDENT by SwapManager.evict and
+    # never ghosted — so they must always RENDER too, else they silently vanish from OPEN FILES (no
+    # ghost/refault/manifest signal) the moment >read_budget exploratory reads push them out of keep_reads.
+    # SwapManager.evict keeps RESIDENT both the dep-closure AND refault-promoted (hot) files; the renderer's
+    # keep-set must match, else a kept file silently vanishes from OPEN FILES (no ghost/refault/manifest
+    # signal) once >read_budget exploratory reads push it out of keep_reads — defeating the refault soft-pin.
+    protected = (set(getattr(s, "protected_deps", set())) | set(getattr(s, "hot", {}))) & set(s.active_files)
+    reads = [p for p in s.active_files if p not in s.edited_files and p not in protected]
     keep_reads = set(reads[-read_budget:]) if read_budget > 0 else set()
-    shown = [p for p in s.active_files if p in s.edited_files or p in keep_reads]
+    shown = [p for p in s.active_files if p in s.edited_files or p in protected or p in keep_reads]
     # STABLE render order (edited files first, then reads; each sorted by path) so an UNCHANGED
     # working set renders byte-identically across steps → the prompt-cache prefix stays warm (a
     # re-read used to reorder active_files and bust the cache). Recency still governs EVICTION
@@ -591,10 +608,12 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     parts = []
     for p in shown:
         try:
-            # OPEN FILES re-read is base-STABLE: locate() matches a relative pin against every authorized
-            # root (not just the moving current-project base), so a workspace pin stays truthful after the
-            # agent moves into another project. Absolute/out-of-reach pins still raise from _resolve.
-            body = tools.read_text(tools.locate(p) if hasattr(tools, "locate") else p)
+            # OPEN FILES re-read goes through the SAME resolution as read_file/edits (resolve_read): prefer
+            # the current-project (focus) copy, else search every authorized root. This keeps the display in
+            # agreement with where edits land even when a relative pin collides across roots, and stays
+            # truthful after the agent moves projects. Absolute/out-of-reach pins still raise from _resolve.
+            _rd = getattr(tools, "resolve_read", None) or getattr(tools, "locate", None)
+            body = tools.read_text(_rd(p) if _rd else p)
         except FileNotFoundError:
             # genuinely absent from disk — the only case that means "not yet written"
             parts.append(f"### {p}\n(not created yet)")
@@ -835,8 +854,26 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     recall_cache: dict[str, str] = {}
     # ITEM 17 — the subdirectory-hint tracker, constructed ONCE (closure-scoped, like recall_cache):
     # a DURABLE store (each subtree surfaces once per task), NOT a transcript. hasattr-guarded so a
-    # host without root() (in-memory test stubs) gets no hints. OWNED by the PageTable (same lifetime).
-    hints = SubdirHints(tools.root()) if hasattr(tools, "root") else None
+    # host without root() (in-memory test stubs) gets no hints. Reuse ONE instance across turns (stashed on
+    # the long-lived ToolHost) so the per-task "surface once" dedup actually holds — a fresh instance every
+    # turn re-injected the same convention file each turn (slice bloat + prompt-cache waste). Reset the dedup
+    # only at a real task boundary (new session or topic switch), NOT per message — `task` is the per-turn
+    # user text and would reset it constantly.
+    hints = None
+    if hasattr(tools, "root"):
+        root_now = tools.root()
+        hints = getattr(tools, "_subdir_hints", None)
+        if hints is None or str(getattr(hints, "_root", "")) != os.path.realpath(root_now or ""):
+            hints = SubdirHints(root_now)
+            try:
+                tools._subdir_hints = hints
+            except Exception:  # noqa: BLE001 — a stash failure just means no cross-turn dedup (the old behavior)
+                pass
+        task_key = (session_id, getattr(state, "active_id", None))
+        if getattr(hints, "_task_key", None) != task_key:
+            if hasattr(hints, "_task_key"):   # an existing instance crossing a task boundary → clear dedup
+                hints.reset()
+            hints._task_key = task_key
     # PageTable — the SINGLE read/retrieval entry: unifies code discovery (retriever), project notes
     # (the SubdirHints above), and cross-session episodes (memory) behind lookup(). Built ONCE per
     # closure; build() drives it. Backends emit RAW text; the renderer fences (one layer).
@@ -992,7 +1029,7 @@ def slice_sink(state):
             elif event.name in ("require", "requirement_done", "drop_requirement") and not event.failing:
                 _t = " ".join(str(event.args.get("text", "")).split())[:MAX_REQ_CHARS]
                 if _t:
-                    _hit = next((r for r in s.requirements if r["text"].lower() == _t.lower()), None)
+                    _hit = next((r for r in s.requirements if isinstance(r, dict) and r.get("text", "").lower() == _t.lower()), None)
                     if event.name == "require":
                         if _hit is None:
                             s.requirements.append({"text": _t, "done": False})
@@ -1025,7 +1062,7 @@ def slice_sink(state):
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
-            if event.name in ("spawn_subagent", "spawn_explore") and not event.failing and event.output:
+            if event.name in ("spawn_subagent", "spawn_explore", "spawn_agent") and not event.failing and event.output:
                 new_finding = record_note(s, event.output, source="observed") or new_finding
             did_edit = False
             if event.name == "skill" and not event.failing:
@@ -1035,8 +1072,9 @@ def slice_sink(state):
             if event.name == "recall_history" and not event.failing:
                 # RATCHET (via SwapManager): record the lookback so render_reviewed shows it next rebuild.
                 _DEFAULT_SWAP.note_review(s, _history_mark(event.args))
-            # list_files' "path" is a DIRECTORY to browse, not a working-set file — don't track it
-            if event.args.get("path") and event.name != "list_files":
+            # list_files/grep/glob "path" is a DIRECTORY scope, not a working-set FILE — don't pin it (else
+            # build_artifacts read_text(dir) → IsADirectoryError → a bogus OPEN FILES entry every turn).
+            if event.args.get("path") and event.name not in ("list_files", "grep", "glob"):
                 did_edit = event.name in ("edit_file", "append_to_file", "str_replace") and not event.failing
                 # WS1 — gate membership on SUCCESS. A read/edit that FAILED (e.g. _resolve raised
                 # "path escapes workspace") must NOT be pinned into the working set, or OPEN FILES
@@ -1054,8 +1092,13 @@ def slice_sink(state):
                 code = event.args.get("code", "")
                 mutated = set(edited_paths_in_code(code))
                 did_edit = bool(mutated) and not event.failing
-                for p in paths_in_code(code):
-                    touch_file(s, p, edited=(p in mutated))  # code-as-action edits join the change set
+                # WS1 parity with the file-tool branch above: gate working-set/change-set membership on
+                # SUCCESS. A FAILED execute_code (e.g. NameError before write_file ran) must NOT pin the
+                # files it MENTIONS — that poisons edited_files with phantom writes (false "done") and
+                # active_files with phantom reads (read-blindness), and survives the seal.
+                if not event.failing:
+                    for p in paths_in_code(code):
+                        touch_file(s, p, edited=(p in mutated))  # code-as-action edits join the change set
             record_action(s, event.name, event.args, event.output, failing=event.failing)
             # convergence tracking: a real edit OR a genuinely-new finding resets the spin counter —
             # actively LEARNING (recording new facts) is progress, not spinning (review #5). Only a call

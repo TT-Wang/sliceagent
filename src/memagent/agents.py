@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
 # (No "glob" here: there is no glob tool registered — list_files(recursive) + grep's glob filter cover
 # file-name patterns. Advertising a tool that isn't in the registry is a dead/misleading allowlist entry.)
-READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "skill", "recall_history")
+READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "skill", "recall_history", "code_review")
 _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
 # Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A
@@ -45,6 +45,8 @@ class AgentSpec:
     tools: tuple[str, ...] | None = None   # allowlist of tool names the child may use (None = all)
     reasoning: str | None = None           # "fast" | "full" | None (inherit the parent's)
     system_prompt: str = ""                # extra system-prompt layer prepended for the child
+    summary_is_deliverable: bool = False   # the child's SUMMARY is the product (a trailing failing check is
+    #                                        intentional, not a crash) — like a verifier that ends on a FAIL.
 
     @property
     def read_only(self) -> bool:
@@ -86,6 +88,8 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
                     "Read-only except running checks. Spawn after a non-trivial change, before reporting done.",
         tools=READ_ONLY_TOOLS + ("run_command", "execute_code"),
         reasoning="full",
+        summary_is_deliverable=True,   # a FAIL verdict normally ends on a failing check — that's the product,
+        #                                not a crash; don't reclassify it as "did not finish cleanly".
         system_prompt=(
             "You are an independent VERIFICATION subagent. Your job is NOT to confirm the work is done — it is "
             "to TRY TO BREAK IT. You are given a task/claim and the change that was made; verify it "
@@ -123,6 +127,11 @@ def _parse_agent_md(path: str) -> AgentSpec | None:
     body = text
     if text.startswith("---"):
         end = text.find("\n---", 3)
+        if end == -1:
+            # opening fence but no closing one (authoring typo). FAIL CLOSED: don't fall through to the
+            # no-frontmatter path, which would leave tools=None (= full writable surface) for a file that
+            # was trying to declare a restrictive tool list. Skip it, per the "malformed → skipped" contract.
+            return None
         if end != -1:
             for line in text[3:end].splitlines():
                 line = line.strip()
@@ -136,9 +145,15 @@ def _parse_agent_md(path: str) -> AgentSpec | None:
     tools_raw = meta.get("tools")
     # #58: accept both the scalar list `tools: a, b` AND inline YAML `tools: [a, b]` — strip brackets/quotes
     # before splitting so a bracketed value doesn't become tool names like "[a".
-    tools = (tuple(t for t in tools_raw.replace(",", " ").replace("[", " ").replace("]", " ")
-                   .replace("'", " ").replace('"', " ").split() if t)
-             if tools_raw else None)
+    # A PRESENT-but-blank `tools:` means restrict to ZERO tools (read-only, matching `tools: []`); only an
+    # ABSENT key grants the full writable surface (None).
+    if "tools" in meta and not str(tools_raw or "").strip():
+        tools = ()
+    elif tools_raw:
+        tools = tuple(t for t in tools_raw.replace(",", " ").replace("[", " ").replace("]", " ")
+                      .replace("'", " ").replace('"', " ").split() if t)
+    else:
+        tools = None
     reasoning = (meta.get("reasoning") or "").lower() or None
     return AgentSpec(name=name, description=meta.get("description", ""),
                      tools=tools, reasoning=reasoning, system_prompt=body.strip())

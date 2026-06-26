@@ -29,6 +29,7 @@ from .events import (
     TurnEnd,
     TurnInterrupted,
 )
+from .guardrails import DEDUP_SAFE_TOOL_NAMES, canonical_tool_args
 from .guidance import BUDGET_EXHAUSTED, STUCK
 from .hooks import Hooks
 from .registry import ToolText
@@ -39,6 +40,21 @@ def _as_text(out):
     """Preserve a ToolText (str subclass carrying .ok); coerce anything non-str defensively. Used so the
     scheduler step does not strip the registry's structured success flag back to a plain string."""
     return out if isinstance(out, str) else str(out)
+
+
+# Path-targeted file mutators — a read of a path written by one of these IN THE SAME BATCH must not be
+# served from a cached earlier read (it would be stale). Focused on tools that carry a `path` arg.
+_FILE_MUTATING_TOOLS = frozenset({"write_file", "edit_file", "str_replace", "append_to_file"})
+
+
+def _dedup_key(name: str, args):
+    """Same-step exact-call dedup key: (name, canonical args). Reuses the guardrail's canonicalizer
+    (sorted JSON, `note` stripped) so the dedup identity matches loop-detection's. None ⇒ never dedup
+    (odd/unserializable args) — paging that case to the normal execute path, never failing the batch."""
+    try:
+        return name + "\x00" + canonical_tool_args(args or {})
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _tool_timeout() -> float | None:
@@ -215,7 +231,7 @@ def _safe_authorize(hooks, name, args):
     """authorize_tool is SECURITY, so it fails CLOSED: any exception in the permission hook DENIES the call,
     never silently allows it. Returns the hook's ToolDecision, or a synthetic deny on error."""
     try:
-        return hooks.authorize_tool(name, args)
+        return hooks.authorize_tool(name, args or {})   # None args → {} so an argless call isn't an opaque fail-closed deny
     except Exception as e:  # noqa: BLE001
         _hook_debug("authorize_tool", e)
         from types import SimpleNamespace
@@ -230,30 +246,75 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
     tasks = []
     metas = []
     blocked = 0
+    seen: dict = {}     # dedup key -> index of the FIRST (executing) occurrence in this batch
+    dup_of: dict = {}   # index -> primary index whose result it reuses (same-step exact-call dedup)
+    # Paths MUTATED somewhere in this same batch — a read of one of these must NOT be deduped against an
+    # earlier read of it (the cached sibling result would be pre-mutation/stale for a read-then-edit-then-
+    # read-back issued in one assistant turn). Best-effort exact-path match.
+    mutated_paths = set()
+    # A shell-exec in the batch can mutate ANY file (we can't know which), so a read in the same batch
+    # might see post-exec state — disable read-dedup entirely for the batch when one is present.
+    batch_has_shell = any(getattr(_tc, "name", None) in ("run_command", "execute_code", "terminal_send", "proc_start")
+                          for _tc in tool_calls)   # any of these can mutate a file the batch also reads
+    for _tc in tool_calls:
+        if _tc.name in _FILE_MUTATING_TOOLS and isinstance(_tc.args, dict):
+            _p = _tc.args.get("path")
+            if isinstance(_p, str) and _p:
+                mutated_paths.add(_p)
     for tc in tool_calls:
-        dispatch(ToolStarted(tc.name, tc.args))
+        idx = len(metas)
         decision = _safe_authorize(hooks, tc.name, tc.args)   # SECURITY: fails CLOSED on hook error
         # #44: `note` is the universal slice-capture seam injected by with_note onto EVERY tool — it is
         # NOT a handler parameter. Strip it before invoking the tool so strict MCP/plugin handlers don't
         # reject an unexpected property; it still rides the dispatched ToolResult.args (metas, below),
         # where slice_sink folds it into FINDINGS.
-        call_args = {k: v for k, v in (tc.args or {}).items() if k != "note"} if tc.args else (tc.args or {})
+        # tc.args may be a non-dict if the model emits a non-object JSON value (a list/str/number that
+        # json.loads accepted) — coerce to {} so `.items()` can't AttributeError and crash the whole batch
+        # (which parked the turn). The tool then reports its missing required arg as a normal per-call error.
+        raw_args = tc.args if isinstance(tc.args, dict) else {}
+        call_args = {k: v for k, v in raw_args.items() if k != "note"}
+        # SAME-STEP exact-call dedup (lossless, borrowed from Kimi tool-dedup): an identical (name, args)
+        # read-only call already issued in THIS batch reuses the first call's result instead of executing
+        # the tool a second time. Gated to read-only query tools (a re-run is byte-identical anyway) and
+        # only when allowed — a blocked/spinning call still gets its block message, and mutating/unknown
+        # tools are never deduped. A duplicate emits NO ToolStarted/ToolResult event (it is free: not
+        # re-folded into the slice/episode, not counted), but still gets a tool message below so the
+        # provider sees a reply for every tool_call_id.
+        _read_path = call_args.get("path") if isinstance(call_args, dict) else None
+        _safe_to_dedup = (tc.name in DEDUP_SAFE_TOOL_NAMES
+                          and not batch_has_shell   # a shell-exec may have mutated the read target
+                          and not (isinstance(_read_path, str) and _read_path in mutated_paths))  # or a same-batch file edit
+        key = _dedup_key(tc.name, call_args) if (decision.allow and _safe_to_dedup) else None
+        # NOTE (R15 critic, by-design): a duplicate read carrying a DISTINCT `note` reuses the primary's
+        # result and its note is not separately folded (the model re-states it next turn). Deduping the
+        # re-read is the deliberate efficiency win that test_tool_dedup.note_only_difference_still_dedups pins.
+        if key is not None and key in seen:
+            dup_of[idx] = seen[key]
+            tasks.append(([], (lambda: "")))   # placeholder; its output is filled from the primary, unused
+            metas.append((_tool_call_id(tc, idx), tc.name, raw_args))   # dict-coerced (note preserved) so sinks never see a non-dict
+            continue
+        dispatch(ToolStarted(tc.name, raw_args))
         if not decision.allow:
             if getattr(decision, "counts_as_stuck", True):
                 blocked += 1   # only a HARD spin counts toward STUCK; a deduped read is skipped but free
             tasks.append(([], (lambda d=decision: ToolText(f"Error: blocked by policy: {d.reason or 'denied'}", ok=False))))
         else:
+            if key is not None:
+                seen[key] = idx
             # preserve ToolText (a str subclass carrying .ok) — coercing with str() here would strip the
             # success flag and force the failing check back onto the prose-match it is meant to replace.
             tasks.append((tools.accesses(tc.name, call_args),
                           (lambda name=tc.name, ca=call_args: _as_text(tools.run(name, ca)))))
         # real OpenAI tool_calls carry an id; synthesize a stable index-based one if absent (e.g. test
         # fakes / a provider that omits it) so accumulate's assistant.tool_calls ↔ tool messages still match.
-        metas.append((_tool_call_id(tc, len(metas)), tc.name, tc.args))
+        metas.append((_tool_call_id(tc, idx), tc.name, raw_args))   # dict-coerced (note preserved) so sinks never see a non-dict
 
     outputs = run_scheduled(tasks, timeout=_tool_timeout())
-    results = []
-    for (tcid, name, args), out in zip(metas, outputs):
+    final: list = [None] * len(metas)       # post-transform output per call, in provider order
+    failed: list = [False] * len(metas)
+    for i, ((tcid, name, args), out) in enumerate(zip(metas, outputs)):
+        if i in dup_of:
+            continue                        # a duplicate is filled from its primary below (no transform, no dispatch)
         transformed = _safe_advisory("transform_tool_result", lambda: hooks.transform_tool_result(name, args, out))
         if transformed is not None:
             out = transformed
@@ -264,7 +325,13 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
         ok = getattr(out, "ok", None)
         failing = (out.startswith("Error") or out.startswith("Exit code")) if ok is None else (not ok)
         dispatch(ToolResult(name, args, out, failing))
-        results.append({"id": tcid, "name": name, "args": args, "output": out, "failing": failing})
+        final[i] = out
+        failed[i] = failing
+    for i, p in dup_of.items():             # reuse the primary's FINAL (post-transform) result, byte-identical
+        final[i] = final[p]
+        failed[i] = failed[p]
+    results = [{"id": tcid, "name": name, "args": args, "output": final[i], "failing": failed[i]}
+               for i, (tcid, name, args) in enumerate(metas)]
     return blocked, results
 
 

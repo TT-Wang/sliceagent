@@ -37,13 +37,14 @@ def run_scheduled(tasks: list[Task], max_workers: int = 8, timeout: float | None
     started: dict = {}   # future -> monotonic start time (deadline tracking)
 
     pool = ThreadPoolExecutor(max_workers=min(max_workers, n))
+    abandoned_acc: list[Accesses] = []   # accesses of timed-out, still-LIVE threads — keep blocking conflicts
     try:
         while pending or running:
-            running_acc = [accesses[i] for i in running.values()]
+            running_acc = [accesses[i] for i in running.values()] + abandoned_acc
             selected_acc: list[Accesses] = []
             for idx in list(pending):
                 a = accesses[idx]
-                # never run two conflicting tasks at once (vs running or vs already-selected this round)
+                # never run two conflicting tasks at once (vs running, an abandoned overrun, or already-selected)
                 if any(conflict(a, ra) for ra in running_acc) or any(conflict(a, sa) for sa in selected_acc):
                     continue
                 fut = pool.submit(tasks[idx][1])
@@ -51,6 +52,14 @@ def run_scheduled(tasks: list[Task], max_workers: int = 8, timeout: float | None
                 started[fut] = time.monotonic()
                 selected_acc.append(a)
                 pending.remove(idx)
+            if not running:
+                # nothing running and nothing startable → the remaining pending all conflict with an
+                # ABANDONED (never-finishing) thread. Resolve them so the loop can't spin forever.
+                for idx in pending:
+                    results[idx] = ("Error: not run — conflicts with a tool that timed out and is still "
+                                    "running in the background")
+                pending.clear()
+                break
             if running:
                 wait_t = None
                 if timeout is not None:
@@ -71,7 +80,8 @@ def run_scheduled(tasks: list[Task], max_workers: int = 8, timeout: float | None
                     for fut in [f for f in running if now - started[f] >= timeout]:
                         idx = running.pop(fut)
                         started.pop(fut, None)
-                        results[idx] = (f"Error: tool timed out after {timeout:.0f}s "
+                        abandoned_acc.append(accesses[idx])   # still-live thread → keep it in the conflict set
+                        results[idx] = (f"Error: tool timed out after {timeout:g}s "
                                         "(abandoned; it may still be running in the background)")
         # safety: the loop only exits when pending AND running are empty, so every slot is set — but
         # never let a stray None escape to a caller that expects str.

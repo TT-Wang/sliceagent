@@ -53,8 +53,9 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     # AWS Bedrock Converse API error patterns
     "input is too long",
     "max input token",
-    "input token",
     "exceeds the maximum number of input tokens",
+    # NOTE: bare "input token" was removed — it matched OpenAI's TPM rate-limit text
+    # ("Limit: 30000 input tokens per minute"), misclassifying a 429 as a hard overflow.
 )
 
 # Structured error codes that unambiguously mean overflow
@@ -84,6 +85,9 @@ _NOT_OVERFLOW_MARKERS = (
     "is not supported with this model",
     "unknown parameter",
     "invalid parameter",
+    "parameter is invalid",   # "the prompt length parameter is invalid" — a validation error, NOT overflow
+    "invalid value",
+    "invalid input token",    # "invalid input token format" — not a context-size overflow
 )
 
 
@@ -156,6 +160,8 @@ def is_context_overflow(error: Exception) -> bool:
     drops Hermes' session-size proxy (we always have a slice to tighten).
     """
     msg = _error_text(error)
+    if "rate limit" in msg or "too many requests" in msg or "tokens per min" in msg:
+        return False  # a TPM/RPM RATE LIMIT (429) must back off + retry, NOT trigger slice-destroying overflow handling
     if any(m in msg for m in _NOT_OVERFLOW_MARKERS):
         return False  # a parameter/validation error is never a context overflow
     if any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS):
