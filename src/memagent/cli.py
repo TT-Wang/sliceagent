@@ -604,7 +604,7 @@ def main() -> None:
         base_tools.on_ask_user = app.ask_user
 
     info = (f"model={llm.model} · net={getattr(llm, 'proxy_used', 'direct')} · "
-            f"policy={policy_mode} · sandbox={cfg.sandbox_backend} · "
+            f"policy={policy_label(_eff_mode)} · sandbox={cfg.sandbox_backend} · "
             f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
             f"episodic={'on' if episodic is not None else 'off'} · "
             f"mine={mine_mode} · subagents={'on' if sub_depth > 0 else 'off'} · "
