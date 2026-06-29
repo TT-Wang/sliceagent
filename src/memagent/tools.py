@@ -51,11 +51,28 @@ def _strip_line_numbers(text: str) -> str:
     return "\n".join(_LINENO_PREFIX.sub("", ln) if ln.strip() else ln for ln in lines)
 
 
+def _number_lines(lines, start: int = 1) -> str:
+    """cat -n number a LIST of lines from `start` (1-based) — ABSOLUTE numbers so a windowed read still
+    gives correct file:line evidence."""
+    return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, start))
+
+
 def _numbered(text: str) -> str:
     """cat -n line numbers for read_file's RETURN, so the model gets file:line evidence IMMEDIATELY in-turn
     (same format as the OPEN FILES render). The number is a display prefix, NOT file content — str_replace
     strips a pasted prefix via _strip_line_numbers, so editing from a numbered read still matches."""
-    return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(text.splitlines(), 1))
+    return _number_lines(text.splitlines(), 1)
+
+
+_READ_MAX_LINES = 1500   # default in-slice VIEW cap for read_file; the full file ALWAYS stays on disk (bound the view, not the file)
+
+
+def _coerce_int(v):
+    """Tolerant int() for model-supplied args (str/float/None) — never raises."""
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # so `import <workspace_module>` works for testing freshly-written code.
@@ -242,13 +259,17 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str
 
 TOOL_SCHEMAS = [
     _fn("read_file",
-        "Read and return a file's FULL contents with cat -n line numbers for reference (whole file — no "
-        "line-range args; the leading number is NOT part of the file, so don't include it in a str_replace "
-        "old_string). To list a directory use list_files; to SEARCH file contents use the `grep` tool "
-        "(ripgrep-backed, paginated) — not bash grep. "
+        "Read a file's contents with cat -n line numbers for reference (the leading number is NOT part of the "
+        "file, so don't include it in a str_replace old_string). A large file returns a bounded window with a "
+        "<system> footer giving the total line count and how to page; pass `offset` (1-based start line) and/or "
+        "`limit` (max lines) to read a specific range. To list a directory use list_files; to SEARCH file "
+        "contents use the `grep` tool (ripgrep-backed) — not bash grep. "
         "Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths use "
         "run_command. A binary file returns a hexdump preview, not editable text.",
-        {"path": {"type": "string"}}, ["path"]),
+        {"path": {"type": "string"},
+         "offset": {"type": "integer", "description": "1-based first line to read (optional)"},
+         "limit": {"type": "integer", "description": "max number of lines to return (optional)"}},
+        ["path"]),
     _fn("list_files",
         "List directory entries (ignore-aware: skips .git/.venv/caches/build/node_modules noise). Use to "
         "discover what exists; use read_file for a file's CONTENTS and the `grep` tool (ripgrep-backed) to "
@@ -750,7 +771,26 @@ class LocalToolHost:
             return self._binary_view(path, raw)
         # Return WITH cat -n line numbers so the model has file:line evidence immediately this turn (matching
         # the OPEN FILES render). Safe for editing: str_replace strips a pasted line-number prefix.
-        return _numbered(raw.decode("utf-8", errors="replace"))   # consistent with read_text's gate decode
+        # BOUNDED VIEW (moat-safe): a huge file would flood the slice, so cap the default view + support a
+        # line window (offset/limit). The FULL file always stays on disk — this bounds the VIEW, not the file.
+        lines = raw.decode("utf-8", errors="replace").splitlines()   # consistent with read_text's gate decode
+        total = len(lines)
+        offset, limit = _coerce_int(args.get("offset")), _coerce_int(args.get("limit"))
+        windowed = offset is not None or limit is not None
+        # a paged-out blob recall is the deliberate L1→L2 "give me the FULL output back" channel — never cap
+        # it (only the default view of an ordinary file is capped). Still windowable if offset/limit is given.
+        is_blob = ".memagent/blobs/" in path.replace("\\", "/") or ".memagent/blobs/" in str(full).replace("\\", "/")
+        if not windowed:
+            start, end = 1, (total if (is_blob or total <= _READ_MAX_LINES) else _READ_MAX_LINES)
+        else:
+            start = min(max(1, offset or 1), total + 1)
+            end = total if limit is None else min(total, start - 1 + max(1, limit))
+        body = _number_lines(lines[start - 1:end], start)
+        if not windowed and end >= total:
+            return body                                  # complete read → unchanged contract (no footer)
+        more = (f" · +{total - end} more — read_file(path, offset={end + 1}) to continue"
+                if end < total else "")
+        return f"{body}\n<system>read_file {path}: lines {start}-{end} of {total}{more}</system>"
 
     @staticmethod
     def _binary_view(path: str, raw: bytes, head_bytes: int = 256) -> str:

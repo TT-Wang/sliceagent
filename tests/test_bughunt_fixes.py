@@ -859,6 +859,26 @@ def proxy_defaults_direct_without_a_local_proxy():
         llm._local_proxy_listening = orig
 
 
+# ── FEATURE (★1 borrow): read_file bounds the in-slice VIEW + supports a line window, full file on disk ──
+@check
+def read_file_bounds_view_and_supports_windowing():
+    import os
+    import tempfile
+    from memagent.tools import LocalToolHost, _READ_MAX_LINES
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "big.py"), "w").write("\n".join(f"line{i}" for i in range(1, 3001)))
+    open(os.path.join(d, "small.py"), "w").write("a\nb\nc")
+    h = LocalToolHost(root=d)
+    out = h._t_read_file({"path": "big.py"})                       # default view of a 3000-line file → capped
+    assert f"lines 1-{_READ_MAX_LINES} of 3000" in out and "offset=" in out, out.splitlines()[-1]
+    body = out.split("<system>")[0]
+    assert f"  {_READ_MAX_LINES}\tline{_READ_MAX_LINES}" in body and f"line{_READ_MAX_LINES + 1}" not in body
+    w = h._t_read_file({"path": "big.py", "offset": 2998, "limit": 5})   # window → ABSOLUTE line numbers
+    assert "  2998\tline2998" in w and "  3000\tline3000" in w and "lines 2998-3000 of 3000" in w, w
+    s = h._t_read_file({"path": "small.py"})                       # complete small read → unchanged contract
+    assert s == "     1\ta\n     2\tb\n     3\tc" and "<system>" not in s, repr(s)
+
+
 # ── FEATURE: MCP spawn-security screen refuses egress/persistence abuse shapes, passes benign servers ──
 @check
 def mcp_security_screen_refuses_abuse_shapes():
