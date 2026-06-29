@@ -240,6 +240,13 @@ _PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END
 # redactor must fail safe), and the \s\n"' bound is sufficient for the data-loss seal.
 _DB_CONNSTR_RE = re.compile(
     r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]*:)([^@\s\n\"']+)(@)", re.IGNORECASE)
+# Credentials embedded in any NON-DB URL scheme (http/https/ftp/git/…): scheme://user:pass@host →
+# scheme://***@host. Catches the http/https leak where a credentialed fetch_url is echoed into a tool result
+# and persisted to the cache. The DB schemes are EXCLUDED (handled above, which keeps the username); the
+# lookbehind anchors the scheme start so it can't match a substring of an excluded scheme (…ostgres://…).
+_URL_USERINFO_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?!(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://)"
+    r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,2}")
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 _PREFIX_RE = re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])")
@@ -288,6 +295,7 @@ def redact_text(text: str, *, code_file: bool = False) -> str:
         text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
     if "://" in text:
         text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+        text = _URL_USERINFO_RE.sub(r"\1***@", text)   # creds in http/https/ftp/git/… URLs
     if "eyJ" in text:
         text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
     if "+" in text:

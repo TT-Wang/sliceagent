@@ -20,8 +20,12 @@ class CommandOracle:
         except subprocess.TimeoutExpired as e:
             # A timed-out verification is a FAILURE, not a thrown exception — otherwise it propagates out
             # of the oracle and silently BYPASSES the done-gate (a hung test would mark the task complete).
-            out = ((e.stdout or "") + (e.stderr or ""))
-            out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            # On timeout, .stdout/.stderr may each be bytes OR str OR None (version/stream dependent) —
+            # decode EACH before concat, else a bytes+str mix (e.g. stdout bytes, stderr None→"") raises
+            # TypeError and the crash bypasses the done-gate. Coerce per-operand.
+            def _s(x):
+                return x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+            out = _s(e.stdout) + _s(e.stderr)
             return False, (out + f"\n[verification timed out after {self.timeout}s]").strip()
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         return r.returncode == 0, out

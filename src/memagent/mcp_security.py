@@ -66,16 +66,23 @@ def validate_mcp_server_entry(name: str, conf) -> list[str]:
     """
     if not isinstance(conf, dict):
         return []
-    if _basename(conf.get("command")) not in _SHELL_INTERPRETERS:
+    # Tokenize command + args together and check whether ANY token is a shell interpreter — so a wrapped
+    # interpreter (env bash -c …, /usr/bin/timeout 5 sh -c …, a full path) is screened, not just a bare
+    # `command: bash`. Then scan the FULL command+args text for the egress/persistence shapes.
+    full = (str(conf.get("command") or "") + " " + _script(conf.get("args"))).strip()
+    if not full:
         return []
-    script = _script(conf.get("args"))
-    if not script:
+    try:
+        tokens = shlex.split(full, posix=(os.name != "nt"))
+    except ValueError:
+        tokens = full.split()
+    if not any(os.path.basename(t).lower() in _SHELL_INTERPRETERS for t in tokens):
         return []
     issues: list[str] = []
-    if _EGRESS.search(script):
+    if _EGRESS.search(full):
         issues.append(f"MCP server '{name}': a shell interpreter with network-egress arguments "
                       "(exfiltration shape — not a real MCP server)")
-    if _PERSISTENCE.search(script):
+    if _PERSISTENCE.search(full):
         issues.append(f"MCP server '{name}': a shell interpreter writing to an OS persistence surface "
                       "(SSH keys / PAM / sudoers / cron / shell rc — backdoor shape, not a real MCP server)")
     return issues

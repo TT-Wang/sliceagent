@@ -33,6 +33,11 @@ EXEC_TOOLS = frozenset(("run_command", "execute_code", "proc_start", "terminal_o
 # defeated by casing — on a case-insensitive filesystem (macOS default) `SHUTDOWN` / `/ETC/PASSWD` resolve
 # to the real command/path, so a case-sensitive denylist is a genuine bypass. A pattern needing DOTALL
 # carries an inline `(?s)`.
+# SCOPE: this denylist is a BEST-EFFORT defense-in-depth SPEED BUMP, not a complete sandbox. A regex cannot
+# catch every shell encoding (globs, $(...), subshells, var-expansion, exotic wrappers); chasing each is a
+# losing arms race. The BINDING guards are the sandbox (network=none fail-closed, cwd-confine, secret-scrub)
+# and the permission modes (baby-sitter/teenager CONFIRM every command by default). Patterns here catch the
+# obvious/common forms so an unattended (let-it-go) run still has a floor.
 _DANGEROUS_SRC: list[tuple[str, str]] = [
     (r"(?s):\s*\(\s*\)\s*\{.*\|.*&",                       "fork bomb"),
     (r"\bsudo\b",                                          "privilege escalation (sudo)"),
@@ -52,7 +57,8 @@ _DANGEROUS_SRC: list[tuple[str, str]] = [
     (r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", "remote script piped to a shell"),
     # writes to / reads of sensitive locations
     (r">>?\s*/etc/",                                       "write to /etc"),
-    (r"/etc/(passwd|shadow|sudoers)",                      "access to system credential files"),
+    # credential files + their common glob/prefix forms (cat /etc/pass*, /etc/shadow, /etc/sudoers.d, …)
+    (r"/etc/(?:passwd|shadow|gshadow|sudoers|pass[\w*]*|shad[\w*]*|sudoer[\w*]*)", "access to system credential files"),
     (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc)", "access to private keys/credentials"),
     (r"\bgit\b[^\n]*\bpush\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)", "force push"),
 ]
