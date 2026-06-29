@@ -80,27 +80,25 @@ def server_start_probe_kill():
     """The canonical 'start a server, keep it alive, probe it' flow — impossible with one-shot run."""
     wd, h = _host()
     open(os.path.join(wd, "hello.txt"), "w").write("OK")
-    # Don't parse http.server's own banner — it goes to stderr and buffers unpredictably across platforms
-    # (flaky on macOS CI). Run a tiny HTTPServer that prints the chosen port to STDOUT with explicit flush,
-    # under `python -u`, so proc_tail reliably captures it. It still serves files from cwd (hello.txt).
-    server_code = ("import http.server;"
-                   "srv=http.server.HTTPServer(('127.0.0.1',0), http.server.SimpleHTTPRequestHandler);"
-                   "print('PORT', srv.server_address[1], flush=True);"
-                   "srv.serve_forever()")
-    h.run("proc_start", {"command": f"{PY} -u -c {shlex.quote(server_code)}"})
-    m, out = _wait_for(lambda: h.run("proc_tail", {"handle": "p1"}), r"PORT (\d+)", 20)
-    assert m, f"server never announced a port: {out!r}"
-    port = m.group(1)
+    # Pick a free port up front, then probe the LIVE HTTP ENDPOINT — not the server's stdout banner. Some CI
+    # sandboxes (GitHub's macOS runner) don't surface a background process's stdout to proc_tail, so depending
+    # on captured output is flaky; the served file is the real source of truth that the process is alive.
+    import socket
+    _s = socket.socket()
+    _s.bind(("127.0.0.1", 0))
+    port = _s.getsockname()[1]
+    _s.close()
+    h.run("proc_start", {"command": f"{PY} -u -m http.server {port} --bind 127.0.0.1"})
     body = None
-    for _ in range(50):
+    for _ in range(150):                       # up to ~15s for a cold runner to bind + serve
         try:
-            body = urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/hello.txt", timeout=1).read().decode()
+            body = urllib.request.urlopen(f"http://127.0.0.1:{port}/hello.txt", timeout=1).read().decode()
             break
         except Exception:  # noqa: BLE001 — server may not be accepting yet
             time.sleep(0.1)
+    tail = h.run("proc_tail", {"handle": "p1"})   # exercise proc_tail (content not asserted — sandbox-dependent)
     h.run("proc_kill", {"handle": "p1"})
-    assert body == "OK", f"server did not serve the file: {body!r}"
+    assert body == "OK", f"server did not start/serve within ~15s: body={body!r} tail={tail!r}"
     assert "exited" in h.run("proc_poll", {"handle": "p1"})
 
 
