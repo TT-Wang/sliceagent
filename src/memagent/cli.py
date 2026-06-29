@@ -17,7 +17,6 @@ from .events import (
     LessonSaved,
     SliceBuilt,
     ToolResult,
-    ToolStarted,
     TurnEnd,
     TurnInterrupted,
     make_dispatcher,

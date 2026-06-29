@@ -1,7 +1,6 @@
 """Offline tests for the episodic cache (MEMORY-SPEC step 1). No model, no pytest.
 Run: python tests/test_episode.py
 """
-import json
 import os
 import sys
 import tempfile

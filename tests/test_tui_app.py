@@ -11,14 +11,12 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
-    import textual
     from textual.widgets import Input, ListView, RichLog, Static, TextArea, Tree
 except Exception as exc:  # pragma: no cover
     print(f"SKIP: Textual not installed ({exc})")
     raise SystemExit(0)
 
 from rich.console import Console
-from textual.pilot import Pilot
 
 from memagent import events as E
 from memagent.session import Session

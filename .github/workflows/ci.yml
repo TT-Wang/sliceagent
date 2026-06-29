@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install ripgrep (powers grep / glob / the code-index tier)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ripgrep
+          else
+            brew install ripgrep
+          fi
+
+      - name: Install memagent + dev/tui extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,tui]"
+
+      - name: Smoke — the installed console script runs
+        run: memagent version
+
+      - name: Lint (ruff)
+        run: ruff check src/memagent tests evals
+
+      - name: Tests
+        run: bash scripts/run_tests.sh

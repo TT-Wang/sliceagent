@@ -15,7 +15,6 @@ so parent and child share one workspace and one sandbox.
 from __future__ import annotations
 
 import copy
-import json
 import os
 
 from .access import AllAccess, ReadAllAccess

@@ -3,7 +3,7 @@
 ## Dev setup
 
 ```bash
-uv sync                 # or: pip install -e ".[tui,treesitter]"
+uv sync                 # or: pip install -e ".[dev,tui,treesitter]"   # [dev] = pytest + ruff
 ```
 
 Python ≥ 3.11. The core is `openai`-free — only `llm.py`/`cli.py` import the SDK — so the whole loop is
@@ -15,7 +15,8 @@ memagent uses a **dependency-free custom test runner** (no pytest): each `tests/
 script with a tiny `@check` harness that exits non-zero on failure. Run the whole offline suite:
 
 ```bash
-for f in tests/test_*.py; do PYTHONPATH=src .venv/bin/python "$f" || break; done
+bash scripts/run_tests.sh             # runs every tests/test_*.py, tallies, exits non-zero on any failure
+ruff check src/memagent tests evals   # lint (real-bug rules; house style configured in pyproject)
 ```
 
 or a single file:

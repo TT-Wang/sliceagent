@@ -32,7 +32,7 @@ from typing import Callable
 
 from textual import events as textual_events
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, Grid
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -53,7 +53,6 @@ from rich import box as _rbox
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.text import Text
 
 from . import events as memagent_events

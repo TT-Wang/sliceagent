@@ -19,6 +19,20 @@ this project aims for [Semantic Versioning](https://semver.org/).
   `AGENT_ROUTER=llm` restores the classifier. Measured identical to the LLM router on continue/resume.
 - **Per-tool wall-clock timeout** (`AGENT_TOOL_TIMEOUT`, opt-in) — a stuck tool no longer hangs the turn.
 - Docs: `QUICKSTART.md`, `docs/OUTPUT.md`, `docs/TROUBLESHOOTING.md`, `CONTRIBUTING.md`.
+- **One-command install** — `install.sh` (bootstraps `uv` → isolated tool install), a `Dockerfile`, and a
+  README `## Install` (uv / pipx / docker). MIT `LICENSE` declared in metadata; `NOTICE` credits the Hermes
+  (MIT) ports + Kimi-Code patterns; `SECURITY.md` documents the threat model + a disclosure path.
+- **Three permission modes** — `baby-sitter` / `teenager` (default) / `let-it-go`, all sharing a
+  catastrophic-command floor; `/mode` + `/model` two-tier selector menus; **Esc = undo**.
+- **MCP spawn-security screen** (`mcp_security.py`) — refuses a shell-interpreter MCP entry that does network
+  egress or writes OS-persistence surfaces, before it is spawned.
+- **`read_file` window** — `offset`/`limit` + a default view cap + a `<system>` footer (a large file no
+  longer floods the slice); a `glob` file-finder; `grep` `output_mode`/`--type`/context; `str_replace`
+  `replace_all`; model pricing single-sourced in `model_catalog`; `with_retry` honors `Retry-After`.
+- **"$ saved" cost meter** — shows dollars saved vs a full-transcript agent, re-priced live on `/model`.
+- **CI** (`.github/workflows/ci.yml`, ubuntu+macOS × py3.11/3.12: install + lint + tests),
+  `scripts/run_tests.sh`, a `ruff` config + `[dev]` extra, single-sourced version, and contribution
+  scaffolding (`CODE_OF_CONDUCT.md`, issue/PR templates).
 
 ### Changed
 - Default UI is the inline `rich` REPL (native copy/paste on any terminal); full-screen Textual is opt-in

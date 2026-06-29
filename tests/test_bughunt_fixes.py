@@ -270,7 +270,8 @@ def html_to_text_linear_and_correct():
 @check
 def skill_name_dot_escape_rejected():
     from memagent.memory import write_skill_file
-    import tempfile, os
+    import tempfile
+    import os
     root = tempfile.mkdtemp(prefix="sk-esc-")
     body = "---\nname: x\n---\nbody"
     p = write_skill_file("..", body, skills_dir=root)
@@ -297,7 +298,8 @@ def fuzzy_rejects_whitespace_only_old():
 @check
 def journal_read_survives_bad_utf8():
     from memagent.records import Journal
-    import tempfile, os
+    import tempfile
+    import os
     p = os.path.join(tempfile.mkdtemp(prefix="jr-"), "j.jsonl")
     with open(p, "wb") as f:
         f.write(b'{"kind":"usage","v":1}\n')
@@ -334,9 +336,9 @@ def too_many_requests_is_retryable():
 # ── R7: code_review rejects an option-shaped ref (no git-diff option injection → arbitrary file write) ─
 @check
 def code_review_rejects_option_ref():
-    import subprocess, os
+    import subprocess
+    import os
     from memagent.tools import LocalToolHost
-    from memagent.registry import ToolText
     root = tempfile.mkdtemp(prefix="cr-")
     subprocess.run(["git", "init", "-q", root])
     target = os.path.join(tempfile.mkdtemp(prefix="cr-out-"), "PWNED.txt")
@@ -348,7 +350,7 @@ def code_review_rejects_option_ref():
 # ── R7: non-dict tool args still record the failing flag in the episode (no sink crash) ──────────────
 @check
 def episode_records_failing_on_non_dict_args():
-    from memagent.episode import EpisodeSink, make_episode_sink
+    from memagent.episode import make_episode_sink
     from memagent.events import ToolResult, TurnEnd
 
     class _Mem:
@@ -385,7 +387,8 @@ def run_tool_batch_dict_args_reach_slice_sink():
 @check
 def config_non_utf8_degrades():
     from memagent.config import _read_toml
-    import tempfile, os
+    import tempfile
+    import os
     p = os.path.join(tempfile.mkdtemp(prefix="cfg-"), "config.toml")
     with open(p, "wb") as f:
         f.write(b"model = \"x\"\n\xff\xfe garbage bytes")

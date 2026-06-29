@@ -9,7 +9,7 @@ no validation (a typo'd AGENT_POLICY silently used the default). This module cen
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

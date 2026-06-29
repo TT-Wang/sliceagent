@@ -25,7 +25,6 @@ from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.text import Text
 from rich.theme import Theme
 
@@ -33,7 +32,7 @@ import shutil
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import HTML, FormattedText
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 
 from .events import (AssistantText, ApiRetry, Event, LessonSaved, SliceBuilt, StepEnd,

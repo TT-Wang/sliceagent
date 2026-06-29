@@ -11,13 +11,11 @@ slice.py — slice.py imports FROM here (one direction), so there is no import c
 """
 from __future__ import annotations
 
-import json
 import os
 import re
-from dataclasses import dataclass
 
 from .safety import wrap_untrusted
-from .swap import MAX_GHOSTS, MAX_REVIEWED, READ_BUDGET
+from .swap import MAX_REVIEWED
 from .text_utils import normalize_ws, one_line
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant

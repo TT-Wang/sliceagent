@@ -1,6 +1,6 @@
 [project]
 name = "memagent"
-version = "0.1.0"
+dynamic = ["version"]   # single-sourced from src/memagent/__init__.py (see [tool.hatch.version])
 description = "A memory-native coding agent: deterministic, bounded, reconstructed context (slice architecture)."
 requires-python = ">=3.11"
 license = "MIT"
@@ -38,6 +38,8 @@ treesitter = ["tree-sitter>=0.21", "tree-sitter-python>=0.21"]
 # when absent (and when piped/headless, e.g. the eval). `pip install -e .[tui]`. Borrowed from
 # Hermes' rich+prompt_toolkit stack; plugs into the event-sink seam, never touches the moat.
 tui = ["rich>=13", "prompt_toolkit>=3.0", "textual>=0.85"]
+# Dev toolchain: test runner + linter (CI installs `.[dev]`). `pip install -e .[dev]`.
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 memagent = "memagent.cli:main"
@@ -50,5 +52,27 @@ build-backend = "hatchling.build"
 # memem is declared as a git direct-reference dependency (see project.dependencies).
 allow-direct-references = true
 
+[tool.hatch.version]
+path = "src/memagent/__init__.py"   # the single version source (__version__)
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/memagent"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["prototype", "brain", "runs", "scratch", ".venv"]
+
+[tool.ruff.lint]
+# ruff's default real-bug set (E4 imports · E7 statements · E9 syntax · F pyflakes). NOT E5/E1/E2/W:
+# the codebase deliberately uses long comment lines + dense formatting, so line-length/whitespace
+# rules would be all noise. Lint for BUGS, not style.
+select = ["E4", "E7", "E9", "F"]
+# Deliberate house style, NOT bugs: E402 path-setup-before-import, E701/E702 terse one-liners
+# (pervasive + intentional), E731 small local lambdas.
+ignore = ["E402", "E701", "E702", "E731"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests + eval scripts (not the shippable package): allow bound-but-unused intermediates + terse loop vars.
+"tests/*" = ["F841", "E741"]
+"evals/*" = ["F841", "E741"]

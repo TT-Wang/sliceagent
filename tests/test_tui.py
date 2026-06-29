@@ -18,7 +18,7 @@ except Exception:
 from rich.console import Console  # noqa: E402
 from memagent import tui  # noqa: E402
 from memagent.events import (AssistantText, ApiRetry, StepEnd, ToolResult,  # noqa: E402
-                             ToolStarted, TurnEnd, TurnInterrupted)
+                             TurnEnd, TurnInterrupted)
 
 CHECKS = []
 def check(fn):
