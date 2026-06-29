@@ -1102,6 +1102,27 @@ def none_choice_message_is_retryable():
     assert classify(EmptyResponseError("x")).get("retryable") is True
 
 
+# ── R24 HIGH: ProcManager.wait() releases the log fd on self-exit (no fd leak toward EMFILE) ───────────
+@check
+def procman_wait_releases_fd_on_exit():
+    import tempfile
+    from memagent.procman import ProcManager
+    pm = ProcManager(scrub_secrets=False)
+    h = pm.start("true", cwd=tempfile.mkdtemp(prefix="pm-wait-"))   # exits immediately
+    pm.wait(h, timeout=5)
+    assert pm._procs[h].log_fh is None, "wait() must close log_fh on self-exit (mirror poll/kill)"
+
+
+# ── R24 HIGH: _clamp truncates large multibyte values with errors='replace' (no silent byte drop) ─────
+@check
+def clamp_uses_replace_not_ignore():
+    import inspect
+    from memagent import memory
+    src = inspect.getsource(memory)
+    assert 'b[:h].decode("utf-8", "replace")' in src, \
+        "_clamp must decode with errors='replace' so a mid-char byte cut isn't silently dropped"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

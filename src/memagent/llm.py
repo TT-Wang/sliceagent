@@ -690,7 +690,7 @@ class OpenAILLM:
                 args = json.loads(fn.arguments)
             except Exception:
                 args = {}
-            calls.append(ToolCall(id=tc.id, name=fn.name, args=args))
+            calls.append(ToolCall(id=getattr(tc, "id", "") or "", name=fn.name, args=args))
         # Degenerate completion — no content AND no tool calls (and not a content-filter stop). Some
         # providers/proxies occasionally emit an empty body; returning it stalls the loop, so raise a
         # RETRYABLE error (Kimi APIEmptyResponseError) and let with_retry re-roll. content_filter is

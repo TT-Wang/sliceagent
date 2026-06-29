@@ -98,6 +98,7 @@ class ProcManager:
         try:
             rc = p.popen.wait(timeout=timeout)
             status = f"exited {rc}"
+            self.poll(handle)   # release the write fd on self-exit (mirror poll/kill) — else wait() leaks one fd/proc
         except subprocess.TimeoutExpired:
             status = f"running (still alive after {timeout:g}s)"
         return f"[{handle} {status}]\n{self._read_log(p, 40)}"

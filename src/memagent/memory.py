@@ -429,7 +429,9 @@ class MememMemory:
     def _clamp(self, v):
         if isinstance(v, str) and len(v.encode("utf-8")) > _MAX_RECORD_VALUE_BYTES:
             b = v.encode("utf-8"); h = _MAX_RECORD_VALUE_BYTES // 2   # slice on BYTES (cap is a byte budget);
-            head = b[:h].decode("utf-8", "ignore"); tail = b[-h:].decode("utf-8", "ignore")  # char-slicing let multibyte overshoot ~4x
+            # errors="replace" (not "ignore"): a byte cut mid-multibyte-char marks it U+FFFD instead of
+            # silently deleting bytes — visible, lossless-ish boundary rather than a quiet corruption.
+            head = b[:h].decode("utf-8", "replace"); tail = b[-h:].decode("utf-8", "replace")
             return redact_text(head + f"\n…[truncated {len(v)} chars]…\n" + tail)
         if isinstance(v, str):
             return redact_text(v)  # (c) redact every persisted episodic string on its way to the cache
