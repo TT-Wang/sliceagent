@@ -184,6 +184,10 @@ class SessionManager:
                     os.killpg(os.getpgid(sess.popen.pid), signal.SIGKILL)
                 except OSError:
                     pass
+                try:
+                    sess.popen.wait(timeout=2)   # reap the SIGKILLed child so it isn't left a zombie at fd close
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
         try:
             os.close(sess.master)
         except OSError:

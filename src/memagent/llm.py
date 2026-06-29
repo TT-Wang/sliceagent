@@ -678,6 +678,9 @@ class OpenAILLM:
             raise EmptyResponseError("empty completion (no choices)")   # RETRYABLE → with_retry re-rolls (not a raw IndexError)
         choice = resp.choices[0]
         msg = choice.message
+        if msg is None:                      # some proxies emit a choice with no message — retry, don't crash
+            from .errors import EmptyResponseError
+            raise EmptyResponseError(f"no message in completion (finish_reason={choice.finish_reason})")
         calls: list[ToolCall] = []
         for tc in (msg.tool_calls or []):
             fn = getattr(tc, "function", None)

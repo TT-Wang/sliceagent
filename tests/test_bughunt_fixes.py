@@ -1086,6 +1086,22 @@ def usage_cache_read_zero_not_overridden():
     assert _usage_dict(raw)["input_cache_read"] == 0, "details.cached_tokens=0 must win over raw (no 0-or-fallthrough)"
 
 
+# ── R23 HIGH: _atomic_write disables newline translation (else Windows double-converts CRLF → \r\r\n) ──
+@check
+def atomic_write_disables_newline_translation():
+    import inspect
+    from memagent import tools
+    src = inspect.getsource(tools)
+    assert 'newline=""' in src, "_atomic_write must os.fdopen(..., newline='') so CRLF isn't double-converted"
+
+
+# ── R23 MED: a None choice.message is a retryable empty completion, not an AttributeError crash ────────
+@check
+def none_choice_message_is_retryable():
+    from memagent.errors import EmptyResponseError, classify
+    assert classify(EmptyResponseError("x")).get("retryable") is True
+
+
 def main():
     failed = 0
     for fn in CHECKS:

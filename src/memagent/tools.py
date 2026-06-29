@@ -1240,7 +1240,10 @@ class LocalToolHost:
             mode = None
         fd, tmp = tempfile.mkstemp(prefix=".memagent-tmp-", dir=d)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # newline="" disables the platform newline translation: _preserve_eol already normalized the
+            # content's line endings (LF or CRLF) to match the target, so text-mode translation on Windows
+            # would double-convert \n→\r\n inside an already-CRLF string (\r\r\n) and corrupt the file.
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             if mode is not None:
                 os.chmod(tmp, mode)
