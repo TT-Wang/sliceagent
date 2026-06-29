@@ -29,6 +29,24 @@ class ModelCapability:
 
 _UNKNOWN = ModelCapability()
 
+# USD per 1M tokens: (input_fresh, input_cached, output). SINGLE SOURCE for the cost meter — keyed by a
+# name/family substring, first match wins. Update HERE when a provider changes pricing. (Context windows stay
+# 0/unknown by design: memagent's overflow is reactive, so nothing fabricates a window — see ModelCapability.)
+_PRICES = {
+    "gpt-5": (1.25, 0.125, 10.0), "gpt-4": (2.50, 1.25, 10.0), "o3": (2.0, 0.5, 8.0),
+    "deepseek": (0.27, 0.07, 1.10), "kimi": (0.60, 0.15, 2.50), "moonshot": (0.60, 0.15, 2.50),
+    "claude": (3.0, 0.30, 15.0),
+}
+
+
+def pricing(model: str, base_url: str = "") -> "tuple | None":
+    """USD/1M (input, cached_input, output) for a model, or None if unknown. The cost meter's single source."""
+    s = (model or "").lower() + " " + (base_url or "").lower()
+    for k, v in _PRICES.items():
+        if k in s:
+            return v
+    return None
+
 # Vision is keyed off the MODEL name (not the family) — kimi-k2.7-code is text-only but moonshot-*-vision is
 # not; gpt-4o/gpt-5/claude-3+/gemini/`*-vl`/anything with 'vision' is multimodal. Conservative allowlist.
 _VISION_HINTS = ("vision", "gpt-4o", "gpt-4.1", "gpt-5", "gpt-6", "claude-3", "claude-4",

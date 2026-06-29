@@ -714,19 +714,10 @@ class _InputCompleter(Completer):
 
 # rough public list prices, USD per 1M tokens: (input, cached_input, output). Substring-matched on the
 # model id; an unknown model shows token counts only (no $). Update as prices change.
-_MODEL_PRICES = {
-    "kimi": (0.60, 0.15, 2.50), "moonshot": (0.60, 0.15, 2.50),
-    "gpt-5": (1.25, 0.125, 10.0), "gpt-4": (2.50, 1.25, 10.0), "o3": (2.0, 0.5, 8.0),
-    "deepseek": (0.27, 0.07, 1.10), "claude": (3.0, 0.30, 15.0),
-}
-
-
 def _price(model: str):
-    m = (model or "").lower()
-    for k, v in _MODEL_PRICES.items():
-        if k in m:
-            return v
-    return None
+    """USD/1M (input, cached, output) for the cost meter — single source is model_catalog.pricing."""
+    from .model_catalog import pricing
+    return pricing(model)
 
 
 def _accrue_cost(stats: dict, usage: dict) -> None:

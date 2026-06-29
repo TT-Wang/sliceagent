@@ -891,6 +891,18 @@ def mcp_security_screen_refuses_abuse_shapes():
     assert v("z", None) == [] and v("z2", {"command": "bash"}) == []                                     # malformed / no-args safe
 
 
+# ── FEATURE (#12 borrow): model pricing is single-sourced in model_catalog; the cost meter delegates ──
+@check
+def model_pricing_is_single_source():
+    from memagent import model_catalog as mc
+    from memagent import tui
+    assert mc.pricing("gpt-5.5")[0] == 1.25 and mc.pricing("deepseek-chat")[2] == 1.10
+    assert mc.pricing("kimi-k2-0905-preview")[1] == 0.15 and mc.pricing("claude-sonnet-4-6")[0] == 3.0
+    assert mc.pricing("totally-unknown-model") is None
+    assert mc.pricing("custom", "https://api.deepseek.com")[0] == 0.27   # base_url disambiguation
+    assert tui._price("gpt-5.5") == mc.pricing("gpt-5.5")               # TUI meter reads the same source
+
+
 # ── FEATURE (quick-win borrows): str_replace replace_all + with_retry honors Retry-After ──────────────
 @check
 def str_replace_replace_all_and_retry_after():
