@@ -80,9 +80,15 @@ def server_start_probe_kill():
     """The canonical 'start a server, keep it alive, probe it' flow — impossible with one-shot run."""
     wd, h = _host()
     open(os.path.join(wd, "hello.txt"), "w").write("OK")
-    # -u (unbuffered) so the "Serving HTTP … port N" banner flushes immediately; longer wait for slow CI runners.
-    h.run("proc_start", {"command": f"{PY} -u -m http.server 0 --bind 127.0.0.1"})
-    m, out = _wait_for(lambda: h.run("proc_tail", {"handle": "p1"}), r"port (\d+)", 15)
+    # Don't parse http.server's own banner — it goes to stderr and buffers unpredictably across platforms
+    # (flaky on macOS CI). Run a tiny HTTPServer that prints the chosen port to STDOUT with explicit flush,
+    # under `python -u`, so proc_tail reliably captures it. It still serves files from cwd (hello.txt).
+    server_code = ("import http.server;"
+                   "srv=http.server.HTTPServer(('127.0.0.1',0), http.server.SimpleHTTPRequestHandler);"
+                   "print('PORT', srv.server_address[1], flush=True);"
+                   "srv.serve_forever()")
+    h.run("proc_start", {"command": f"{PY} -u -c {shlex.quote(server_code)}"})
+    m, out = _wait_for(lambda: h.run("proc_tail", {"handle": "p1"}), r"PORT (\d+)", 20)
     assert m, f"server never announced a port: {out!r}"
     port = m.group(1)
     body = None
