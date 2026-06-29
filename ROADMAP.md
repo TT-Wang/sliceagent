@@ -46,14 +46,14 @@ Tags: `[launch]` OSS-readiness · `[borrow ★N/#N kimi|hermes]` from the cross-
 - [ ] **Config reference** auto-generated from `envspec.py` REGISTRY `[launch] M` — *(remaining)*
 - [ ] per-provider `base_url` env override `[borrow hermes] S` · project-scoped config writes `[borrow kimi] S` — *(remaining)*
 
-## Wave 2 — Trust & legal · ~½–1 day  → *credible & safe to run*
-- [ ] `license = "MIT"` + classifier in pyproject; README `## License` `[launch] S`
-- [ ] **NOTICE / THIRD-PARTY-LICENSES** mapping the ~13 Kimi/Hermes verbatim ports → sources `[launch] M`
-- [ ] **SECURITY.md** + disclosure path (tongtao.wang@gmail.com) `[launch] S`
-- [ ] **★3 MCP spawn-security screen** (egress/persistence/IOC check before spawn) — mcp_client.py:193 `[borrow ★3 hermes] S–M`
-- [ ] **Persisted allow/deny/ask permission rules** (path/command scoped) as a PolicyChain entry — policy.py · hooks.py `[borrow #8 both] M`
-- [ ] **★5 live-env tier**: re-surface running bg procs/terminals in the slice each turn — slice.py + procman.py/terminal.py `[borrow ★5 kimi] S`
-- [ ] Document the safety model (sandbox local/docker, 3 modes) + warn on headless→let-it-go downgrade `[launch] M`
+## Wave 2 — Trust & legal · ~½–1 day  → *credible & safe to run*  (core done, 033afa9)
+- [x] `license = "MIT"` + license-files + classifiers in pyproject; README `## License` `(033afa9)`
+- [x] **NOTICE** — Hermes MIT text + file map; Kimi credited as reimplemented patterns (Hermes confirmed MIT) `(033afa9)`
+- [x] **SECURITY.md** + disclosure path + 4-layer threat model `(033afa9)`
+- [x] **★3 MCP spawn-security screen** (egress/persistence shapes refused before spawn) — mcp_security.py + mcp_client.py `(033afa9)`
+- [x] Warn on headless→let-it-go policy downgrade (no silent weakening) — cli.py `(033afa9)`
+- [ ] **Persisted allow/deny/ask permission rules** (path/command scoped) as a PolicyChain entry — policy.py · hooks.py `[borrow #8 both] M` — *(remaining: bigger trust borrow)*
+- [ ] **★5 live-env tier**: re-surface running bg procs/terminals in the slice each turn — slice.py + procman.py/terminal.py `[borrow ★5 kimi] S` — *(remaining)*
 
 ## Wave 3 — Prove it + relieve the slice · ~1 day
 - [ ] One-command **flat-cost demo + chart** (the now-tracked realenv_multiturn) in README `[launch] M`
