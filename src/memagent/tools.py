@@ -297,10 +297,11 @@ TOOL_SCHEMAS = [
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
         "changing a file you've read. `old_string` should be the SMALLEST unique snippet — usually 2-4 adjacent "
         "lines, not 10+. It must identify exactly ONE place: more than one occurrence is rejected (add "
-        "surrounding context); an exact match is used, else a unique whitespace-tolerant fuzzy "
-        "match. Prefer over edit_file (whole-file overwrite). If a replace fails to match, don't retry it "
-        "identically — rewrite the file with edit_file.",
-        {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
+        "surrounding context, or pass replace_all=true to change EVERY occurrence); an exact match is used, "
+        "else a unique whitespace-tolerant fuzzy match. If old_string isn't found the file may be STALE — "
+        "re-read it and copy the current text rather than retrying the same edit; for a bigger change use edit_file.",
+        {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"},
+         "replace_all": {"type": "boolean", "description": "replace ALL occurrences (default false: a >1 match is rejected)"}},
         ["path", "old_string", "new_string"]),
     _fn("run_command",
         "Run a shell command (blocking, cwd=workspace root); returns combined stdout+stderr (exit code on "
@@ -929,16 +930,19 @@ class LocalToolHost:
         stripped = _strip_line_numbers(old)
         if stripped != old:
             candidates.append(stripped)
-        # PRIMARY: exact match (raw first, then de-numbered). A >1 count is a real ambiguity — report it.
+        # PRIMARY: exact match (raw first, then de-numbered). >1 is ambiguous UNLESS replace_all is set.
+        replace_all = bool(args.get("replace_all"))
         for cand in candidates:
             n = cur.count(cand)
-            if n == 1:
-                updated = self._preserve_eol(cur.replace(cand, new, 1), crlf)
+            if n == 0:
+                continue
+            if n == 1 or replace_all:
+                updated = self._preserve_eol(cur.replace(cand, new, n if replace_all else 1), crlf)
                 self._journal(args["path"], full)
                 self._atomic_write(full, updated)
                 return self._edit_result(args["path"], cur, updated, cur.index(cand), new)
-            if n > 1:
-                return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it unique", ok=False)
+            return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it "
+                            "unique, or pass replace_all=true to change them all", ok=False)
         # FALLBACK: whitespace-tolerant UNIQUE fuzzy span (raw first, then de-numbered). fuzzy_find_unique
         # returns None on 0/>1 candidates, so uniqueness is preserved — we never replace an ambiguous match.
         for cand in candidates:

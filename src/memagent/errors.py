@@ -126,6 +126,24 @@ def classify(error: Exception) -> dict:
     return {"retryable": retryable, "is_context_overflow": overflow, "status": status, "kind": kind}
 
 
+def _retry_after_seconds(error: Exception) -> "float | None":
+    """Best-effort: a 429/503 may carry a Retry-After (SDK `.retry_after` or a response header) telling us
+    EXACTLY how long to wait — honor it instead of guessing. Returns seconds, or None to fall back to
+    backoff (incl. when Retry-After is an HTTP-date, which we don't parse). Never raises."""
+    try:
+        val = getattr(error, "retry_after", None)
+        if val is None:
+            hdrs = getattr(getattr(error, "response", None), "headers", None)
+            if hdrs is not None:
+                val = hdrs.get("retry-after") or hdrs.get("Retry-After")
+        if val is None:
+            return None
+        secs = float(val)
+        return secs if secs >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def with_retry(
     fn: Callable[[], object],
     *,
@@ -142,4 +160,8 @@ def with_retry(
                 raise
             if dispatch:
                 dispatch(ApiRetry(attempt=attempt, error=str(e)[:200]))
-            time.sleep(jittered_backoff(attempt))
+            delay = jittered_backoff(attempt)
+            ra = _retry_after_seconds(e)
+            if ra is not None:
+                delay = max(delay, min(ra, 60.0))   # honor server Retry-After, capped so a huge value can't stall the turn
+            time.sleep(delay)

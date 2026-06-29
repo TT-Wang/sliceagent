@@ -891,6 +891,40 @@ def mcp_security_screen_refuses_abuse_shapes():
     assert v("z", None) == [] and v("z2", {"command": "bash"}) == []                                     # malformed / no-args safe
 
 
+# ── FEATURE (quick-win borrows): str_replace replace_all + with_retry honors Retry-After ──────────────
+@check
+def str_replace_replace_all_and_retry_after():
+    import os
+    import tempfile
+    from memagent import errors
+    from memagent.tools import LocalToolHost
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "a.py")
+    open(p, "w").write("x=1\nx=1\nx=1\n")
+    h = LocalToolHost(root=d)
+    r = h._t_str_replace({"path": "a.py", "old_string": "x=1", "new_string": "x=2"})   # >1 → rejected
+    assert getattr(r, "ok", True) is False and "replace_all" in str(r), r
+    h._t_str_replace({"path": "a.py", "old_string": "x=1", "new_string": "x=2", "replace_all": True})
+    assert open(p).read() == "x=2\nx=2\nx=2\n", open(p).read()                          # all changed
+    one = os.path.join(d, "b.py"); open(one, "w").write("a\nb\n")
+    h._t_str_replace({"path": "b.py", "old_string": "a", "new_string": "z"})            # single still works
+    assert open(one).read() == "z\nb\n"
+
+    class _E(Exception):
+        retry_after = 5
+
+    class _Resp:
+        headers = {"retry-after": "7"}
+
+    class _E2(Exception):
+        response = _Resp()
+
+    assert errors._retry_after_seconds(_E()) == 5.0                  # SDK attr
+    assert errors._retry_after_seconds(_E2()) == 7.0                 # response header
+    assert errors._retry_after_seconds(Exception()) is None          # absent → backoff
+    assert errors._retry_after_seconds(type("E3", (Exception,), {"retry_after": "soon"})()) is None  # HTTP-date unparsed
+
+
 # ── FEATURE (★2 borrow): grep output_mode/type + a glob file-finder (Kimi discovery surface) ──────────
 @check
 def grep_modes_and_glob_tool():
