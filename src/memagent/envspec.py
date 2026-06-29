@@ -86,6 +86,9 @@ REGISTRY: list[EnvVar] = [
     EnvVar("MEMAGENT_MONITOR_DIR", "monitor", "Directory the monitor writes slice snapshots to.", ""),
     EnvVar("MEMAGENT_DEBUG_TRACE", "debug", "Set truthy to print tracebacks for parked/hook errors.", ""),
     EnvVar("MEMAGENT_NO_CLOSURE", "debug", "Debug flag: disable the turn closeout call.", ""),
+    EnvVar("MEMAGENT_PROMPT_FILE", "debug", "A/B experiment seam: path to a full SYSTEM_PROMPT template "
+           "(must keep the {{MEMORY_MODEL}} marker) to override the prompt for a measurement run "
+           "(evals/prompt_ab). Unset → the production prompt.", ""),
 ]
 
 BY_NAME: dict[str, EnvVar] = {e.name: e for e in REGISTRY}

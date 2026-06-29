@@ -15,11 +15,17 @@ venv/
 *.egg-info/
 .pytest_cache/
 *.whl
+/dist/
+/build/
 
 # agent scratch / runtime
 scratch/
 *.jsonl
 .DS_Store
+
+# prompt A/B generated artifacts (variant .txt are regenerated from slice.py by variants.build_all)
+evals/prompt_ab/variants/
+evals/prompt_ab/runs/
 
 # local memagent state / monitor runtime (personal; not part of the repo)
 .memagent/

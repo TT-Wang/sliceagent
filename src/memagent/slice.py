@@ -274,6 +274,23 @@ SYSTEM_PROMPT = (
 )
 
 
+# A/B PROMPT SEAM (experiment hook; OFF by default → identical production prompt). Point MEMAGENT_PROMPT_FILE
+# at a full prompt template to swap SYSTEM_PROMPT for a measurement run (evals/prompt_ab). The override replaces
+# ONLY the static template; the downstream {{MEMORY_MODEL}} / delegation / repo-map splice is unchanged, so a
+# variant is a fair drop-in. Guarded: a file missing the {{MEMORY_MODEL}} marker (which would silently drop the
+# memory block) or an unreadable path falls back to the default and warns — never a silent wrong prompt.
+_prompt_ab_file = os.environ.get("MEMAGENT_PROMPT_FILE", "").strip()
+if _prompt_ab_file:
+    try:
+        _ov = open(_prompt_ab_file, encoding="utf-8").read()
+        if "{{MEMORY_MODEL}}" in _ov:
+            SYSTEM_PROMPT = _ov
+        else:
+            sys.stderr.write(f"[prompt-ab] {_prompt_ab_file} lacks the {{MEMORY_MODEL}} marker; using default prompt\n")
+    except OSError as _e:
+        sys.stderr.write(f"[prompt-ab] cannot read {_prompt_ab_file}: {_e}; using default prompt\n")
+
+
 # The "HOW YOUR MEMORY WORKS" block, spliced into SYSTEM_PROMPT at the {{MEMORY_MODEL}} marker. WITHIN a
 # task your own actions+results stay visible (working memory accumulates); ACROSS tasks nothing carries but
 # a reconstructed slice + the durable cache (recall_history pages earlier turns back in).
