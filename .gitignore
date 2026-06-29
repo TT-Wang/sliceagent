@@ -14,6 +14,7 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+*.whl
 
 # agent scratch / runtime
 scratch/
@@ -23,6 +24,8 @@ scratch/
 # local memagent state / monitor runtime (personal; not part of the repo)
 .memagent/
 monitor/
+brain/
+.mindmux/
 
 # local tooling artifacts (not part of the repo).
 # NOTE: gitignore has no inline comments — keep each pattern on its own line.

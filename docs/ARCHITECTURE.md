@@ -70,7 +70,7 @@ Retrieval is not 100%. The loop — not the retriever — is the recovery mechan
 
 ## Positioning vs incumbents
 
-OpenClaw and Hermes are both **transcript + LLM-summarization-compaction** (verified by source inspection): accumulate, then summarize near the window. memagent is **deterministic bounded reconstruction** — genuinely distinct. Edge is largest at scale / long-horizon / cost-sensitive / auditability-critical work. Borrow their periphery (sandbox backends, TUI, code-as-action); do not adopt their loop.
+OpenHands and Hermes are both **transcript + LLM-summarization-compaction** (Hermes verified by source inspection): accumulate, then summarize near the window. memagent is **deterministic bounded reconstruction** — genuinely distinct. Edge is largest at scale / long-horizon / cost-sensitive / auditability-critical work. Borrow their periphery (sandbox backends, TUI, code-as-action); do not adopt their loop.
 
 ## Refined thesis: *relevant* bounded context
 

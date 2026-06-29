@@ -4,7 +4,7 @@
 
 [agent]
 model = "gpt-5.5"            # AGENT_MODEL
-policy = "guard"             # AGENT_POLICY: guard (blocks catastrophic cmds) | readonly | ask | allow
+policy = "teenager"          # AGENT_POLICY: teenager (auto edits, ask on cmds) | baby-sitter (ask on all) | let-it-go (auto) — all block catastrophic
 mine = "deterministic"      # AGENT_MINE: deterministic | llm | off  (memem write loop)
 subagent_depth = 1          # AGENT_SUBAGENT_DEPTH: 0 disables spawn_subagent
 show_slice = false          # SHOW_SLICE: print the reconstructed slice each turn
