@@ -15,9 +15,8 @@ import os
 from dataclasses import dataclass
 
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
-# (No "glob" here: there is no glob tool registered — list_files(recursive) + grep's glob filter cover
-# file-name patterns. Advertising a tool that isn't in the registry is a dead/misleading allowlist entry.)
-READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "skill", "recall_history", "code_review")
+# `grep` (find by CONTENT) + `glob` (find by NAME) are the two discovery tools; both read-only.
+READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history", "code_review")
 _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
 # Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A

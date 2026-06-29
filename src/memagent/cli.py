@@ -204,8 +204,9 @@ def main() -> None:
     skill_tool = make_skill_tool(skills)
     if skill_tool is not None:        # register the `skill` tool into the shared registry
         base_tools.registry.register(skill_tool)
-    from .code_grep import make_grep_tool  # guarded ripgrep: the single discovery-on-demand seam
+    from .code_grep import make_glob_tool, make_grep_tool  # ripgrep discovery: grep (contents) + glob (names)
     base_tools.registry.register(make_grep_tool(base_tools))
+    base_tools.registry.register(make_glob_tool(base_tools))
     # web tools (fetch_url + web_search, DuckDuckGo, no key) — network egress, so gated by AGENT_WEB
     # (default ON). SSRF-guarded + results fenced UNTRUSTED + large pages paged (see web.py).
     if os.environ.get("AGENT_WEB", "1").strip().lower() not in ("0", "off", "false", "no"):

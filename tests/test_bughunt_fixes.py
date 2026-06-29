@@ -891,6 +891,32 @@ def mcp_security_screen_refuses_abuse_shapes():
     assert v("z", None) == [] and v("z2", {"command": "bash"}) == []                                     # malformed / no-args safe
 
 
+# ── FEATURE (★2 borrow): grep output_mode/type + a glob file-finder (Kimi discovery surface) ──────────
+@check
+def grep_modes_and_glob_tool():
+    import os
+    import shutil
+    import tempfile
+    from memagent.code_grep import _expand_braces, _glob_walk, make_glob_tool, make_grep_tool
+    from memagent.tools import LocalToolHost
+    assert _expand_braces("*.{ts,tsx}") == ["*.ts", "*.tsx"]
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "a.py"), "w").write("def foo():\n    return 1\n")
+    open(os.path.join(d, "b.py"), "w").write("x = foo()\n")
+    open(os.path.join(d, "c.md"), "w").write("# notes\n")
+    assert sorted(os.path.basename(x) for x in _glob_walk(d, "*.{md,py}", 100)) == ["a.py", "b.py", "c.md"]
+    if not shutil.which("rg"):
+        return                                                        # rg-backed modes need ripgrep
+    h = LocalToolHost(root=d)
+    g, gl = make_grep_tool(h).handler, make_glob_tool(h).handler
+    fwm = g({"pattern": "foo", "output_mode": "files_with_matches"})
+    assert "a.py" in fwm and "b.py" in fwm and "c.md" not in fwm, fwm   # only files that match
+    assert "a.py:" in g({"pattern": "foo", "output_mode": "count"})     # per-file counts
+    assert "c.md" not in g({"pattern": "foo", "type": "py", "output_mode": "files_with_matches"})  # type filter
+    assert "a.py" in gl({"pattern": "*.py"}) and "c.md" not in gl({"pattern": "*.py"})  # glob by name
+    assert "c.md" in gl({"pattern": "*.{md,py}"})                       # brace expansion
+
+
 def main():
     failed = 0
     for fn in CHECKS:
