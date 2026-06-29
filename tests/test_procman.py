@@ -80,8 +80,9 @@ def server_start_probe_kill():
     """The canonical 'start a server, keep it alive, probe it' flow — impossible with one-shot run."""
     wd, h = _host()
     open(os.path.join(wd, "hello.txt"), "w").write("OK")
-    h.run("proc_start", {"command": f"{PY} -m http.server 0 --bind 127.0.0.1"})
-    m, out = _wait_for(lambda: h.run("proc_tail", {"handle": "p1"}), r"port (\d+)", 5)
+    # -u (unbuffered) so the "Serving HTTP … port N" banner flushes immediately; longer wait for slow CI runners.
+    h.run("proc_start", {"command": f"{PY} -u -m http.server 0 --bind 127.0.0.1"})
+    m, out = _wait_for(lambda: h.run("proc_tail", {"handle": "p1"}), r"port (\d+)", 15)
     assert m, f"server never announced a port: {out!r}"
     port = m.group(1)
     body = None

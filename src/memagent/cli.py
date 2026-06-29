@@ -162,7 +162,7 @@ def main() -> None:
     from .memory import make_memory
     from .oracle import CommandOracle
     from .plugins import load_plugins
-    from .policy import CONFIRMS, make_policy, policy_label, resolve_policy_mode
+    from .policy import CONFIRMS, legacy_warning, make_policy, policy_label, resolve_policy_mode
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route
     from .skills import make_skill_manager, make_skill_tool
@@ -175,7 +175,11 @@ def main() -> None:
     from .config import load_prefs, save_prefs
     _prefs = load_prefs()
     # mode resolution: explicit env wins, then the saved /mode choice, then config (default teenager).
-    canonical = resolve_policy_mode(os.environ.get("AGENT_POLICY") or _prefs.get("policy") or cfg.policy) or "teenager"
+    _raw_policy = os.environ.get("AGENT_POLICY") or _prefs.get("policy") or cfg.policy
+    canonical = resolve_policy_mode(_raw_policy) or "teenager"
+    _pol_warn = legacy_warning(_raw_policy)   # loud note if a legacy name (e.g. guard) was used — no silent downgrade
+    if _pol_warn:
+        print(f"  · {_pol_warn}")
     mine_mode = cfg.mine           # deterministic | llm | off
     sub_depth = cfg.subagent_depth  # 0 disables delegation
     # SUBAGENT/base policy never prompts (no human in a spawned turn) → a confirm-mode runs as let-it-go for

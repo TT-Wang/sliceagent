@@ -23,8 +23,19 @@ def check(fn):
 
 # ── provider-aware proxy ─────────────────────────────────────────────────────
 @check
-def openai_endpoint_uses_clashx_by_default():
-    assert _choose_proxy("https://api.openai.com/v1", None) == _CLASHX
+def openai_endpoint_uses_clashx_only_when_a_local_proxy_is_up():
+    # The default is DIRECT for everyone; a foreign endpoint falls back to the local ClashX proxy ONLY if one
+    # is actually listening (so non-CN first runs don't fail on a refused 127.0.0.1:7890). Mock the probe so
+    # this is deterministic regardless of whether the CI/dev box happens to have a proxy running.
+    import memagent.llm as _llm
+    orig = _llm._local_proxy_listening
+    try:
+        _llm._local_proxy_listening = lambda url: True
+        assert _choose_proxy("https://api.openai.com/v1", None) == _CLASHX   # proxy present → use it (CN behind GFW)
+        _llm._local_proxy_listening = lambda url: False
+        assert _choose_proxy("https://api.openai.com/v1", None) == "none"    # no proxy → DIRECT (non-CN default)
+    finally:
+        _llm._local_proxy_listening = orig
 
 
 @check

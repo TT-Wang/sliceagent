@@ -1001,7 +1001,8 @@ class LocalToolHost:
         if mime is None:
             return f"Error: {path} is not a recognized image (png/jpeg/gif/webp/bmp) — not attached"
         self.pending_images.append({"path": path, "b64": base64.b64encode(raw).decode("ascii"), "mime": mime})
-        return f"attached image {path} ({len(raw)} bytes, {mime})"
+        # cost-awareness: a base64 image is large + billed as image tokens → this turn costs more than text.
+        return f"attached image {path} ({len(raw) // 1024} KB, {mime}) — vision turn, costs more than a text turn"
 
     def _t_code_review(self, args: dict) -> str:
         """Return the git diff for the workspace so the model can review it (read-only; task-agnostic)."""

@@ -126,6 +126,23 @@ _MODE_LABELS = {"babysitter": "baby-sitter", "teenager": "teenager", "letitgo": 
 # canonical → True if the mode confirms (needs an interactive resolver; downgrade to let-it-go when headless)
 CONFIRMS = {"babysitter": True, "teenager": True, "letitgo": False, "allow": False, "readonly": False}
 
+# Legacy names still RESOLVE (back-compat for old configs/eval) but their connotation differs from the new
+# modes — warn LOUDLY so a name like `guard` can't SILENTLY downgrade safety (it now means let-it-go = auto).
+_LEGACY_WARN = {
+    "guard": "AGENT_POLICY=guard is legacy and now maps to 'let-it-go' (auto-runs everything except "
+             "catastrophic commands). For confirmations use 'baby-sitter' or 'teenager'.",
+    "ask": "AGENT_POLICY=ask is legacy → use 'baby-sitter' (confirm every edit + command).",
+    "allow": "AGENT_POLICY=allow is a legacy permissive eval mode (NO catastrophic floor) — for normal use "
+             "pick baby-sitter / teenager / let-it-go.",
+    "readonly": "AGENT_POLICY=readonly is a legacy mode (no writes/exec).",
+}
+
+
+def legacy_warning(name: str) -> Optional[str]:
+    """A loud deprecation note when a LEGACY mode name is used, so a safety-connoting name like `guard` can't
+    silently resolve to a more permissive mode. None for the current friendly names."""
+    return _LEGACY_WARN.get((name or "").strip().lower().replace("_", "-").replace(" ", "-"))
+
 
 def resolve_policy_mode(name: str) -> Optional[str]:
     """Friendly/legacy mode name → canonical key, or None if unrecognized (the caller warns + defaults)."""

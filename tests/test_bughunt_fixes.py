@@ -845,6 +845,17 @@ def policy_three_modes():
     assert resolve_policy_mode("guard") == "letitgo" and resolve_policy_mode("ask") == "babysitter"
 
 
+# ── FEATURE: legacy policy names warn LOUDLY (guard can't silently downgrade safety to let-it-go) ──────
+@check
+def legacy_policy_names_warn_loudly():
+    from memagent.policy import legacy_warning
+    assert "let-it-go" in legacy_warning("guard"), "guard must warn it now means let-it-go (auto)"
+    assert legacy_warning("ask") and legacy_warning("allow") and legacy_warning("readonly")
+    assert legacy_warning("GUARD") and legacy_warning(" guard ")          # case/space tolerant
+    for friendly in ("baby-sitter", "teenager", "let-it-go"):             # current names: NO warning
+        assert legacy_warning(friendly) is None, friendly
+
+
 # ── FEATURE: proxy defaults DIRECT unless a local proxy is actually up (the wide-user first-run fix) ───
 @check
 def proxy_defaults_direct_without_a_local_proxy():
