@@ -1064,6 +1064,28 @@ def floor_catches_flagless_chmod_chown_on_root():
         assert not blocked(c), f"floor must NOT block legit: {c}"
 
 
+# ── R22 HIGH: the catastrophic floor is CASE-INSENSITIVE (uppercase can't bypass; macOS case-insens FS) ─
+@check
+def floor_is_case_insensitive():
+    from memagent.policy import no_dangerous_commands as nd
+
+    def blocked(c):
+        return nd("run_command", {"command": c}) is not None
+    for c in ["SHUTDOWN now", "REBOOT", "MKFS.ext4 /dev/sda", "DD if=/dev/zero of=/dev/sda",
+              "cat /ETC/PASSWD", "SUDO rm x", "CHMOD 755 /", "CHOWN root /", "rm -RF /"]:
+        assert blocked(c), f"uppercase must still be blocked by the floor: {c}"
+
+
+# ── R22 HIGH: a legit cached_tokens=0 must NOT fall through to raw.cached_tokens (cost miscount) ────────
+@check
+def usage_cache_read_zero_not_overridden():
+    from types import SimpleNamespace
+    from memagent.llm import _usage_dict
+    raw = SimpleNamespace(prompt_tokens=100, completion_tokens=5, cached_tokens=999,
+                          prompt_tokens_details=SimpleNamespace(cached_tokens=0))
+    assert _usage_dict(raw)["input_cache_read"] == 0, "details.cached_tokens=0 must win over raw (no 0-or-fallthrough)"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

@@ -29,31 +29,36 @@ EXEC_TOOLS = frozenset(("run_command", "execute_code", "proc_start", "terminal_o
 # Patterns that are almost never legitimate inside a coding-agent workspace.
 # Kept deliberately narrow so normal dev commands (pytest, pip, npm, git add/commit,
 # rm of a workspace file, mkdir, mv) pass untouched.
-_DANGEROUS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r":\s*\(\s*\)\s*\{.*\|.*&", re.S),        "fork bomb"),
-    (re.compile(r"\bsudo\b"),                              "privilege escalation (sudo)"),
-    (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"),  "system power control"),
-    (re.compile(r"\b(mkfs|wipefs)\b"),                     "filesystem format"),
-    (re.compile(r"\bdd\b[^\n]*\bof=/dev/"),               "raw write to a device"),
-    (re.compile(r">\s*/dev/(sd|nvme|disk|hd)"),           "raw write to a device"),
+# INVARIANT: every pattern is compiled case-INSENSITIVE (the comprehension below). The floor must not be
+# defeated by casing — on a case-insensitive filesystem (macOS default) `SHUTDOWN` / `/ETC/PASSWD` resolve
+# to the real command/path, so a case-sensitive denylist is a genuine bypass. A pattern needing DOTALL
+# carries an inline `(?s)`.
+_DANGEROUS_SRC: list[tuple[str, str]] = [
+    (r"(?s):\s*\(\s*\)\s*\{.*\|.*&",                       "fork bomb"),
+    (r"\bsudo\b",                                          "privilege escalation (sudo)"),
+    (r"\b(shutdown|reboot|halt|poweroff)\b",              "system power control"),
+    (r"\b(mkfs|wipefs)\b",                                 "filesystem format"),
+    (r"\bdd\b[^\n]*\bof=/dev/",                            "raw write to a device"),
+    (r">\s*/dev/(sd|nvme|disk|hd)",                        "raw write to a device"),
     # any RECURSIVE rm targeting / ~ $HOME /* .. (workspace-relative rm is fine). Catches -rf, split "-r -f",
     # and long-form --recursive — the recursive flag (short -...r... or --recursive) anywhere before the target.
-    (re.compile(r"\brm\b(?=[^|;&\n]*(?:\s-[a-z]*r|\s--recursive))"
-                r"[^|;&\n]*\s(?:/|~|\$HOME|/\*|\.\.)(?=[\s/*'\"]|$)", re.IGNORECASE), "recursive delete of / ~ or parent"),
+    (r"\brm\b(?=[^|;&\n]*(?:\s-[a-z]*r|\s--recursive))"
+     r"[^|;&\n]*\s(?:/|~|\$HOME|/\*|\.\.)(?=[\s/*'\"]|$)", "recursive delete of / ~ or parent"),
     # chmod/chown on / — flags are OPTIONAL (plain `chmod 755 /` / `chown nobody /` are just as catastrophic
     # as the -R forms), and long-form flags (--recursive) count too. The target must be the bare root.
-    (re.compile(r"\bchmod\b\s+(?:-{1,2}[a-z]+\s+)*[0-7]{3,4}\s+/(?:[\s/*'\"]|$)", re.IGNORECASE), "chmod on /"),
-    (re.compile(r"\bchown\b\s+[^\n]*\s/(?:[\s/*'\"]|$)", re.IGNORECASE), "chown on /"),
+    (r"\bchmod\b\s+(?:-{1,2}[a-z]+\s+)*[0-7]{3,4}\s+/(?:[\s/*'\"]|$)", "chmod on /"),
+    (r"\bchown\b\s+[^\n]*\s/(?:[\s/*'\"]|$)",              "chown on /"),
     # remote code piped straight into a shell
-    (re.compile(r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", re.IGNORECASE),
-     "remote script piped to a shell"),
+    (r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", "remote script piped to a shell"),
     # writes to / reads of sensitive locations
-    (re.compile(r">>?\s*/etc/"),                          "write to /etc"),
-    (re.compile(r"/etc/(passwd|shadow|sudoers)"),         "access to system credential files"),
-    (re.compile(r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc)"), "access to private keys/credentials"),
-    (re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)", re.IGNORECASE),
-     "force push"),
+    (r">>?\s*/etc/",                                       "write to /etc"),
+    (r"/etc/(passwd|shadow|sudoers)",                      "access to system credential files"),
+    (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc)", "access to private keys/credentials"),
+    (r"\bgit\b[^\n]*\bpush\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)", "force push"),
 ]
+# Compile ALL case-insensitively in one place — uniform, so a future pattern can't silently reintroduce a
+# casing bypass (the round-3 bug: shutdown/mkfs/dd/etc had no IGNORECASE while rm/chmod/curl did).
+_DANGEROUS: list[tuple[re.Pattern, str]] = [(re.compile(p, re.IGNORECASE), why) for p, why in _DANGEROUS_SRC]
 
 
 # DENY-BY-DEFAULT reader allowlist for readonly/ask modes. Keying on a mutator NAME set let unknown

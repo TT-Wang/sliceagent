@@ -1232,7 +1232,12 @@ class LocalToolHost:
         d = os.path.dirname(full)
         # preserve the target's permission bits across the replace — else a str_replace/edit_file on an
         # existing 0755 script silently resets it to the mkstemp 0600 (drops the executable + group/other bits).
-        mode = _stat.S_IMODE(os.stat(full).st_mode) if os.path.exists(full) else None
+        # ONE stat in a try (no exists()+stat() TOCTOU): if the file is absent or concurrently removed, write
+        # fresh with default perms rather than raising an unhandled FileNotFoundError.
+        try:
+            mode = _stat.S_IMODE(os.stat(full).st_mode)
+        except OSError:
+            mode = None
         fd, tmp = tempfile.mkstemp(prefix=".memagent-tmp-", dir=d)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

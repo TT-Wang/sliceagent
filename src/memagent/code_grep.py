@@ -26,6 +26,7 @@ from .registry import ToolEntry, ToolText
 # {host_id: {"last_key": tuple | None, "consecutive": int}} — module-level, per-host.
 # Mirrors Hermes' per-task _read_tracker shape. Not a transcript: a tiny durable counter.
 GREP_GUARD: dict = {}
+_GREP_LOCK = threading.Lock()   # parallel explorers share GREP_GUARD; serialize the check-then-update
 
 _BLOCK_AFTER = 4          # 4th identical-in-a-row call is blocked (mirrors Hermes count>=4)
 _DEFAULT_LIMIT = 50
@@ -73,17 +74,20 @@ def _norm_int(value, default: int) -> int:
 
 
 def _bump_guard(host_id, key) -> int:
-    """Update the consecutive-identical counter for this host; return the run length."""
-    if host_id not in GREP_GUARD and len(GREP_GUARD) > 256:
-        GREP_GUARD.clear()   # bound the per-host map (no host-teardown hook + id() reuse) — resetting the
-        #                      consecutive counter is harmless (worst case: one missed back-to-back warning)
-    data = GREP_GUARD.setdefault(host_id, {"last_key": None, "consecutive": 0})
-    if data["last_key"] == key:
-        data["consecutive"] += 1
-    else:
-        data["last_key"] = key
-        data["consecutive"] = 1
-    return data["consecutive"]
+    """Update the consecutive-identical counter for this host; return the run length. Locked: parallel
+    explorers share GREP_GUARD, so the check-then-clear and the counter update must be atomic (else a
+    concurrent clear() blows away another thread's run length)."""
+    with _GREP_LOCK:
+        if host_id not in GREP_GUARD and len(GREP_GUARD) > 256:
+            GREP_GUARD.clear()   # bound the per-host map (no host-teardown hook + id() reuse) — resetting the
+            #                      consecutive counter is harmless (worst case: one missed back-to-back warning)
+        data = GREP_GUARD.setdefault(host_id, {"last_key": None, "consecutive": 0})
+        if data["last_key"] == key:
+            data["consecutive"] += 1
+        else:
+            data["last_key"] = key
+            data["consecutive"] = 1
+        return data["consecutive"]
 
 
 def make_grep_tool(host) -> ToolEntry:

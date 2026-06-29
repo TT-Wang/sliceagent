@@ -87,8 +87,11 @@ def _usage_dict(raw) -> dict | None:
     prompt = _int(getattr(raw, "prompt_tokens", 0))
     output = _int(getattr(raw, "completion_tokens", 0))
     details = getattr(raw, "prompt_tokens_details", None)
-    # cache READ: OpenAI nests it under prompt_tokens_details; Moonshot/some report it top-level.
-    cache_read = _int(getattr(details, "cached_tokens", None) or getattr(raw, "cached_tokens", None))
+    # cache READ: OpenAI nests it under prompt_tokens_details; Moonshot/some report it top-level. Use
+    # is-None (not truthiness) to choose the source — a legit cached_tokens=0 from details must NOT fall
+    # through to raw.cached_tokens (that miscounted a no-cache-hit turn as a top-level value).
+    _cr = getattr(details, "cached_tokens", None)
+    cache_read = _int(_cr if _cr is not None else getattr(raw, "cached_tokens", None))
     # cache CREATION: Anthropic-compatible only (absent on OpenAI/Moonshot → 0).
     cache_create = _int(getattr(raw, "cache_creation_input_tokens", 0))
     input_other = max(0, prompt - cache_read - cache_create)
