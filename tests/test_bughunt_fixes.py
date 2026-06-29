@@ -891,6 +891,22 @@ def mcp_security_screen_refuses_abuse_shapes():
     assert v("z", None) == [] and v("z2", {"command": "bash"}) == []                                     # malformed / no-args safe
 
 
+# ── FEATURE (moat proof): the flat-cost demo renders a dependency-free ASCII chart (memagent flat vs rising)
+@check
+def cost_chart_renders_flat_vs_rising():
+    import os
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(root, "evals"))
+    import realenv_multiturn as rem                                  # importable WITHOUT the heavy swebench dep
+    rows = [{"turn": i, "peak_in": 6000, "transcript": 6000 * i} for i in range(1, 13)]
+    chart = rem.render_cost_chart(rows)
+    assert "memagent" in chart and "transcript" in chart and "12×" in chart, chart
+    mem_bars = {ln.count("▒") for ln in chart.splitlines() if "▒" in ln}   # only memagent per-turn rows use ▒
+    assert len(mem_bars) == 1, ("memagent bar must be FLAT every turn", mem_bars)
+    assert rem.render_cost_chart([]) == ""                           # empty rows → no crash
+
+
 # ── FEATURE (#12 borrow): model pricing is single-sourced in model_catalog; the cost meter delegates ──
 @check
 def model_pricing_is_single_source():

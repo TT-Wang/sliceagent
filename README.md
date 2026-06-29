@@ -56,7 +56,16 @@ memagent                 # start the agent
 The "reconstruct, don't accumulate" bet is validated, not just claimed:
 
 - **JS prototype** ([`prototype/`](prototype/)) — controlled A/B vs a classic transcript loop: **−61% to −80% tokens** on long/iterative tasks at identical pass rates.
-- **Python core** — `evals/realenv_multiturn.py` plots the per-turn **fresh-input** curve: flat (~6k) for memagent vs a transcript that climbs to **~24× by turn 12**. Watch the `fresh` number in the status bar to see it live.
+- **Python core** — `evals/realenv_multiturn.py` measures the per-turn **input** cost across a 12-turn session: flat (~6k) for memagent vs a transcript that climbs to **~24× by turn 12**:
+
+```text
+per-turn INPUT tokens — memagent (sealed slice) vs transcript (full history re-sent):
+  t 1  memagent ▒▒                 ~6k      transcript ▒▒                 ~6k
+  t 6  memagent ▒▒                 ~6k      transcript ████████          ~40k
+  t12  memagent ▒▒                 ~6k      transcript ████████████████  ~145k   (~24× more)
+```
+
+Reproduce (needs an API key): `LLM_API_KEY=… AGENT_MODEL=gpt-5.5 PYTHONPATH=src .venv/bin/python evals/realenv_multiturn.py` — it drives a real 12-turn session and prints this chart from live token counts.
 
 The win shows up in **multi-turn real use** (where the transcript grows), not single-turn SWE-bench (which structurally can't show it).
 
