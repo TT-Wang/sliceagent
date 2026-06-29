@@ -26,23 +26,25 @@ Tags: `[launch]` OSS-readiness · `[borrow ★N/#N kimi|hermes]` from the cross-
 
 ---
 
-## Wave 0 — Stop the bleeding · ~½ day
-- [x] Startup `NameError` (banner used renamed `policy_mode`) — `cli.py:607` → `policy_label(_eff_mode)` `[launch] (4c0d783)`
-- [ ] Sync **AGENT_POLICY docs** to baby-sitter / teenager(default) / let-it-go; stop calling `guard` the safe default — README.md:57,74 · .env.example:18 · memagent.toml.example:7 `[launch] S`
-- [ ] **OpenClaw → OpenHands** — README.md:7 · docs/ARCHITECTURE.md:73 `[launch] S`
-- [ ] **Delete the 96 root `*.whl`** (untracked cruft) + `.gitignore += *.whl, brain/, .mindmux/, scratch/, prototype/, runs/, .coverage, .DS_Store, .pytest_cache/, .ruff_cache/` `[launch] S`
-- [ ] **`git add evals/realenv_multiturn.py`** (proof artifact, currently untracked) `[launch] S`
-- [ ] Rebuild local `.venv` so `PYTHONPATH=src` workaround can be dropped `[launch] S`
+## Wave 0 — Stop the bleeding · ~½ day  ✅ DONE (50648b3; repo moved to ~/code/memagent)
+- [x] Startup `NameError` (banner used renamed `policy_mode`) — `cli.py:607` → `policy_label(_eff_mode)` `(4c0d783)`
+- [x] Sync **AGENT_POLICY docs** to baby-sitter / teenager(default) / let-it-go; stop calling `guard` the safe default — README · .env.example · memagent.toml.example `(50648b3)`
+- [x] **OpenClaw → OpenHands** — README.md:7 · docs/ARCHITECTURE.md:73 `(50648b3)`
+- [x] **Deleted the 96 root `*.whl`** + `.gitignore += *.whl, brain/, .mindmux/` `(50648b3)`
+- [x] **Tracked `evals/realenv_multiturn.py`** (proof artifact) `(50648b3)`
+- [ ] Rebuild local `.venv` so `PYTHONPATH=src` workaround can be dropped `[launch] S` — *(optional; deferred)*
+- [ ] **Make the GitHub repo public** `[you]`
 
-## Wave 1 — Launching kit + honest docs · ~1–1.5 day  → *installable in one command*
-- [ ] **`install.sh`** (detect/bootstrap uv → `uv tool install git+…` → PATH + uninstall) `[launch] M`
-- [ ] **`Dockerfile`** + publish `ghcr.io/TT-Wang/memagent` `[launch] M`
-- [ ] Pin **`memem@<sha>`** — pyproject.toml:13 `[launch] S`
-- [ ] Fix **proxy default** (don't force `127.0.0.1:7890` for non-CN users) — llm.py:51 `[launch] S`
-- [ ] Missing-key → **init wizard** (helpful path, not a stack trace) — config.py/cli.py key gate → onboarding.py `[launch] S`
-- [ ] **README rewrite**: pitch · the one-command install · usage example · demo gif `[launch] M`
-- [ ] **Config reference** auto-generated from `envspec.py` REGISTRY `[launch] M`
-- [ ] per-provider `base_url` env override `[borrow #cfg hermes] S` · project-scoped config writes `[borrow #cfg kimi] S`
+## Wave 1 — Launching kit + honest docs · ~1–1.5 day  → *installable in one command*  (mostly done, 72c3ec1)
+- [x] **`install.sh`** (bootstrap uv → `uv tool install "memagent[tui] @ git+…"` → PATH + `--uninstall`) `(72c3ec1)`
+- [x] **`Dockerfile`** + `.dockerignore` (publish `ghcr.io/tt-wang/memagent` at release) `(72c3ec1)`
+- [x] Pin **`memem@2705e7d`** — pyproject.toml `(72c3ec1)`
+- [x] Fix **proxy default** — probe a local proxy; DIRECT for non-CN users — llm.py `(72c3ec1)`
+- [x] Missing-key → **init wizard** — already routed (cli.py:151–152), verified `(72c3ec1)`
+- [x] **README `## Install`** — the one-command install + uv/pipx/docker alternatives `(72c3ec1)`
+- [ ] **README pitch polish + demo gif/asciinema** `[launch] M` — *(remaining)*
+- [ ] **Config reference** auto-generated from `envspec.py` REGISTRY `[launch] M` — *(remaining)*
+- [ ] per-provider `base_url` env override `[borrow hermes] S` · project-scoped config writes `[borrow kimi] S` — *(remaining)*
 
 ## Wave 2 — Trust & legal · ~½–1 day  → *credible & safe to run*
 - [ ] `license = "MIT"` + classifier in pyproject; README `## License` `[launch] S`
