@@ -33,14 +33,28 @@ def _import_api_timeout_error():
     return _FallbackTimeoutError
 
 
-_CLASHX = "http://127.0.0.1:7890"  # local ClashX default for foreign endpoints (OpenAI) behind the GFW
+_CLASHX = "http://127.0.0.1:7890"  # local ClashX proxy used for foreign endpoints (OpenAI) behind the GFW
+
+
+def _local_proxy_listening(url: str) -> bool:
+    """Best-effort, fast (<200ms), never-raises: is a proxy actually accepting connections at *url*'s
+    host:port? Lets the ClashX default kick in ONLY when a local proxy is really up."""
+    import socket
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url)
+        with socket.create_connection((u.hostname or "127.0.0.1", u.port or 7890), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 
 def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
     """Pick the HTTP proxy for the active provider. An EXPLICIT setting (arg or AGENT_PROXY/HTTPS_PROXY/
-    HTTP_PROXY) ALWAYS wins. Otherwise: foreign endpoints (OpenAI/gpt) route through the local ClashX
-    proxy, CN-direct providers (deepseek/moonshot) go DIRECT — so picking a model 'just works' without
-    juggling AGENT_PROXY. Returns a proxy URL or 'none'. (Environment/provider quirk, isolated here.)"""
+    HTTP_PROXY) ALWAYS wins. Otherwise go DIRECT — EXCEPT a foreign endpoint (OpenAI/gpt) falls back to the
+    local ClashX proxy ONLY IF one is actually listening, so CN users behind the GFW 'just work' while
+    everyone else connects directly instead of failing on a refused 127.0.0.1:7890 (detect, don't assume).
+    Returns a proxy URL or 'none'. (Environment/provider quirk, isolated here.)"""
     if explicit and explicit.strip():            # a whitespace-only env var is NOT an explicit setting
         s = explicit.strip()
         if s.lower() in ("off", "none", "direct", "no", "false", "0"):
@@ -48,7 +62,9 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
         return s
     base_l = (resolved_base or "").lower()
     direct = any(d in base_l for d in ("deepseek", "moonshot", "127.0.0.1", "localhost"))
-    return "none" if direct else _CLASHX
+    if direct:
+        return "none"
+    return _CLASHX if _local_proxy_listening(_CLASHX) else "none"
 
 
 def _usage_dict(raw) -> dict | None:

@@ -1,0 +1,20 @@
+# keep the build context (and image) lean — only src + packaging are needed to install
+.git
+.venv
+**/__pycache__
+*.pyc
+*.whl
+brain/
+.mindmux/
+scratch/
+runs/
+evals/
+tests/
+docs/
+prototype/
+examples/
+.claude/
+.coverage
+.pytest_cache
+.ruff_cache
+*.pdf

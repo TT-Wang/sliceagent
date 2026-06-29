@@ -842,6 +842,23 @@ def policy_three_modes():
     assert resolve_policy_mode("guard") == "letitgo" and resolve_policy_mode("ask") == "babysitter"
 
 
+# ── FEATURE: proxy defaults DIRECT unless a local proxy is actually up (the wide-user first-run fix) ───
+@check
+def proxy_defaults_direct_without_a_local_proxy():
+    from memagent import llm
+    assert llm._choose_proxy("https://api.openai.com/v1", "off") == "none"               # explicit off wins
+    assert llm._choose_proxy("https://api.openai.com/v1", "http://p:9") == "http://p:9"  # explicit url wins
+    assert llm._choose_proxy("https://api.deepseek.com/v1", None) == "none"              # CN-direct never proxies
+    orig = llm._local_proxy_listening
+    try:                                                                                  # foreign + no explicit:
+        llm._local_proxy_listening = lambda url: False
+        assert llm._choose_proxy("https://api.openai.com/v1", None) == "none"            #   proxy down -> DIRECT (fix)
+        llm._local_proxy_listening = lambda url: True
+        assert llm._choose_proxy("https://api.openai.com/v1", None) == llm._CLASHX       #   proxy up -> use it (CN ok)
+    finally:
+        llm._local_proxy_listening = orig
+
+
 def main():
     failed = 0
     for fn in CHECKS:

@@ -19,10 +19,27 @@ This is the opposite of the field's default ("bigger windows + summarize"): **re
 
 Early. The **core idea is validated** in a ~250-line JS prototype (see [`prototype/`](prototype/)) through controlled experiments vs a classic transcript loop. The production build is Python (aligns with [memem](https://github.com/TT-Wang/memem)).
 
+## Install
+
+**One command** — installs `uv` if needed, then memagent in an isolated tool env:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TT-Wang/memagent/main/install.sh | sh
+```
+
+Prefer to run it yourself (any one of):
+
+```bash
+uv tool install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"    # uv
+pipx install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"       # pipx
+docker run -it -e LLM_API_KEY=$LLM_API_KEY -v "$PWD:/work" -w /work ghcr.io/tt-wang/memagent   # container
+```
+
+Footprint is light (no torch). `pip install -e .` works for a clone too. PyPI / Homebrew arrive in v0.2 once `memem` is on PyPI.
+
 ## Quickstart
 
 ```bash
-uv sync                  # or: pip install -e .
 memagent init            # guided setup: provider, API key, model → ~/.memagent/config.toml (tests your key)
 memagent                 # start the agent
 ```
