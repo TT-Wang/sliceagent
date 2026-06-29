@@ -58,10 +58,11 @@ Tags: `[launch]` OSS-readiness · `[borrow ★N/#N kimi|hermes]` from the cross-
 ## Wave 3 — Prove it + relieve the slice · ~1 day  (read-surface borrows done: 31fd5ee, 77dbcde)
 - [x] **★1 bound `read_file`** — default view cap + `offset`/`limit` window + `<system>` footer; blobs exempt `(31fd5ee)`
 - [x] **★2 `glob` tool + enriched `grep`** (output_mode, context, --type, mtime-sort, brace globs) `(77dbcde)`
-- [ ] One-command **flat-cost demo + chart** (the now-tracked realenv_multiturn) in README `[launch] M` — *(remaining)*
-- [ ] Real **live-LLM smoke** on a fresh machine `[launch] M` — *(needs a key; remaining)*
-- [ ] **#12 self-updating model catalog** (context-window + pricing as data) — model_catalog.py · tui.py `[borrow #12 hermes] M` — *(remaining)*
-- [ ] quick-wins: `replace_all` on str_replace · read-after-edit staleness hints · abort-aware backoff + honor `Retry-After` `[borrow S]` — *(remaining)*
+- [x] **Flat-cost demo + chart** — render_cost_chart ASCII chart in the demo + README proof chart `(c5cb89f)`
+- [x] **#12 model pricing single-sourced** in model_catalog (cost meter delegates) `(f50550b)`
+- [x] quick-wins: `replace_all` on str_replace · read-after-edit staleness hint · honor `Retry-After` `(dd0af8c)`
+- [ ] Real **live-LLM smoke** on a fresh machine `[launch] M` — *(needs your API key; handed off)*
+- [ ] *(deferred to Wave 5)* abort-aware retry sleep — needs the abort signal threaded into errors.with_retry
 
 ## Wave 4 — Ship + CI · ~1 day  → *PR → green CI → merge*
 - [ ] **`.github/workflows/ci.yml`**: install + `install.sh` smoke + `memagent --help` + test loop + `ruff`, on ubuntu+macOS × py3.11/3.12 (would have caught the crash) `[launch] M`
