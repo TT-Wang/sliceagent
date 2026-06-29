@@ -230,9 +230,13 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
                     "tags": _tags(c["files"])})
         if len(out) >= cap:
             break
-    dropped = len(sig_freq) - len(out)          # F3: surface the silent cap instead of dropping quietly
+    # Surface what was NOT promoted. `cand` is the candidate list; `out` is what survived dedup (shape +
+    # near-dup goal) AND the cap. `len(sig_freq)` counted only UNIQUE SHAPES, so it under/over-counted the
+    # real drop; report candidates-minus-promoted and name both causes (dedup + cap) honestly.
+    dropped = len(cand) - len(out)
     if dropped > 0:
-        _log.debug("promote_procedures: capped at %d; dropped %d lower-frequency procedure(s)", cap, dropped)
+        _log.debug("promote_procedures: promoted %d of %d candidate procedure(s) (deduped + capped at %d)",
+                   len(out), len(cand), cap)
     return out
 
 

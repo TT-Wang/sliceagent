@@ -40,8 +40,10 @@ _DANGEROUS: list[tuple[re.Pattern, str]] = [
     # and long-form --recursive — the recursive flag (short -...r... or --recursive) anywhere before the target.
     (re.compile(r"\brm\b(?=[^|;&\n]*(?:\s-[a-z]*r|\s--recursive))"
                 r"[^|;&\n]*\s(?:/|~|\$HOME|/\*|\.\.)(?=[\s/*'\"]|$)", re.IGNORECASE), "recursive delete of / ~ or parent"),
-    (re.compile(r"\bchmod\b\s+-[a-z]*\s*[0-7]{3,4}\s+/(?:\s|$)", re.IGNORECASE), "chmod on /"),
-    (re.compile(r"\bchown\b\s+-[a-z]*r[a-z]*\s+[^\n]*\s/(?:\s|$)", re.IGNORECASE), "recursive chown on /"),
+    # chmod/chown on / — flags are OPTIONAL (plain `chmod 755 /` / `chown nobody /` are just as catastrophic
+    # as the -R forms), and long-form flags (--recursive) count too. The target must be the bare root.
+    (re.compile(r"\bchmod\b\s+(?:-{1,2}[a-z]+\s+)*[0-7]{3,4}\s+/(?:[\s/*'\"]|$)", re.IGNORECASE), "chmod on /"),
+    (re.compile(r"\bchown\b\s+[^\n]*\s/(?:[\s/*'\"]|$)", re.IGNORECASE), "chown on /"),
     # remote code piped straight into a shell
     (re.compile(r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", re.IGNORECASE),
      "remote script piped to a shell"),

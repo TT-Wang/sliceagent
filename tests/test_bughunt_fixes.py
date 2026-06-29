@@ -1049,6 +1049,21 @@ def seal_keeps_edited_subset_of_active():
     assert "phantom.py" not in s.edited_files
 
 
+# ── R21 HIGH: the catastrophic floor catches FLAGLESS chmod/chown on / (not only the -R forms) ─────────
+@check
+def floor_catches_flagless_chmod_chown_on_root():
+    from memagent.policy import no_dangerous_commands as nd
+
+    def blocked(c):
+        return nd("run_command", {"command": c}) is not None
+    for c in ["chmod 755 /", "chmod 0777 /", "chmod --recursive 755 /", "chmod -R 755 /",
+              "chown nobody /", "chown root /", "chown -R nobody:nobody /"]:
+        assert blocked(c), f"floor must block: {c}"
+    for c in ["chmod 755 ./build.sh", "chmod +x scripts/x.sh", "chmod 644 src/a.py",
+              "chown -R me:me ./dist", "chown me /home/me/proj"]:
+        assert not blocked(c), f"floor must NOT block legit: {c}"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

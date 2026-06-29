@@ -889,7 +889,8 @@ class LocalToolHost:
             f.write(args["content"].encode("utf-8"))
         msg = f"Appended {len(args['content'])} bytes to {args['path']}"
         try:                             # echo the file tail so the model sees the appended content in context
-            whole = open(full, encoding="utf-8", errors="replace").read()
+            with open(full, encoding="utf-8", errors="replace") as _f:
+                whole = _f.read()
             total = whole.replace("\r\n", "\n").rstrip("\n").count("\n") + 1
             app = args["content"].replace("\r\n", "\n").rstrip("\n").count("\n") + 1
             return f"{msg}. File tail:\n" + _numbered_window(whole, max(0, total - app), total - 1, ctx=2)
@@ -961,7 +962,11 @@ class LocalToolHost:
         """Record a file's pre-image (or None if it didn't exist) just before a write, so /undo can revert
         the most recent edit. Bounded ring — recent edits only, never an unbounded history."""
         try:
-            prev = open(full, "rb").read() if os.path.exists(full) else None
+            if os.path.exists(full):
+                with open(full, "rb") as _f:
+                    prev = _f.read()
+            else:
+                prev = None
         except OSError:
             prev = None
         self._edit_journal.append((rel, full, prev))
@@ -992,7 +997,8 @@ class LocalToolHost:
         import base64
         try:
             full = self._resolve(path)
-            raw = open(full, "rb").read()
+            with open(full, "rb") as _f:
+                raw = _f.read()
         except OSError as e:
             return f"Error: cannot read image {path}: {e}"
         if len(raw) > 8 * 1024 * 1024:
