@@ -67,6 +67,15 @@ def _choose_proxy(resolved_base: str | None, explicit: str | None) -> str:
     return _CLASHX if _local_proxy_listening(_CLASHX) else "none"
 
 
+def _int(x) -> int:
+    """Coerce a provider-supplied token counter to int; non-numeric (str/object/None) → 0. Some providers
+    report counts as strings or odd objects, and `x or 0` keeps a truthy non-number → arithmetic TypeError."""
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _usage_dict(raw) -> dict | None:
     """Normalize a provider usage object into a typed token breakdown (borrowed from Kimi kosong
     `TokenUsage`, usage.ts): `output` plus input split into cache-read / cache-creation / other. Keeps
@@ -75,14 +84,13 @@ def _usage_dict(raw) -> dict | None:
     Provider-agnostic: every field defaults to 0, so a provider that omits a counter never crashes."""
     if not raw:
         return None
-    prompt = getattr(raw, "prompt_tokens", 0) or 0
-    output = getattr(raw, "completion_tokens", 0) or 0
+    prompt = _int(getattr(raw, "prompt_tokens", 0))
+    output = _int(getattr(raw, "completion_tokens", 0))
     details = getattr(raw, "prompt_tokens_details", None)
     # cache READ: OpenAI nests it under prompt_tokens_details; Moonshot/some report it top-level.
-    cache_read = (getattr(details, "cached_tokens", None)
-                  or getattr(raw, "cached_tokens", None) or 0)
+    cache_read = _int(getattr(details, "cached_tokens", None) or getattr(raw, "cached_tokens", None))
     # cache CREATION: Anthropic-compatible only (absent on OpenAI/Moonshot → 0).
-    cache_create = getattr(raw, "cache_creation_input_tokens", 0) or 0
+    cache_create = _int(getattr(raw, "cache_creation_input_tokens", 0))
     input_other = max(0, prompt - cache_read - cache_create)
     usage = {
         "prompt_tokens": prompt, "completion_tokens": output,            # legacy / back-compat
@@ -669,11 +677,14 @@ class OpenAILLM:
         msg = choice.message
         calls: list[ToolCall] = []
         for tc in (msg.tool_calls or []):
+            fn = getattr(tc, "function", None)
+            if fn is None or not getattr(fn, "name", None):
+                continue                        # malformed tool_call (no function/name) — skip, don't crash
             try:
-                args = json.loads(tc.function.arguments)
+                args = json.loads(fn.arguments)
             except Exception:
                 args = {}
-            calls.append(ToolCall(id=tc.id, name=tc.function.name, args=args))
+            calls.append(ToolCall(id=tc.id, name=fn.name, args=args))
         # Degenerate completion — no content AND no tool calls (and not a content-filter stop). Some
         # providers/proxies occasionally emit an empty body; returning it stalls the loop, so raise a
         # RETRYABLE error (Kimi APIEmptyResponseError) and let with_retry re-roll. content_filter is

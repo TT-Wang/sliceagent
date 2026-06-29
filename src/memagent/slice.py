@@ -499,6 +499,9 @@ class Slice:
         self.pre_defs = {}
         # CARRY the in-progress change-set resident; SEAL exploratory reads (re-readable / recallable).
         self.active_files = [p for p in self.active_files if p in self.edited_files]
+        # Keep edited_files ⊆ active_files coherent: drop any phantom edit that is no longer resident, so a
+        # restored/desynced state can't feed ghost files into prefetch's change-set closure next turn.
+        self.edited_files = type(self.edited_files)(p for p in self.edited_files if p in self.active_files)
         self.edit_anchor = {p: a for p, a in self.edit_anchor.items() if p in self.edited_files}
         self.protected_deps = set()       # re-derived from the carried change-set by prefetch on next build
         self.stale_deps = set()

@@ -12,10 +12,31 @@ Hook return conventions (all optional, return None to no-op):
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .guardrails import ToolCallGuardrail
 from .guidance import DENIAL_NO_PROMPT, DENIAL_USER
+
+# Commands a wide AGENT_AUTO_APPROVE glob (e.g. "git *") must NEVER silently approve: destructive ops that
+# are not catastrophic (so the policy floor lets them through to ASK) yet discard work/data. These always
+# fall through to a confirmation even when a glob matches. The catastrophic floor is screened too (below).
+_DESTRUCTIVE_AUTO = [
+    re.compile(r"\bgit\b[^\n]*\b(reset|clean|checkout|restore|rebase|filter-branch)\b", re.I),
+    re.compile(r"\bgit\b[^\n]*\bbranch\b[^\n]*\s-D\b", re.I),
+    re.compile(r"\bgit\b[^\n]*\bstash\b[^\n]*\b(drop|clear)\b", re.I),
+    re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(--force|--force-with-lease|\s-f\b)", re.I),
+    re.compile(r"\brm\b(?=[^|;&\n]*\s-[a-z]*r)", re.I),     # any recursive rm
+    re.compile(r"\b(shred|mkfs|wipefs)\b", re.I),
+]
+
+
+def _is_destructive_command(name: str, cmd: str) -> bool:
+    """True if `cmd` must never be silently auto-approved — catastrophic OR work-discarding."""
+    from . import policy   # deferred: policy imports hooks, so import here to avoid a cycle at load
+    if policy.no_dangerous_commands(name, {"command": cmd}) is not None:
+        return True
+    return any(p.search(cmd) for p in _DESTRUCTIVE_AUTO)
 
 
 @dataclass
@@ -243,7 +264,9 @@ class PermissionHook(Hooks):
         cmd = (args.get("command") or args.get("code") or args.get("input") or "").strip()
         if cmd and self._rules:
             import fnmatch
-            return any(fnmatch.fnmatch(cmd, rule) for rule in self._rules)
+            if any(fnmatch.fnmatch(cmd, rule) for rule in self._rules):
+                # A broad glob must NOT silently green-light a destructive command — fall through to ask.
+                return not _is_destructive_command(name, cmd)
         return False
 
     def authorize_tool(self, name, args):

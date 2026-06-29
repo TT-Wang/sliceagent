@@ -1005,6 +1005,50 @@ def grep_modes_and_glob_tool():
     assert "c.md" in gl({"pattern": "*.{md,py}"})                       # brace expansion
 
 
+# ── R20 HIGH: a broad AGENT_AUTO_APPROVE glob must NOT silently approve a destructive command ──────────
+@check
+def auto_approve_does_not_bypass_destructive_commands():
+    from memagent.hooks import PermissionHook
+    from memagent.policy import make_policy
+    h = PermissionHook(make_policy("teenager"), on_ask=None, auto_approve=["git *", "*"])
+
+    def pre(cmd):
+        a = {"command": cmd}
+        return h._pre_allowed("run_command", a, h._key("run_command", a))
+    assert pre("git status") is True                         # safe → auto-approved
+    assert pre("git reset --hard HEAD~3") is False           # destructive git → falls through to ask
+    assert pre("git clean -fd") is False
+    assert pre("git push --force origin main") is False
+    assert pre("rm -rf /tmp/x ..") is False                  # recursive rm of parent
+    assert pre("rm -rf /") is False                          # catastrophic floor, even via "*"
+
+
+# ── R20 HIGH: token-usage accounting must not crash on a non-numeric provider counter ─────────────────
+@check
+def usage_dict_coerces_nonnumeric_counters():
+    from types import SimpleNamespace
+    from memagent.llm import _usage_dict
+    raw = SimpleNamespace(prompt_tokens=100, completion_tokens=10, cached_tokens="n/a",
+                          prompt_tokens_details=None)
+    u = _usage_dict(raw)                                     # must not raise TypeError
+    assert u["input_cache_read"] == 0 and u["input_other"] == 100
+    raw2 = SimpleNamespace(prompt_tokens=100, completion_tokens=10, cached_tokens="40",
+                           prompt_tokens_details=None)
+    assert _usage_dict(raw2)["input_cache_read"] == 40       # numeric string still coerces
+
+
+# ── R20 MED: seal() keeps edited_files ⊆ active_files (no phantom edits across turns) ──────────────────
+@check
+def seal_keeps_edited_subset_of_active():
+    from memagent.slice import Slice
+    s = Slice(); s.reset("t")
+    s.active_files = ["a.py"]
+    s.edited_files = type(s.edited_files)(["a.py", "phantom.py"])
+    s.seal()
+    assert all(p in s.active_files for p in s.edited_files), "edited_files must stay subset of active_files"
+    assert "phantom.py" not in s.edited_files
+
+
 def main():
     failed = 0
     for fn in CHECKS:

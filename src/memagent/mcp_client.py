@@ -48,6 +48,8 @@ def _result_to_text(result) -> str:
         text = text[:_MCP_SAFETY_CAP] + f"\n…[truncated {len(text) - _MCP_SAFETY_CAP} chars of MCP output]"
     # isError must propagate as ok=False so the loop's failing-detection + the anti-loop guardrail
     # (repeated_exact_failure) actually see the failure — a plain "Error: …" string gets wrapped ok=True.
+    # (MCP results enter as role="tool" messages, which the model already treats as DATA at the protocol
+    #  level — unlike web's slice re-injection channels — so an extra wrap_untrusted fence is low-value here.)
     return ToolText(f"Error: {text}", ok=False) if getattr(result, "isError", False) else text
 
 
