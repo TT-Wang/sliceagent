@@ -845,6 +845,18 @@ def policy_three_modes():
     assert resolve_policy_mode("guard") == "letitgo" and resolve_policy_mode("ask") == "babysitter"
 
 
+# ── FEATURE (item D): a chitchat fast-path detector — high precision, never fires on a real request ────
+@check
+def chitchat_detector_high_precision():
+    from memagent.text_utils import is_chitchat
+    for t in ["hi", "Hello!", "hey there", "thanks", "thank you so much", "ok", "cool",
+              "good morning", "  thanks!  ", "gg", "what's up"]:
+        assert is_chitchat(t), f"should be chitchat: {t!r}"
+    for t in ["fix the bug in auth.py", "what does foo() do?", "explain the slice loop",
+              "hi, can you read config.py", "add a test", "thanks, now refactor X", "", "ok do it"]:
+        assert not is_chitchat(t), f"must NOT be chitchat (real request): {t!r}"
+
+
 # ── FEATURE: legacy policy names warn LOUDLY (guard can't silently downgrade safety to let-it-go) ──────
 @check
 def legacy_policy_names_warn_loudly():

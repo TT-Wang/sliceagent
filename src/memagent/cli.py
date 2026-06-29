@@ -619,9 +619,25 @@ def main() -> None:
     # ── choose UI: full-screen Textual (terminal-only) or the original rich+prompt_toolkit REPL ──
     _input = _tui.TuiInput(_stats, root=root) if _tui else None
 
+    from .text_utils import is_chitchat
+
+    def _chitchat_reply(text, _dispatch):
+        """A pure greeting/social message → cheap reply: MINIMAL prompt, NO tools, NO slice. Skips the full
+        per-turn token cost (the 12k system prompt + tool schemas + tiers) for a 'hi'/'thanks'. (item D)"""
+        from .text_utils import CHITCHAT_PROMPT
+        msgs = [{"role": "system", "content": CHITCHAT_PROMPT}, {"role": "user", "content": text}]
+        try:
+            am = llm.complete(msgs, [])     # NO tools
+            _dispatch(AssistantText((am.content or "").strip() or "Hi! What would you like to work on?"))
+        except Exception:  # noqa: BLE001 — a chitchat reply must never crash the session
+            _dispatch(AssistantText("Hi! What would you like to work on?"))
+
     def _run_one_turn(text, sink, signal):
         """One turn for the LIVE composer: route (lexical) → build slice → run_turn with a per-turn dispatch
         that feeds the LiveSink. Runs in run_live's worker thread, so the pinned box stays responsive."""
+        if is_chitchat(text):                       # 'hi'/'thanks' → cheap reply, no slice/tools (item D)
+            _chitchat_reply(text, make_dispatcher(sink))
+            return
         if session.active_id is None:
             session.new_topic(text)
         else:
@@ -733,6 +749,9 @@ def main() -> None:
             # enforces the same ordering via its worker thread (tui_app.py: _append_user before _run_user_turn).
             if _tui:                              # anchor the user turn with spacing (fixes cramped layout)
                 _tui.user_echo(_console, line)
+            if is_chitchat(line):                # 'hi'/'thanks' → cheap reply, skip routing/slice/run_turn (item D)
+                _chitchat_reply(line, dispatch)
+                continue
             if session.active_id is None:                      # first message bootstraps the first topic
                 session.new_topic(line)
             else:                                              # route: continue / new / resume (no junk topic)
