@@ -55,13 +55,13 @@ Tags: `[launch]` OSS-readiness · `[borrow ★N/#N kimi|hermes]` from the cross-
 - [ ] **Persisted allow/deny/ask permission rules** (path/command scoped) as a PolicyChain entry — policy.py · hooks.py `[borrow #8 both] M` — *(remaining: bigger trust borrow)*
 - [ ] **★5 live-env tier**: re-surface running bg procs/terminals in the slice each turn — slice.py + procman.py/terminal.py `[borrow ★5 kimi] S` — *(remaining)*
 
-## Wave 3 — Prove it + relieve the slice · ~1 day
-- [ ] One-command **flat-cost demo + chart** (the now-tracked realenv_multiturn) in README `[launch] M`
-- [ ] Real **live-LLM smoke** on a fresh machine `[launch] M`
-- [ ] **★1 bound `read_file`** (route through `_page_out` / add `offset`+`limit`) + `<system>` status footer — tools.py:739,708 `[borrow ★1 kimi] M`
-- [ ] **★2 `glob` tool + enriched `grep`** (output_mode, -A/-B/-C, --type, mtime-sort) — tools.py · code_grep.py · agents.py:18 `[borrow ★2 kimi] M`
-- [ ] **#12 self-updating model catalog** (context-window + pricing as data) — kills stale price table — model_catalog.py · tui.py `[borrow #12 hermes] M`
-- [ ] quick-wins ride here: `replace_all` on str_replace · read-after-edit staleness hints · grep sensitive-file exclusion · abort-aware backoff + honor `Retry-After` `[borrow S]`
+## Wave 3 — Prove it + relieve the slice · ~1 day  (read-surface borrows done: 31fd5ee, 77dbcde)
+- [x] **★1 bound `read_file`** — default view cap + `offset`/`limit` window + `<system>` footer; blobs exempt `(31fd5ee)`
+- [x] **★2 `glob` tool + enriched `grep`** (output_mode, context, --type, mtime-sort, brace globs) `(77dbcde)`
+- [ ] One-command **flat-cost demo + chart** (the now-tracked realenv_multiturn) in README `[launch] M` — *(remaining)*
+- [ ] Real **live-LLM smoke** on a fresh machine `[launch] M` — *(needs a key; remaining)*
+- [ ] **#12 self-updating model catalog** (context-window + pricing as data) — model_catalog.py · tui.py `[borrow #12 hermes] M` — *(remaining)*
+- [ ] quick-wins: `replace_all` on str_replace · read-after-edit staleness hints · abort-aware backoff + honor `Retry-After` `[borrow S]` — *(remaining)*
 
 ## Wave 4 — Ship + CI · ~1 day  → *PR → green CI → merge*
 - [ ] **`.github/workflows/ci.yml`**: install + `install.sh` smoke + `memagent --help` + test loop + `ruff`, on ubuntu+macOS × py3.11/3.12 (would have caught the crash) `[launch] M`
