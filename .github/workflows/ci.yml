@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: ['**']   # every branch (pre-1.0): CI runs on each push, not just main
   pull_request:
 
 jobs:
