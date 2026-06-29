@@ -215,6 +215,12 @@ def connect_mcp_servers(registry, servers: dict, runtime: McpRuntime | None = No
         if not isinstance(conf, dict) or not conf.get("command"):
             log(f"mcp:{name} skipped (only stdio with a 'command' is supported in this phase)")
             continue
+        from .mcp_security import validate_mcp_server_entry   # screen BEFORE spawning (RCE-by-design surface)
+        _bad = validate_mcp_server_entry(name, conf)
+        if _bad:
+            for _b in _bad:
+                log(f"mcp:{name} REFUSED (security) — {_b}")
+            continue
         server = McpServer(name, runtime)
         try:
             tools = server.connect(_params_from_conf(conf), timeout)

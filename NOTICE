@@ -1,0 +1,61 @@
+memagent
+Copyright (c) 2026 TT-Wang
+Licensed under the MIT License — see LICENSE.
+
+This product includes code ported from, and architecture reimplemented after, the
+open-source projects below. We are grateful to their authors.
+
+────────────────────────────────────────────────────────────────────────────
+Hermes — https://github.com/NousResearch/hermes   (MIT License)
+Copyright (c) 2025 Nous Research
+
+  Verbatim / closely-ported source:
+    src/memagent/binsniff.py          ← tools/binary_extensions.py
+    src/memagent/fuzzy.py             ← fuzzy_match.py (_calculate_line_positions)
+    src/memagent/context_overflow.py  ← overflow-pattern matcher
+    src/memagent/mcp_security.py      ← hermes_cli/mcp_security.py
+  Pattern / structure adapted:
+    src/memagent/errors.py (classify + retry/backoff), src/memagent/sandbox.py
+    (execution backend), src/memagent/subdir_hints.py, and the execute_code
+    (code-as-action) pattern.
+
+  The MIT License text for Hermes is reproduced under THIRD-PARTY-LICENSES below
+  (its notice clause requires carrying the copyright + permission notice).
+
+────────────────────────────────────────────────────────────────────────────
+Kimi-Code — https://github.com/MoonshotAI/kimi-code   (Moonshot AI)
+
+  ARCHITECTURE AND PATTERNS reimplemented in Python (no source copied — ideas,
+  not code):
+    access.py + scheduler.py (resource-access model for safe tool parallelism),
+    policy.py (permission chain), config.py (layered config), clock.py, cron.py,
+    flags.py, model_catalog.py, mcp_client.py (the mcp__server__tool namespacing),
+    loop.py (micro-compaction), tui.py (selector menus + footer/streaming),
+    code_grep.py (ripgrep pagination), agents.py (named-agent registry).
+  See the upstream repository for its license terms.
+
+────────────────────────────────────────────────────────────────────────────
+Also gratefully acknowledged for ideas and conventions: Aider, OpenHands.
+
+════════════════════════════ THIRD-PARTY-LICENSES ═══════════════════════════
+
+Hermes — MIT License
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -588,6 +588,9 @@ def main() -> None:
     _can_confirm = sys.stdin.isatty() and not use_live
     _eff_mode = canonical if (_can_confirm or not CONFIRMS.get(canonical)) else "letitgo"
     _stats["policy"] = policy_label(_eff_mode)
+    if CONFIRMS.get(canonical) and _eff_mode != canonical:   # confirm-mode with no way to prompt → say so
+        print(f"  · non-interactive shell: '{policy_label(canonical)}' can't ask for confirmation here → "
+              f"running as '{policy_label(_eff_mode)}' (auto-run, still blocks catastrophic commands).")
     perm_hook = PermissionHook(make_policy(_eff_mode),
                                on_ask=_ask if CONFIRMS.get(_eff_mode) else None, auto_approve=_auto)
     hook_list = [perm_hook]

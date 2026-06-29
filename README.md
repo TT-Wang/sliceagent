@@ -103,3 +103,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component map, t
 ## The differentiator, in one line
 
 > **Deterministic reconstruction from ground truth** — vs the incumbents' **accumulate-then-LLM-summarize**.
+
+## License & attribution
+
+**MIT** — see [LICENSE](LICENSE). memagent ports verbatim utilities from **Hermes** (MIT, Nous Research) and
+reimplements architecture/patterns from **Kimi-Code** (Moonshot AI); full credits in [NOTICE](NOTICE).
+
+Security policy + threat model: **[SECURITY.md](SECURITY.md)**.
