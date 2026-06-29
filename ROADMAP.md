@@ -64,13 +64,14 @@ Tags: `[launch]` OSS-readiness · `[borrow ★N/#N kimi|hermes]` from the cross-
 - [ ] Real **live-LLM smoke** on a fresh machine `[launch] M` — *(needs your API key; handed off)*
 - [ ] *(deferred to Wave 5)* abort-aware retry sleep — needs the abort signal threaded into errors.with_retry
 
-## Wave 4 — Ship + CI · ~1 day  → *PR → green CI → merge*
-- [ ] **`.github/workflows/ci.yml`**: install + `install.sh` smoke + `memagent --help` + test loop + `ruff`, on ubuntu+macOS × py3.11/3.12 (would have caught the crash) `[launch] M`
-- [ ] **`scripts/run_tests.sh`** wrapper (tally + non-zero exit) `[launch] M`
-- [ ] `[tool.ruff]` + `[project.optional-dependencies] dev = [pytest, ruff]` `[launch] S`
-- [ ] Single-source version (`[tool.hatch.version]` ← `__init__.py`) `[launch] S`
-- [ ] CODE_OF_CONDUCT.md + ISSUE/PR templates; move design notes → `docs/design/` `[launch] S`
-- [ ] **Tag `v0.1.0`** + dated CHANGELOG `[launch] S`
+## Wave 4 — Ship + CI · ~1 day  → *PR → green CI → merge*  (done: 94af7c8)
+- [x] **`.github/workflows/ci.yml`** — install + `memagent version` smoke + `ruff` + test loop, ubuntu+macOS × py3.11/3.12 `(94af7c8)`
+- [x] **`scripts/run_tests.sh`** wrapper (tally + non-zero exit) `(94af7c8)`
+- [x] `[tool.ruff]` config + `[dev]` extra; ruff-clean across src/tests/evals (~40 unused imports removed) `(94af7c8)`
+- [x] Single-source version (`[tool.hatch.version]` ← `__init__.py`) `(94af7c8)`
+- [x] CODE_OF_CONDUCT.md + ISSUE/PR templates `(94af7c8)`
+- [ ] **Tag `v0.1.0`** — deferred to release (after repo public + merge to main); CHANGELOG entries staged under [Unreleased]
+- [ ] *(optional)* move internal design notes → `docs/design/` `[launch] S`
 
 ## Wave 5 — Depth borrows (post-launch, sub-sequenced by leverage)
 **5a — high-leverage UX/perf**
