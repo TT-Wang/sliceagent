@@ -1162,6 +1162,25 @@ def oracle_timeout_with_output_no_crash():
     assert ok is False and "timed out" in out   # must RETURN a failure, never raise
 
 
+# ── R26 HIGH: a streaming tool-call continuation fragment (no index/id) routes to the OPEN slot ────────
+@check
+def streaming_continuation_fragment_routes_to_open_slot():
+    import inspect
+    from memagent import llm
+    assert "next(reversed(calls))" in inspect.getsource(llm), \
+        "an index-less/id-less streaming tool-call fragment must append to the open slot, not len(calls)"
+
+
+# ── R26 MED: execute_code prelude write helpers are byte-exact (newline='') — sibling of _atomic_write ─
+@check
+def code_prelude_writes_are_byte_exact():
+    import inspect
+    from memagent import tools
+    src = inspect.getsource(tools)
+    assert 'open(path, "w", encoding="utf-8", newline="")' in src
+    assert 'open(path, "a", encoding="utf-8", newline="")' in src
+
+
 def main():
     failed = 0
     for fn in CHECKS:

@@ -97,7 +97,7 @@ def write_file(path, content):
     path = _confine(path)
     _d = _os.path.dirname(path)
     if _d: _os.makedirs(_d, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as _f: _f.write(content)
+    with open(path, "w", encoding="utf-8", newline="") as _f: _f.write(content)
     if content[:2] == "#!":  # a shebang script should be runnable (parity with the edit_file tool)
         try: _os.chmod(path, _os.stat(path).st_mode | 0o111)
         except OSError: pass
@@ -107,16 +107,16 @@ def append_file(path, content):
     path = _confine(path)
     _d = _os.path.dirname(path)
     if _d: _os.makedirs(_d, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as _f: _f.write(content)
+    with open(path, "a", encoding="utf-8", newline="") as _f: _f.write(content)
     return f"appended {len(content)} bytes to {path}"
 
 def str_replace(path, old, new):
     path = _confine(path)
-    with open(path, encoding="utf-8") as _f: _cur = _f.read()
+    with open(path, encoding="utf-8", newline="") as _f: _cur = _f.read()
     _n = _cur.count(old)
     if _n != 1: return (f"error: old_string occurs {_n}x in {path} (need exactly 1) — "
                         f"add surrounding lines to make it unique, or write_file the whole file")
-    with open(path, "w", encoding="utf-8") as _f: _f.write(_cur.replace(old, new, 1))
+    with open(path, "w", encoding="utf-8", newline="") as _f: _f.write(_cur.replace(old, new, 1))
     return f"replaced 1 occurrence in {path}"
 
 def list_files(path="."):

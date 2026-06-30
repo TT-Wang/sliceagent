@@ -441,8 +441,14 @@ class OpenAILLM:
                             self._emit("reasoning", rc)
                         for tcd in (getattr(d, "tool_calls", None) or []):
                             _ix = getattr(tcd, "index", None)
-                            if _ix is None:                       # provider omitted index → don't collapse parallel
-                                _ix = getattr(tcd, "id", None) or len(calls)   # calls onto one slot; key by id/position
+                            if _ix is None:                       # provider omitted the streaming index
+                                _tid = getattr(tcd, "id", None)
+                                if _tid is not None:
+                                    _ix = _tid                    # a NEW call, announced by its id → its own slot
+                                elif calls:
+                                    _ix = next(reversed(calls))   # continuation fragment → the OPEN (last) slot,
+                                else:                             # NOT len(calls) (that split args into a dead slot)
+                                    _ix = 0                       # first fragment before any id/index arrives
                             slot = calls.setdefault(_ix, {"id": None, "name": None, "args": []})
                             if getattr(tcd, "id", None):
                                 slot["id"] = tcd.id
