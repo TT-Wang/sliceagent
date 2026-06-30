@@ -15,16 +15,27 @@ import tempfile
 import time
 
 
-def _wal_dir() -> str:
+def state_dir(*parts: str) -> str:
+    """The memagent STATE root (~/.memagent, or $MEMAGENT_CACHE_DIR) — internal logs / records / WAL live
+    HERE, never in the user's workspace. Joins `parts`, creates the dir, returns it. One source of truth so
+    nothing scribbles scratch/ into the project being worked on."""
     base = os.environ.get("MEMAGENT_CACHE_DIR") or os.path.join(os.path.expanduser("~"), ".memagent")
-    d = os.path.join(base, "wal")
+    d = os.path.join(base, *parts)
     os.makedirs(d, exist_ok=True)
     return d
 
 
+def root_key(root: str) -> str:
+    """A stable short key for a workspace path (so per-workspace state files don't collide)."""
+    return hashlib.sha1(os.path.realpath(root or ".").encode("utf-8")).hexdigest()[:16]
+
+
+def _wal_dir() -> str:
+    return state_dir("wal")
+
+
 def _path(root: str) -> str:
-    key = hashlib.sha1(os.path.realpath(root).encode("utf-8")).hexdigest()[:16]
-    return os.path.join(_wal_dir(), key + ".json")
+    return os.path.join(_wal_dir(), root_key(root) + ".json")
 
 
 def _sanitize(messages: list) -> list:

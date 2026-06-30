@@ -1296,6 +1296,16 @@ def rerooting_the_host_switches_the_slice_workspace():
     assert "core.py" in sysmsg, "repo map must reflect the NEW workspace root after a re-root"
 
 
+@check
+def internal_logs_and_records_stay_out_of_the_workspace():
+    # bug (usersim): scratch/durable-log.jsonl + scratch/records were written into the user's cwd, polluting
+    # the repo. They must live in the memagent STATE dir (~/.memagent / $MEMAGENT_CACHE_DIR), absolute.
+    from memagent import records as _rec
+    from memagent.recovery import state_dir
+    assert os.path.isabs(_rec.RECORDS_ROOT) and "scratch" not in _rec.RECORDS_ROOT, _rec.RECORDS_ROOT
+    assert os.path.isabs(state_dir("logs")), "state dir must be absolute (outside any workspace)"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

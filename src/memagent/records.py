@@ -14,8 +14,11 @@ import json
 import os
 
 from .events import Event, StepEnd, TurnEnd, TurnInterrupted
+from .recovery import state_dir
 
-RECORDS_ROOT = "scratch/records"
+# Records live in the memagent STATE dir (~/.memagent/records), NOT scratch/ in the user's workspace —
+# the session_id is already in each filename, so a flat per-session journal needs no per-workspace key.
+RECORDS_ROOT = state_dir("records")
 
 
 def _records_path(session_id: str, root: str = RECORDS_ROOT) -> str:

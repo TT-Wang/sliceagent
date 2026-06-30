@@ -25,7 +25,7 @@ def secrets_are_redacted_before_hitting_the_log():
     path = os.path.join(d, "log.jsonl")
     secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     assert redact_text(secret) != secret, "test input must be a recognized secret"
-    sink = log_sink(path)
+    sink = log_sink(path=path)
     sink(ToolResult("read_file", {"path": ".env"}, f"GITHUB_TOKEN={secret}\n", failing=False))
     data = open(path, encoding="utf-8").read()
     assert secret not in data, "raw secret leaked into the debug log"
@@ -36,7 +36,7 @@ def secrets_are_redacted_before_hitting_the_log():
 def non_secret_output_passes_through():
     d = tempfile.mkdtemp(prefix="log-")
     path = os.path.join(d, "log.jsonl")
-    log_sink(path)(ToolResult("read_file", {"path": "a.py"}, "def f():\n    return 42\n", failing=False))
+    log_sink(path=path)(ToolResult("read_file", {"path": "a.py"}, "def f():\n    return 42\n", failing=False))
     assert "return 42" in open(path, encoding="utf-8").read()
 
 
@@ -46,7 +46,7 @@ def log_rotates_past_the_size_cap():
     path = os.path.join(d, "log.jsonl")
     with open(path, "w", encoding="utf-8") as f:        # pre-seed over the cap
         f.write("x" * (LOG_MAX_BYTES + 10))
-    log_sink(path)(ToolResult("read_file", {"path": "a"}, "fresh", failing=False))
+    log_sink(path=path)(ToolResult("read_file", {"path": "a"}, "fresh", failing=False))
     assert os.path.exists(path + ".1"), "oversized log should rotate to .1"
     assert "fresh" in open(path, encoding="utf-8").read(), "new line goes to the fresh file"
 

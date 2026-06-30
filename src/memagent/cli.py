@@ -39,12 +39,15 @@ def _load_env(path: str = ".env") -> None:
         pass
 
 
-LOG_FILE = "scratch/durable-log.jsonl"
 LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate the debug log past this (keep one prior) — Kimi RotatingFileSink
 
 
-def log_sink(path: str = LOG_FILE):
+def log_sink(root: str = ".", path: str | None = None):
+    from .recovery import root_key, state_dir
     from .safety import redact_text   # strip secrets before they hit the on-disk debug log (off the moat)
+    # the debug log lives in the memagent STATE dir (~/.memagent/logs/<workspace-key>/), NOT scratch/ in the
+    # user's workspace — a coding agent must not litter the repo it's working on. `path` overrides (tests).
+    path = path or os.path.join(state_dir("logs", root_key(root)), "durable-log.jsonl")
 
     def _scrub_args(args: dict) -> dict:          # redact string values (edit_file content, inline tokens)
         return {k: (redact_text(v) if isinstance(v, str) else v) for k, v in (args or {}).items()}
@@ -320,7 +323,7 @@ def main() -> None:
     sinks = [slice_sink(session)]
     if episodic is not None:
         sinks.append(episodic)
-    sinks.append(log_sink())
+    sinks.append(log_sink(root))
     # optional: the moat-MEASURING cost sink (AGENT_METRICS=1). Accumulates the per-turn FRESH-input
     # curve (should stay flat as the conversation grows) + cache-hit rate + reliability counters; the
     # summary prints at session end. Pure observer — eval/default path untouched.
@@ -635,7 +638,7 @@ def main() -> None:
         _live_sinks = [slice_sink(session)]
         if episodic is not None:
             _live_sinks.append(episodic)
-        _live_sinks.append(log_sink())
+        _live_sinks.append(log_sink(root))
         if metrics is not None:
             _live_sinks.append(metrics)
         if monitor_sink is not None:        # live mode must feed the web monitor too (was silently omitted)
