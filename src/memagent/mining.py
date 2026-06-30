@@ -17,11 +17,6 @@ from .text_utils import one_line
 from .tools import HOST_ERROR_SENTINELS
 
 
-def _err_key(err: str) -> str:
-    """A stable-ish signature for an error, for dedup."""
-    return one_line(err, 100).lower()
-
-
 def is_self_inflicted(pitfall: str) -> bool:
     """D2 — True when `pitfall` is the agent hitting the HOST's own guard rail (confinement,
     permission), not a real engineering pitfall. Such an error teaches a future agent nothing, so it

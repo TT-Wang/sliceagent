@@ -143,10 +143,6 @@ class SliceMonitor:
                     "tokens": self._tokens, "steps": steps}
 
 
-def make_monitor_sink(monitor: SliceMonitor):
-    return monitor.sink
-
-
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):       # silence the default stderr access log
         pass
