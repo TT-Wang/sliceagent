@@ -193,9 +193,10 @@ _GLOB_SCHEMA = {
     "function": {
         "name": "glob",
         "description": (
-            "Find files by NAME pattern under the workspace (for CONTENTS use grep). Supports glob wildcards "
-            "incl. brace sets, e.g. '*.py', 'src/**/*.{ts,tsx}'. Returns matching paths, most-recently-modified "
-            "first, capped. Use to locate files before reading them."
+            "Find files AND directories by NAME pattern under the workspace (for CONTENTS use grep). Matching "
+            "folders (e.g. a 'hunter/' project dir) are returned too, listed first. Supports glob wildcards incl. "
+            "brace sets, e.g. '*.py', 'src/**/*.{ts,tsx}', '*hunter*'. Paths most-recently-modified first, capped. "
+            "Use to locate a file or project folder before opening it."
         ),
         "parameters": {
             "type": "object",
@@ -242,6 +243,42 @@ def _glob_walk(root: str, pattern: str, cap: int) -> list:
     return hits
 
 
+def _dir_matches(root: str, pats: list, cap: int, maxdepth: int = 12) -> list:
+    """Find DIRECTORIES whose name (or relpath) matches the pattern. `rg --files` lists FILES only, so a
+    project FOLDER named like the pattern (e.g. a 'hunter/' dir) is otherwise invisible to glob. BREADTH-
+    first so a shallow match (Desktop/hunter) is found before descending huge deep trees (Library/…), and
+    bounded by depth + a node budget so it can't run away on a big home directory."""
+    import fnmatch
+    import os as _os
+    from collections import deque
+    hits: list = []
+    q: deque = deque([(root, 0)])
+    budget = 40000
+    while q and budget > 0:
+        base, depth = q.popleft()
+        budget -= 1
+        try:
+            entries = list(_os.scandir(base))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if not e.is_dir(follow_symlinks=False):   # no symlink loops; dirs only
+                    continue
+            except OSError:
+                continue
+            if e.name in _GLOB_IGNORE_DIRS:
+                continue
+            rel = _os.path.relpath(e.path, root)
+            if any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(e.name, p) for p in pats):
+                hits.append(e.path + "/")
+                if len(hits) >= cap:
+                    return hits
+            if depth + 1 < maxdepth:
+                q.append((e.path, depth + 1))
+    return hits
+
+
 def make_glob_tool(host) -> ToolEntry:
     """Build the file-name `glob` ToolEntry bound to a host (uses ripgrep --files, falls back to os.walk)."""
 
@@ -269,10 +306,15 @@ def make_glob_tool(host) -> ToolEntry:
         else:
             files = _glob_walk(target, pattern, limit)   # graceful degrade when rg is absent
 
-        if not files:
-            return f"glob: no files match {pattern!r}."
-        total = len(files)
-        body = "\n".join(files[:limit])
+        # rg --files lists FILES only — so a DIRECTORY named like the pattern (a 'hunter/' project folder)
+        # would be invisible. Always add matching directories so "glob *hunter*" finds folders too; show
+        # them FIRST (a name search is usually after the folder, not files buried beneath it).
+        dirs = _dir_matches(target, _expand_braces(pattern), limit)
+        results = dirs + files
+        if not results:
+            return f"glob: nothing matches {pattern!r} (no files or directories)."
+        total = len(results)
+        body = "\n".join(results[:limit])
         if total > limit:
             body += f"\n\n[{total - limit} more not shown; narrow the pattern or path]"
         return body

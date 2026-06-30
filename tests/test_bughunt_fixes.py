@@ -1262,6 +1262,20 @@ def confirm_fallback_prompt_brackets_survive_rich_markup():
     assert "[y]es" in out and "[n]o" in out and "[a]lways" in out, f"brackets eaten by markup: {out!r}"
 
 
+@check
+def glob_finds_directories_not_just_files():
+    # bug: glob was rg --files (files only) → "find a project called hunter" missed the hunter/ FOLDER.
+    from memagent.code_grep import make_glob_tool
+    from memagent.tools import LocalToolHost
+    d = tempfile.mkdtemp(prefix="glob-")
+    os.makedirs(os.path.join(d, "sub", "hunter"))          # a nested project folder
+    open(os.path.join(d, "sub", "hunter", "main.py"), "w").write("x=1\n")  # its files aren't named *hunter*
+    open(os.path.join(d, "notes.txt"), "w").write("hi\n")
+    out = make_glob_tool(LocalToolHost(root=d)).handler({"pattern": "*hunter*"})
+    out = getattr(out, "text", out)                        # ToolText or str
+    assert "hunter/" in out, f"glob must return the hunter/ directory, got: {out!r}"
+
+
 def main():
     failed = 0
     for fn in CHECKS:
