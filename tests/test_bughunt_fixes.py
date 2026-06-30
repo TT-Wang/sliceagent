@@ -1194,6 +1194,46 @@ def seal_keeps_pre_defs_for_edited_files():
     assert "readonly.py" not in s.pre_defs, "exploratory (non-edited) pre_defs are still dropped at seal"
 
 
+# ── convo-audit fixes (2026-07-01): read-only command allowlist + repo-content gate + map bound ──
+@check
+def teenager_auto_allows_readonly_shell_but_confirms_writes():
+    from memagent.policy import ask_commands
+    ro = ["git rev-parse --show-toplevel", "git status", "ls -la", "pwd", "cat README.md",
+          "find . -name '*.py'", "grep -rn foo src"]
+    for c in ro:
+        assert ask_commands("run_command", {"command": c}) is None, f"read-only should auto-allow: {c}"
+    asks = ["rm -rf build", "git push", "git commit -m x", "python setup.py", "echo hi > f",
+            "cat a && rm b", "git branch -d main", "find . -delete", "git config user.x y"]
+    for c in asks:
+        d = ask_commands("run_command", {"command": c})
+        assert d is not None and d.ask, f"non-read-only should still confirm: {c}"
+    # execute_code (arbitrary python) is never auto-allowed by the shell allowlist
+    assert ask_commands("execute_code", {"code": "print(1)"}).ask, "execute_code must still confirm"
+
+
+@check
+def repo_map_is_char_bounded():
+    from memagent.tools import repo_map
+    with tempfile.TemporaryDirectory() as d:
+        for i in range(60):
+            sub = os.path.join(d, f"pkg{i}")
+            os.makedirs(sub)
+            for j in range(30):
+                open(os.path.join(sub, f"module_with_a_longish_name_{j}.py"), "w").write("x=1\n")
+        out = repo_map(d, max_chars=4000)
+        assert len(out) <= 4000 + 120, f"map must honor the char ceiling, got {len(out)}"
+        assert "over map budget" in out, "truncated map should say how to drill in"
+
+
+@check
+def project_root_none_outside_a_project():
+    from memagent.workspace import project_root
+    with tempfile.TemporaryDirectory() as d:
+        assert project_root(d) is None, "a bare non-project dir has no project root (→ no repo map)"
+        os.makedirs(os.path.join(d, ".git"))
+        assert project_root(d) == os.path.realpath(d), "a git root IS a project root"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

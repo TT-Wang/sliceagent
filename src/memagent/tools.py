@@ -217,14 +217,15 @@ _CODE_SUFFIX = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb
                 ".exs", ".clj", ".r", ".jl", ".vue", ".sql")
 
 
-def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str:
+def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_chars: int = 12000) -> str:
     """A compact, ignore-aware STRUCTURAL MAP of the project (the world-state cache's tier-B resident
     store): directories with their files, pruned of VCS/venv/cache + asset/log noise, RANKED by source-
     density so the real code tree shows first and never gets starved by asset/log dirs. This is what
     kills cold-start — a 'review/understand the repo' task sees the structure RESIDENT instead of re-
     listing with find. Built ONCE per session (stable → prompt-cache warm); new files created mid-task
-    surface via the LIVE worktree region. Over budget, late dirs collapse to a count (structure stays
-    COMPLETE). '' if root is unusable; never raises."""
+    surface via the LIVE worktree region. Over budget, late dirs collapse to a count; `max_chars` is a
+    HARD ceiling on the output (ranked tail dropped) so a huge tree can't blow the context window.
+    '' if root is unusable; never raises."""
     if not root or not os.path.isdir(root):
         return ""
     rows: list[tuple[str, list[str], int, int]] = []  # (rel, files, total, code_count)
@@ -254,7 +255,22 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25) -> str
             lines.append(f"{prefix} — {', '.join(take)}{extra}")
         else:                                         # over budget: keep the dir, collapse to a count
             lines.append(f"{prefix} — ({total} files)")
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    if len(out) <= max_chars:
+        return out
+    # HARD char ceiling: rows are ranked source-dense-first, so keep the prefix that fits and drop the
+    # tail to a count. Without this a giant tree (or a session launched in a bare HOME) produces a
+    # multi-10k-token map that overflows the window on the very first turn.
+    kept, used = [], 0
+    for ln in lines:
+        if used + len(ln) + 1 > max_chars:
+            break
+        kept.append(ln)
+        used += len(ln) + 1
+    dropped = len(lines) - len(kept)
+    kept.append(f"… (+{dropped} more director{'y' if dropped == 1 else 'ies'} — over map budget; "
+                "use list_files to drill in)")
+    return "\n".join(kept)
 
 
 TOOL_SCHEMAS = [

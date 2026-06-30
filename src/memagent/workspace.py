@@ -310,6 +310,18 @@ def build_workspace_snapshot(cwd: str) -> str:
 # ── LIVE world-state (the cache's recomputed-each-build region) ───────────────
 
 
+def project_root(cwd: str) -> Optional[str]:
+    """The project root for `cwd` — its git root, else the nearest ancestor holding a project marker
+    (pyproject/package.json/…); None outside any project (e.g. a bare HOME dir). This is the session-
+    static 'are we in a project at all?' decision that gates repo-derived slice content (the REPO MAP,
+    facts, conventions, subdir hints) — so launching in HOME doesn't os.walk the whole home directory."""
+    resolved = _resolve_cwd(cwd)
+    if resolved is None:
+        return None
+    root = _git_root(resolved) or _marker_root(resolved)
+    return str(root) if root else None
+
+
 def workspace_facts(cwd: str) -> str:
     """STATIC project facts (manifest, package manager, verify commands, context files) for the
     cache-stable SYSTEM tier — the git-INDEPENDENT subset of build_workspace_snapshot. Live git

@@ -58,6 +58,28 @@ path = "src/memagent/__init__.py"   # the single version source (__version__)
 [tool.hatch.build.targets.wheel]
 packages = ["src/memagent"]
 
+[tool.hatch.build.targets.sdist]
+# sdist = source distribution; PyPI serves it to builders. Keep it lean: the wheel carries the
+# runnable package, the sdist carries enough to rebuild + run offline tests. Do NOT ship eval caches,
+# benchmark job artifacts, or brand assets — evals/ alone was >120 MB of untracked tbench/job state.
+exclude = [
+  "/evals",
+  "/docs/brand",
+  "/prototype",
+  "/brain",
+  "/runs",
+  "/scratch",
+  "/.venv",
+  "/.claude",
+  "/.coverage",
+  "/.mindmux",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "*.pdf",
+  "*.whl",
+  "*.jsonl",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

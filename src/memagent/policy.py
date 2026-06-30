@@ -13,7 +13,9 @@ the ToolHost still confines paths even if a policy abstains.
 """
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from typing import Callable, Optional
 
 from .agents import READ_ONLY_TOOLS   # single source of truth for the known read-only surface
@@ -89,10 +91,56 @@ def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
     return None
 
 
+# Provably read-only shell verbs — a `run_command` whose verb is one of these (and which contains no
+# shell metacharacter that could chain/redirect/substitute) reports state without changing it, so teenager
+# mode runs it without a confirm prompt. Deny-by-default: an unknown verb still asks. The catastrophic floor
+# (no_dangerous_commands) runs BEFORE this, so e.g. `cat /etc/passwd` is still denied.
+_RO_VERBS = frozenset((
+    "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "type", "env", "printenv", "date",
+    "whoami", "hostname", "uname", "id", "groups", "tree", "stat", "file", "du", "df", "realpath",
+    "dirname", "basename", "grep", "rg", "egrep", "fgrep", "sort", "uniq", "nl", "cut", "column",
+    "cksum", "md5", "md5sum", "sha1sum", "sha256sum", "true",
+))
+# git subcommands with NO mutating form (excludes branch/tag/config/remote/stash/reflog, which can write).
+_RO_GIT_SUB = frozenset((
+    "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "describe", "blame",
+    "shortlog", "rev-list", "cat-file", "for-each-ref", "name-rev", "whatchanged", "count-objects",
+    "var", "ls-remote", "grep",
+))
+# find ACTIONS that run/delete (anything else is a read-only traversal)
+_FIND_MUTATORS = frozenset(("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprintf", "-fprint", "-fls", "-fprint0"))
+_SHELL_META = re.compile(r"[;&|<>`\n]|\$\(|\$\{|\breturn\b")
+
+
+def _is_readonly_command(cmd: str) -> bool:
+    """True only when `cmd` PROVABLY just reads/reports state — a tiny verb allowlist with no shell
+    metacharacters. Conservative by design: anything unrecognized returns False (→ still confirmed)."""
+    cmd = (cmd or "").strip()
+    if not cmd or _SHELL_META.search(cmd):
+        return False
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not toks:
+        return False
+    verb = os.path.basename(toks[0])
+    if verb == "git":
+        sub = next((t for t in toks[1:] if not t.startswith("-")), "")
+        return sub in _RO_GIT_SUB
+    if verb == "find":
+        return not any(t in _FIND_MUTATORS for t in toks)
+    return verb in _RO_VERBS
+
+
 def ask_commands(name: str, args: dict) -> Optional[ToolDecision]:
     """'teenager' middle ground: auto-allow known file EDITS + reads, but confirm anything that RUNS a
-    command (EXEC tools) or is an unknown tool that might. Edits flow; running code pauses for a yes."""
+    command (EXEC tools) or is an unknown tool that might. Edits flow; running code pauses for a yes —
+    EXCEPT a provably read-only `run_command` (git status, ls, cat, …), which reports state without
+    changing it and so runs without a prompt (kills the confirm-hang on 'which repo am I in')."""
     if name in _READERS or name in WRITE_TOOLS:
+        return None
+    if name == "run_command" and _is_readonly_command(str(args.get("command") or "")):
         return None
     return ToolDecision(False, f"{name} runs a command — confirm before it executes", ask=True)
 
