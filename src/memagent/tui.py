@@ -921,6 +921,10 @@ def _arrow_select(options: list[str], default: int = 0) -> "int | None":
     try:
         tty.setraw(fd)
         raw_entered = True
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)   # discard type-ahead / a leftover Enter so it can't
+        except Exception:  # noqa: BLE001 — instantly auto-pick the default before the user's first keypress
+            pass
         draw()
         while True:
             ch = sys.stdin.read(1)
