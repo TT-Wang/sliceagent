@@ -48,7 +48,7 @@ Useful keys & commands:
 - `/help` lists slash commands · `/plan` shows the agent's plan · `/threads` lists topics · `/exit` quits.
 
 UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned box, streams above it) ·
-`textual` (full-screen) · `off` (plain stdout, good for pipes/CI).
+`off` (plain stdout, good for pipes/CI).
 
 ## 4. Reading the output
 

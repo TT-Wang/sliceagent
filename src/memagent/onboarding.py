@@ -283,7 +283,7 @@ def print_usage() -> int:
   memagent {_version()} — a memory-native coding agent (the slice/cache-not-log kernel)
 
   usage:
-    memagent                 start the interactive agent (inline UI; AGENT_TUI=textual|live|off to switch)
+    memagent                 start the interactive agent (inline UI; AGENT_TUI=live|off to switch)
     memagent init            interactive first-run setup (provider, key, model) → ~/.memagent/config.toml
     memagent config          show resolved settings, providers, and config path
     memagent config --list   list every environment variable, default, and current value

@@ -75,5 +75,5 @@ memagent reads **44** environment variables across **6** groups; every value is 
 
 | variable | default | description |
 |---|---|---|
-| `AGENT_TUI` | `rich` | UI mode: rich (default inline), textual (full-screen), live (pinned box), off (plain). _(choices: rich, textual, live, off)_ _(aliases: 1, on, true, yes, 0, false, no)_ |
+| `AGENT_TUI` | `rich` | UI mode: rich (default inline), live (pinned box), off (plain). _(choices: rich, live, off)_ _(aliases: 1, on, true, yes, 0, false, no)_ |
 | `SHOW_SLICE` | — | Set truthy to print the rebuilt slice each turn (debug view). |

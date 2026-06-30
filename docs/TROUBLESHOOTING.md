@@ -23,7 +23,6 @@ memagent falls back to `NullRetriever` (no auto code discovery, everything else 
 
 ## Copy/paste doesn't work
 - **Default (`AGENT_TUI=rich`) and `live`**: stay in the normal terminal buffer — native select + copy/paste/scroll work everywhere, including macOS Terminal.app.
-- **`AGENT_TUI=textual`** (full-screen): uses the alternate screen; native terminal copy is limited. Prefer `rich`/`live` if you copy a lot, or use a terminal with OSC-52 (iTerm2/WezTerm/Kitty).
 
 ## An MCP server fails to load
 memagent logs the failure and continues without that server (it never crashes the session). Check the server

@@ -284,54 +284,19 @@ def main() -> None:
         _tui = None
     _console = _tui.make_console() if _tui else None   # themed: no black-bg highlight on inline `code`/paths
 
-    # Decide early whether to use the full-screen Textual TUI. We need this before wiring stdin-
-    # dependent callbacks, because Textual owns stdin and synchronous prompts from worker threads
-    # would deadlock.
-    tui_env = os.environ.get("AGENT_TUI", "").strip().lower()
-    force_textual = tui_env in ("1", "on", "true", "yes", "textual")
-    disable_textual = tui_env in ("0", "off", "false", "no", "rich")
     # DEFAULT UI = the inline rich+prompt_toolkit REPL: it stays in the NORMAL terminal buffer, so native
     # copy / paste / scrollback work on ANY terminal (incl. macOS Terminal.app), with a pinned composer
     # (patch_stdout, the Python analogue of Ink's <Static>+live-region that Hermes/Claude Code use) and
-    # streaming replies. The full-screen Textual app is now OPT-IN (AGENT_TUI=textual): it looks nicer but
-    # uses the alternate screen + mouse capture, which break copy/paste/scrollback on stock terminals that
-    # lack OSC-52. A wide-audience CLI must work everywhere, so inline is the default. AGENT_TUI=off → plain.
-    use_textual = (_tui is not None and not disable_textual and force_textual)
-    # AGENT_TUI=live → the always-pinned live composer: the bordered box stays at the bottom EVEN WHILE the
-    # agent streams (output prints above it in the normal buffer). Opt-in/experimental; the default REPL
-    # (box between turns) is the proven path. Falls back to the REPL if it can't start.
+    # streaming replies. AGENT_TUI=off → plain stdout (handled in tui_enabled). AGENT_TUI=live → the
+    # always-pinned live composer: the bordered box stays at the bottom EVEN WHILE the agent streams (output
+    # prints above it). Opt-in/experimental; the default REPL (box between turns) is the proven path, and
+    # live falls back to it if it can't start.
+    tui_env = os.environ.get("AGENT_TUI", "").strip().lower()
     use_live = (_tui is not None and tui_env == "live")
-    if use_textual:
-        try:
-            from .tui_app import textual_available
-            use_textual = textual_available()
-        except Exception:
-            use_textual = False
 
-    # Build the Textual app BEFORE the dispatcher, so its event sink can BE the sole renderer (the app
-    # re-runs run_turn through the same dispatcher it renders from). dispatch + _hooks are injected once
-    # they exist (below). Created here (not after dispatch) to avoid the old crossed wiring where the rich
-    # sink AND the textual app both received events.
-    app = None
-    if use_textual:
-        from .tui_app import MemagentTui
-        from . import recovery as _rec
-        app = MemagentTui(
-            session=session, tools=tools, retriever=retriever, memory=memory,
-            llm=llm, hooks=None, dispatch=None,
-            run_turn=run_turn, make_build_slice=make_build_slice,
-            record_user=record_user, route_topic=route,
-            stats=_stats,
-            max_steps=cfg.max_steps,   # else Textual turns are guillotined at run_turn's 40 default
-            consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
-            checkpoint=lambda m, s: _rec.record(
-                root, goal=(session.active().goal if session.active_id else ""), messages=m, step=s),
-            clear_recovery=lambda: _rec.clear(root),
-        )
-
-    # Note: in Textual mode, interactive approval and ask_user are wired to the Textual app
-    # below (after dispatch is built). Here we only set up the fallback non-Textual prompts.
-    if not use_textual and not use_live and (_tui or sys.stdin.isatty()):
+    # wire the ask_user capability to a real prompt when interactive — NOT in live mode, where a worker-
+    # thread console.input() would contend with the pinned prompt_toolkit app for stdin and HANG.
+    if not use_live and (_tui or sys.stdin.isatty()):
         # wire the ask_user capability to a real prompt when interactive (TUI rich prompt, or plain
         # input); headless/eval — AND live mode, where a worker-thread console.input() would contend with
         # the pinned prompt_toolkit app for stdin and HANG — keep the non-interactive default.
@@ -364,12 +329,9 @@ def main() -> None:
         from .metrics import make_metrics_sink
         metrics = make_metrics_sink()
         sinks.append(metrics)
-    # EXACTLY ONE renderer is wired: the full-screen Textual app, OR the rich+prompt_toolkit sink, OR the
-    # plain stdout sink (headless/eval). Never two — wiring the rich sink alongside Textual made rich print
-    # under the alternate screen while the Textual pane was starved of agent events.
-    if use_textual:
-        sinks.append(MemagentTui.make_sink(app))   # the Textual app IS the renderer (events → its pane)
-    elif _tui:
+    # EXACTLY ONE renderer is wired: the rich+prompt_toolkit sink (TUI), OR the plain stdout sink
+    # (headless/eval). Never two.
+    if _tui:
         _rich = _tui.make_rich_sink(_console, _stats)
         sinks.append(_rich)
         llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner (Kimi-style)
@@ -393,14 +355,10 @@ def main() -> None:
         print(f"  · slice monitor: writing to {_monitor_dir()} — view at the persistent server "
               "(run: python -m memagent.monitor)")
     dispatch = make_dispatcher(*sinks)
-    if app is not None:            # inject the dispatcher the app (created earlier) re-runs turns through
-        app._dispatch = dispatch
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     def _ask(name, args, reason):  # interactive resolver for AGENT_POLICY=ask
         detail = args.get("command") or args.get("path") or args.get("code", "")
-        if app is not None:  # Textual modal dialog (runs in worker thread, marshals to UI)
-            return app.confirm(name, args, reason)
         if use_live:  # the pinned prompt_toolkit app owns stdin → a Rich confirm would hang; deny (safe default)
             return "no"
         if _tui:  # synchronous mid-run (no pt app live) → a Rich confirm is safe
@@ -606,9 +564,6 @@ def main() -> None:
         hook_list.append(BudgetHook(cfg.max_tokens))
     hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
     hooks = CompositeHooks(*hook_list)
-    if app is not None:
-        app._hooks = hooks
-        base_tools.on_ask_user = app.ask_user
 
     info = (f"model={llm.model} · net={getattr(llm, 'proxy_used', 'direct')} · "
             f"policy={policy_label(_eff_mode)} · sandbox={cfg.sandbox_backend} · "
@@ -616,7 +571,7 @@ def main() -> None:
             f"episodic={'on' if episodic is not None else 'off'} · "
             f"mine={mine_mode} · subagents={'on' if sub_depth > 0 else 'off'} · "
             f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
-    # ── choose UI: full-screen Textual (terminal-only) or the original rich+prompt_toolkit REPL ──
+    # ── choose UI: the always-pinned live composer (AGENT_TUI=live), else the rich+prompt_toolkit REPL ──
     _input = _tui.TuiInput(_stats, root=root) if _tui else None
 
     from .text_utils import is_chitchat
@@ -706,15 +661,7 @@ def main() -> None:
         (_console.print(f"[yellow]{_note}[/]") if _console is not None else print(_note))
         recovery.clear(root)
 
-    if use_textual:
-        # The Textual app was created earlier so its dialogs could be wired into hooks/tools.
-        try:
-            app.run()
-        except Exception as _e:  # noqa: BLE001 — a Textual runtime failure must not dump a traceback on the
-            # default UI; degrade with a clear, actionable message instead.
-            print(f"\n  Textual UI failed to run ({type(_e).__name__}: {_e}).\n"
-                  "  Rerun with AGENT_TUI=rich for the classic REPL, or AGENT_TUI=off for plain output.")
-    elif use_live and _try_live():
+    if use_live and _try_live():
         pass                              # the live composer ran the whole session (until ctrl-d/exit)
     else:
         if _tui:
@@ -745,8 +692,7 @@ def main() -> None:
                 _handle_slash(line)
                 continue
             # INVARIANT: echo the user's line BEFORE any blocking work (esp. route_topic's LLM round-trip),
-            # so the message paints the instant Enter is pressed — not ~0.5-2s later. The Textual path
-            # enforces the same ordering via its worker thread (tui_app.py: _append_user before _run_user_turn).
+            # so the message paints the instant Enter is pressed — not ~0.5-2s later.
             if _tui:                              # anchor the user turn with spacing (fixes cramped layout)
                 _tui.user_echo(_console, line)
             if is_chitchat(line):                # 'hi'/'thanks' → cheap reply, skip routing/slice/run_turn (item D)

@@ -34,9 +34,15 @@ this project aims for [Semantic Versioning](https://semver.org/).
   `scripts/run_tests.sh`, a `ruff` config + `[dev]` extra, single-sourced version, and contribution
   scaffolding (`CODE_OF_CONDUCT.md`, issue/PR templates).
 
+### Removed
+- The full-screen Textual UI (`AGENT_TUI=textual`) and its `textual` dependency. The inline `rich` REPL is
+  the proven default (native copy/paste/scrollback on any terminal); `AGENT_TUI=live` remains for the
+  always-pinned composer, `off` for plain stdout.
+
 ### Changed
-- Default UI is the inline `rich` REPL (native copy/paste on any terminal); full-screen Textual is opt-in
-  (`AGENT_TUI=textual`). The composer is a bordered, bottom-pinned box.
+- Default UI is the inline `rich` REPL (native copy/paste on any terminal). The composer is a bordered,
+  bottom-pinned box.
+- Permission confirms are arrow-key selectable (Yes / No / Always) instead of typed.
 - The user's message is echoed the instant Enter is pressed — before any routing/LLM work (no input lag).
 - `AGENT_PROXY=off` now forces a direct connection (previously misread as a proxy URL); the network route
   is shown on startup (`net=…`).

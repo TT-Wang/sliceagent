@@ -66,8 +66,8 @@ REGISTRY: list[EnvVar] = [
     EnvVar("MOONSHOT_API_KEY", "provider", "Legacy alias for LLM_API_KEY (Moonshot).", "", secret=True),
     EnvVar("OPENAI_BASE_URL", "provider", "Legacy alias for LLM_BASE_URL.", ""),
     # ── UI ────────────────────────────────────────────────────────────────────────────────────
-    EnvVar("AGENT_TUI", "ui", "UI mode: rich (default inline), textual (full-screen), live (pinned box), off (plain).",
-           "rich", choices=("rich", "textual", "live", "off"),
+    EnvVar("AGENT_TUI", "ui", "UI mode: rich (default inline), live (pinned box), off (plain).",
+           "rich", choices=("rich", "live", "off"),
            aliases=("1", "on", "true", "yes", "0", "false", "no")),
     EnvVar("SHOW_SLICE", "ui", "Set truthy to print the rebuilt slice each turn (debug view).", ""),
     # ── memory ────────────────────────────────────────────────────────────────────────────────

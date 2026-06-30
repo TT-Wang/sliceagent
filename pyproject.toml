@@ -37,7 +37,7 @@ treesitter = ["tree-sitter>=0.21", "tree-sitter-python>=0.21"]
 # input (history/completion/ctrl-c-abort). OPTIONAL: the CLI falls back to plain print()+input()
 # when absent (and when piped/headless, e.g. the eval). `pip install -e .[tui]`. Borrowed from
 # Hermes' rich+prompt_toolkit stack; plugs into the event-sink seam, never touches the moat.
-tui = ["rich>=13", "prompt_toolkit>=3.0", "textual>=0.85"]
+tui = ["rich>=13", "prompt_toolkit>=3.0"]
 # Dev toolchain: test runner + linter (CI installs `.[dev]`). `pip install -e .[dev]`.
 dev = ["pytest>=8", "ruff>=0.6"]
 

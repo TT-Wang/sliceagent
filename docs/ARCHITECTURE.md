@@ -59,7 +59,7 @@ Retrieval is not 100%. The loop — not the retriever — is the recovery mechan
 | Tool execution + sandbox | BORROW | container / OpenHands runtime |
 | Tool breadth (git/web/db/…) | BORROW | MCP client + servers |
 | Code-as-action (script→RPC, collapse pipelines into one turn) | BORROW | Hermes `execute_code` pattern |
-| Streaming / TUI / diff-approval | BORROW | Textual·Rich / Ink (Cline UX) |
+| Streaming / TUI / diff-approval | BORROW | Rich + prompt_toolkit / Ink (Cline UX) |
 | Eval harness | BORROW | SWE-bench(-lite) |
 
 ## Phased plan

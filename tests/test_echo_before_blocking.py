@@ -1,6 +1,5 @@
-"""Regression guard for the Enter→echo latency bug (it recurred once: fixed in the Textual path, then
-re-surfaced in the inline REPL when the default flipped). The INVARIANT, across EVERY UI path: the user's
-message is echoed to the log BEFORE any blocking work — above all before route_topic's LLM round-trip.
+"""Regression guard for the Enter→echo latency bug. The INVARIANT: the user's message is echoed to the
+log BEFORE any blocking work — above all before route_topic's LLM round-trip.
 
 We assert it at the source level (the loop is an I/O-heavy function not worth mocking end-to-end): in each
 path the echo call must textually precede the route_topic call. A future edit that reintroduces the bug
@@ -61,39 +60,6 @@ def live_path_echoes_before_dispatching_the_turn():
     i_thread = src.find("threading.Thread")
     assert i_echo != -1 and i_thread != -1, "build_live_app shape changed (test stale?)"
     assert i_echo < i_thread, "REGRESSION: the live composer spawns the turn worker before echoing the message"
-
-
-@check
-def textual_path_echoes_before_dispatching_the_turn():
-    # tui_app.on_user_submit: _append_user(...) (the echo) must precede _run_user_turn(...) (which carries
-    # route_topic + the turn into a worker). Guards the path that was fixed FIRST from regressing.
-    try:
-        from memagent import tui_app
-    except Exception as e:  # noqa: BLE001 — textual extra may be absent in a minimal env; skip, don't fail
-        print(f"  (skip textual check: {type(e).__name__})")
-        return
-    src = inspect.getsource(tui_app.MemagentTui.on_user_submit)
-    i_echo = src.find("_append_user")
-    i_turn = src.find("_run_user_turn")
-    assert i_echo != -1 and i_turn != -1, "on_user_submit shape changed (test stale?)"
-    assert i_echo < i_turn, (
-        "REGRESSION: the Textual path dispatches the turn before echoing the user message")
-
-
-@check
-def textual_route_topic_runs_off_the_ui_thread():
-    # the blocking work (route_topic / run_turn) must live inside the worker closure, NOT on the UI thread
-    # before it — i.e. _run_user_turn must hand work to run_worker(thread=True).
-    try:
-        from memagent import tui_app
-    except Exception as e:  # noqa: BLE001
-        print(f"  (skip textual worker check: {type(e).__name__})")
-        return
-    src = inspect.getsource(tui_app.MemagentTui._run_user_turn)
-    assert "run_worker" in src and "thread=True" in src, (
-        "_run_user_turn no longer offloads to a worker thread — blocking work may freeze the UI thread")
-    # route_topic must be referenced inside the worker (after the run_worker handoff is set up)
-    assert "_route_topic" in src or "route_topic" in src, "route_topic not found in _run_user_turn (test stale?)"
 
 
 def main():

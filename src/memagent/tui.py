@@ -789,7 +789,7 @@ class TuiInput:
     The composer is a BORDERED box pinned at the bottom (Claude-Code/Hermes look). It's a prompt_toolkit
     Application run full_screen=False with mouse_support=False — so it stays in the NORMAL terminal buffer:
     the conversation above is real scrollback, and native select/copy/paste keep working on EVERY terminal
-    (incl. macOS Terminal.app), unlike the full-screen Textual UI. Degrades to a plain ❯ prompt if the
+    (incl. macOS Terminal.app). Degrades to a plain ❯ prompt if the
     framed Application can't run, so input is never broken."""
 
     def __init__(self, stats: dict, root: str | None = None):
@@ -1035,7 +1035,7 @@ def user_echo(console: Console, text: str) -> None:
 
 
 def banner_panel(info: str) -> Panel:
-    """The startup logo as a rich renderable (reused by the rich CLI and the Textual TUI). RESPONSIVE:
+    """The startup logo as a rich renderable (reused by the rich CLI and the live composer). RESPONSIVE:
     the full ansi_shadow wordmark is ~74 cols (+emblem +padding ≈ 82); on a narrower terminal it wraps
     into garbage, so fall back to a compact one-line wordmark that always fits."""
     cols = shutil.get_terminal_size((80, 24)).columns
