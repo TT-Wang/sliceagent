@@ -627,6 +627,7 @@ def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
 _SLASH = {
     "/model":   "switch model + reasoning — opens a menu (or /model <name> [fast|full|high|max])",
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
+    "/cwd":     "switch workspace root (/cwd <path>) — re-roots repo map, file tools & commands",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN + mission",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",

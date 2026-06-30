@@ -1276,6 +1276,26 @@ def glob_finds_directories_not_just_files():
     assert "hunter/" in out, f"glob must return the hunter/ directory, got: {out!r}"
 
 
+@check
+def rerooting_the_host_switches_the_slice_workspace():
+    # what /cwd does: set the host root → the slice's REPO MAP / project facts re-root to the new dir.
+    from memagent.memory import NullMemory
+    from memagent.slice import Slice, make_build_slice
+    from memagent.tools import LocalToolHost
+    a = tempfile.mkdtemp(prefix="wsA-")
+    b = tempfile.mkdtemp(prefix="wsB-")
+    os.makedirs(os.path.join(b, "pkg"))
+    open(os.path.join(b, "pkg", "core.py"), "w").write("def f():\n    return 1\n")
+    open(os.path.join(b, "pyproject.toml"), "w").write("[project]\nname='b'\n")
+    host = LocalToolHost(root=a)
+    assert host.root() == os.path.realpath(a)
+    host._root = os.path.realpath(b)                        # the re-root /cwd performs
+    assert host.root() == os.path.realpath(b)
+    s = Slice(); s.reset("go")
+    sysmsg = make_build_slice(s, host, None, NullMemory(), "go")()[0]["content"]
+    assert "core.py" in sysmsg, "repo map must reflect the NEW workspace root after a re-root"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

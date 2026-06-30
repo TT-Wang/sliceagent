@@ -372,9 +372,9 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /model · /mode · /learn · /plan · /cost · /threads · /plugins · /mcp · "
-                           "/help · /exit\n  (type / for the menu · Esc = undo last turn · "
-                           "say \"review my changes\" for code_review · @path pins a file)")
+            _console.print("commands: /model · /mode · /cwd · /learn · /plan · /cost · /threads · /plugins · /mcp · "
+                           "/help · /exit\n  (type / for the menu · /cwd <path> switches workspace · "
+                           "Esc = undo last turn · say \"review my changes\" for code_review · @path pins a file)")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -503,6 +503,29 @@ def main() -> None:
                 save_prefs({"reasoning": llm.reasoning})
                 note = _reasoning_note(llm)
                 _console.print(f"  ✓ reasoning → [bold]{llm.reasoning}[/] (saved)" + (f"\n  {note}" if note else ""))
+        elif cmd == "/cwd":
+            # Switch the workspace root mid-session (user-authorized — the AGENT can't re-root itself, that's
+            # its boundary). Re-roots the file tools + run_command cwd, drops the stale focus/hint caches, and
+            # re-indexes; the next slice's REPO MAP / ENVIRONMENT / git all reflect the new root. (Crash-
+            # recovery follows the new root; a running subagent host keeps the old code index until relaunch.)
+            nonlocal root, retriever
+            if not arg:
+                _console.print(f"  workspace: {base_tools.root()}")
+            else:
+                newp = os.path.realpath(os.path.expanduser(arg))
+                if not os.path.isdir(newp):
+                    _console.print(f"  not a directory: {arg}")
+                else:
+                    base_tools._root = newp
+                    base_tools._focus = None
+                    base_tools._extra_roots.clear()
+                    base_tools._subdir_hints = None        # invalidate the cross-turn convention-hint cache
+                    root = newp                            # crash-recovery WAL + @mentions track the new root
+                    try:
+                        retriever = make_code_index(newp)  # re-index for the RELATED CODE tier
+                    except Exception:  # noqa: BLE001 — re-index is best-effort; the re-root still stands
+                        pass
+                    _console.print(f"  ✓ workspace → [bold]{newp}[/]  (repo map, file tools & commands rooted here)")
         else:
             _console.print(f"  unknown command {cmd} (/help)")
         return True
