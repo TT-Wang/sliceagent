@@ -39,17 +39,6 @@ _PERSISTENCE = re.compile(
 )
 
 
-def _basename(command) -> str:
-    text = str(command or "").strip()
-    if not text:
-        return ""
-    try:
-        parts = shlex.split(text, posix=(os.name != "nt"))
-    except ValueError:
-        parts = text.split()
-    return os.path.basename(parts[0] if parts else text).lower()
-
-
 def _script(args) -> str:
     if args is None:
         return ""
@@ -86,7 +75,3 @@ def validate_mcp_server_entry(name: str, conf) -> list[str]:
         issues.append(f"MCP server '{name}': a shell interpreter writing to an OS persistence surface "
                       "(SSH keys / PAM / sudoers / cron / shell rc — backdoor shape, not a real MCP server)")
     return issues
-
-
-def is_suspicious(name: str, conf) -> bool:
-    return bool(validate_mcp_server_entry(name, conf))

@@ -61,7 +61,3 @@ def enabled(flag_id: str) -> bool:
     if per is not None:
         return per                                     # explicit per-flag override
     return f.default
-
-
-def all_flags() -> list[Flag]:
-    return list(_FLAGS.values())

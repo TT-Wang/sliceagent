@@ -544,28 +544,6 @@ def _history_mark(args: dict) -> str:
 # and STOP_NUDGE_AFTER/READONLY_NUDGE_AFTER) moved to regions.py; re-exported above, render_slice calls them.
 
 
-def _focus_line(s: Slice, path: str, lines: list[str]) -> int:
-    """For a huge file, the line to center the relevant region on: the agent's last edit
-    target if present, else the best relevance match against the task + current error,
-    else the top. Relevance selection — not a position guess."""
-    anchor = s.edit_anchor.get(path)
-    if anchor:
-        for i, ln in enumerate(lines, 1):
-            if anchor in ln:
-                return i
-    terms = {t.lower() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", f"{s.goal} {s.last_error}")}
-    if terms:
-        best, best_score = 1, 0
-        for i, ln in enumerate(lines, 1):
-            low = ln.lower()
-            score = sum(1 for t in terms if t in low)
-            if score > best_score:
-                best, best_score = i, score
-        if best_score:
-            return best
-    return 1
-
-
 def _relevant_regions(s: Slice, path: str, lines: list[str], region_lines: int = REGION_LINES) -> list[tuple]:
     """Multi-focus RELEVANCE view of a large EXPLORATORY file: the union of windows around EVERY line
     that matches the current focus (edit anchor + task/error identifiers), merged. Bound by RELEVANCE
