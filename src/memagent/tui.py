@@ -884,15 +884,108 @@ class TuiInput:
             return None
 
 
+def _arrow_select(options: list[str], default: int = 0) -> "int | None":
+    """Single-line, arrow-key selector: ←/→ (or ↑/↓) move, Enter chooses, Esc/Ctrl-C cancels; the
+    first letter of each option is also a hotkey. Returns the chosen index, -1 if cancelled, or None
+    if a selector can't SAFELY run (not a TTY, not the main thread, no termios, raw-mode error) so the
+    caller falls back to typed input. POSIX only — Windows returns None. termios + ANSI on one line."""
+    import sys
+    import threading
+    # Raw mode is process-global terminal state — only ever drive it from the MAIN thread with nothing
+    # else owning the terminal. A worker-thread turn or a live prompt_toolkit app would race and corrupt it.
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        import select
+        import termios
+        import tty
+    except Exception:  # noqa: BLE001 — non-POSIX → caller falls back to typed input
+        return None
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except Exception:  # noqa: BLE001 — not a real terminal
+        return None
+    idx = default
+    hot = {o[:1].lower(): i for i, o in enumerate(options)}   # y/n/a first-letter hotkeys
+
+    def draw() -> None:
+        cells = [(f"\x1b[7m {o} \x1b[0m" if i == idx else f"\x1b[2m {o} \x1b[0m")
+                 for i, o in enumerate(options)]
+        sys.stdout.write("\r\x1b[2K    " + "  ".join(cells) + "   \x1b[2m(←/→ then Enter)\x1b[0m")
+        sys.stdout.flush()
+
+    raw_entered = False
+    try:
+        tty.setraw(fd)
+        raw_entered = True
+        draw()
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:                                        # EOF (stdin closed mid-prompt) → cancel, don't spin
+                idx = -1
+                break
+            if ch in ("\r", "\n"):
+                break
+            if ch == "\x03":                                  # Ctrl-C → cancel
+                idx = -1
+                break
+            if ch == "\x1b":                                  # ESC alone, or an arrow/escape sequence
+                try:
+                    if not select.select([sys.stdin], [], [], 0.06)[0]:
+                        idx = -1                              # bare ESC → cancel
+                        break
+                    if sys.stdin.read(1) in ("[", "O"):       # CSI or application-cursor (ESC O A) arrows
+                        k = sys.stdin.read(1)
+                        if k in ("C", "B"):                   # → / ↓
+                            idx = (idx + 1) % len(options)
+                        elif k in ("D", "A"):                 # ← / ↑
+                            idx = (idx - 1) % len(options)
+                except Exception:  # noqa: BLE001 — a torn escape read → cancel, never hang mid-sequence
+                    idx = -1
+                    break
+                draw()
+            elif ch.lower() in hot:                           # letter hotkey still works
+                idx = hot[ch.lower()]
+                draw()
+    except Exception:  # noqa: BLE001 — any I/O error → fall back to typed input, never corrupt the turn
+        idx = None
+    finally:
+        if raw_entered:                                       # only restore if setraw actually succeeded
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:  # noqa: BLE001 — wedged terminal: best-effort immediate restore
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, old)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                sys.stdout.write("\r\x1b[2K\n")               # wipe the menu line, land on a clean row
+                sys.stdout.flush()
+            except Exception:  # noqa: BLE001
+                pass
+    return idx
+
+
 def confirm(console: Console, name: str, detail: str, reason: str) -> str:
     """Approval prompt used by the permission hook when the TUI is active. Synchronous (no pt app
-    is live mid-run), returns 'yes' | 'no' | 'always'."""
+    is live mid-run), returns 'yes' | 'no' | 'always'. Arrow-key selectable; falls back to a typed
+    prompt where no TTY is available."""
     console.print(Text.assemble(
         Text("  ⚠ allow ", style=TH["warn"]), Text(name, style=TH["tool"]),
         Text(f" {_shorten(detail, 60)!r}? ", style=TH["dim"]), Text(f"({reason})", style=TH["dim"])))
-    _pause_active_live()        # stop the turn spinner so the typed answer echoes
+    _pause_active_live()        # stop the turn spinner so the prompt / typed answer is visible
     try:
-        ans = console.input("    [y]es / [n]o / [a]lways ▸ ").strip().lower()
+        console.file.flush()    # commit the "allow…" line before the selector's raw ANSI writes (no interleave)
+    except Exception:  # noqa: BLE001
+        pass
+    idx = _arrow_select(["Yes", "No", "Always"], default=0)
+    if idx is not None:                                       # selector ran (TTY): -1 cancel → no
+        return ("yes", "no", "always")[idx] if idx >= 0 else "no"
+    try:                                                      # fallback: \[y] escapes the Rich markup
+        ans = console.input(r"    \[y]es / \[n]o / \[a]lways ▸ ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return "no"
     return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")

@@ -1234,6 +1234,34 @@ def project_root_none_outside_a_project():
         assert project_root(d) == os.path.realpath(d), "a git root IS a project root"
 
 
+@check
+def confirm_maps_arrow_selection_to_verdict():
+    import io
+    from rich.console import Console
+    from memagent import tui
+    c = Console(file=io.StringIO())
+    orig = tui._arrow_select
+    try:
+        for i, expect in [(0, "yes"), (1, "no"), (2, "always"), (-1, "no")]:
+            tui._arrow_select = lambda opts, default=0, _i=i: _i
+            got = tui.confirm(c, "run_command", "ls", "reason")
+            assert got == expect, f"selection idx {i} should map to {expect!r}, got {got!r}"
+    finally:
+        tui._arrow_select = orig
+
+
+@check
+def confirm_fallback_prompt_brackets_survive_rich_markup():
+    # the rendered bug: console.input("[y]es...") → Rich parses [y] as a style tag → "es / o / lways".
+    # the fix escapes them (\[y]); pin that the literal brackets survive a Rich render.
+    import io
+    from rich.console import Console
+    c = Console(file=io.StringIO(), force_terminal=False)
+    c.print(r"\[y]es / \[n]o / \[a]lways")
+    out = c.file.getvalue()
+    assert "[y]es" in out and "[n]o" in out and "[a]lways" in out, f"brackets eaten by markup: {out!r}"
+
+
 def main():
     failed = 0
     for fn in CHECKS:
