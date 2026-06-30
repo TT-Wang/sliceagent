@@ -616,12 +616,15 @@ class OpenAILLM:
         calls: list[ToolCall] = []
         for item in (getattr(resp, "output", None) or []):
             if getattr(item, "type", None) == "function_call":
+                _name = getattr(item, "name", "") or ""
+                if not _name:
+                    continue                 # malformed function_call (no name) — skip, don't dispatch nameless
                 try:
                     args = json.loads(getattr(item, "arguments", "") or "{}")
                 except Exception:  # noqa: BLE001
                     args = {}
                 calls.append(ToolCall(id=getattr(item, "call_id", "") or getattr(item, "id", ""),
-                                      name=getattr(item, "name", ""), args=args))
+                                      name=_name, args=args))
         status = getattr(resp, "status", None)               # finish_reason from Responses status
         reason = ""
         if status == "incomplete":

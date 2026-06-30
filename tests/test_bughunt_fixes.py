@@ -1181,6 +1181,19 @@ def code_prelude_writes_are_byte_exact():
     assert 'open(path, "a", encoding="utf-8", newline="")' in src
 
 
+# ── R27 HIGH: seal() keeps the pre-edit def snapshot for EDITED files (change-set-closure works cross-turn) ─
+@check
+def seal_keeps_pre_defs_for_edited_files():
+    from memagent.slice import Slice
+    s = Slice(); s.reset("t")
+    s.active_files = ["e.py"]
+    s.edited_files = type(s.edited_files)(["e.py"])
+    s.pre_defs = {"e.py": {"foo", "bar"}, "readonly.py": {"baz"}}
+    s.seal()
+    assert s.pre_defs.get("e.py") == {"foo", "bar"}, "pre-edit baseline for an edited file must survive seal"
+    assert "readonly.py" not in s.pre_defs, "exploratory (non-edited) pre_defs are still dropped at seal"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

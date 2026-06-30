@@ -176,8 +176,8 @@ def _http_get(url: str, *, timeout: float):
     import httpx
     with httpx.stream("GET", url, timeout=timeout, follow_redirects=False,
                       headers={"User-Agent": _UA, "Accept": "text/html,*/*"}) as r:
-        cl = r.headers.get("content-length")
-        if r.is_redirect or (cl and cl.isdigit() and int(cl) > _MAX_RAW_BYTES):
+        cl = (r.headers.get("content-length") or "").strip()   # strip OWS so a padded length still validates
+        if r.is_redirect or (cl.isdigit() and int(cl) > _MAX_RAW_BYTES):
             return _Resp(r.status_code, dict(r.headers), "")   # redirect: don't read body; oversized: reject
         buf = bytearray()
         for chunk in r.iter_bytes():

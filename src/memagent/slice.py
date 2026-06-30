@@ -490,13 +490,16 @@ class Slice:
         # BOUND THE CARRY AT THE SEAL (not within the loop): the next loop starts from the most-recent
         # MAX_FINDINGS distilled facts; older ones are in the durable episodic cache (archived at TurnEnd,
         # recallable). This is the loop-boundary bound the moat prescribes — without it findings carried
-        # unbounded across a long session (transcript-style growth). pre_defs is transient pre-edit state,
-        # re-derived by prefetch next loop, so it's dropped too (world is intentionally durable: kept).
+        # unbounded across a long session (transcript-style growth). pre_defs is mostly transient pre-edit
+        # state (re-derived by prefetch next loop) — but prefetch only snapshots NON-edited files, so the
+        # pre-edit baseline for an EDITED file would be lost here and the change-set-closure (stale_deps)
+        # could never detect a removed symbol's dangling callers next turn. So KEEP pre_defs for the carried
+        # change-set (bounded by it), drop the exploratory rest. (world is intentionally durable: kept).
         if len(self.findings) > MAX_FINDINGS:
             self.findings = self.findings[-MAX_FINDINGS:]
             live = set(self.findings)
             self.finding_source = {k: v for k, v in self.finding_source.items() if k in live}
-        self.pre_defs = {}
+        self.pre_defs = {p: d for p, d in self.pre_defs.items() if p in self.edited_files}
         # CARRY the in-progress change-set resident; SEAL exploratory reads (re-readable / recallable).
         self.active_files = [p for p in self.active_files if p in self.edited_files]
         # Keep edited_files ⊆ active_files coherent: drop any phantom edit that is no longer resident, so a
