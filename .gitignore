@@ -42,3 +42,4 @@ brain/
 .coverage
 runs/
 *.pdf
+evals/usersim_findings.json
