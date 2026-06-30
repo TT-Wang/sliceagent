@@ -91,14 +91,22 @@ def _build(wd, goal="review the repo"):
 
 @check
 def slice_contains_repo_map_and_live_worktree():
+    from memagent.events import ToolResult
+    from memagent.slice import slice_sink
     wd = _mk_repo()
     open(os.path.join(wd, "pkg", "core.py"), "a").write("# edit\n")
-    _, build = _build(wd)
+    state, build = _build(wd)
+    # REPO-CONTENT GATE: before the agent investigates the repo (no tool call yet), the slice is
+    # system-prompt-only — no repo map / project facts — so a fresh/conversational turn can't blow the window.
+    assert "# REPO MAP" not in build()[0]["content"], "repo map must NOT appear before the agent engages the repo"
+    slice_sink(state)(ToolResult("grep", {"pattern": "x"}, "result", False))   # agent investigates → engaged
+    # the prefix is computed once per make_build_slice (per turn), so the map appears on the NEXT build (turn)
+    build = make_build_slice(state, LocalToolHost(wd), None, NullMemory(), "review the repo")
     msgs = build()
     system, user = msgs[0]["content"], msgs[1]["content"]
-    # REPO MAP is session-static → it rides the cacheable SYSTEM prefix (shared across turns + subagents),
-    # NOT the volatile user slice; live worktree stays in the user slice.
-    assert "# REPO MAP" in system and "core.py" in system, "repo map should be in the cacheable SYSTEM prefix"
+    # Once engaged, REPO MAP is session-static → it rides the cacheable SYSTEM prefix (shared across turns +
+    # subagents), NOT the volatile user slice; live worktree stays in the user slice.
+    assert "# REPO MAP" in system and "core.py" in system, "repo map should be in the SYSTEM prefix once engaged"
     assert "# REPO MAP" not in user, "repo map must NOT be in the volatile user slice anymore"
     assert "# REPO STATE (LIVE" in user and "modified: pkg/core.py" in user, "live worktree missing"
     # PROJECT facts (static) live in the SYSTEM message; live git does NOT (cache stability)
