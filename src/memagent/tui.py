@@ -899,7 +899,6 @@ def _arrow_select(options: list[str], default: int = 0) -> "int | None":
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     try:
-        import select
         import termios
         import tty
     except Exception:  # noqa: BLE001 — non-POSIX → caller falls back to typed input
@@ -923,37 +922,45 @@ def _arrow_select(options: list[str], default: int = 0) -> "int | None":
         tty.setraw(fd)
         raw_entered = True
         try:
-            termios.tcflush(fd, termios.TCIFLUSH)   # discard type-ahead / a leftover Enter so it can't
-        except Exception:  # noqa: BLE001 — instantly auto-pick the default before the user's first keypress
+            termios.tcflush(fd, termios.TCIFLUSH)   # drain the OS input queue (type-ahead / leftover Enter)
+        except Exception:  # noqa: BLE001
             pass
         draw()
         while True:
-            ch = sys.stdin.read(1)
-            if not ch:                                        # EOF (stdin closed mid-prompt) → cancel, don't spin
+            # Read RAW bytes straight off the fd — NOT sys.stdin.read(): that's a BUFFERED TEXT stream, and
+            # its read-ahead buffer (a) hides a leftover Enter that tcflush can't drain and (b) breaks the
+            # select()-based escape probe — which is why an arrow press fell through to picking the default.
+            # In raw mode one keypress, incl. a 3-byte arrow (\x1b[C), arrives in a SINGLE os.read.
+            try:
+                data = os.read(fd, 16)
+            except OSError:
                 idx = -1
                 break
-            if ch in ("\r", "\n"):
-                break
-            if ch == "\x03":                                  # Ctrl-C → cancel
+            if not data:                                      # EOF (stdin closed) → cancel
                 idx = -1
                 break
-            if ch == "\x1b":                                  # ESC alone, or an arrow/escape sequence
-                try:
-                    if not select.select([sys.stdin], [], [], 0.06)[0]:
-                        idx = -1                              # bare ESC → cancel
-                        break
-                    if sys.stdin.read(1) in ("[", "O"):       # CSI or application-cursor (ESC O A) arrows
-                        k = sys.stdin.read(1)
-                        if k in ("C", "B"):                   # → / ↓
-                            idx = (idx + 1) % len(options)
-                        elif k in ("D", "A"):                 # ← / ↑
-                            idx = (idx - 1) % len(options)
-                except Exception:  # noqa: BLE001 — a torn escape read → cancel, never hang mid-sequence
+            if data[:1] in (b"\r", b"\n"):                     # Enter → choose the highlighted option
+                break
+            if data[:1] == b"\x03":                           # Ctrl-C → cancel
+                idx = -1
+                break
+            if data[:1] == b"\x1b":                           # ESC alone, or a CSI/SS3 escape sequence
+                if len(data) == 1:                            # bare ESC → cancel
                     idx = -1
                     break
-                draw()
-            elif ch.lower() in hot:                           # letter hotkey still works
-                idx = hot[ch.lower()]
+                if data[1:2] in (b"[", b"O"):                 # CSI / SS3 arrows: the direction byte is right
+                    arrow = data[2:3]                         # AFTER [ or O (NOT the buffer's last byte — a
+                    if arrow in (b"C", b"B"):                 # trailing Enter in the same read would mask it)
+                        idx = (idx + 1) % len(options)        # → / ↓
+                    elif arrow in (b"D", b"A"):               # ← / ↑
+                        idx = (idx - 1) % len(options)
+                    draw()
+                    if b"\r" in data[3:] or b"\n" in data[3:]:   # arrow + Enter arrived together → also choose
+                        break
+                continue                                      # unknown/partial escape → keep waiting
+            c = data[:1].decode("ascii", "ignore").lower()    # printable → first-letter hotkey (y/n/a)
+            if c in hot:
+                idx = hot[c]
                 draw()
     except Exception:  # noqa: BLE001 — any I/O error → fall back to typed input, never corrupt the turn
         idx = None
