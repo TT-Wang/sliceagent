@@ -692,6 +692,10 @@ def main() -> None:
         else:
             print("memagent · slice core (run_turn) · " + info)
             print('type a task, or "exit" to quit\n')
+        from .workspace import project_root as _project_root
+        if _project_root(root) is None:        # launched outside a project → tell the user how to pick one
+            _hint = "  · no project here — type /cwd <path> to set your workspace (or just chat / ask me to find one)"
+            (_console.print(f"[grey50]{_hint}[/]") if _console is not None else print(_hint))
         while True:
             if _input is not None:
                 line = _input.prompt()
