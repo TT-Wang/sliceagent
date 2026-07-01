@@ -1296,13 +1296,23 @@ def user_echo(console: Console, text: str) -> None:
     console.print()
 
 
-def banner_panel(info: str) -> Panel:
+def banner_panel(console: Console, info: str) -> Panel:
     """The startup logo as a rich renderable (reused by the rich CLI and the live composer). RESPONSIVE:
-    the full ansi_shadow wordmark is ~74 cols (+emblem +padding ≈ 82); on a narrower terminal it wraps
-    into garbage, so fall back to a compact one-line wordmark that always fits."""
-    cols = shutil.get_terminal_size((80, 24)).columns
+    the full ansi_shadow wordmark needs 86 cols (80 for the art + emblem, +6 for the panel's border and
+    padding); below that it wraps into garbage, so fall back to a compact one-line wordmark that always fits.
+
+    Width MUST come from the SAME console that renders this panel — never a separate shutil.get_terminal_size()
+    call. That call silently returns the 80×24 default whenever the tty size isn't cleanly readable at that
+    instant, so with the old threshold sitting right on 80 (82) the banner flipped between the big font and
+    the compact fallback on an otherwise-unchanged terminal. One width source + a measured threshold makes
+    the choice deterministic per width, and makes a wrap-into-garbage render impossible (the number that
+    picks the layout is the number it's rendered at)."""
+    try:
+        cols = int(console.width)
+    except Exception:  # noqa: BLE001 — width unknown → the compact form always fits, so default to it
+        cols = 0
     rows = []
-    if cols >= 82:
+    if cols >= 86:
         for i, word in enumerate(_WORDMARK):
             blk, col = _EMBLEM[i]
             rows.append(Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}")))
@@ -1318,7 +1328,7 @@ def banner_panel(info: str) -> Panel:
 
 
 def banner(console: Console, info: str) -> None:
-    console.print(banner_panel(info))
+    console.print(banner_panel(console, info))
 
 
 def tui_enabled() -> bool:
