@@ -132,6 +132,13 @@ def _reasoning_note(llm) -> str:
     return "high/max run WITH tools via /v1/responses." if eff in ("high", "max") else ""
 
 
+def _ws_name(path: str) -> str:
+    """Short display name for the workspace shown in the status bar — the folder's basename, or '~' when the
+    workspace is the home dir (so a home-launched session doesn't read as the username)."""
+    p = os.path.realpath(path or ".")
+    return "~" if p == os.path.realpath(os.path.expanduser("~")) else (os.path.basename(p) or p)
+
+
 def main() -> None:
     # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `memagent init` runs on a
     # machine with nothing configured yet. A bare `memagent` (or one with non-subcommand args) falls through.
@@ -231,6 +238,10 @@ def main() -> None:
         base_tools._subdir_hints = None          # invalidate the cross-turn convention-hint cache
         root = newp                              # crash-recovery WAL + @mentions track the new root
         try:
+            _stats["workspace"] = _ws_name(newp)  # status bar reflects the new workspace immediately
+        except NameError:                         # _stats not built yet (reroot before the REPL loop) — ignore
+            pass
+        try:
             retriever = make_code_index(newp)    # re-index for the RELATED CODE tier
         except Exception:  # noqa: BLE001 — re-index is best-effort; the re-root still stands
             pass
@@ -315,7 +326,8 @@ def main() -> None:
     # optional rich TUI (the `tui` extra). Output via Rich, input via prompt_toolkit — temporally
     # separate from the synchronous run_turn, so no patch_stdout/threading. Off when piped (eval).
     _tui = None
-    _stats = {"model": llm.model, "policy": policy_label(canonical), "topic": "", "tokens": 0}
+    _stats = {"model": llm.model, "policy": policy_label(canonical), "topic": "",
+              "workspace": _ws_name(root), "tokens": 0}
     try:
         from . import tui as _tuimod
         if _tuimod.tui_enabled():

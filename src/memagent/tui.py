@@ -10,7 +10,7 @@ Design (borrowed from Hermes' rich+prompt_toolkit stack and Kimi's TUI UX):
     They are TEMPORALLY separate (output during the synchronous run_turn, input between turns), so
     there is no patch_stdout/threading minefield.
   - tool-call CARDS (spinner -> ✓/✗, primary-arg header, inline diff for edits),
-  - a two-line STATUS footer (model · policy · topic · tokens),
+  - a two-line STATUS footer (model · policy · workspace · tokens),
   - a SLASH-command palette wired to existing session ops (/new /switch /resume /threads /help /exit),
   - graceful ctrl-c: a SIGINT handler sets run_turn's existing `signal=` Event (loop.py:139) so the
     turn aborts at the next step boundary — no background thread.
@@ -756,17 +756,17 @@ def _saved_dollars(stats: dict):
 
 
 def _toolbar(stats: dict):
-    """Hermes-style pinned status bar (re-rendered each redraw). FormattedText, not HTML — so a topic
-    containing < & > can never break the markup."""
+    """Hermes-style pinned status bar (re-rendered each redraw). FormattedText, not HTML — so a workspace
+    name containing < & > can never break the markup."""
     _dim, _accent, _val = "fg:ansibrightblack", "fg:ansibrightcyan bold", "fg:ansicyan"
     sep = (_dim, "  │  ")
 
     def render():
-        topic = _shorten(stats.get("topic") or "—", 32)
+        ws = _shorten(stats.get("workspace") or "—", 28)
         ft = [
             (_accent, " ◆ "), (_val, str(stats.get("model", "?"))),
             sep, ("", str(stats.get("policy", "?"))),
-            sep, (_dim, topic),
+            sep, (_dim, f"📂 {ws}"),
             sep, (_dim, f"Σ {stats.get('tokens', 0)} tok · {stats.get('fresh', 0)} fresh"),
         ]
         # Headline the MOAT number — $ SAVED vs a full-transcript agent (priced at the current model; flips
