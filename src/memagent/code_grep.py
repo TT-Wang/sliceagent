@@ -186,7 +186,8 @@ def make_grep_tool(host) -> ToolEntry:
 
 # ── glob: find files by NAME (the discovery companion to grep's find-by-CONTENT) ──────────────────────
 _GLOB_DEFAULT_LIMIT = 100
-_GLOB_IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache"}
+_GLOB_IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache",
+                     ".next", ".turbo", ".parcel-cache", ".nuxt", ".svelte-kit", ".output", "dist", "build"}
 
 _GLOB_SCHEMA = {
     "type": "function",

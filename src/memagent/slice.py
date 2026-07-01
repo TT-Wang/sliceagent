@@ -901,8 +901,11 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # PageTable — the SINGLE read/retrieval entry: unifies code discovery (retriever), project notes
     # (the SubdirHints above), and cross-session episodes (memory) behind lookup(). Built ONCE per
     # closure; build() drives it. Backends emit RAW text; the renderer fences (one layer).
-    pages = PageTable(retriever, memory, hints, session_id=session_id or None)
-    swap = SwapManager(retriever)   # owns the working-set page lifecycle for this session
+    # GATE the code retriever on being in a project (like the repo map): rooted at a bare HOME the RELATED
+    # CODE search would scan the WHOLE home directory every turn (~6s/turn) for no useful signal.
+    _retr = retriever if proot else None
+    pages = PageTable(_retr, memory, hints, session_id=session_id or None)
+    swap = SwapManager(_retr)   # owns the working-set page lifecycle for this session
     # CACHE tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session (stable →
     # prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/find. Lazy
     # import avoids any slice<->tools cycle; '' (suppressed) for hosts without root() (in-memory stubs).

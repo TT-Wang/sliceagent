@@ -176,6 +176,10 @@ _IGNORE_NAMES = frozenset({
     ".git", ".hg", ".svn", ".venv", "venv", "env", ".env", "node_modules", "__pycache__", ".ruff_cache",
     ".pytest_cache", ".mypy_cache", ".tox", ".idea", ".vscode", ".cache", "dist", "build", ".eggs", "htmlcov",
     ".DS_Store",
+    # JS/TS build + framework caches — huge generated trees that make repo_map/list/retrieval crawl (hunter's
+    # .next was ~thousands of files → 6s builds); never source the agent should read.
+    ".next", ".turbo", ".parcel-cache", ".nuxt", ".svelte-kit", ".output", ".angular", ".vite", "coverage",
+    ".gradle",
 })
 _IGNORE_SUFFIX = (".egg-info", ".pyc")
 _LIST_CAP = 600   # bound recursive output so a huge tree can't flood the slice
