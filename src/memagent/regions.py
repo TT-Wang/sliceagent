@@ -433,7 +433,8 @@ def render_closure(s) -> str:
     """CHANGE-SET CLOSURE — the PRECISE half of 'verify before done'. After an edit settles, name the
     dependents whose code STILL references a symbol your edit removed or moved: a dangling call-site a
     coordinated change must fix (re-observation-reach = action-reach). SYMBOL-AWARE (SwapManager.prefetch
-    computes stale_deps from the cached code graph: pre-edit defs - current defs, intersected with each
+    computes stale_deps from the code graph — a SENSORY CORTEX derived view, re-derived on file change,
+    not a persisted store: pre-edit defs - current defs, intersected with each
     dependent's current ref tokens), so it is SILENT on feature-adds (nothing removed → never inflates a
     non-refactor task) and on already-fixed sites (their tokens no longer name the symbol). Locator-only,
     advisory, self-extinguishing (kept to UNOPENED stale deps), bounded; empty on a no-graph host. It does
@@ -640,9 +641,10 @@ REGION_ORDER = (
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
     # (CURRENT REQUEST renders OUTSIDE the fence in build() — see render_current_request above — not here.)
-    # REPO STATE — the LIVE world-state region (cache tier A): current branch + changed-file set,
-    # re-probed every build (not the session-start snapshot). High-authority current-state ground truth,
-    # so it rides in the salient tail just above the blocker/error. Suppresses itself when not a repo.
+    # REPO STATE — the LIVE world-state region (SENSORY CORTEX — a derived view, tier A): current branch
+    # + changed-file set, re-probed every build (not the session-start snapshot, and never persisted).
+    # High-authority current-state ground truth, so it rides in the salient tail just above the blocker/
+    # error. Suppresses itself when not a repo.
     # CURRENT PROJECT — where the agent is working RIGHT NOW (the frame on top of the immutable boundary):
     # the moved relative-path base + auto-granted file-tool reach, otherwise invisible. Rides the salient
     # tail so a follow-up's referent resolves HERE. Self-suppresses for the single-project case.

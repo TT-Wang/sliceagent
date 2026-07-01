@@ -12,6 +12,14 @@ MVCC-style snapshot descriptor / a PCB. The single invariant "cache not log" IMP
 LLM-agnosticism (the cache contract sits below the model). Borrowed + validated against
 CPU/MMU/out-of-order/microkernel/dataflow/DB designs (see auto-memory: kernel-architecture).
 
+IN BRAIN TERMS (a naming aid — see pagetable.py for the fuller legend): the Slice's own carried
+state (findings, conversation ring, plan, mission — see seal() below) is PREFRONTAL CORTEX /
+working memory: bounded, actively maintained, free, lost on reset. PageTable's durable-store
+reads are HIPPOCAMPUS (the episodic log — explicit, cue-dependent recall) and NEOCORTEX (the
+lessons vault — distilled, auto-surfaced). PageTable's code/project-notes reads, plus the direct
+git/repo-map probes, are SENSORY CORTEX — perception of the live world, not memory of the past;
+nothing there is ever "cached" because nothing is ever stored between turns.
+
 No chat history across turns. The host builds the SEED messages once per turn via
 `make_build_slice` (the reconstruction seam); within the turn the loop accumulates native
 messages. Tool results also fold into the carried tiers through `slice_sink` (an event sink)
@@ -826,8 +834,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     `state` is a Slice (single task) OR a Session (host-side topic manager, has .active()). The
     ACTIVE slice is resolved EACH call, so a topic switch redirects the next turn's seed.
     System (instructions + the active topic's goal) is stable per topic and cacheable; the user
-    message is the volatile slice. Cross-session memory is recalled once per topic-goal (cached);
-    code discovery is per-turn (adapts as the agent works)."""
+    message is the volatile slice. NEOCORTEX (cross-session lessons) is recalled once per topic-goal
+    (memoized); SENSORY CORTEX (code discovery) is re-derived every turn (adapts as the agent works)."""
     is_session = hasattr(state, "active")
     cwd = ""
     try:
@@ -850,8 +858,9 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # warm) across turns. Empty outside a repo / on any error — then no WORKSPACE header is spliced.
     # STATIC project facts (manifest / package manager / verify commands) go in the cacheable SYSTEM
     # message; LIVE git state (branch + changed files) is recomputed each build() into the volatile
-    # slice (the world-state cache's tier-A region), so the system message stays byte-stable and the
-    # model always sees current git state — no stale session-start snapshot.
+    # slice (the SENSORY CORTEX / derived-view tier-A region — perceived fresh, never persisted), so
+    # the system message stays byte-stable and the model always sees current git state — no stale
+    # session-start snapshot.
     # REPO-CONTENT GATE: repo-derived blocks (PROJECT facts, CONVENTIONS, REPO MAP, subdir hints) are
     # included ONLY when cwd is actually inside a project — a git root or a project-marker root. This is a
     # session-static, byte-stable decision (no mid-session flip → prompt-cache stays warm). Launched in a
@@ -885,8 +894,10 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         "\n\n# ENVIRONMENT (OBSERVED ground truth at session start — use THESE real values; do NOT "
         "assume a generic sandbox/OS or path)\n" + "\n".join(env_facts)
     )
-    recall_cache: dict[str, str] = {}
-    # ITEM 17 — the subdirectory-hint tracker, constructed ONCE (closure-scoped, like recall_cache):
+    lessons_memo: dict[str, str] = {}   # per-build memo of the NEOCORTEX (memory-lessons) lookup, keyed
+    #                                     by goal — NOT a durable store itself, just avoids repeating the
+    #                                     lookup within one build() when the goal is unchanged.
+    # ITEM 17 — the subdirectory-hint tracker, constructed ONCE (closure-scoped, like lessons_memo):
     # a DURABLE store (each subtree surfaces once per task), NOT a transcript. hasattr-guarded so a
     # host without root() (in-memory test stubs) gets no hints. Reuse ONE instance across turns (stashed on
     # the long-lived ToolHost) so the per-task "surface once" dedup actually holds — a fresh instance every
@@ -916,9 +927,10 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     _retr = retriever if proot else None
     pages = PageTable(_retr, memory, hints, session_id=session_id or None)
     swap = SwapManager(_retr)   # owns the working-set page lifecycle for this session
-    # CACHE tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session (stable →
-    # prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/find. Lazy
-    # import avoids any slice<->tools cycle; '' (suppressed) for hosts without root() (in-memory stubs).
+    # SENSORY CORTEX tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session
+    # (stable → prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/
+    # find. A derived view (re-computed from the filesystem), memoized for the session, never a durable
+    # store. Lazy import avoids any slice<->tools cycle; '' (suppressed) for hosts without root() (stubs).
     try:
         from .tools import repo_map as _repo_map
         # Map the CONFINEMENT root (respects the workspace boundary), but ONLY when we're inside a project —
@@ -965,43 +977,51 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # at both primacy and recency (see build()). Cache breakpoint now sits cleanly at the end of this prefix.
         return system_prefix
 
+    # Brain-analogy tags below (legend at the top of this file / in pagetable.py): PFC = carried working
+    # memory (free, in-memory, lost on reset); HIPPOCAMPUS = episodic log (explicit recall); NEOCORTEX =
+    # lessons vault (auto-surfaced); SENSORY CORTEX = derived view (recomputed live, never persisted).
+    # NOTE: this function's statement ORDER is NOT freely regroupable by tag — swap.prefetch (SENSORY
+    # CORTEX) must run before build_artifacts (SENSORY CORTEX) because it populates s.protected_deps/
+    # s.hot that build_artifacts reads; a mechanical CARRIED-then-RETRIEVED reorder would break that.
+    # The tags are for legibility only; do not reorder these lines by tag.
     def build() -> list[dict]:
-        s = _active(state)
-        swap.prefetch(s)   # CO-RESIDENCY: refresh change-set deps from the code graph, BEFORE any eviction
-        goal = s.goal or task
-        if goal not in recall_cache:
-            # RELEVANT MEMORY through the ONE read seam (memory-lessons backend) — no sibling recall.
+        s = _active(state)                                            # PFC: resolve the active slice
+        swap.prefetch(s)   # SENSORY CORTEX: refresh change-set deps from the code graph, BEFORE any eviction
+        goal = s.goal or task                                          # PFC: carried goal
+        if goal not in lessons_memo:
+            # NEOCORTEX through the ONE read seam (memory-lessons backend) — no sibling recall.
             # R1: pass the files in play at topic-recall time so memem bonuses lessons tagged with them.
-            # Snapshot-at-first-recall (cached by goal) — keeps the per-topic single memem call stable.
-            _paths = sorted(set(s.edited_files) | set(s.active_files)) or None
-            recall_cache[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6, paths=_paths))
+            # Snapshot-at-first-recall (memoized by goal) — keeps the per-topic single memem call stable.
+            _paths = sorted(set(s.edited_files) | set(s.active_files)) or None   # PFC: carried file sets
+            lessons_memo[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6, paths=_paths))
         # the render view budget tracks the LIVE adaptive budget (s.read_budget, grown on refault by
         # SwapManager); OPEN FILES/RECENT/findings are otherwise UNCAPPED (bound = relevance, not size).
-        read_budget = s.read_budget
+        read_budget = s.read_budget                                    # PFC: carried adaptive budget
         artifacts = build_artifacts(s, tools, full_file_lines=FULL_FILE_LINES, read_budget=read_budget)
+        # ^ SENSORY CORTEX: fresh re-read of OPEN FILES from disk (depends on swap.prefetch above)
         # PageTable.lookup is the single read path. discovery_query builds the code focus (Markov:
         # latest finding + current error + task).
-        code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=DISCOVERY_K)
+        code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=DISCOVERY_K)  # SENSORY CORTEX
         discovery = render_discovery(code_refs, discovery_chars=DISCOVERY_CHARS)
-        threads = render_threads(state.open_threads()) if is_session else ""
-        note_refs = pages.lookup(s.active_files, kind="project-notes", k=1)  # ITEM 17 subtree notes
+        threads = render_threads(state.open_threads()) if is_session else ""  # PFC: other topics' state
+        note_refs = pages.lookup(s.active_files, kind="project-notes", k=1)  # SENSORY CORTEX: subtree notes
         hint_text = note_refs[0].preview if note_refs else ""
-        # CACHE tier A — LIVE world-state: re-probe git each build (current branch + changed files), so
+        # SENSORY CORTEX — LIVE world-state: re-probe git each build (current branch + changed files), so
         # the slice always carries the up-to-date working-tree state instead of a stale snapshot.
         worktree = git_worktree_state(cwd) if cwd else ""
-        # PAGED-OUT HISTORY manifest — the cache made VISIBLE so the model CALLS recall_history (the dead
-        # active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession; bounded
-        # to MANIFEST_TURNS locators (moat), self-suppresses when no durable cache (NullMemory => []).
-        manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)
+        # PAGED-OUT HISTORY manifest — the HIPPOCAMPUS made VISIBLE so the model CALLS recall_history (the
+        # dead active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession;
+        # bounded to MANIFEST_TURNS locators (moat), self-suppresses with no durable log (NullMemory => []).
+        manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)  # HIPPOCAMPUS
         cache_manifest = render_cache_manifest(manifest_refs)
         # ACTIVE FOCUS — surface the file-tool reach beyond the workspace (auto-granted when the shell
         # works on an external dir, but otherwise INVISIBLE → the model defaulted to the workspace frame
         # and lost the thread across turns). Carries naturally: the host's extra roots persist per session.
         focus_text = ""
         if hasattr(tools, "focus") and hasattr(tools, "root"):
-            _focus_path, _extra_roots = tools.focus()
+            _focus_path, _extra_roots = tools.focus()   # PFC: carried ToolHost state (set by change_workspace)
             focus_text = render_focus(_focus_path, _extra_roots, home=os.path.expanduser("~"), workspace=tools.root())
-        body = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
+        body = render_slice(s, artifacts, discovery, lessons_memo[goal], threads,
                             worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix;
                             max_findings=_NO_CAP)                       # subdir hints ride the NOW footer (nowblock) below
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames

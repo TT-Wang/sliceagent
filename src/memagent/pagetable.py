@@ -16,6 +16,20 @@ NO-TRANSCRIPT MOAT: lookup() reads from durable/derived sources each turn; it ne
 accumulates state across turns (the only per-instance state is SubdirHints' per-task
 surfaced-subtree set, which is a bounded durable store, not a transcript).
 
+BRAIN-ANALOGY LEGEND (used in this file's section comments — a naming aid, not a new mechanism):
+  SENSORY CORTEX  — code / project-notes: re-computed live from the filesystem, never persisted;
+                    perception of the present, not memory of the past.
+  NEOCORTEX       — memory-lessons: distilled, cross-session, auto-surfaced (like consolidated
+                    semantic memory recalled associatively, with no explicit search).
+  HIPPOCAMPUS     — episode-*: the lossless per-turn log, reached only by an explicit, cue-dependent
+                    recall (recall_history) — like real hippocampal recall, prone to confabulation if
+                    the cue is weak, which the visible-manifest/recall-marker work exists to prevent.
+The Slice's own carried state (findings, conversation ring, plan, mission — see slice.py) is the
+fourth piece: PREFRONTAL CORTEX / working memory — bounded, actively maintained, free (no lookup()
+call at all), and lost when the task resets. Only 4 of PageTable's 6 kinds fire per turn inside
+build(); the other 2 (episode-xsession, episode-search-thissession) are reached only via the
+recall_history tool (history.py) — the model's own hippocampal-recall lever.
+
 DEFERRED (next backends to fold in here):
   - per-file code refs (fan-out of the repo map) — kept as the single '(repo map)' page.
 """
@@ -55,12 +69,20 @@ class PageTable:
         RAW text; the caller fences them at render time."""
         if k <= 0:
             return []
+        # — SENSORY CORTEX (derived views): re-computed from the LIVE filesystem/code every call,
+        # never persisted — there is nothing to "remember" here, only to look at again, more carefully.
         if kind == "code":
             return self._code(focus, k)
         if kind == "project-notes":
             return self._project_notes(focus)
+        # — NEOCORTEX (long-term memory): distilled, cross-session, auto-surfaced — like a consolidated
+        # semantic memory that comes to mind associatively, without an effortful, cue-driven search.
         if kind == "memory-lessons":
             return self._lessons(focus, k, paths)
+        # — HIPPOCAMPUS (episodic memory): the lossless per-turn log. Retrieval is cue-dependent and
+        # EXPLICIT (recall_history) — like real hippocampal recall, it can fail or confabulate if the
+        # retrieval cue is weak, which is exactly the class of bug the cache-manifest/recall-marker work
+        # in slice.py and regions.py exists to prevent.
         if kind == "episode-xsession":
             return self._episodes(focus, k)
         if kind == "episode-thissession":
@@ -97,8 +119,9 @@ class PageTable:
 
     def _lessons(self, query: str, k: int, paths=None) -> list[PageRef]:
         """RELEVANT MEMORY: distilled cross-session LESSONS (memem's relevance-gated retrieve), the
-        always-on per-turn recall. Distinct from `_episodes` (raw FTS5 episode text): lessons are the
-        consolidated long-term vault, episodes are the lossless cache. Each Snippet -> one PageRef
+        always-on per-turn recall — NEOCORTEX in brain terms: consolidated, generalized, auto-surfaced.
+        Distinct from `_episodes` (raw FTS5 episode text) — HIPPOCAMPUS: the lossless, per-session log,
+        reached only by an explicit, cue-dependent recall_history call. Each Snippet -> one PageRef
         (preview carries the lesson text RAW; the renderer fences it). memory absent / no hits -> []."""
         if self.memory is None:
             return []

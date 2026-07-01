@@ -307,7 +307,7 @@ def build_workspace_snapshot(cwd: str) -> str:
     return "\n".join(lines)
 
 
-# ── LIVE world-state (the cache's recomputed-each-build region) ───────────────
+# ── LIVE world-state (SENSORY CORTEX — the derived-view, recomputed-each-build region) ────────────
 
 
 def project_root(cwd: str) -> Optional[str]:
@@ -363,11 +363,12 @@ def project_conventions(cwd: str, *, max_chars: int = 4000) -> str:
 
 
 def git_worktree_state(cwd: str, *, max_files: int = 20) -> str:
-    """LIVE working-tree state for the VOLATILE slice tier (the world-state cache's recomputed-each-
-    build region): current branch + the CHANGED-FILE SET (staged/modified/untracked/conflicts),
-    re-probed every build — unlike the one-shot session-start snapshot. This is the cure for the
-    stale-snapshot 're-run git' smell: the model always sees the current git state. Bounded to
-    max_files. '' outside a repo / on error; never raises (POMDP per-turn belief update analog)."""
+    """LIVE working-tree state for the VOLATILE slice tier (SENSORY CORTEX — the derived-view,
+    recomputed-each-build region, never persisted): current branch + the CHANGED-FILE SET (staged/
+    modified/untracked/conflicts), re-probed every build — unlike the one-shot session-start snapshot.
+    This is the cure for the stale-snapshot 're-run git' smell: the model always sees the current git
+    state. Bounded to max_files. '' outside a repo / on error; never raises (POMDP per-turn belief
+    update analog)."""
     resolved = _resolve_cwd(cwd)
     if resolved is None:
         return ""

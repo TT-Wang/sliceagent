@@ -94,7 +94,8 @@ class SwapManager:
             s.hot = {p: t - 1 for p, t in s.hot.items() if t - 1 > 0}
         r = self.retriever
         # Snapshot pre-edit def-names of files READ but not yet edited, so we can later see what an edit
-        # REMOVED/MOVED (pre-edit defs - current defs). Cheap: reads the already-cached code graph.
+        # REMOVED/MOVED (pre-edit defs - current defs). Cheap: reads the already-computed code graph
+        # (SENSORY CORTEX — a derived view, not a persisted store).
         if hasattr(r, "def_names") and hasattr(s, "pre_defs"):
             for p in s.active_files:
                 if p not in s.edited_files and p not in s.pre_defs:

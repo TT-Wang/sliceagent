@@ -247,7 +247,8 @@ def main() -> None:
         base_tools._root = newp
         base_tools._focus = None
         base_tools._extra_roots.clear()
-        base_tools._subdir_hints = None          # invalidate the cross-turn convention-hint cache
+        base_tools._subdir_hints = None          # reset the convention-hint tracker (SENSORY CORTEX —
+        #                                           derived from the filesystem, not persisted)
         root = newp                              # crash-recovery WAL + @mentions track the new root
         try:
             _stats["workspace"] = _ws_name(newp)  # status bar reflects the new workspace immediately

@@ -222,9 +222,10 @@ _CODE_SUFFIX = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb
 
 
 def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_chars: int = 12000) -> str:
-    """A compact, ignore-aware STRUCTURAL MAP of the project (the world-state cache's tier-B resident
-    store): directories with their files, pruned of VCS/venv/cache + asset/log noise, RANKED by source-
-    density so the real code tree shows first and never gets starved by asset/log dirs. This is what
+    """A compact, ignore-aware STRUCTURAL MAP of the project (SENSORY CORTEX — the derived-view tier-B
+    resident view, memoized for the session, never a persisted store): directories with their files,
+    pruned of VCS/venv/cache + asset/log noise, RANKED by source-density so the real code tree shows
+    first and never gets starved by asset/log dirs. This is what
     kills cold-start — a 'review/understand the repo' task sees the structure RESIDENT instead of re-
     listing with find. Built ONCE per session (stable → prompt-cache warm); new files created mid-task
     surface via the LIVE worktree region. Over budget, late dirs collapse to a count; `max_chars` is a
