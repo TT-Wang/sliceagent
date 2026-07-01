@@ -81,6 +81,7 @@ REGISTRY: list[EnvVar] = [
            "(per-flag AGENT_EXPERIMENTAL_<ID> overrides).", ""),
     # ── monitoring / debug ────────────────────────────────────────────────────────────────────
     EnvVar("AGENT_METRICS", "monitor", "Set truthy to print per-turn fresh-token (moat) metrics at exit.", ""),
+    EnvVar("AGENT_TIMING", "monitor", "Set truthy to print a per-turn latency breakdown (slice build vs model).", ""),
     EnvVar("AGENT_MONITOR", "monitor", "Set truthy to enable the live monitor server.", ""),
     EnvVar("AGENT_MONITOR_PORT", "monitor", "Port for the monitor server.", ""),
     EnvVar("MEMAGENT_MONITOR_DIR", "monitor", "Directory the monitor writes slice snapshots to.", ""),

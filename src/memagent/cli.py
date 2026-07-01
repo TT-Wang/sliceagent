@@ -752,6 +752,15 @@ def main() -> None:
             record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
             _expand_mentions(line)               # @path → pin the file into OPEN FILES
             build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
+            if os.environ.get("AGENT_TIMING"):   # per-turn latency breakdown (build vs model) → find the hang
+                import time as _tt
+                _b = build
+                def build(_b=_b):
+                    _s = _tt.monotonic()
+                    r = _b()
+                    print(f"  ⏱ slice build {(_tt.monotonic() - _s) * 1000:.0f} ms (spinner appears here; "
+                          "the rest of the wait is the model's first token)", flush=True)
+                    return r
             # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
             # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
             import time as _time

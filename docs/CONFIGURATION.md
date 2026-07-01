@@ -2,7 +2,7 @@
 
 _Auto-generated from `src/memagent/envspec.py` — do not edit by hand (`python scripts/gen_config_reference.py`)._
 
-memagent reads **44** environment variables across **6** groups; every value is validated at startup (a misspelled enum warns instead of silently defaulting). Run `memagent config --list` to see the resolved value of each on your machine. Secrets (🔒) are read from the environment / config and never printed.
+memagent reads **45** environment variables across **6** groups; every value is validated at startup (a misspelled enum warns instead of silently defaulting). Run `memagent config --list` to see the resolved value of each on your machine. Secrets (🔒) are read from the environment / config and never printed.
 
 ## agent
 
@@ -56,6 +56,7 @@ memagent reads **44** environment variables across **6** groups; every value is 
 | `AGENT_METRICS` | — | Set truthy to print per-turn fresh-token (moat) metrics at exit. |
 | `AGENT_MONITOR` | — | Set truthy to enable the live monitor server. |
 | `AGENT_MONITOR_PORT` | — | Port for the monitor server. |
+| `AGENT_TIMING` | — | Set truthy to print a per-turn latency breakdown (slice build vs model). |
 | `MEMAGENT_MONITOR_DIR` | — | Directory the monitor writes slice snapshots to. |
 
 ## provider
