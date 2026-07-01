@@ -1,12 +1,12 @@
 [project]
 name = "memagent"
 dynamic = ["version"]   # single-sourced from src/memagent/__init__.py (see [tool.hatch.version])
-description = "A memory-native coding agent: deterministic, bounded, reconstructed context (slice architecture)."
+description = "A coding agent with a new context-engineering framework: bounded, deterministic, reconstructed context (slice architecture) — built for long-horizon work."
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "TT-Wang" }]
-keywords = ["coding-agent", "llm", "agent", "context-management", "memory", "cli", "mcp"]
+keywords = ["coding-agent", "llm", "agent", "context-engineering", "context-management", "long-horizon", "memory", "cli", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
