@@ -213,6 +213,43 @@ def main() -> None:
     from .code_grep import make_glob_tool, make_grep_tool  # ripgrep discovery: grep (contents) + glob (names)
     base_tools.registry.register(make_grep_tool(base_tools))
     base_tools.registry.register(make_glob_tool(base_tools))
+
+    # WORKSPACE SWITCH — the agent CAN re-root when the user explicitly asks (the same re-root /cwd performs).
+    # Shared by the change_workspace tool AND /cwd. User-authorized either way; teenager mode still confirms
+    # the tool call, so switching is one tap instead of typing the whole path.
+    def _reroot(path: str) -> str:
+        nonlocal root, retriever
+        raw = os.path.expanduser((path or "").strip())
+        # a RELATIVE path (the agent often passes 'hunter') resolves against the CURRENT workspace, not the
+        # process cwd — so "switch to hunter" means <workspace>/hunter, as the user intends.
+        newp = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(base_tools.root(), raw))
+        if not os.path.isdir(newp):
+            return f"not a directory: {path}"
+        base_tools._root = newp
+        base_tools._focus = None
+        base_tools._extra_roots.clear()
+        base_tools._subdir_hints = None          # invalidate the cross-turn convention-hint cache
+        root = newp                              # crash-recovery WAL + @mentions track the new root
+        try:
+            retriever = make_code_index(newp)    # re-index for the RELATED CODE tier
+        except Exception:  # noqa: BLE001 — re-index is best-effort; the re-root still stands
+            pass
+        return f"workspace switched → {newp} (repo map, file tools & commands now rooted here)"
+
+    from .registry import ToolEntry
+    _CW_SCHEMA = {"type": "function", "function": {
+        "name": "change_workspace",
+        "description": ("Switch your workspace ROOT to another directory — call this when the user explicitly "
+                        "asks to switch workspace / open a project / work in a different folder (e.g. 'switch "
+                        "to hunter', 'work in ~/proj'). Re-roots your file tools, run_command cwd, repo map and "
+                        "git to that dir. Do NOT call it for a mere mention of a path."),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Directory to switch to (absolute or ~)."}},
+            "required": ["path"]}}}
+    base_tools.registry.register(ToolEntry(
+        name="change_workspace", schema=_CW_SCHEMA,
+        handler=lambda args: _reroot(str((args or {}).get("path") or "")),
+        accesses=lambda args: [], source="builtin"))
     # web tools (fetch_url + web_search, DuckDuckGo, no key) — network egress, so gated by AGENT_WEB
     # (default ON). SSRF-guarded + results fenced UNTRUSTED + large pages paged (see web.py).
     if os.environ.get("AGENT_WEB", "1").strip().lower() not in ("0", "off", "false", "no"):
@@ -507,28 +544,13 @@ def main() -> None:
                 note = _reasoning_note(llm)
                 _console.print(f"  ✓ reasoning → [bold]{llm.reasoning}[/] (saved)" + (f"\n  {note}" if note else ""))
         elif cmd == "/cwd":
-            # Switch the workspace root mid-session (user-authorized — the AGENT can't re-root itself, that's
-            # its boundary). Re-roots the file tools + run_command cwd, drops the stale focus/hint caches, and
-            # re-indexes; the next slice's REPO MAP / ENVIRONMENT / git all reflect the new root. (Crash-
-            # recovery follows the new root; a running subagent host keeps the old code index until relaunch.)
-            nonlocal root, retriever
+            # Manual workspace switch (the agent also does this via change_workspace when you ask). Shares
+            # _reroot: re-roots file tools + run_command cwd + repo map + git; re-indexes; crash-recovery
+            # follows the new root. (A running subagent host keeps the old code index until relaunch.)
             if not arg:
                 _console.print(f"  workspace: {base_tools.root()}")
             else:
-                newp = os.path.realpath(os.path.expanduser(arg))
-                if not os.path.isdir(newp):
-                    _console.print(f"  not a directory: {arg}")
-                else:
-                    base_tools._root = newp
-                    base_tools._focus = None
-                    base_tools._extra_roots.clear()
-                    base_tools._subdir_hints = None        # invalidate the cross-turn convention-hint cache
-                    root = newp                            # crash-recovery WAL + @mentions track the new root
-                    try:
-                        retriever = make_code_index(newp)  # re-index for the RELATED CODE tier
-                    except Exception:  # noqa: BLE001 — re-index is best-effort; the re-root still stands
-                        pass
-                    _console.print(f"  ✓ workspace → [bold]{newp}[/]  (repo map, file tools & commands rooted here)")
+                _console.print("  ✓ " + _reroot(arg))
         else:
             _console.print(f"  unknown command {cmd} (/help)")
         return True

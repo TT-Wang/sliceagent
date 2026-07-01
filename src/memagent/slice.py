@@ -827,13 +827,13 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     env_line = (
         f"\n\n# PROJECT ROOT & BOUNDARY\nYou start in: {cwd} — reference files here by their RELATIVE path "
         "(e.g. 'pkg/mod.py', 'test_x.py'); run_command already starts here.\n"
-        "Your file tools are confined to your authorized directories — this is the BOUNDARY you cannot "
-        "cross. To act outside it, use run_command/execute_code (the shell is unconfined). You CANNOT change "
-        "your own workspace root (it is your boundary): if the user asks you to switch workspace / cd / open a "
-        "different project, tell them to type `/cwd <path>` (or relaunch memagent rooted there) — do NOT claim "
-        "you switched when you have not. You CAN still work on any file inside your authorized directories by "
-        "its path. If you move into another authorized project it appears under CURRENT PROJECT in the context, "
-        "and bare relative paths resolve THERE — you are not pinned to the start dir."
+        "Your file tools are confined to your authorized directories — this is the BOUNDARY. To act outside "
+        "it, use run_command/execute_code (the shell is unconfined). When the user asks you to switch "
+        "workspace / cd / open a different project, CALL change_workspace(path) — it re-roots your file tools, "
+        "run_command cwd, repo map and git to that dir (the user can also type `/cwd <path>` themselves). Do "
+        "NOT claim you switched unless change_workspace actually succeeded. You can also work on any file "
+        "inside your authorized dirs by its path. If you move into another authorized project it appears under "
+        "CURRENT PROJECT in the context, and bare relative paths resolve THERE — not pinned to the start dir."
     ) if cwd else ""
     # ITEM 11(B) — git/project snapshot computed ONCE per session (NOT inside build()). It is
     # deterministic per cwd within a session, so the system message stays byte-stable (prompt-cache
