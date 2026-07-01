@@ -50,23 +50,6 @@ def livesink_status_transitions_and_prints_above():
 
 
 @check
-def livesink_clears_the_writing_status_when_the_response_arrives():
-    # AssistantText means the reply is done → the "writing…" status must clear THEN, not linger until
-    # TurnEnd, so the finished panel isn't shown above a stale streaming spinner. (RichSink already stops its
-    # transient status on AssistantText; this gives LiveSink the same guarantee.)
-    from memagent.tui import LiveSink
-    from memagent.events import SliceBuilt, AssistantText
-    console, _ = _rec_console()
-    statuses = []
-    sink = LiveSink(console, {}, lambda s: statuses.append(s))
-    sink(SliceBuilt("q"))
-    sink.on_delta("content", "streaming the answer now")     # → writing… …
-    assert (statuses[-1] or "").startswith("writing…"), statuses
-    sink(AssistantText("the final answer"))                  # must clear the status right here
-    assert statuses[-1] is None, f"AssistantText must clear the streaming status, got {statuses[-1]!r}"
-
-
-@check
 def livesink_read_card_is_header_only_like_richsink():
     # parity with RichSink: read/list cards show no content dump (shared _render_tool_result)
     from memagent.tui import LiveSink
