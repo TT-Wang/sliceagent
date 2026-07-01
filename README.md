@@ -1,10 +1,14 @@
 # memagent
 
-A **memory-native coding agent**. Its core bet is a different memory model from every mainstream agent:
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml) [![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+
+A **memory-native coding agent** for your terminal. Its core bet is a different memory model from every mainstream agent:
 
 > **Don't accumulate the transcript — reconstruct a small, deterministic working state every turn.**
 
 Mainstream agents accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). memagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
+
+**Contents:** [Why](#why) · [What it can do](#what-it-can-do) · [How it works](#how-it-works--the-brain-model) · [Install](#install) · [Quickstart](#quickstart) · [Usage](#usage) · [Benchmarks](#benchmarks) · [Under the hood](#under-the-hood) · [License](#license)
 
 ## Why
 
@@ -14,6 +18,19 @@ Mainstream agents accumulate a growing message history and **LLM-summarize it wh
 - **Cheap at scale** — validated: on long/iterative tasks the slice cut tokens up to ~60–80% and wall-clock ~70% vs a transcript loop, with identical test pass rates.
 
 This is the opposite of the field's default ("bigger windows + summarize"): **remember less, reconstruct precisely.**
+
+## What it can do
+
+memagent is an interactive terminal coding agent. Point it at a repo, describe the task in plain language, and it investigates, edits, and verifies.
+
+- **Edit code** — create, modify, and refactor files. Edits are workspace-confined and reversible with `/undo`.
+- **Run commands** — execute shell commands, launch background processes, and drive interactive terminals (REPLs, servers, `ssh`) through a sandbox — `local` by default, `docker` for full isolation.
+- **Investigate** — grep and search the tree, read line-numbered context, and trace a bug from its live error. Deterministic; no embeddings, no index to stale.
+- **Search the web** — fetch a page or run a keyless search when a task needs current information.
+- **Delegate** — fan out large, decomposable work to subagents, each on its own bounded slice, returning a summary instead of a transcript.
+- **Extend** — add tools via **MCP** servers, prompt-packs via **skills** (`SKILL.md`), or full **plugins** — all through one registry.
+- **Remember across sessions** — durable lessons are distilled and auto-surfaced when relevant (via [memem](https://github.com/TT-Wang/memem)); park a topic and `/resume` it later.
+- **Stay in control** — three permission modes with a hard floor on catastrophic commands; secrets are scrubbed from anything it runs or logs.
 
 ## How it works — the brain model
 
@@ -75,6 +92,50 @@ memagent                 # start the agent
 [LLM_BASE_URL=…]` and skip `init`. Discover every setting with `memagent config --list`.
 
 → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
+
+## Usage
+
+Run `memagent` in your project and type what you want in plain language. It rebuilds its working context, investigates, edits (auto-applied or confirmed, per your mode), and can run your tests to verify. A turn looks like:
+
+```text
+❯ why does retry_with_backoff drop the last attempt? fix it
+
+  🔍 grep "retry_with_backoff"   📖 read errors.py:40-72   ✎ edit errors.py
+  ┌─ assistant ─────────────────────────────────────────────┐
+  │ The loop exits on `attempt == max` before the final      │
+  │ sleep+retry, so the last attempt never runs. Changed the  │
+  │ bound to `attempt <= max` and added a regression test.    │
+  └──────────────────────────────────────────────────────────┘
+  ✓ done · 4 steps · 6.1k tokens
+```
+
+Attach a file or path to your message with `@`: `@src/errors.py explain the backoff`.
+
+**In-session commands** (type `/help` for the full list):
+
+| Command | What it does |
+|---|---|
+| `/model` · `/reasoning` | switch model / reasoning effort (persists) |
+| `/mode` | permission mode: **baby-sitter** (confirm each edit + command) · **teenager** (default; confirm risky ones) · **let-it-go** (auto-run all but catastrophic) |
+| `/undo` | revert the last edit(s) |
+| `/cwd <path>` | change the workspace root mid-session |
+| `/cost` | tokens and estimated $ spent this session |
+| `/skills` · `/tools` · `/mcp` · `/plugins` · `/agents` | list what's available to the agent |
+| `/threads` · `/resume` | switch between, or resume, parked topics |
+| `/learn <note>` | save a durable lesson yourself |
+| `/plan` | draft a plan before it starts editing |
+| `Ctrl-C` · `exit` | interrupt the turn · quit |
+
+**Configuration.** `memagent config --list` prints every setting. Set them persistently in `~/.memagent/config.toml` (written by `init`), or override any one via an environment variable:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `AGENT_MODEL` | *(required)* | the model id to run |
+| `AGENT_POLICY` | `teenager` | permission mode |
+| `AGENT_SANDBOX` | `local` | `local` or `docker` (isolated) |
+| `AGENT_MAX_STEPS` | `60` | per-turn step ceiling |
+| `MEMEM_VAULT` | *(unset)* | path that enables cross-session memory |
+| `AGENT_VERIFY_CMD` | *(unset)* | test command used as the verification oracle |
 
 ## Benchmarks
 
