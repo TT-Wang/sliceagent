@@ -251,6 +251,32 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
     assert s2.findings[-1] == "a short claim under the cap", s2.findings
 
 
+@check
+def truncated_user_report_also_advertises_recall():
+    # THIRD site sharing the same class of bug: capture_user_report stores the user's OWN detailed bug
+    # report (verbatim, bounded to MAX_REPORT_CHARS=280) as the OPEN USER REPORT blocker. The capturing
+    # turn also shows the message in full via CURRENT REQUEST, but a LATER turn only sees this bounded
+    # field — if it was silently cut, part of the user's own spec of what's broken would be lost with no
+    # recovery path. Both this and the findings fix now share the SAME _cut_with_recall_marker helper.
+    from memagent.regions import capture_user_report
+    from memagent.slice import Slice
+
+    long_report = "it's broken - " + ("when I click X, Y happens instead of Z. " * 8)
+    from memagent.text_utils import normalize_ws
+    assert len(normalize_ws(long_report)) > 280, "test premise broken: must exceed MAX_REPORT_CHARS"
+
+    s = Slice(); s.reset("x")
+    assert capture_user_report(s, long_report) is True, "a failure-report message must be captured"
+    assert "PARTIAL" in s.open_report and "don't guess" in s.open_report, s.open_report
+    assert "recall_history(search=" in s.open_report, s.open_report
+
+    # a short report fits verbatim, no marker
+    s2 = Slice(); s2.reset("y")
+    short = "it's broken - the button doesn't work"
+    capture_user_report(s2, short)
+    assert s2.open_report == short, s2.open_report
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:

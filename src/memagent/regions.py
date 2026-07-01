@@ -184,6 +184,26 @@ def is_done_claim(text: str) -> bool:
     return bool(_DONE_CLAIM_RE.search(text or ""))
 
 
+# RECALL-ON-CUT marker (see memory: recall-ring-truncation-gap). A silent one_line() cut with no signal
+# reads as "this is the whole thing" — the model then RE-DERIVES the missing part from scratch instead of
+# recalling it, and a re-derived answer usually does NOT match the original (confabulation, not correction).
+# Found live TWICE via two independent cut sites (a bug-hunt reply cut in the RECENT CONVERSATION ring, then
+# again cut here in FINDINGS/OPEN USER REPORT) — any NEW site that bounds model- or user-authored text with
+# one_line() should go through this helper rather than a bare one_line() call.
+_RECALL_ON_CUT_MARK = " [cut — PARTIAL; see PAGED-OUT HISTORY or recall_history(search=...) for the rest, don't guess]"
+
+
+def _cut_with_recall_marker(text: str, cap: int) -> str:
+    """one_line(text, cap), but if the cut actually removed content, replace the tail with a marker
+    naming the cut + the two general recall paths (no turn number is available at these call sites,
+    unlike the RECENT CONVERSATION ring which knows an exact recall_history(last=K)) + an explicit
+    don't-guess instruction."""
+    was_cut = len(one_line(text, cap + 1)) > cap
+    if not was_cut:
+        return one_line(text, cap)
+    return one_line(text, max(0, cap - len(_RECALL_ON_CUT_MARK))) + _RECALL_ON_CUT_MARK
+
+
 def record_note(s, text: str, source: str = "tool-note") -> bool:
     """Fold the model's per-turn note (a distilled FACT it established) into the FINDINGS tier.
     Returns True iff a GENUINELY NEW finding was added (not narration, not a dedup refresh) — the
@@ -199,18 +219,11 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
     is downgraded to "claim" unless the caller passed an observed source, so it can't ratchet into
     an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call.
 
-    RECALL BRIDGE (mirrors the RECENT CONVERSATION ring fix): a long AssistantText reply (e.g. a multi-item
-    bug-hunt report) folds in here as a "claim" via one_line(text, MAX_FINDING_CHARS) — a hard per-item cut,
-    since findings must stay compact. Without a signal, a later "what were those bugs" sees ONLY the
-    surviving fragment (findings carry no turn/episode number, so there's no exact recall_history(turns=[N])
-    to hand back) with no hint anything was cut, and re-derives from the code instead of recalling — the
-    fabrication reported after "explain item 2" was fixed for the ring but recurred here via this SEPARATE
-    truncation path. Fix: append a terse marker naming the cut + the two real recall paths (the PAGED-OUT
-    HISTORY manifest, or recall_history(search=...) by content) whenever the text was actually cut."""
-    TRUNC_MARK = " [cut — PARTIAL; see PAGED-OUT HISTORY or recall_history(search=...) for the rest, don't guess]"
-    was_cut = len(one_line(text, MAX_FINDING_CHARS + 1)) > MAX_FINDING_CHARS
-    note = (one_line(text, max(0, MAX_FINDING_CHARS - len(TRUNC_MARK))) + TRUNC_MARK) if was_cut \
-        else one_line(text, MAX_FINDING_CHARS)
+    RECALL BRIDGE: a long AssistantText reply (e.g. a multi-item bug-hunt report) folds in here as a
+    "claim" — a hard per-item cut to MAX_FINDING_CHARS, since findings must stay compact. See
+    _cut_with_recall_marker: without a signal, a later "what were those bugs" sees ONLY the surviving
+    fragment and re-derives the rest from the code instead of recalling it — a confirmed fabrication."""
+    note = _cut_with_recall_marker(text, MAX_FINDING_CHARS)
     if not note:
         return False
     if _NARRATION_RE.match(note):   # pure intent/narration — carries no durable fact
@@ -536,10 +549,13 @@ def capture_user_report(s, message: str) -> bool:
     """If `message` looks like a failure report, store it (verbatim, bounded) as the OPEN USER REPORT
     blocker on the slice and return True. A NEWER report replaces an older one (most-recent wins,
     inherently bounded). Returns False (and leaves any prior report intact) for a non-report message —
-    so a benign follow-up does NOT clear a still-open report."""
+    so a benign follow-up does NOT clear a still-open report.
+
+    The CAPTURING turn also shows the message in full via CURRENT REQUEST (no cap there); the risk is a
+    LATER turn, where this bounded field is the only surviving copy — see _cut_with_recall_marker."""
     if not is_user_report(message):
         return False
-    s.open_report = one_line(message, MAX_REPORT_CHARS)
+    s.open_report = _cut_with_recall_marker(message, MAX_REPORT_CHARS)
     return True
 
 
