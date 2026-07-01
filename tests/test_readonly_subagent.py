@@ -18,7 +18,8 @@ from memagent.subagent import (                       # noqa: E402
     run_subagent,
 )
 from memagent.tools import LocalToolHost              # noqa: E402
-from memagent.slice import Slice, make_build_slice    # noqa: E402
+from memagent.pfc import Slice  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 from memagent.memory import NullMemory                # noqa: E402
 from memagent.retriever import NullRetriever          # noqa: E402
 
@@ -209,7 +210,7 @@ def explorer_keeps_reads_resident_no_eviction_churn():
     # guard flags the re-reads as no-progress → the child goes "stuck" before it can summarize. The
     # explorer budget (EXPLORER_READ_BUDGET) holds the exploration, so there is no eviction churn.
     from memagent.subagent import EXPLORER_READ_BUDGET
-    from memagent.slice import Slice, touch_file
+    from memagent.pfc import Slice, touch_file
     from memagent.swap import READ_BUDGET
     assert EXPLORER_READ_BUDGET > READ_BUDGET
     # explorer budget: 10 distinct reads ALL stay resident (no eviction → no re-read churn)

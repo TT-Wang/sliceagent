@@ -14,9 +14,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.events import ToolResult                         # noqa: E402
-from memagent.slice import (                                   # noqa: E402
-    Slice, build_artifacts, make_build_slice, slice_sink, touch_file,
-)
+from memagent.pfc import Slice, slice_sink, touch_file  # noqa: E402
+from memagent.seed import build_artifacts, make_build_slice  # noqa: E402
 from memagent.tools import LocalToolHost                       # noqa: E402
 
 CHECKS = []

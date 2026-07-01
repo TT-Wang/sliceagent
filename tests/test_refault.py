@@ -8,8 +8,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.slice import (HOT_CEILING, HOT_TTL, READ_BUDGET, Slice,  # noqa: E402
-                            render_slice, touch_file)
+from memagent.pfc import Slice, touch_file  # noqa: E402
+from memagent.seed import render_slice  # noqa: E402
+from memagent.swap import HOT_CEILING, HOT_TTL, READ_BUDGET  # noqa: E402
 from memagent.swap import _DEFAULT_SWAP  # noqa: E402
 
 CHECKS = []

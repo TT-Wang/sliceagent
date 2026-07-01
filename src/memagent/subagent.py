@@ -20,7 +20,7 @@ import os
 from .access import AllAccess, ReadAllAccess
 from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, SUBAGENT_EXCLUDED_TOOLS, AgentSpec  # named-agent registry
 from .events import AssistantText, ToolStarted
-from .slice import one_line
+from .text_utils import one_line
 
 _SUBAGENT_SCHEMA = {
     "type": "function",
@@ -150,7 +150,8 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     from .guardrails import ToolCallGuardrailConfig
     from .hooks import CompositeHooks, GuardrailHook, PermissionHook
     from .loop import run_turn
-    from .slice import Slice, make_build_slice, slice_sink
+    from .pfc import Slice, slice_sink
+    from .seed import make_build_slice
 
     if spec is None:
         spec = BUILTIN_AGENTS["explorer" if read_only else "general"]

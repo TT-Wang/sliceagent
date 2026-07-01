@@ -1,10 +1,14 @@
-"""Memory implementations — the RELEVANT MEMORY tier (lessons) + the durable STATE VAULT.
+"""Memory implementations — the state VAULT (task resumability) that MememMemory/NullMemory share,
+plus the two brain-region MIXINS that give MememMemory its HIPPOCAMPUS (hippocampus.py) and
+NEOCORTEX (neocortex.py) behavior. This file owns only what's left once those two concerns are
+factored out: the skill-writer utilities (shared by /learn and consolidation), the task-state
+markdown (de)serialization, and `checkpoint_task`/`load_task`/`list_session_tasks` — task resume is
+neither episodic recall nor a distilled lesson, so it stays here rather than forcing it into either
+mixin.
 
-memem is the plug for cross-session lessons: its in-process hybrid retrieval feeds the tier and
-`memory_save` stores lessons. On top of that, this module is the **state vault** (MEMORY-SPEC):
-an episodic cache (lossless turn log) and resumable task-state records, all on disk under a
-memagent-owned vault. memem stays behind the `Memory` interface — the moat never imports it — and
-we degrade to NullMemory when memem/its vault is absent.
+memem is the plug for cross-session lessons (via NeocortexMixin): its in-process hybrid retrieval
+feeds the RELEVANT MEMORY tier and `memory_save` stores lessons. memem stays behind the `Memory`
+interface — the moat never imports it — and we degrade to NullMemory when memem/its vault is absent.
 
 `is_durable` is the structural marker: NullMemory sets it False, so hosts skip cache/checkpoint
 wiring and evals stay deterministic. The vault root is decoupled from memem's STATE dir
@@ -17,6 +21,12 @@ import os
 import re
 import tempfile
 import threading
+
+from .hippocampus import HippocampusMixin
+from .interfaces import Snippet, TaskRef, TaskState
+from .neocortex import NeocortexMixin
+from .safety import redact_text, scan_for_threats   # persist-guards: block-on-write + redact-on-persist
+from .text_utils import now_iso as _now_iso
 
 
 def _write_atomic(path: str, text: str) -> None:
@@ -34,28 +44,6 @@ def _write_atomic(path: str, text: str) -> None:
         except OSError:
             pass
         raise
-from datetime import datetime, timezone
-
-from .code_index import _terms   # reuse the query-term extractor (drops stopwords/short tokens)
-from .interfaces import Snippet, TaskRef, TaskState
-from .safety import scan_for_threats, redact_text   # persist-guards: block-on-write + redact-on-persist
-
-_MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one pathological output)
-
-
-def _memory_relevant(text: str, terms: list[str]) -> bool:
-    """Relevance gate for the RELEVANT MEMORY tier: keep a recalled lesson only if it shares a
-    discriminating term with the goal (whole-word, so 'add' doesn't match 'address'). With no terms
-    (un-discriminating query) keep it — we can't gate. This makes the tier relevant-or-nothing
-    instead of memem's blind top-k, the same relevance discipline the RELATED CODE map uses."""
-    if not terms:
-        return True
-    blob = (text or "").lower()
-    return any(re.search(r"\b" + re.escape(t.lower()) + r"\b", blob) for t in terms)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _safe_vault_id(x: str) -> str | None:
@@ -376,8 +364,9 @@ class NullMemory:
         return None
 
 
-class MememMemory:
-    """Adapter over memem (lessons) + the on-disk state vault. Construction fails fast if memem
+class MememMemory(HippocampusMixin, NeocortexMixin):
+    """Adapter over memem (lessons, via NeocortexMixin) + the on-disk episodic cache (via
+    HippocampusMixin) + the state vault (task resume, below). Construction fails fast if memem
     isn't importable. The vault is memagent-owned (_vault_root), decoupled from memem's state dir."""
 
     is_durable = True
@@ -387,198 +376,6 @@ class MememMemory:
         self._vault = _vault_root()
         self._scope = os.path.basename(os.getcwd()) or "default"   # same-project soft bonus on recall
         self._idx_lock = threading.Lock()   # serialize the lazy FTS-index open across parallel explorers
-
-    # --- lessons ---
-    def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
-        """Recall cross-session lessons, then GATE by relevance: drop hits that share no term with
-        the goal (memem returns top-k with no floor → cross-domain noise). Pass scope_id so same-
-        project lessons get memem's soft bonus, and `paths` (R1, the files in play at topic-start) so
-        memem's paths_context gives lessons tagged with those files a small bonus. REINFORCE the
-        surfaced (relevant) ones via mark_used. Decay of the unreinforced is memem's own job."""
-        from memem.retrieve import retrieve
-        try:
-            hits = retrieve(query, k=k, log_call_type=None, writeback=False, scope_id=self._scope,
-                            paths_context=paths or None)
-        except Exception:
-            return []
-        terms = _terms(query)
-        out: list[Snippet] = []
-        for h in hits:
-            text = h.get("body") or h.get("title") or ""
-            if not _memory_relevant(f"{h.get('title', '')} {text}", terms):
-                continue                       # relevance gate: relevant-or-nothing, no noise
-            self.mark_used(h.get("id", ""))    # reinforce what we surface (feeds memem's decay)
-            out.append(Snippet(path=h.get("path", ""), text=text, score=float(h.get("score", 0.0))))
-        return out
-
-    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "",
-                 paths: list[str] | None = None) -> None:
-        # (a) BLOCK on WRITE: a poisoned lesson would re-inject into the slice every turn forever.
-        if scan_for_threats(f"{title}\n{content}", scope="strict"):
-            return
-        # (c) REDACT on PERSIST: never durably store a leaked secret that then re-surfaces.
-        content = redact_text(content)
-        title = redact_text(title)
-        from memem.operations import memory_save
-        try:
-            memory_save(content, title=title, scope_id=scope, tags=tags, paths=paths or None)  # R1: tag with files
-        except Exception:
-            pass
-
-    # --- episodic cache (lossless, cold) ---
-    def _clamp(self, v):
-        if isinstance(v, str) and len(v.encode("utf-8")) > _MAX_RECORD_VALUE_BYTES:
-            b = v.encode("utf-8"); h = _MAX_RECORD_VALUE_BYTES // 2   # slice on BYTES (cap is a byte budget);
-            # errors="replace" (not "ignore"): a byte cut mid-multibyte-char marks it U+FFFD instead of
-            # silently deleting bytes — visible, lossless-ish boundary rather than a quiet corruption.
-            head = b[:h].decode("utf-8", "replace"); tail = b[-h:].decode("utf-8", "replace")
-            return redact_text(head + f"\n…[truncated {len(v)} chars]…\n" + tail)
-        if isinstance(v, str):
-            return redact_text(v)  # (c) redact every persisted episodic string on its way to the cache
-        # #35: recurse into structured (non-string) tool outputs so str leaves inside a dict/list are
-        # still byte-bounded + redacted — a huge or secret-bearing nested payload can't slip past.
-        if isinstance(v, dict):
-            return {k: self._clamp(x) for k, x in v.items()}
-        if isinstance(v, (list, tuple)):
-            return [self._clamp(x) for x in v]
-        return v
-
-    def _clamp_record(self, rec: dict) -> dict:
-        # Redact + byte-bound EVERY string leaf of the WHOLE record, not just steps. Earlier this clamped
-        # only steps[*].observation/action — so the top-level title/note/markdown/meta (markdown is rendered
-        # from the RAW steps + note) reached the durable cache UNREDACTED and could be surfaced by
-        # recall_history. _clamp recurses through dict/list, so one call covers the entire record uniformly.
-        return self._clamp(rec)
-
-    def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
-        try:
-            d = os.path.join(self._vault, "episodic")
-            os.makedirs(d, exist_ok=True)
-            ts = _now_iso()
-            clamped = self._clamp_record(record)
-            line = {"v": 1, "session_id": session_id, "task_id": task_id, "turn": turn,
-                    "ts": ts, "record": clamped}
-            with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f:
-                # #36: default=str — a non-serializable value in a tool output must STRINGIFY, never raise
-                # and silently drop the whole turn (the except below would eat it = lost episode + index).
-                f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            return  # a cache write must never break a session
-        self._index_episode(session_id, task_id, turn, ts, clamped)  # additive FTS5 mirror (item 12)
-
-    # --- cross-session FTS5 episode index (item 12; additive, degrades to no-op) ---
-    def _episode_index(self):
-        """Lazily open the FTS5 episode index (cached). Returns None if FTS5 is
-        unavailable — every caller treats None as 'index off' and falls back."""
-        idx = getattr(self, "_idx", "unset")
-        if idx != "unset":
-            return idx                       # fast path: already opened (lock-free)
-        with self._idx_lock:                 # double-checked: exactly ONE connection is opened + tracked by close()
-            idx = getattr(self, "_idx", "unset")
-            if idx == "unset":
-                try:
-                    from .search_index import make_episode_index
-                    idx = make_episode_index()
-                    if not idx.is_active:
-                        idx = None
-                except Exception:
-                    idx = None
-                self._idx = idx
-        return idx
-
-    def close(self) -> None:
-        """#33: close the cached FTS5 episode-index connection (WAL checkpoint + release the fd) at
-        session end. Idempotent — safe before the index was ever opened ('unset') or after close."""
-        idx = getattr(self, "_idx", None)
-        if idx is not None and idx != "unset":
-            try:
-                idx.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self._idx = None
-
-    def _index_episode(self, session_id, task_id, turn, ts, record) -> None:
-        idx = self._episode_index()
-        if idx is None:
-            return
-        try:
-            from .search_index import episode_searchable_text
-            idx.index_episode(session_id=session_id, task_id=task_id, turn=turn, ts=ts,
-                              title=record.get("title", ""), note=record.get("note", ""),
-                              text=episode_searchable_text(record))
-        except Exception:
-            pass
-
-    def search_episodes(self, query: str, *, limit: int = 5,
-                        exclude_session: str | None = None,
-                        only_session: str | None = None) -> list[dict]:
-        """Episode discovery (FTS5). `exclude_session` => cross-session recall; `only_session` =>
-        within-session content recall of the long tail (turns past the manifest/index window).
-        Returns bounded hit dicts (see search_index.EpisodeIndex.search) or [] when unavailable."""
-        idx = self._episode_index()
-        if idx is None:
-            return []
-        try:
-            return idx.search(query, limit=limit, exclude_session=exclude_session,
-                              only_session=only_session)
-        except Exception:
-            return []
-
-    def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
-        """Read the session's episodic cache (the read side of the recall_history tool). Returns the
-        raw line dicts in turn order; `limit` keeps only the most recent N. Never raises."""
-        try:
-            path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
-            if not os.path.exists(path):
-                return []
-            # limit set → keep only the last N parsed dicts via a bounded deque (don't hold the whole
-            # session in memory just to slice the tail); limit unset (consolidate) reads all by design.
-            from collections import deque
-            out = deque(maxlen=limit) if limit is not None else []   # limit=0 ⇒ deque(maxlen=0) keeps ZERO (was: read all)
-            with open(path, encoding="utf-8") as f:
-                for ln in f:
-                    ln = ln.strip()
-                    if ln:
-                        try:
-                            out.append(json.loads(ln))
-                        except ValueError:
-                            continue
-            return list(out)
-        except Exception:
-            return []
-
-    def episode_manifest(self, session_id: str, k: int) -> tuple[list[dict], int]:
-        """(last_k_dicts, total_count) for the PAGED-OUT HISTORY manifest. Reads only the file TAIL and
-        parses only ~k records, so the per-turn slice build stays O(k) instead of re-parsing the whole
-        session JSONL every turn (which was O(n²) over a long session). Never raises."""
-        try:
-            path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
-            if not os.path.exists(path):
-                return [], 0
-            size = os.path.getsize(path)
-            total = 0
-            window = min(size, max(65536, (k + 1) * 4096))
-            with open(path, "rb") as f:
-                for line in f:                 # cheap newline count (no JSON parse) for the '…older' flag
-                    if line.strip():
-                        total += 1
-                f.seek(max(0, size - window))
-                tail = f.read()
-            rows = tail.splitlines()
-            if size > window and rows:
-                rows = rows[1:]                # the window may start mid-line → drop the partial leader
-            out: list[dict] = []
-            for ln in rows:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln.decode("utf-8", "replace")))
-                except ValueError:
-                    continue
-            return out[-k:], total
-        except Exception:
-            return [], 0
 
     # --- task state / resume ---
     def checkpoint_task(self, task: TaskState) -> None:
@@ -619,53 +416,6 @@ class MememMemory:
             return _parse_session_index(path) if os.path.exists(path) else []
         except Exception:
             return []
-
-    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> dict:
-        """Session-end sweep: promote durable knowledge from the episodic CACHE (never the slice),
-        ROUTED BY TYPE — FACTS (corrective lessons) → memem; PROCEDURES (repeated smooth workflows) →
-        reusable SKILL.md the SkillManager discovers next session. `mode="llm"` (with an `llm`) renders
-        skill bodies via render_skill_llm (generalized) instead of render_skill (recorded); both fall
-        back to deterministic on any failure. RETURNS a stats dict so the caller reports the truth (never a
-        blind 'success'); each item is guarded so one bad lesson/skill can't abort the batch. Never raises."""
-        stats = {"lessons": 0, "skills": 0, "skills_rejected": 0, "errors": 0}
-        try:
-            from .consolidate import promote_episodes, promote_procedures, render_skill, render_skill_llm
-            records = self.read_episodes(session_id)
-            if not records:
-                return stats
-            for lesson in promote_episodes(records):                 # facts → memem (tagged with files: R1)
-                try:
-                    self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
-                                  tags=lesson["tags"], paths=lesson.get("files"))
-                    stats["lessons"] += 1
-                except Exception:  # noqa: BLE001 — one bad lesson must not sink the rest
-                    stats["errors"] += 1
-            skills_dir = _skills_dir()
-            for proc in promote_procedures(records):                 # procedures → skill packs (AUTO)
-                try:
-                    body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
-                    if write_skill_file(proc["name"], body, skills_dir=skills_dir):   # guarded; None = rejected
-                        stats["skills"] += 1
-                    else:
-                        stats["skills_rejected"] += 1                # validate/threat-scan rejected it
-                except Exception:  # noqa: BLE001
-                    stats["errors"] += 1
-        except Exception:  # noqa: BLE001 — promote_*/read failures never break teardown
-            stats["errors"] += 1
-        return stats
-
-    # --- declared now; implemented in step 5 (loud-but-safe so a premature wire is caught) ---
-    def mark_used(self, memory_id: str) -> None:
-        """Retrieval feedback: reinforce a memory that proved relevant (bumps its access count, which
-        feeds memem's decay/ranking). Delegates to memem's primitive — we don't reinvent the decay
-        machinery memem already has (obsidian_store.bump_access + decay.compute_decay_factor)."""
-        if not memory_id:
-            return
-        try:
-            from memem.obsidian_store import bump_access
-            bump_access(memory_id)
-        except Exception:
-            pass   # feedback is best-effort; must never break a recall
 
 
 def make_memory(prefer_memem: bool = True):

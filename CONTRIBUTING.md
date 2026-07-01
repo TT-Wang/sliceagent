@@ -43,7 +43,7 @@ and is sealed to the durable cache at the turn boundary. The core depends only o
 (`interfaces.py`): `LLMClient`, `ToolHost`, `Retriever`, `Oracle`, plus an event `dispatch` and `hooks`. It
 never imports implementations. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-**Layering rule:** `loop.py`/`slice.py` are the moat — keep them stateless and contract-only. UI
+**Layering rule:** `loop.py`/`pfc.py`/`seed.py` are the moat — keep them stateless and contract-only. UI
 (`tui.py`, `tui_app.py`, `cli.py`), tools, providers, and extensions are periphery: borrow liberally,
 keep them behind seams (event sinks, the tool registry, the `LLMClient`/`Memory` interfaces).
 

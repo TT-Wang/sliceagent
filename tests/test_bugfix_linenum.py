@@ -8,7 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.slice import _numbered            # noqa: E402
+from memagent.seed import _numbered  # noqa: E402
 from memagent.tools import LocalToolHost, _strip_line_numbers  # noqa: E402
 
 CHECKS = []

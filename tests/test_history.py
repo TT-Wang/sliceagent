@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.history import make_history_tool, render_full, render_index, render_trace  # noqa: E402
+from memagent.hippocampus import make_history_tool, render_full, render_index, render_trace  # noqa: E402
 from memagent.memory import NullMemory  # noqa: E402
 
 CHECKS = []
@@ -140,7 +140,8 @@ def repeat_redirected_but_distinct_search_allowed():
 @check
 def ratchet_folds_lookback_into_slice():
     from memagent.events import ToolResult
-    from memagent.slice import Slice, render_reviewed, slice_sink
+    from memagent.pfc import Slice, slice_sink
+    from memagent.regions import render_reviewed
     s = Slice(); s.reset("task")
     sink = slice_sink(s)
     sink(ToolResult("recall_history", {}, "index", False))            # index lookback
@@ -162,7 +163,7 @@ def reviewed_is_temporal_not_permanent():
     # the ratchet must clear between directives/turns, or a past lookback contaminates future moves
     from memagent.memory import NullMemory
     from memagent.session import Session
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     s = Slice(); s.reset("task A"); s.reviewed = ["index", "turns=[3]"]
     s.reset("task B")
     assert s.reviewed == []                              # new_topic / reset → clean slate

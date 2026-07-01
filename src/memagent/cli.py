@@ -177,7 +177,7 @@ def main() -> None:
         print(f"  · config warning: {_w}")
 
     from .code_index import make_code_index
-    from .episode import make_episode_sink
+    from .hippocampus import make_episode_sink
     from .llm import OpenAILLM
     from .mcp_client import connect_mcp_servers
     from .loop import run_turn
@@ -188,7 +188,9 @@ def main() -> None:
     from .sandbox import make_sandbox
     from .session import Session, make_topic_tools, route
     from .skills import make_skill_manager, make_skill_tool
-    from .slice import consolidate_checkpoint, make_build_slice, one_line, record_user, slice_sink
+    from .pfc import consolidate_checkpoint, record_user, slice_sink
+    from .seed import make_build_slice
+    from .text_utils import one_line
     from .subagent import SubagentHost
     from .tools import LocalToolHost
 
@@ -313,7 +315,7 @@ def main() -> None:
         base_tools.registry.register(t)
     # recall_history: the model's bounded valve into the cold cache (paged-out turns of this session).
     if getattr(memory, "is_durable", False):
-        from .history import make_history_tool
+        from .hippocampus import make_history_tool
         base_tools.registry.register(make_history_tool(memory, session.session_id))
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
@@ -591,7 +593,7 @@ def main() -> None:
             return
         import re as _re
         from .model_catalog import capability
-        from .slice import touch_file
+        from .pfc import touch_file
         vision = capability(llm.model, getattr(llm, "_base_url", "")).supports_vision
         pinned, images, skipped = [], [], []
         for m in _re.findall(r"@([\w./\-]+)", text):
@@ -745,7 +747,7 @@ def main() -> None:
         else:
             print("memagent · slice core (run_turn) · " + info)
             print('type a task, or "exit" to quit\n')
-        from .workspace import project_root as _project_root
+        from .sensory_cortex import project_root as _project_root
         if _project_root(root) is None:        # launched outside a project → tell the user how to pick one
             _hint = "  · no project here — type /cwd <path> to set your workspace (or just chat / ask me to find one)"
             (_console.print(f"[grey50]{_hint}[/]") if _console is not None else print(_hint))
@@ -766,7 +768,7 @@ def main() -> None:
             if not line:
                 continue
             if line == "/learn" or line.startswith("/learn "):  # transcript → reusable skill (runs as a turn)
-                from .consolidate import build_learn_prompt
+                from .neocortex import build_learn_prompt
                 line = build_learn_prompt(line[len("/learn"):].strip())
             elif _tui and line.startswith("/"):                # navigation palette (no turn)
                 _handle_slash(line)

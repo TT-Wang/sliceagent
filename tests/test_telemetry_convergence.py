@@ -7,7 +7,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.events import StepEnd, ToolResult            # noqa: E402
-from memagent.slice import Slice, record_note, slice_sink  # noqa: E402
+from memagent.pfc import Slice, slice_sink  # noqa: E402
+from memagent.regions import record_note  # noqa: E402
 from memagent.telemetry import Telemetry                   # noqa: E402
 
 CHECKS = []

@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.episode import EpisodeSink, make_episode_sink   # noqa: E402
+from memagent.hippocampus import EpisodeSink, make_episode_sink   # noqa: E402
 from memagent.events import (AssistantText, SliceBuilt, ToolResult,   # noqa: E402
                              TurnEnd, TurnInterrupted)
 from memagent.memory import NullMemory   # noqa: E402

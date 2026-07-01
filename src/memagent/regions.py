@@ -2,12 +2,12 @@
 
 The slice is an address space of TYPED REGIONS (open files, ghosts, conversation, skills,
 threads, …); each region knows how to render itself and to SUPPRESS itself when empty.
-slice.py's render_slice is the layout pass that orders these region renderers into the one
+seed.py's render_slice is the layout pass that orders these region renderers into the one
 user string (the moat); the renderers themselves live here.
 
-This module is a pure rendering/metadata layer: it reads Slice fields and low-level helpers
-(safety.wrap_untrusted, the working-set bounds OWNED by swap.py) but imports NOTHING from
-slice.py — slice.py imports FROM here (one direction), so there is no import cycle.
+This module is a pure rendering/metadata layer: it reads Slice fields (pfc.py) and low-level
+helpers (safety.wrap_untrusted, the working-set bounds OWNED by swap.py) but imports NOTHING
+from pfc.py/seed.py — they import FROM here (one direction), so there is no import cycle.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-sig
 # Working-set view caps (the OPEN FILES region). A working-set file is shown IN FULL up to
 # FULL_FILE_LINES; only a PATHOLOGICALLY huge file collapses to its RELEVANT REGION (REGION_LINES).
 # Co-located here because they parameterize the OPEN FILES region renderer (build_artifacts in
-# slice.py imports them from here — one direction). DISCOVERY_K is the RELATED CODE region's k.
+# seed.py imports them from here — one direction). DISCOVERY_K is the RELATED CODE region's k.
 FULL_FILE_LINES = 1200
 REGION_LINES = 400
 DISCOVERY_K = 6
@@ -54,8 +54,8 @@ CONVO_MSG_CHARS = 800    # per-message GIST cap in the conversation tier (count-
 _NO_CAP = 1_000_000
 
 
-# `one_line` is re-exported from text_utils (single definition; slice.py re-exports it onward as the
-# package-wide one-line renderer). Kept importable from regions for the existing call sites.
+# `one_line` is re-exported from text_utils (single definition — pfc.py/seed.py/neocortex.py import the
+# real definition directly). Kept importable from regions too for the existing call sites here.
 
 
 def render_reviewed(s) -> str:

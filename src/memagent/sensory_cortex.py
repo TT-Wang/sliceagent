@@ -1,4 +1,11 @@
-"""Workspace snapshot for the system prompt — a one-shot, cache-stable probe.
+"""SENSORY CORTEX — perception of the live world, not memory of the past. Everything in this
+module is a DERIVED VIEW: recomputed live from the filesystem/git each time it's called, never
+persisted between turns, nothing here is ever "recalled" — only re-observed. Holds the workspace
+snapshot (git branch/status, project facts, conventions) AND the repo map / directory-walk
+primitives (``repo_map``, ``_is_ignored``) — both are the same kind of thing: a fresh read of
+the world, memoized at most for the session, never a durable store.
+
+Workspace snapshot for the system prompt — a one-shot, cache-stable probe.
 
 Ported (trimmed) from Hermes ``agent/coding_context.py`` (``_git`` :590,
 ``_parse_status`` :603, ``_project_facts`` :638, ``build_coding_workspace_block``
@@ -403,3 +410,93 @@ def git_worktree_state(cwd: str, *, max_files: int = 20) -> str:
     if len(changed) > max_files:
         lines.append(f"  …and {len(changed) - max_files} more")
     return "\n".join(lines)
+
+
+# Build/VCS/cache directories that are pure noise to LIST — and FLOOD context on a real repo (the reason a
+# whole-repo "review" derailed: find/list surfaced thousands of .venv/.ruff_cache paths). list_files (tools.py)
+# and repo_map both prune these so the model gets a clean map and doesn't fall back to raw `find`. Task-agnostic
+# denylist (not a full .gitignore parse): covers the universal offenders. ripgrep (grep tool) is already
+# .gitignore-aware natively.
+_IGNORE_NAMES = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", ".env", "node_modules", "__pycache__", ".ruff_cache",
+    ".pytest_cache", ".mypy_cache", ".tox", ".idea", ".vscode", ".cache", "dist", "build", ".eggs", "htmlcov",
+    ".DS_Store",
+    # JS/TS build + framework caches — huge generated trees that make repo_map/list/retrieval crawl (hunter's
+    # .next was ~thousands of files → 6s builds); never source the agent should read.
+    ".next", ".turbo", ".parcel-cache", ".nuxt", ".svelte-kit", ".output", ".angular", ".vite", "coverage",
+    ".gradle",
+})
+_IGNORE_SUFFIX = (".egg-info", ".pyc")
+
+
+def _is_ignored(name: str) -> bool:
+    return name in _IGNORE_NAMES or any(name.endswith(s) for s in _IGNORE_SUFFIX)
+
+
+# Asset/binary/log files are noise in a structural MAP (they crowd out source); skipped from repo_map
+# only (list_files still shows them). Generic, not task-specific.
+_MAP_SKIP_SUFFIX = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".pdf", ".log", ".lock", ".bin",
+                    ".so", ".dylib", ".o", ".class", ".woff", ".woff2", ".ttf", ".mp4", ".mov", ".zip",
+                    ".tar", ".gz", ".whl", ".pyc", ".jsonl", ".csv", ".parquet")
+# Code extensions — used ONLY to RANK directories by source-density so the map shows the real source
+# tree first (a generic signal, identical across task types; never a task-category switch).
+_CODE_SUFFIX = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb", ".c", ".h", ".cc",
+                ".cpp", ".hpp", ".cs", ".php", ".swift", ".kt", ".scala", ".sh", ".lua", ".ml", ".ex",
+                ".exs", ".clj", ".r", ".jl", ".vue", ".sql")
+
+
+def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_chars: int = 12000) -> str:
+    """A compact, ignore-aware STRUCTURAL MAP of the project (SENSORY CORTEX — the derived-view tier-B
+    resident view, memoized for the session, never a persisted store): directories with their files,
+    pruned of VCS/venv/cache + asset/log noise, RANKED by source-density so the real code tree shows
+    first and never gets starved by asset/log dirs. This is what
+    kills cold-start — a 'review/understand the repo' task sees the structure RESIDENT instead of re-
+    listing with find. Built ONCE per session (stable → prompt-cache warm); new files created mid-task
+    surface via the LIVE worktree region. Over budget, late dirs collapse to a count; `max_chars` is a
+    HARD ceiling on the output (ranked tail dropped) so a huge tree can't blow the context window.
+    '' if root is unusable; never raises."""
+    if not root or not os.path.isdir(root):
+        return ""
+    rows: list[tuple[str, list[str], int, int]] = []  # (rel, files, total, code_count)
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):  # symlinks not followed
+            dirnames[:] = sorted(d for d in dirnames if not _is_ignored(d))
+            files = sorted(f for f in filenames
+                           if not _is_ignored(f) and not f.endswith(_MAP_SKIP_SUFFIX))
+            if not files:
+                continue
+            rel = os.path.relpath(dirpath, root)
+            code_count = sum(1 for f in files if f.endswith(_CODE_SUFFIX))
+            rows.append((rel, files, len(files), code_count))
+    except OSError:
+        return ""
+    if not rows:
+        return ""
+    # rank source-dense dirs first (so src/ beats docs/ assets), ties broken by path for stability
+    rows.sort(key=lambda r: (-r[3], r[0]))
+    lines, shown = [], 0
+    for rel, files, total, _code in rows:
+        prefix = "./" if rel == "." else rel + "/"
+        if shown < max_entries:                       # detailed: list files (per-dir capped)
+            take = files[:max_per_dir]
+            shown += len(take)
+            extra = f" (+{total - len(take)} more)" if total > len(take) else ""
+            lines.append(f"{prefix} — {', '.join(take)}{extra}")
+        else:                                         # over budget: keep the dir, collapse to a count
+            lines.append(f"{prefix} — ({total} files)")
+    out = "\n".join(lines)
+    if len(out) <= max_chars:
+        return out
+    # HARD char ceiling: rows are ranked source-dense-first, so keep the prefix that fits and drop the
+    # tail to a count. Without this a giant tree (or a session launched in a bare HOME) produces a
+    # multi-10k-token map that overflows the window on the very first turn.
+    kept, used = [], 0
+    for ln in lines:
+        if used + len(ln) + 1 > max_chars:
+            break
+        kept.append(ln)
+        used += len(ln) + 1
+    dropped = len(lines) - len(kept)
+    kept.append(f"… (+{dropped} more director{'y' if dropped == 1 else 'ies'} — over map budget; "
+                "use list_files to drill in)")
+    return "\n".join(kept)

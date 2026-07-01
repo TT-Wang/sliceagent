@@ -10,8 +10,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.guardrails import ToolCallGuardrail                      # noqa: E402
-from memagent.slice import (MAX_ACTION_LOG, MAX_ACTION_SHOWN, Slice,    # noqa: E402
-                            action_sig, record_action, render_action_history)
+from memagent.pfc import Slice  # noqa: E402
+from memagent.regions import MAX_ACTION_LOG, MAX_ACTION_SHOWN, action_sig, record_action, render_action_history  # noqa: E402
 from memagent.tools import LocalToolHost                                # noqa: E402
 
 CHECKS = []

@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.consolidate import (  # noqa: E402
+from memagent.neocortex import (  # noqa: E402
     build_learn_prompt, promote_episodes, promote_procedures, render_skill, render_skill_llm)
 from memagent.memory import make_write_skill_tool  # noqa: E402
 

@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.hooks import BudgetHook            # noqa: E402
-from memagent.slice import is_user_report        # noqa: E402
+from memagent.regions import is_user_report  # noqa: E402
 
 CHECKS = []
 def check(fn):

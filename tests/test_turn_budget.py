@@ -13,7 +13,8 @@ from memagent.guidance import BUDGET_EXHAUSTED, DENIAL_NO_PROMPT, DENIAL_USER  #
 from memagent.hooks import PermissionHook, ToolDecision, Hooks       # noqa: E402
 from memagent.interfaces import Snippet                              # noqa: E402
 from memagent.loop import run_tool_batch, run_turn                   # noqa: E402
-from memagent.slice import Slice, make_build_slice, slice_sink       # noqa: E402
+from memagent.pfc import Slice, slice_sink  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
 def check(fn):

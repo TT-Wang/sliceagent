@@ -184,7 +184,8 @@ def richsink_ondelta_noop_when_idle():
 def _slice_msgs(host, goal="do the thing"):
     from memagent.memory import NullMemory
     from memagent.retriever import NullRetriever
-    from memagent.slice import Slice, make_build_slice
+    from memagent.pfc import Slice
+    from memagent.seed import make_build_slice
     s = Slice(); s.reset(goal)
     return make_build_slice(s, host, NullRetriever(), NullMemory(), goal)()
 

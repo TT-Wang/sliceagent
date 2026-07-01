@@ -9,9 +9,11 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost, repo_map                     # noqa: E402
-from memagent.workspace import git_worktree_state     # noqa: E402
-from memagent.slice import Slice, make_build_slice                     # noqa: E402
+from memagent.tools import LocalToolHost  # noqa: E402
+from memagent.sensory_cortex import repo_map  # noqa: E402
+from memagent.sensory_cortex import git_worktree_state  # noqa: E402
+from memagent.pfc import Slice  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 from memagent.memory import NullMemory                                 # noqa: E402
 
 CHECKS = []

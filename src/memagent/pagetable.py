@@ -9,7 +9,7 @@ so the slice has a single place that decides WHAT to page in.
 The PageTable owns the SubdirHints instance (constructed once per build closure, same
 lifetime as before, preserving per-task subtree dedup). It is otherwise stateless: each
 backend is a thin adapter over its source. Backends emit RAW text in the PageRef.preview;
-fencing (wrap_untrusted) stays at ONE layer — the renderer in slice.py — so there is no
+fencing (wrap_untrusted) stays at ONE layer — the renderer in seed.py — so there is no
 double-wrap.
 
 NO-TRANSCRIPT MOAT: lookup() reads from durable/derived sources each turn; it never
@@ -24,11 +24,11 @@ BRAIN-ANALOGY LEGEND (used in this file's section comments — a naming aid, not
   HIPPOCAMPUS     — episode-*: the lossless per-turn log, reached only by an explicit, cue-dependent
                     recall (recall_history) — like real hippocampal recall, prone to confabulation if
                     the cue is weak, which the visible-manifest/recall-marker work exists to prevent.
-The Slice's own carried state (findings, conversation ring, plan, mission — see slice.py) is the
+The Slice's own carried state (findings, conversation ring, plan, mission — see pfc.py) is the
 fourth piece: PREFRONTAL CORTEX / working memory — bounded, actively maintained, free (no lookup()
 call at all), and lost when the task resets. Only 4 of PageTable's 6 kinds fire per turn inside
 build(); the other 2 (episode-xsession, episode-search-thissession) are reached only via the
-recall_history tool (history.py) — the model's own hippocampal-recall lever.
+recall_history tool (hippocampus.py) — the model's own hippocampal-recall lever.
 
 DEFERRED (next backends to fold in here):
   - per-file code refs (fan-out of the repo map) — kept as the single '(repo map)' page.
@@ -82,7 +82,7 @@ class PageTable:
         # — HIPPOCAMPUS (episodic memory): the lossless per-turn log. Retrieval is cue-dependent and
         # EXPLICIT (recall_history) — like real hippocampal recall, it can fail or confabulate if the
         # retrieval cue is weak, which is exactly the class of bug the cache-manifest/recall-marker work
-        # in slice.py and regions.py exists to prevent.
+        # in seed.py and regions.py exists to prevent.
         if kind == "episode-xsession":
             return self._episodes(focus, k)
         if kind == "episode-thissession":

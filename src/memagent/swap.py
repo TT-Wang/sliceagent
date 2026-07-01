@@ -1,7 +1,7 @@
 """SwapManager — single owner of the working-set PAGE lifecycle (file/dep/skill/ghost/reviewed); every page enters/
 leaves the slice THROUGH here. The memory plane of a DEMAND-PAGED SNAPSHOT MACHINE: the slice is a CACHE, not a log,
-so eviction is always safe (a re-fault re-reads from the durable store). DUCK-TYPED: imports nothing from slice.py
-(reverse import circular — slice re-imports the bounds, re-exported there for callers/tests); only prefetch() reaches
+so eviction is always safe (a re-fault re-reads from the durable store). DUCK-TYPED: imports nothing from pfc.py
+(reverse import circular — pfc.py imports the bounds below); only prefetch() reaches
 self.retriever. SELF-TUNING (automatic, no model): a re-read of a file still in the recency ring (a REFAULT) proves
 the budget was momentarily too tight, so the kernel grants ITSELF a brief reclaim-protection (Linux mm/workingset
 refault detection, scaled down) AND widens its OWN read budget one notch (s.read_budget, bounded by s.read_ceiling)
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 READ_BUDGET = 4    # FLOOR for the exploratory-read residue — the lean DEFAULT, NOT a hard cap. The kernel GROWS the
                    # live budget (s.read_budget) on refault thrash up to READ_BUDGET_MAX. "Bounded" = no PASSIVE/
-                   # history-proportional growth (Markov current-state), never a fixed size ceiling. SINGLE owner;
-                   # slice.py re-exports all bounds below.
+                   # history-proportional growth (Markov current-state), never a fixed size ceiling. SINGLE owner
+                   # of this and every other bound below (pfc.py/seed.py import directly, no re-export chain).
 READ_BUDGET_MAX = 16  # per-slice DISASTER CEILING for refault-driven growth. A single COHERENT task rarely needs more
                       # resident reads than this; genuine BREADTH ("review the repo") is delegated to the subagent SWARM
                       # (each child a fresh lean slice), NOT served by inflating one slice toward the context window
@@ -179,4 +179,4 @@ class SwapManager:
         s.ghosts = [g for g in s.ghosts if not (g["kind"] == kind and g["ref"] == ref)]
 
 
-_DEFAULT_SWAP = SwapManager()   # retriever-free ops; touch_file/add_skill in slice.py delegate here
+_DEFAULT_SWAP = SwapManager()   # retriever-free ops; touch_file/add_skill in pfc.py delegate here

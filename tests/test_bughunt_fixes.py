@@ -17,7 +17,7 @@ def check(fn):
 # ── HIGH: a FAILED execute_code must not poison the change-set (slice WS1 parity) ─────────────
 @check
 def failed_execute_code_does_not_pin_files():
-    from memagent.slice import Slice, slice_sink
+    from memagent.pfc import Slice, slice_sink
     from memagent.events import ToolResult
     s = Slice()
     slice_sink(s)(ToolResult("execute_code", {"code": "write_file('new.py', gen())"}, "NameError: gen", True))
@@ -28,7 +28,7 @@ def failed_execute_code_does_not_pin_files():
 # ── HIGH: consolidate must not tag a SUCCESS line as the pitfall in a mixed step ──────────────
 @check
 def consolidate_mixed_step_picks_the_failure_not_the_success():
-    from memagent.consolidate import promote_episodes
+    from memagent.neocortex import promote_episodes
     mixed = {"steps": [{"action": [{"name": "run_command", "failing": False},
                                    {"name": "run_command", "failing": True}],
                         "observation": ["all tests pass", "Error: still broken"]}],
@@ -102,7 +102,7 @@ def verbatim_header_line_round_trips():
 # ── MED: finding_source provenance round-trips slice→TaskState→md→slice ───────────────────────
 @check
 def finding_source_round_trips():
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     from memagent.taskstate import slice_to_task_state, task_state_to_slice
     from memagent import memory as M
     s = Slice(); s.goal = "g"; s.findings = ["f1"]; s.finding_source = {"f1": "claim"}
@@ -178,7 +178,8 @@ def redact_connstr_does_not_span_sections():
 # ── R2: a protected dep renders even when pushed past read_budget (render↔evict parity) ───────────────
 @check
 def build_artifacts_renders_protected_dep_past_read_budget():
-    from memagent.slice import Slice, build_artifacts
+    from memagent.pfc import Slice
+    from memagent.seed import build_artifacts
     from memagent.tools import LocalToolHost
     root = tempfile.mkdtemp(prefix="ba-")
     names = ["dep.py", "edited.py", "r1.py", "r2.py", "r3.py", "r4.py", "r5.py"]
@@ -350,7 +351,7 @@ def code_review_rejects_option_ref():
 # ── R7: non-dict tool args still record the failing flag in the episode (no sink crash) ──────────────
 @check
 def episode_records_failing_on_non_dict_args():
-    from memagent.episode import make_episode_sink
+    from memagent.hippocampus import make_episode_sink
     from memagent.events import ToolResult, TurnEnd
 
     class _Mem:
@@ -370,7 +371,7 @@ def episode_records_failing_on_non_dict_args():
 def run_tool_batch_dict_args_reach_slice_sink():
     from memagent.loop import run_tool_batch
     from memagent.hooks import Hooks
-    from memagent.slice import Slice, slice_sink
+    from memagent.pfc import Slice, slice_sink
 
     class _TC:
         def __init__(self): self.name = "read_file"; self.args = [1, 2, 3]; self.id = "c1"
@@ -548,7 +549,7 @@ def load_env_strips_quotes():
 # ── R14: the OPEN USER REPORT blocker survives a checkpoint → cross-session resume ────────────────────
 @check
 def open_report_survives_resume():
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     from memagent.taskstate import slice_to_task_state, task_state_to_slice
     from memagent.memory import _render_task_md, _parse_task_md
     s = Slice(); s.reset("build the thing"); s.open_report = "user says output is still wrong"
@@ -603,7 +604,7 @@ def guardrail_does_not_count_its_own_block():
 # ── R15 MED: a grep with a DIRECTORY path arg is not pinned into the working set (phantom file) ────────
 @check
 def grep_dir_path_not_pinned():
-    from memagent.slice import Slice, slice_sink
+    from memagent.pfc import Slice, slice_sink
     from memagent.events import ToolResult
     s = Slice()
     slice_sink(s)(ToolResult("grep", {"path": "src", "pattern": "foo"}, "src/a.py:1: foo", False))
@@ -689,7 +690,7 @@ def split_recursive_rm_root_denied():
 # ── R18 HIGH: a world-model value containing "Authorization: Bearer <tok>" survives checkpoint redaction ─
 @check
 def world_model_survives_auth_redaction():
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     from memagent.taskstate import slice_to_task_state, task_state_to_slice
     from memagent.memory import _render_task_md, _parse_task_md
     from memagent.safety import redact_text
@@ -720,7 +721,7 @@ def call_budget_lets_edit_escape():
 # ── R18 MED: episode meta['files'] = only SUCCESSFUL edits (reads + failed edits excluded) ─────────────
 @check
 def episode_files_only_real_edits():
-    from memagent.episode import _files_of
+    from memagent.hippocampus import _files_of
     from memagent.events import ToolResult
     assert _files_of(ToolResult("read_file", {"path": "r.py"}, "x", False)) == []          # a read isn't a change
     assert _files_of(ToolResult("str_replace", {"path": "e.py"}, "no match", True)) == []   # a FAILED edit isn't
@@ -1040,7 +1041,7 @@ def usage_dict_coerces_nonnumeric_counters():
 # ── R20 MED: seal() keeps edited_files ⊆ active_files (no phantom edits across turns) ──────────────────
 @check
 def seal_keeps_edited_subset_of_active():
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     s = Slice(); s.reset("t")
     s.active_files = ["a.py"]
     s.edited_files = type(s.edited_files)(["a.py", "phantom.py"])
@@ -1117,8 +1118,8 @@ def procman_wait_releases_fd_on_exit():
 @check
 def clamp_uses_replace_not_ignore():
     import inspect
-    from memagent import memory
-    src = inspect.getsource(memory)
+    from memagent import hippocampus
+    src = inspect.getsource(hippocampus)
     assert 'b[:h].decode("utf-8", "replace")' in src, \
         "_clamp must decode with errors='replace' so a mid-char byte cut isn't silently dropped"
 
@@ -1184,7 +1185,7 @@ def code_prelude_writes_are_byte_exact():
 # ── R27 HIGH: seal() keeps the pre-edit def snapshot for EDITED files (change-set-closure works cross-turn) ─
 @check
 def seal_keeps_pre_defs_for_edited_files():
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
     s = Slice(); s.reset("t")
     s.active_files = ["e.py"]
     s.edited_files = type(s.edited_files)(["e.py"])
@@ -1213,7 +1214,7 @@ def teenager_auto_allows_readonly_shell_but_confirms_writes():
 
 @check
 def repo_map_is_char_bounded():
-    from memagent.tools import repo_map
+    from memagent.sensory_cortex import repo_map
     with tempfile.TemporaryDirectory() as d:
         for i in range(60):
             sub = os.path.join(d, f"pkg{i}")
@@ -1227,7 +1228,7 @@ def repo_map_is_char_bounded():
 
 @check
 def project_root_none_outside_a_project():
-    from memagent.workspace import project_root
+    from memagent.sensory_cortex import project_root
     with tempfile.TemporaryDirectory() as d:
         assert project_root(d) is None, "a bare non-project dir has no project root (→ no repo map)"
         os.makedirs(os.path.join(d, ".git"))
@@ -1303,7 +1304,8 @@ def glob_finds_directories_not_just_files():
 def rerooting_the_host_switches_the_slice_workspace():
     # what /cwd does: set the host root → the slice's REPO MAP / project facts re-root to the new dir.
     from memagent.memory import NullMemory
-    from memagent.slice import Slice, make_build_slice
+    from memagent.pfc import Slice
+    from memagent.seed import make_build_slice
     from memagent.tools import LocalToolHost
     a = tempfile.mkdtemp(prefix="wsA-")
     b = tempfile.mkdtemp(prefix="wsB-")

@@ -1,5 +1,5 @@
 """Skill usage sidecar (item 13) — per-skill last-used + use-count telemetry in ONE JSON
-file, so consolidate.py can frequency-weight skills the way it already weights pitfalls and
+file, so neocortex.py can frequency-weight skills the way it already weights pitfalls and
 procedures, and a future curator can prune stale AUTO skills.
 
 PORTED (trimmed) from /tmp/hermes-agent/tools/skill_usage.py:

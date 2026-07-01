@@ -2,7 +2,7 @@
 
 Borrowed periphery — NOT the moat. The loop already decouples rendering via the event
 dispatcher; this is just (a) a rich rendering SINK over those events and (b) a prompt_toolkit
-input layer. loop.py / slice.py are never touched. The whole module is import-guarded behind the
+input layer. loop.py / pfc.py / seed.py are never touched. The whole module is import-guarded behind the
 `tui` extra: core/headless/eval never import rich or prompt_toolkit.
 
 Design (borrowed from Hermes' rich+prompt_toolkit stack and Kimi's TUI UX):
@@ -691,7 +691,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
         if text in ("exit", "quit", "/exit"):
             ev.app.exit(); return
         if text == "/learn" or text.startswith("/learn "):   # transcript → reusable skill, runs as a TURN (mirror the REPL)
-            from .consolidate import build_learn_prompt
+            from .neocortex import build_learn_prompt
             text = build_learn_prompt(text[len("/learn"):].strip())
         elif text.startswith("/") and handle_slash is not None:
             handle_slash(text); return

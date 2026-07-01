@@ -47,7 +47,7 @@ def reset_authoring_origin(token: contextvars.Token) -> None:
 
 def current_authoring_origin() -> str:
     """The active authoring origin. Default USER — a bare skill write belongs to the user
-    and must never be auto-pruned. consolidate.py sets AUTO around its render_skill writes."""
+    and must never be auto-pruned. neocortex.py sets AUTO around its render_skill writes."""
     return _origin.get()
 
 

@@ -9,7 +9,7 @@ consolidate, just incremental and off the critical path.
 
 WHY THIS CAN'T DESTABILIZE THE DEFAULT PATH (the hard requirement):
   - OFF by default. Only runs when AGENT_BACKGROUND_REVIEW is truthy.
-  - The fork reads ONLY the durable episodic cache (already flushed to disk by episode.py)
+  - The fork reads ONLY the durable episodic cache (already flushed to disk by hippocampus.py's EpisodeSink)
     and writes ONLY to durable stores (memem remember / SKILL.md / FTS5 index). It NEVER
     touches the Slice, the Session, the loop, the dispatcher, or the prompt cache.
   - It is a daemon thread: it can't block process exit and an exception in it is swallowed.
@@ -101,7 +101,7 @@ class BackgroundReviewer:
         """Worker body — durable-in, durable-out. Every failure is swallowed: a background
         critique must NEVER affect the foreground session."""
         try:
-            from .consolidate import promote_episodes, promote_procedures, render_skill
+            from .neocortex import promote_episodes, promote_procedures, render_skill
             records = self.memory.read_episodes(session_id)
             if not records:
                 return

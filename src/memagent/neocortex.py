@@ -1,5 +1,10 @@
-"""Consolidation — the cache→long-term step (MEMORY-SPEC step 4).
+"""NEOCORTEX — the long-term / semantic memory: distilled lessons, auto-surfaced every turn with no
+tool call (unlike HIPPOCAMPUS's explicit, cue-dependent recall_history). Two sides live in this one
+module: `NeocortexMixin` (recall/remember/mark_used, the memem-backed cross-session lesson store
+mixed into MememMemory in memory.py) and the CONSOLIDATION pipeline (the cache→long-term step that
+distills the episodic cache into those lessons, plus reusable skills).
 
+CONSOLIDATION — the cache→long-term step (MEMORY-SPEC step 4).
 Reads the lossless episodic cache for a session and PROMOTES durable knowledge, ROUTED BY TYPE
 (EverOS pattern: facts→memory, procedures→skills):
   - FACTS: a CORRECTIVE episode (pitfall hit, then ended clean) → a declarative "Pitfall/Resolution"
@@ -8,9 +13,16 @@ Reads the lossless episodic cache for a session and PROMOTES durable knowledge, 
     by action-shape and frequency-weighted (repeated workflows first — EverOS "repeated patterns
     become skills"); capped to avoid skill spam.
 Both `promote_episodes` and `promote_procedures` are pure (no I/O, no LLM) → testable offline.
-`MememMemory.consolidate` wires them to the cache + remember()/skill files. The deterministic skill
+`NeocortexMixin.consolidate` wires them to the cache + remember()/skill files. The deterministic skill
 body is a RECORDED procedure; LLM-distillation (generalizing the steps) is the clean upgrade at
 `render_skill`. Cross-session frequency is handled separately by retrieval-feedback (bump_access).
+
+MINING HELPERS — shared by the CACHE-sourced distill path.
+The WRITE side of the memory loop is CACHE-ONLY: distillation happens at session end in
+`NeocortexMixin.consolidate` → `promote_episodes` / `promote_procedures`, which read the episodic
+CACHE (`read_episodes`, a HIPPOCAMPUS concern), never the live slice. These pure helpers — error-
+signature dedup, self-inflicted-error filtering, and pitfall titling — are reused by that cache path
+(and the tests). No slice import; no event sink.
 """
 from __future__ import annotations
 
@@ -19,11 +31,13 @@ import os
 import re
 from collections import Counter
 
+from .code_index import _terms   # reuse the query-term extractor (drops stopwords/short tokens)
 from .finding_types import badge, classify_finding
-from .mining import is_self_inflicted   # the cache-distill path now owns self-inflicted filtering
+from .interfaces import Snippet
 from .safety import redact_text, scan_for_threats   # F1: scan recorded material BEFORE the LLM call + the return
 from .skill_provenance import AUTO, frontmatter_line
-from .slice import one_line
+from .text_utils import one_line
+from .tools import HOST_ERROR_SENTINELS
 
 _log = logging.getLogger("memagent.consolidate")
 
@@ -35,6 +49,26 @@ _SKILL_OPS = frozenset(("edit_file", "str_replace", "append_to_file", "write_fil
 _SECRET_RE = re.compile(r"(api[_-]?key|secret|token|password|credential|bearer)\s*[:=]", re.I)
 _EXT_TAG = {".py": "python", ".js": "javascript", ".ts": "typescript", ".go": "go", ".rs": "rust",
             ".java": "java", ".rb": "ruby", ".c": "c", ".cpp": "cpp", ".sh": "shell"}
+
+
+def is_self_inflicted(pitfall: str) -> bool:
+    """D2 — True when `pitfall` is the agent hitting the HOST's own guard rail (confinement,
+    permission), not a real engineering pitfall. Such an error teaches a future agent nothing, so it
+    must mine NOTHING. Task-agnostic substring match against the host's error sentinels (tools.py)."""
+    low = (pitfall or "").lower()
+    return any(sentinel in low for sentinel in HOST_ERROR_SENTINELS)
+
+
+# leading boilerplate the host prepends to a tool error — stripped so the lesson TITLE is the actual
+# pitfall, not "Error: ". Task-agnostic (no tool/language names).
+_ERR_PREFIX_RE = re.compile(r"^\s*(?:error|exit code \d+)\s*[:\-]?\s*", re.I)
+
+
+def pitfall_signature(pitfall: str, n: int = 60) -> str:
+    """D1 — a short, readable lesson TITLE from the PITFALL itself (never the user's goal). Strips the
+    host's 'Error:'/'Exit code:' prefix so the title leads with the real failure."""
+    sig = _ERR_PREFIX_RE.sub("", one_line(pitfall, 200)).strip()
+    return one_line(sig or pitfall, n)
 
 
 def _tags(files) -> str:
@@ -294,3 +328,109 @@ def render_skill_llm(proc: dict, llm, *, origin: str = AUTO) -> str:
     prov = f"Generalized from {n} successful run(s)." if n > 1 else "Generalized from a successful run."
     return (f"---\nname: {proc['name']}\ndescription: {proc['description']}\n"
             f"{frontmatter_line(origin)}\n---\n\n# {proc['description']}\n\n{prov}\n\n{body}\n")
+
+
+_MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one pathological output) — mirrors
+# hippocampus's own record-size discipline; used by NeocortexMixin.recall/remember only indirectly
+# (kept here since it's a neocortex-side concern: nothing in this constant reads episodic state).
+
+
+class NeocortexMixin:
+    """Cross-session LESSONS (memem-backed) + the session-end CONSOLIDATION sweep. Mixed into
+    MememMemory (memory.py) alongside HippocampusMixin (hippocampus.py) — `self` at runtime is a
+    concrete MememMemory instance, so `self._vault`/`self._scope` (set by MememMemory.__init__) and
+    `self.read_episodes` (HippocampusMixin) resolve normally via the MRO."""
+
+    # --- lessons ---
+    def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
+        """Recall cross-session lessons, then GATE by relevance: drop hits that share no term with
+        the goal (memem returns top-k with no floor → cross-domain noise). Pass scope_id so same-
+        project lessons get memem's soft bonus, and `paths` (R1, the files in play at topic-start) so
+        memem's paths_context gives lessons tagged with those files a small bonus. REINFORCE the
+        surfaced (relevant) ones via mark_used. Decay of the unreinforced is memem's own job."""
+        from memem.retrieve import retrieve
+        try:
+            hits = retrieve(query, k=k, log_call_type=None, writeback=False, scope_id=self._scope,
+                            paths_context=paths or None)
+        except Exception:
+            return []
+        terms = _terms(query)
+        out: list[Snippet] = []
+        for h in hits:
+            text = h.get("body") or h.get("title") or ""
+            if not _memory_relevant(f"{h.get('title', '')} {text}", terms):
+                continue                       # relevance gate: relevant-or-nothing, no noise
+            self.mark_used(h.get("id", ""))    # reinforce what we surface (feeds memem's decay)
+            out.append(Snippet(path=h.get("path", ""), text=text, score=float(h.get("score", 0.0))))
+        return out
+
+    def remember(self, content: str, *, title: str = "", scope: str = "default", tags: str = "",
+                 paths: list[str] | None = None) -> None:
+        # (a) BLOCK on WRITE: a poisoned lesson would re-inject into the slice every turn forever.
+        if scan_for_threats(f"{title}\n{content}", scope="strict"):
+            return
+        # (c) REDACT on PERSIST: never durably store a leaked secret that then re-surfaces.
+        content = redact_text(content)
+        title = redact_text(title)
+        from memem.operations import memory_save
+        try:
+            memory_save(content, title=title, scope_id=scope, tags=tags, paths=paths or None)  # R1: tag with files
+        except Exception:
+            pass
+
+    def mark_used(self, memory_id: str) -> None:
+        """Retrieval feedback: reinforce a memory that proved relevant (bumps its access count, which
+        feeds memem's decay/ranking). Delegates to memem's primitive — we don't reinvent the decay
+        machinery memem already has (obsidian_store.bump_access + decay.compute_decay_factor)."""
+        if not memory_id:
+            return
+        try:
+            from memem.obsidian_store import bump_access
+            bump_access(memory_id)
+        except Exception:
+            pass   # feedback is best-effort; must never break a recall
+
+    def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> dict:
+        """Session-end sweep: promote durable knowledge from the episodic CACHE (never the slice),
+        ROUTED BY TYPE — FACTS (corrective lessons) → memem; PROCEDURES (repeated smooth workflows) →
+        reusable SKILL.md the SkillManager discovers next session. `mode="llm"` (with an `llm`) renders
+        skill bodies via render_skill_llm (generalized) instead of render_skill (recorded); both fall
+        back to deterministic on any failure. RETURNS a stats dict so the caller reports the truth (never a
+        blind 'success'); each item is guarded so one bad lesson/skill can't abort the batch. Never raises."""
+        from .memory import _skills_dir, write_skill_file
+        stats = {"lessons": 0, "skills": 0, "skills_rejected": 0, "errors": 0}
+        try:
+            records = self.read_episodes(session_id)   # HippocampusMixin, resolved via self/MRO
+            if not records:
+                return stats
+            for lesson in promote_episodes(records):                 # facts → memem (tagged with files: R1)
+                try:
+                    self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
+                                  tags=lesson["tags"], paths=lesson.get("files"))
+                    stats["lessons"] += 1
+                except Exception:  # noqa: BLE001 — one bad lesson must not sink the rest
+                    stats["errors"] += 1
+            skills_dir = _skills_dir()
+            for proc in promote_procedures(records):                 # procedures → skill packs (AUTO)
+                try:
+                    body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
+                    if write_skill_file(proc["name"], body, skills_dir=skills_dir):   # guarded; None = rejected
+                        stats["skills"] += 1
+                    else:
+                        stats["skills_rejected"] += 1                # validate/threat-scan rejected it
+                except Exception:  # noqa: BLE001
+                    stats["errors"] += 1
+        except Exception:  # noqa: BLE001 — promote_*/read failures never break teardown
+            stats["errors"] += 1
+        return stats
+
+
+def _memory_relevant(text: str, terms: list[str]) -> bool:
+    """Relevance gate for the RELEVANT MEMORY tier: keep a recalled lesson only if it shares a
+    discriminating term with the goal (whole-word, so 'add' doesn't match 'address'). With no terms
+    (un-discriminating query) keep it — we can't gate. This makes the tier relevant-or-nothing
+    instead of memem's blind top-k, the same relevance discipline the RELATED CODE map uses."""
+    if not terms:
+        return True
+    blob = (text or "").lower()
+    return any(re.search(r"\b" + re.escape(t.lower()) + r"\b", blob) for t in terms)

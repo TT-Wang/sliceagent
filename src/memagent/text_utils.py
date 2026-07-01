@@ -1,12 +1,17 @@
 """Tiny shared text helpers — ONE home for the whitespace/timestamp normalizers that were copy-pasted
-across regions.py, skills.py, pagetable.py and history.py. Leaf module (no intra-package imports) so any
-module can use it without an import cycle. Behavior is byte-identical to the expressions it replaces.
+across regions.py, skills.py, pagetable.py and hippocampus.py. Leaf module (no intra-package imports) so
+any module can use it without an import cycle. Behavior is byte-identical to the expressions it replaces.
 """
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 _WS = re.compile(r"\s+")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_ws(s) -> str:

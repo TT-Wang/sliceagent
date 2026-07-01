@@ -8,7 +8,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent import skill_usage  # noqa: E402
-from memagent.consolidate import render_skill  # noqa: E402
+from memagent.neocortex import render_skill  # noqa: E402
 from memagent.skill_provenance import (  # noqa: E402
     AUTO, USER, current_authoring_origin, is_auto, provenance_of,
     reset_authoring_origin, set_authoring_origin,

@@ -1,6 +1,6 @@
 """Pure Slice <-> TaskState mappers (MEMORY-SPEC step 2).
 
-No I/O, no memem — keeps slice.py (the moat) byte-identical. TaskState stores REFS (paths +
+No I/O, no memem — keeps pfc.py (the moat) byte-identical. TaskState stores REFS (paths +
 anchors), never file contents; resume re-reads files live (ground truth = disk). Transient tiers
 (recent, action_log, active_skills) are intentionally NOT serialized — they're per-turn residue
 re-derived from ground truth. NOTE on resume: active_skills is dropped (skill bodies live on disk
@@ -14,7 +14,8 @@ verbatim user text into the vault for marginal continuity gain.
 from __future__ import annotations
 
 from .interfaces import TaskState
-from .slice import Slice, one_line
+from .pfc import Slice
+from .text_utils import one_line
 
 
 def slice_to_task_state(s: Slice, task_id: str, *, session_id: str = "", title: str = "",

@@ -17,7 +17,8 @@ from memagent.events import TurnInterrupted                          # noqa: E40
 from memagent.hooks import BudgetHook, Hooks, OracleHook             # noqa: E402
 from memagent.interfaces import Snippet                              # noqa: E402
 from memagent.loop import run_turn                                   # noqa: E402
-from memagent.slice import Slice, make_build_slice                   # noqa: E402
+from memagent.pfc import Slice  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
 def check(fn):

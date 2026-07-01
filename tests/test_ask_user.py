@@ -12,7 +12,8 @@ from memagent.hooks import CompositeHooks, GuardrailHook       # noqa: E402
 from memagent.loop import STUCK_BLOCK_BUDGET, run_turn         # noqa: E402
 from memagent.memory import NullMemory                         # noqa: E402
 from memagent.retriever import NullRetriever                   # noqa: E402
-from memagent.slice import Slice, make_build_slice, slice_sink # noqa: E402
+from memagent.pfc import Slice, slice_sink  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 from memagent.tools import LocalToolHost                       # noqa: E402
 
 CHECKS = []

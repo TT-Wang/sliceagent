@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.slice import (MAX_ACTIVE_SKILLS, MAX_GHOSTS, READ_BUDGET, Slice,  # noqa: E402
-                            add_skill, touch_file)
+from memagent.pfc import Slice, add_skill, touch_file  # noqa: E402
+from memagent.swap import MAX_ACTIVE_SKILLS, MAX_GHOSTS, READ_BUDGET  # noqa: E402
 
 CHECKS = []
 def check(fn):

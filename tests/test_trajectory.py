@@ -21,12 +21,9 @@ from memagent.guardrails import (                          # noqa: E402
 )
 from memagent.memory import NullMemory                     # noqa: E402
 from memagent.session import Session                       # noqa: E402
-from memagent.slice import (                               # noqa: E402
-    Slice,
-    capture_user_report,
-    is_user_report,
-    render_slice,
-)
+from memagent.pfc import Slice  # noqa: E402
+from memagent.seed import render_slice  # noqa: E402
+from memagent.regions import capture_user_report, is_user_report  # noqa: E402
 
 CHECKS = []
 def check(fn):

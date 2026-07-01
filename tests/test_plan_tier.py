@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from memagent.events import ToolResult  # noqa: E402
 from memagent.regions import render_plan  # noqa: E402
-from memagent.slice import Slice, slice_sink  # noqa: E402
+from memagent.pfc import Slice, slice_sink  # noqa: E402
 from memagent.taskstate import slice_to_task_state, task_state_to_slice  # noqa: E402
 from memagent.tools import LocalToolHost  # noqa: E402
 

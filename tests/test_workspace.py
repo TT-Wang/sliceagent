@@ -13,7 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.workspace import build_workspace_snapshot, project_conventions  # noqa: E402
+from memagent.sensory_cortex import build_workspace_snapshot, project_conventions  # noqa: E402
 
 CHECKS = []
 def check(fn):

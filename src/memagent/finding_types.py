@@ -11,7 +11,7 @@ Vocabulary (fixed, small — the point is sharp typed recall, not a taxonomy):
 
 The classifier reads cheap lexical signals from the note text and the episode meta (was a
 file edited? did an error clear?). It is intentionally conservative: an ambiguous note stays
-NOTE rather than mis-typed. consolidate.py tags promoted lessons with the type; history.py
+NOTE rather than mis-typed. neocortex.py tags promoted lessons with the type; hippocampus.py
 renders it as a leading [TYPE] badge.
 
 NO-TRANSCRIPT INVARIANT: classification reads already-stored episode records; it produces a

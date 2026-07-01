@@ -24,8 +24,8 @@ any other result) — never a message appended to a transcript.
 
 CONVENTIONS BORROWED FROM MEMAGENT (not from Hermes)
 ----------------------------------------------------
-- "failing" is memagent's existing convention (loop.py / slice.record_action /
-  mining.py): out.startswith("Error") or out.startswith("Exit code"). We do NOT port
+- "failing" is memagent's existing convention (loop.py / regions.record_action /
+  neocortex.py): out.startswith("Error") or out.startswith("Exit code"). We do NOT port
   Hermes's JSON exit-code classifier (memagent has no safe_json_loads and a different
   result shape). Callers may pass `failed=` explicitly; otherwise we classify here.
 - The idempotent / mutating tool sets are memagent's actual builtins.

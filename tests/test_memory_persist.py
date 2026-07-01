@@ -15,7 +15,8 @@ import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.memory import MememMemory, _MAX_RECORD_VALUE_BYTES  # noqa: E402
+from memagent.hippocampus import _MAX_RECORD_VALUE_BYTES  # noqa: E402
+from memagent.memory import MememMemory  # noqa: E402
 
 CHECKS = []
 def check(fn):

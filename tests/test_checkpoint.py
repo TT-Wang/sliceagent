@@ -7,7 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.slice import Slice, consolidate_checkpoint, record_note  # noqa: E402
+from memagent.pfc import Slice, consolidate_checkpoint  # noqa: E402
+from memagent.regions import record_note  # noqa: E402
 
 CHECKS = []
 def check(fn):

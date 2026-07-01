@@ -3,9 +3,9 @@
 PORTED SHAPE from /tmp/hermes-agent/tools/session_search_tool.py (discovery / scroll /
 read, ZERO LLM — every shape returns actual stored rows). Adapted to memagent's grain:
 Hermes indexes per-MESSAGE rows in a live session DB; memagent has no transcript, so we
-index per-EPISODE records (one row per turn) appended by episode.py. The index is an
+index per-EPISODE records (one row per turn) appended by hippocampus.py's EpisodeSink. The index is an
 ADDITIVE sidecar over the already-durable JSONL cache — the JSONL stays the source of
-truth, this is a queryable mirror. Recall (history.py) is single-session today; this lets
+truth, this is a queryable mirror. Recall (hippocampus.py's recall_history) is single-session today; this lets
 it search ACROSS sessions without ever feeding a growing transcript.
 
 NO-TRANSCRIPT INVARIANT: this never enters the slice. It is a durable store the model

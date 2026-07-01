@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from memagent.memory import NullMemory                              # noqa: E402
 from memagent.pagetable import PageTable                           # noqa: E402
 from memagent.regions import MANIFEST_TURNS, render_cache_manifest # noqa: E402
-from memagent.slice import Slice, make_build_slice                 # noqa: E402
+from memagent.pfc import Slice  # noqa: E402
+from memagent.seed import make_build_slice  # noqa: E402
 from memagent.tools import LocalToolHost                           # noqa: E402
 
 CHECKS = []
@@ -145,7 +146,7 @@ def pagetable_memory_lessons_unifies_recall():
     distinct from raw episode-xsession. PageRefs wrap recall's Snippets; render is byte-identical
     to the former render_memory(memory.recall(...)) path; absent/empty/skip all collapse to ''."""
     from memagent.interfaces import Snippet
-    from memagent.slice import render_memory
+    from memagent.seed import render_memory
 
     class _LessonMem:
         def recall(self, q, k=6, paths=None):
@@ -174,10 +175,10 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
     800-char gist. If the ring doesn't SIGNAL the cut + how to page the rest, the model reads the gist as
     the whole reply and confabulates the part it can't see (a cross-turn-continuity failure = the moat).
     Fix: a truncated ring reply carries a recall_history(last=K) marker, and that call returns the full text."""
-    from memagent.episode import turn_markdown
+    from memagent.hippocampus import turn_markdown
     from memagent.events import AssistantText
-    from memagent.history import make_history_tool
-    from memagent.slice import record_user, slice_sink
+    from memagent.hippocampus import make_history_tool
+    from memagent.pfc import record_user, slice_sink
 
     item2 = "2. lib/pipeline.ts:131,142 — jobs_scored column used for the jobs_updated value."
     report = ("Bug Hunt Report\n\n1. queries.ts:233 build-blocker. "
@@ -227,7 +228,8 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
     # the model saw a snippet of bug #1 and FABRICATED 3 replacement bugs instead of recalling the rest.
     # Findings carry no turn number, so the fix points at the two GENERAL recall paths (the manifest, or
     # recall_history(search=...)) rather than a specific turns=[N] call.
-    from memagent.slice import Slice, record_note
+    from memagent.pfc import Slice
+    from memagent.regions import record_note
 
     long_report = ("Bug Hunt: lib/db.ts\n\n" + "1. (BUG) jobs_updated column has broken indentation. " * 6
                    + "\n\n2. (BUG) archetypeCounts() missing bd, finance, strategy. Build-breaking.\n"
@@ -259,7 +261,7 @@ def truncated_user_report_also_advertises_recall():
     # field — if it was silently cut, part of the user's own spec of what's broken would be lost with no
     # recovery path. Both this and the findings fix now share the SAME _cut_with_recall_marker helper.
     from memagent.regions import capture_user_report
-    from memagent.slice import Slice
+    from memagent.pfc import Slice
 
     long_report = "it's broken - " + ("when I click X, Y happens instead of Z. " * 8)
     from memagent.text_utils import normalize_ws

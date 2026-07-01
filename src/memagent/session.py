@@ -19,7 +19,9 @@ import re
 import uuid
 
 from .interfaces import TaskRef
-from .slice import Slice, capture_user_report, one_line
+from .pfc import Slice
+from .regions import capture_user_report
+from .text_utils import one_line
 from .taskstate import slice_to_task_state, task_state_to_slice
 
 

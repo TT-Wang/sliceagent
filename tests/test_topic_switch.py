@@ -116,7 +116,7 @@ def cross_session_resume_if_memem():
 @check
 def build_renders_other_threads_and_follows_active():
     from memagent.retriever import NullRetriever
-    from memagent.slice import make_build_slice
+    from memagent.seed import make_build_slice
     from memagent.tools import LocalToolHost
     sess = fresh()
     a_id = sess.new_topic("fix the parser")
