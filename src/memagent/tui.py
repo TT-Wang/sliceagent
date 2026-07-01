@@ -438,20 +438,11 @@ class RichSink:
         self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
         #                                  all _status transitions (rich Status is not thread-safe)
         self._status = None
-        # The animated in-place spinner is a Rich Live region (console.status). On macOS Terminal.app the
-        # combination of Rich's live-cursor sequences + prompt_toolkit's pinned box GARBLES a turn — the
-        # spinner frames cascade down the screen and the reply prints shifted right. Verified live: the same
-        # turn is clean in a VT emulator, and the chitchat path (which never starts the spinner) stays clean
-        # on Terminal.app too — so the spinner is the differentiator. Default it OFF on Terminal.app, ON
-        # elsewhere; AGENT_SPINNER overrides. Off keeps ALL other Rich formatting (reply panel, markdown, tool
-        # cards) — only the animated status line is dropped.
-        _sp = os.environ.get("AGENT_SPINNER", "").strip().lower()
-        if _sp in ("off", "0", "false", "no"):
-            self._spinner_on = False
-        elif _sp in ("on", "1", "true", "yes"):
-            self._spinner_on = True
-        else:
-            self._spinner_on = os.environ.get("TERM_PROGRAM", "") != "Apple_Terminal"
+        # AGENT_SPINNER=off disables the animated in-place status spinner (a Rich live region), keeping every
+        # other Rich element (reply panel, markdown, tool cards). Default ON everywhere. (The mid-turn garble
+        # once blamed on the spinner + Terminal.app was actually the Esc-sentinel clearing OPOST — fixed in
+        # _EscSentinel._enter_raw — so the spinner is safe again; this stays as a plain user preference.)
+        self._spinner_on = os.environ.get("AGENT_SPINNER", "on").strip().lower() not in ("off", "0", "false", "no")
         self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
         # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
         # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
