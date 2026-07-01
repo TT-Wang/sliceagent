@@ -500,8 +500,13 @@ class RichSink:
             if bucket:
                 self._tally[bucket] = self._tally.get(bucket, 0) + 1
 
+    _STREAM_TAIL_CHARS = 600  # bound the LIVE panel's height so it can never grow tall enough to scroll the
+    # terminal — see on_delta's docstring for why an unbounded panel corrupts the display (the final,
+    # untruncated reply still prints in full once streaming ends, via AssistantText → _response_panel).
+
     def _stream_panel(self, text: str) -> Panel:
-        return Panel(Markdown(text), title=f"[bold {TH['accent']}]assistant[/] [grey50]streaming…[/]",
+        shown = text if len(text) <= self._STREAM_TAIL_CHARS else "…" + text[-self._STREAM_TAIL_CHARS:]
+        return Panel(Text(shown), title=f"[bold {TH['accent']}]assistant[/] [grey50]streaming…[/]",
                      title_align="left", border_style=TH["dim"], box=_box.HORIZONTALS,
                      padding=(1, 2), width=_box_width(self.c))
 
@@ -510,7 +515,17 @@ class RichSink:
         (Rich Live, transient) — the actual text rendering as it arrives, not a 100-char spinner tail. The
         Live is transient, so on stop it erases and AssistantText prints the canonical panel once (no
         double-print). Falls back to a spinner tail if Live can't run (non-tty / edge). No-op until a step
-        is active (e.g. nothing to stream during routing)."""
+        is active (e.g. nothing to stream during routing).
+
+        Two things matter for correctness, found via a real repro (many stacked "assistant streaming…"
+        panels instead of one updating in place): (1) the panel must render PLAIN text, not Markdown —
+        streaming text is mid-token/syntactically incomplete markdown on every delta, and Markdown's
+        rendered HEIGHT swings unpredictably on incomplete syntax, which breaks Rich Live's line-count-based
+        erase/redraw math; (2) the panel's height must stay BOUNDED (_stream_panel truncates to a tail
+        window) — an unbounded, ever-growing panel eventually reaches the bottom of the terminal and forces
+        a scroll, and ANSI cursor-up/clear sequences cannot un-scroll content that has already left the
+        visible screen, so every scroll permanently bakes one stale frame into the scrollback. Bounding the
+        height keeps the panel far from the bottom edge, so it can redraw in place instead of scrolling."""
         if kind != "content" or not text or (self._status is None and self._live is None):
             return
         self._stream += text

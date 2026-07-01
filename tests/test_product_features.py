@@ -180,6 +180,34 @@ def richsink_ondelta_noop_when_idle():
     assert sink._live is None and sink._status is None
 
 
+@check
+def stream_panel_is_plain_text_and_height_bounded():
+    # Reported live: many stacked "assistant streaming…" panels instead of one updating in place.
+    # Root cause (traced with a real repro): (1) rendering Markdown on every delta — incomplete markdown
+    # syntax mid-stream makes the panel's rendered HEIGHT swing unpredictably, breaking Rich Live's
+    # line-count-based erase/redraw; (2) an unbounded, ever-growing panel eventually scrolls the terminal,
+    # and ANSI erase codes can't un-scroll content already in scrollback. Pin both fixes.
+    import io
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from memagent.tui import make_rich_sink
+    sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
+    panel = sink._stream_panel("**bold** _partial markdown that never clos")
+    assert not isinstance(panel.renderable, Markdown), \
+        "the LIVE streaming panel must render plain Text, not Markdown (incomplete syntax mid-stream " \
+        "makes Markdown's rendered height unstable, which breaks Rich Live's erase/redraw)"
+    long_text = "x" * (sink._STREAM_TAIL_CHARS * 3)
+    panel = sink._stream_panel(long_text)
+    shown = panel.renderable.plain
+    assert len(shown) <= sink._STREAM_TAIL_CHARS + 1, \
+        f"the streaming panel must stay height-bounded (tail-truncated), got {len(shown)} chars shown"
+    assert shown.endswith("x" * 10) and shown.startswith("…"), \
+        "truncation must keep the TAIL (most recent text), marked with a leading ellipsis"
+    short_text = "short reply, no truncation needed"
+    panel = sink._stream_panel(short_text)
+    assert panel.renderable.plain == short_text, "text under the cap must render unchanged"
+
+
 # ---- image input (vision) ----------------------------------------------------
 def _slice_msgs(host, goal="do the thing"):
     from memagent.memory import NullMemory
