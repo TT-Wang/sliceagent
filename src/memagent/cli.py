@@ -706,7 +706,9 @@ def main() -> None:
         _note = (f"  ⚠ recovered an interrupted turn (step {_pend.get('step', '?')}): {_rg}"
                  + (f"\n    last said: {_rla}" if _rla else "")
                  + "\n    its progress wasn't saved cleanly — re-send the request to continue.")
-        (_console.print(f"[yellow]{_note}[/]") if _console is not None else print(_note))
+        # markup=False: _note holds RECOVERED agent/user text (paths like app/jobs/[id]/page.tsx, code, or a
+        # stray `[/learn]`) — parsing it as Rich markup crashes startup with a MarkupError. Style, don't parse.
+        (_console.print(_note, style="yellow", markup=False) if _console is not None else print(_note))
         recovery.clear(root)
 
     if use_live and _try_live():
