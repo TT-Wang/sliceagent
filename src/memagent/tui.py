@@ -1339,27 +1339,17 @@ def user_echo(console: Console, text: str) -> None:
 
 
 def banner_panel(console: Console, info: str) -> Panel:
-    """The startup logo as a rich renderable (reused by the rich CLI and the live composer). RESPONSIVE:
-    the full ansi_shadow wordmark needs 86 cols (80 for the art + emblem, +6 for the panel's border and
-    padding); below that it wraps into garbage, so fall back to a compact one-line wordmark that always fits.
-
-    Width MUST come from the SAME console that renders this panel — never a separate shutil.get_terminal_size()
-    call. That call silently returns the 80×24 default whenever the tty size isn't cleanly readable at that
-    instant, so with the old threshold sitting right on 80 (82) the banner flipped between the big font and
-    the compact fallback on an otherwise-unchanged terminal. One width source + a measured threshold makes
-    the choice deterministic per width, and makes a wrap-into-garbage render impossible (the number that
-    picks the layout is the number it's rendered at)."""
-    try:
-        cols = int(console.width)
-    except Exception:  # noqa: BLE001 — width unknown → the compact form always fits, so default to it
-        cols = 0
+    """The startup logo: the full ansi_shadow BLOCK wordmark, always (per user preference — never a compact
+    fallback). Each art row is no-wrap + crop, so a terminal narrower than the art (~86 cols) clips it
+    cleanly on the right instead of wrapping into a staircase; a normal-width window shows it in full.
+    `console` is kept in the signature for the callers, though the layout is now width-independent."""
     rows = []
-    if cols >= 86:
-        for i, word in enumerate(_WORDMARK):
-            blk, col = _EMBLEM[i]
-            rows.append(Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}")))
-    else:
-        rows.append(Text.assemble(("  ▓▒░  ", "bold bright_cyan"), ("m e m a g e n t", "bold bright_cyan")))
+    for i, word in enumerate(_WORDMARK):
+        blk, col = _EMBLEM[i]
+        t = Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}"))
+        t.no_wrap = True
+        t.overflow = "crop"          # narrow terminal → clip the art, never wrap it into a staircase
+        rows.append(t)
     rows.append(Text(""))
     rows.append(Text("  ▓ slice → ▒ cache → ░ memory   ·   memory-native coding agent", style=TH["dim"]))
     if info:

@@ -84,13 +84,10 @@ def completer_does_slash_and_files():
 
 
 @check
-def banner_decides_from_console_width_and_never_wraps_the_big_art():
-    # Root cause of "same terminal, different banner": the big-vs-compact choice was read from a SEPARATE
-    # shutil.get_terminal_size() call (which returns the 80x24 default when the tty size isn't readable at
-    # that instant) with the threshold sitting right on 80 (was 82) — so it flipped on an unchanged terminal,
-    # and 82-85 cols rendered the big art WRAPPED into garbage. Fix: decide from the SAME console width the
-    # panel is rendered at, threshold = the art's true minimum (86). Pin: >=86 -> big art, each row intact on
-    # one line (no wrap); <86 -> the compact one-liner.
+def banner_always_uses_the_big_block_wordmark():
+    # User preference: the full ansi_shadow BLOCK wordmark every time — never the compact one-line fallback.
+    # Each art row is no-wrap+crop, so a wide terminal shows it in full and a narrow one clips it cleanly on
+    # the right (a single line per row), never wrapping into a staircase.
     from rich.console import Console
     from memagent.tui import banner_panel, _WORDMARK
     def render(width):
@@ -98,12 +95,16 @@ def banner_decides_from_console_width_and_never_wraps_the_big_art():
         c = Console(file=buf, width=width, force_terminal=True, color_system=None)
         c.print(banner_panel(c, "info"))
         return buf.getvalue()
-    big = render(86)                                  # exactly the art's minimum width
-    assert _WORDMARK[0] in big and _WORDMARK[-1] in big, \
-        "at 86 cols every big-wordmark row must render intact on one line (a wrap would split these)"
-    compact = render(85)                              # one column short → must fall back, cleanly
-    assert "█" not in compact and "m e m a g e n t" in compact, \
-        "below 86 cols must use the compact one-line wordmark, never a wrapped big one"
+    wide = render(120)
+    assert _WORDMARK[0] in wide and _WORDMARK[-1] in wide, "a wide terminal must show the full block wordmark"
+    assert "m e m a g e n t" not in wide, "the compact fallback must be gone"
+    narrow = render(60)                               # narrower than the art → still big, just clipped
+    assert "█" in narrow and "m e m a g e n t" not in narrow, \
+        "even a narrow terminal must show the big block wordmark (clipped), never the compact one"
+    # each big-art row is ONE display line (no_wrap): the 6 emblem-prefixed rows stay 6 lines, never split.
+    # (Doubled emblems ▓▓/▒▒/░░ mark exactly the art rows; the tagline uses single ▓/▒/░, so it's excluded.)
+    art_lines = [ln for ln in narrow.splitlines() if any(e in ln for e in ("▓▓", "▒▒", "░░"))]
+    assert len(art_lines) == len(_WORDMARK), f"art must not wrap: {len(_WORDMARK)} rows, got {len(art_lines)}"
 
 
 def main():
