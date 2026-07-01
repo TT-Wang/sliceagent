@@ -69,6 +69,9 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_TUI", "ui", "UI mode: rich (default inline), live (pinned box), off (plain).",
            "rich", choices=("rich", "live", "off"),
            aliases=("1", "on", "true", "yes", "0", "false", "no")),
+    EnvVar("AGENT_SPINNER", "ui", "Animated in-place status spinner (Rich live region). Set off if your "
+           "terminal garbles the display during a turn — keeps all other Rich formatting.",
+           "on", choices=("on", "off"), aliases=("1", "true", "yes", "0", "false", "no")),
     EnvVar("SHOW_SLICE", "ui", "Set truthy to print the rebuilt slice each turn (debug view).", ""),
     # ── memory ────────────────────────────────────────────────────────────────────────────────
     EnvVar("MEMAGENT_VAULT", "memory", "memagent's STATE vault (episodic cache + task-state records).", ""),

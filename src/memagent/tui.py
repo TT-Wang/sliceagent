@@ -431,6 +431,11 @@ class RichSink:
         self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
         #                                  all _status transitions (rich Status is not thread-safe)
         self._status = None
+        # AGENT_SPINNER=off → never create the Rich Live spinner (console.status). Rich's Live region and
+        # prompt_toolkit's pinned box both drive the terminal; on some emulators that combo corrupts the
+        # cursor column (the reply prints shifted right, the input box fragments). Off keeps ALL the Rich
+        # formatting (panels, markdown, tool cards) — only the animated in-place spinner is dropped.
+        self._spinner_on = os.environ.get("AGENT_SPINNER", "on").strip().lower() not in ("off", "0", "false", "no")
         self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
         # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
         # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
@@ -465,7 +470,7 @@ class RichSink:
             self._action_t0 = time.monotonic()
             if self._turn_t0 is None:
                 self._turn_t0 = self._action_t0
-            if self._status is None:   # create once; MUTATE the same region for every later frame
+            if self._spinner_on and self._status is None:   # create once; MUTATE the same region every frame
                 self._body = _LiveStatus(self)
                 self._status = self.c.status(self._body, spinner="dots")
                 self._status.start()
@@ -479,7 +484,7 @@ class RichSink:
                 self._subagent = text
                 if self._action_t0 is None:
                     self._action_t0 = time.monotonic()
-                if self._status is None:
+                if self._spinner_on and self._status is None:
                     self._body = _LiveStatus(self)
                     self._status = self.c.status(self._body, spinner="dots")
                     self._status.start()
@@ -534,6 +539,8 @@ class RichSink:
             self._tally = {}
             self._step = 0
             self._spin("thinking…")
+            if not self._spinner_on:                       # spinner off → one plain line so it's not silent
+                self.c.print(Text("  · thinking…", style=TH["dim"]))
         elif isinstance(e, StepBegin):
             self._step = e.step                           # the step counter the status line shows
             self._spin("thinking…")                       # new step → reset the action clock, keep the turn clock
