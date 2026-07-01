@@ -161,10 +161,10 @@ def richsink_streams_content_then_finalizes_once():
         c = Console(file=buf, force_terminal=force, width=80, soft_wrap=False)
         sink = make_rich_sink(c, {"model": "kimi"})
         sink(SliceBuilt("req"))                    # starts the thinking spinner
-        sink.on_delta("content", "Hello ")         # deltas stream into the live reply
+        sink.on_delta("content", "Hello ")         # deltas flip the live label to "writing…" (no preview)
         sink.on_delta("content", "world — the fix is X.")
-        assert sink._stream == "Hello world — the fix is X.", sink._stream
-        sink(AssistantText("Hello world — the fix is X."))   # finalize (transient live erased; panel printed)
+        assert sink._label == "writing…", sink._label
+        sink(AssistantText("Hello world — the fix is X."))   # finalize (live region torn down; panel printed)
         out = buf.getvalue()
         assert "fix is X" in out, f"(force_terminal={force}) reply missing: {out!r}"
 
@@ -177,33 +177,35 @@ def richsink_ondelta_noop_when_idle():
     from memagent.tui import make_rich_sink
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=False), {})
     sink.on_delta("content", "stray")
-    assert sink._status is None and sink._stream == ""
+    assert sink._status is None
 
 
 @check
-def streaming_reply_uses_the_bounded_status_line_not_a_growing_panel():
-    # Reported live, TWICE: many stacked "assistant streaming…" panels instead of one updating in place —
-    # the first fix (plain text + a bounded tail on a separate rich.live.Live panel) reduced but did not
-    # eliminate it on a real terminal, because ANY panel tall enough to near the bottom of a short terminal
-    # window can still force a scroll, which ANSI erase codes cannot undo. Root fix: don't use a separate
-    # Live panel for the in-progress reply at all — stream into the SAME single-line status region the
-    # "thinking…" spinner already uses (console.status(), proven safe elsewhere in this file), bounded to
-    # a short tail. Pin: on_delta never creates a Live/Panel; _LiveStatus shows a bounded tail while
-    # streaming; the FULL reply still prints in full once done (unaffected, via AssistantText).
+def streaming_reply_shows_a_fixed_single_line_status_not_a_growing_region():
+    # Reported live THREE times: stacked "assistant streaming…" panels instead of one region updating in
+    # place. Every earlier fix that still showed the GROWING reply — a Markdown rich.live.Live panel, then a
+    # plain-text bounded panel, then a bounded reply-tail INSIDE this status line — shared one root cause: a
+    # multi-row region whose height grows/wraps eventually reaches the bottom of the terminal and forces a
+    # scroll, and ANSI erase codes cannot un-scroll content already in scrollback, so stale frames pile up.
+    # Root fix: while streaming, show a FIXED single-line "writing…" status (the exact shape of the
+    # "thinking…" spinner, which has never misbehaved) — no reply preview at all. The full reply still prints
+    # once via AssistantText. Pin: on_delta creates no Live/Panel and embeds no reply text; the status render
+    # stays a short constant-length line no matter how long the reply gets.
     import io
     from rich.console import Console
-    from memagent.tui import make_rich_sink, _LiveStatus, _STATUS_TAIL_CHARS
+    from memagent.tui import make_rich_sink, _LiveStatus
     from memagent.events import SliceBuilt
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
     sink(SliceBuilt("req"))                             # arms the status region (like a real turn)
     try:
         assert not hasattr(sink, "_live"), "on_delta must not create a separate rich.live.Live panel"
-        long_text = "x" * (_STATUS_TAIL_CHARS * 3) + "y" * 10
-        sink.on_delta("content", long_text)
-        assert sink._stream == long_text, "the FULL streamed text must still accumulate untruncated"
-        shown = _LiveStatus(sink).__rich__().plain
-        assert shown.startswith("writing… ") and len(shown) <= len("writing… ") + _STATUS_TAIL_CHARS
-        assert shown.endswith("y" * 10), "the status line must show the TAIL (most recent text)"
+        before = _LiveStatus(sink).__rich__().plain
+        sink.on_delta("content", "z" * 5000)           # a very long reply must not enlarge the status line
+        after = _LiveStatus(sink).__rich__().plain
+        assert "writing" in after, f"the status must reflect the writing phase, got {after!r}"
+        assert "z" * 40 not in after, "the status line must NOT embed the growing reply text"
+        assert len(after) < 120 and abs(len(after) - len(before)) < 20, \
+            f"the status must stay a short, fixed-length single line regardless of reply length ({len(after)})"
     finally:
         sink._stop()   # a Status left running past the test would dangle a live region / refresh thread
 

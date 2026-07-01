@@ -387,10 +387,6 @@ def _fmt_tally(tally: dict) -> str:
     return " · ".join(f"{tally[k]} {k}" for k in ("read", "edit", "cmd", "fail") if tally.get(k))
 
 
-_STATUS_TAIL_CHARS = 160  # the streaming-reply preview shown in the status line — bounded so it stays a
-# single/few-line region regardless of reply length (the full reply prints in full once streaming ends).
-
-
 class _LiveStatus:
     """A Rich RichCast whose __rich__ RECOMPUTES the elapsed clocks every frame off the Status Live loop —
     so the timer ticks with NO extra thread (console.status() already redraws ~12×/s to animate the dots).
@@ -408,19 +404,10 @@ class _LiveStatus:
         s = self._sink
         try:
             with s._lock:
-                stream = s._stream
                 label, step = (s._subagent or s._label or "working…"), s._step
                 a0, t0, tally = s._action_t0, s._turn_t0, dict(s._tally)
             now = time.monotonic()
             a, turn = max(0.0, now - (a0 or now)), max(0.0, now - (t0 or now))
-            if stream:
-                # A reply is streaming in: show its live tail INSIDE this same single-line status region
-                # (never a separate Rich Live panel — see RichSink.on_delta's docstring for why a growing
-                # panel is unsafe: it can scroll the terminal, and ANSI erase codes can't un-scroll content
-                # already committed to scrollback). Bounded to the last _STATUS_TAIL_CHARS so the line
-                # never wraps to more than a couple of rows regardless of how long the reply gets.
-                tail = " ".join(stream.split())[-_STATUS_TAIL_CHARS:]
-                return Text.assemble(("writing… ", TH["dim"]), (tail, "default"))
             parts = []
             if step:
                 parts.append((f"step {step} · ", TH["dim"]))
@@ -444,11 +431,6 @@ class RichSink:
         self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
         #                                  all _status transitions (rich Status is not thread-safe)
         self._status = None
-        self._stream = ""        # the assistant text streamed so far this step (shown as a bounded tail in
-        #                          the status line — see _LiveStatus.__rich__ — never a separate Rich Live
-        #                          panel: a growing panel can scroll the terminal, and ANSI erase codes
-        #                          cannot un-scroll content already committed to scrollback, which is what
-        #                          caused the real "many stacked streaming panels" bug this replaced.
         self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
         # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
         # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
@@ -474,7 +456,6 @@ class RichSink:
         Status the first time. On a non-tty, console.status() no-ops its animation (no ANSI, body never
         refreshed) — same degraded behaviour as before, so on_delta's 'a step is active' gate still holds."""
         with self._lock:   # serialize vs parallel subagent_notify on _status
-            self._stream = ""        # new step → reset the streamed reply
             self._label = label
             self._subagent = None
             self._action_t0 = time.monotonic()
@@ -510,26 +491,23 @@ class RichSink:
                 self._tally[bucket] = self._tally.get(bucket, 0) + 1
 
     def on_delta(self, kind: str, text: str) -> None:
-        """Live token sink wired to OpenAILLM.set_delta_sink. Content deltas accumulate into self._stream;
-        _LiveStatus.__rich__ shows a bounded tail of it inside the SAME single-line status region the
-        "thinking…" spinner already uses — no separate rendering object, no explicit redraw call here (the
-        status's own animation loop re-invokes __rich__ ~12x/s, same as how the step/tool label and clocks
-        already update with no manual .update()). The full, untruncated reply still prints once as a real
-        Markdown panel when streaming ends, via AssistantText → _response_panel (unaffected by this).
+        """Live token sink wired to OpenAILLM.set_delta_sink. While a reply streams, the live region just
+        flips its label to a calm, FIXED single-line "writing…" (same shape as the "thinking…" spinner, with
+        the running clock) — it does NOT render a live preview of the reply text. The full, formatted reply
+        prints once when streaming ends, via AssistantText → _response_panel.
 
-        This used to stream into a separate, growing `rich.live.Live` panel. A real repro (many stacked
-        "assistant streaming…" panels instead of one updating in place) traced that design to two compounding
-        problems: rendering Markdown on every delta made the panel's height swing unpredictably on
-        incomplete syntax, and even after fixing that, an ever-growing panel eventually reaches the bottom
-        of the terminal and forces a scroll — which ANSI cursor-up/erase codes cannot undo, permanently
-        baking one stale frame into scrollback per scroll. Reusing the status line (already proven safe —
-        it's the exact mechanism the "thinking…" spinner and subagent_notify use with no reported issue)
-        sidesteps the whole class of bug: a bounded single/few-line region is never near the bottom edge.
-        No-op until a step is active (e.g. nothing to stream during routing)."""
+        Why no live preview: three separate live reports of stacked "assistant streaming…" panels traced to
+        one root cause shared by every variant that showed the GROWING reply (a Markdown rich.live.Live
+        panel, then a plain-text bounded panel, then a bounded text tail inside this status line). Any region
+        that grows/wraps eventually reaches the bottom of the terminal and forces a scroll, and ANSI
+        cursor-up/erase codes cannot un-scroll content already committed to scrollback — so stale frames pile
+        up. A fixed one-line indicator has no height to grow and nothing to scroll, which removes the whole
+        bug class regardless of terminal size or emulator. No-op until a step is active (nothing streams
+        during routing)."""
         if kind != "content" or not text or self._status is None:
             return
         with self._lock:
-            self._stream += text
+            self._label = "writing…"   # thinking → writing: the status line reflects the phase (+ its clock)
 
     def _flush_reads(self) -> None:
         """Emit ONE compact dim line for a buffered run of read-only tools (📖 7 read · 🔍 3 grep · names),
