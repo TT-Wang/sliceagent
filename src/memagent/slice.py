@@ -733,21 +733,20 @@ def record_user(s: Slice, message: str) -> None:
 
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
-                 subdir_hints: str = "", worktree: str = "", repo_map: str = "", cache_manifest: str = "",
+                 worktree: str = "", repo_map: str = "", cache_manifest: str = "",
                  focus: str = "", *, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
-    tail trails). Signature unchanged: the per-build caps (window / max_findings) and the pre-rendered
-    passthroughs (artifacts / discovery / memory / threads / subdir hints) ride in via the ctx dict.
-    SUBDIRECTORY CONTEXT is framed here (render_subdir_hints) then handed to the NOW-footer region."""
+    tail trails). The per-build caps (window / max_findings) and the pre-rendered passthroughs
+    (artifacts / discovery / memory / threads) ride in via the ctx dict. SUBDIRECTORY CONTEXT is NOT a
+    region here — it's framed by the caller into the NOW footer (make_build_slice → render_now)."""
     ctx = {
         "s": s,
         "artifacts": artifacts,
         "discovery": discovery,
         "memory": memory,
         "threads": threads,
-        "hints": render_subdir_hints(subdir_hints),
         "worktree": worktree,
         "repo_map": repo_map,
         "cache_manifest": cache_manifest,
@@ -992,8 +991,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
             _focus_path, _extra_roots = tools.focus()
             focus_text = render_focus(_focus_path, _extra_roots, home=os.path.expanduser("~"), workspace=tools.root())
         body = render_slice(s, artifacts, discovery, recall_cache[goal], threads,
-                            hint_text, worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
-                            max_findings=_NO_CAP)
+                            worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix;
+                            max_findings=_NO_CAP)                       # subdir hints ride the NOW footer (nowblock) below
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
         # the two copies never diverge — and the intent-aware NOW footer is the OUTERMOST tail, so the final

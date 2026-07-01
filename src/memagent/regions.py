@@ -635,7 +635,7 @@ def render_regions(ctx: dict) -> str:
     user string (the moat). Each region suppresses itself when empty; the slot grouping + the blank-line
     separator between the action tally (slot 4) and the high-authority tail (slot 6) keeps the stable bulk
     leading for prompt-cache locality and the volatile salient tail trailing. `ctx` carries the Slice + the
-    pre-rendered passthroughs (artifacts / discovery / memory / threads / hints) + the max_findings cap."""
+    pre-rendered passthroughs (artifacts / discovery / memory / threads) + the max_findings cap."""
     slots: dict[int, str] = {}
     for _name, _tier, render, slot in REGION_ORDER:
         slots[slot] = slots.get(slot, "") + render(ctx)
