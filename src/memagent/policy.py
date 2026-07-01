@@ -1,4 +1,4 @@
-"""Permission policy — authorization for tool calls (borrowed pattern: Kimi permission/policies).
+"""Permission policy — authorization for tool calls.
 
 An ordered chain of small policies. Each inspects (name, args) and returns a
 ToolDecision to DENY, or None to abstain (defer to the next policy). First denial

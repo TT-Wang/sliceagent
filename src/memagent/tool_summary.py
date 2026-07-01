@@ -1,10 +1,9 @@
 """Deterministic tool-result one-liners (item 14b) — '[tool] action -> outcome, N lines'.
 
-PORTED from /tmp/hermes-agent/agent/context_compressor.py :: _summarize_tool_result (L471).
-Hermes uses it during compression to replace a large tool output with an informative line
-instead of a zero-information placeholder. memagent has no transcript to compress, but the
-SAME shape makes the episodic TRACE (history.render_trace) far more legible: a compact line
-that says WHAT the tool did and HOW IT CAME OUT, replacing the raw head+tail tail-snippet.
+Replaces a large tool output with an informative line instead of a zero-information
+placeholder. memagent has no transcript to compress, but the SAME shape makes the episodic
+TRACE (history.render_trace) far more legible: a compact line that says WHAT the tool did and
+HOW IT CAME OUT, replacing the raw head+tail tail-snippet.
 
 Adapted to memagent's tool names (file_operations / tools.py: read_file, write_file,
 edit_file/str_replace, append_to_file, run_command, list_files, execute_code, plus the

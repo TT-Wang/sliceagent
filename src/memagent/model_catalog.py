@@ -1,4 +1,4 @@
-"""Model capability catalog (borrowed from Kimi agent-core/services/modelCatalog).
+"""Model capability catalog.
 
 Maps a model name (+ base URL) to its capabilities and wire quirks so provider-specific knowledge lives
 in ONE place instead of scattered `startswith` checks. Pattern-matched with a safe UNKNOWN default. Pure

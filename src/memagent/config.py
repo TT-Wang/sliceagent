@@ -1,6 +1,6 @@
 """Config — layered settings from memagent.toml (Step ③.2).
 
-Borrowed from Kimi/Hermes: a layered config file (user then project, project overriding)
+A layered config file (user then project, project overriding)
 that declares persistent settings AND extension surfaces (skills dirs, MCP servers,
 plugin dirs). Precedence is ENV > project file > user file > default, so a quick
 `AGENT_POLICY=allow memagent ...` still overrides the file and ALL prior env-driven
@@ -198,8 +198,7 @@ class Config:
     @property
     def max_steps(self) -> int:
         # Per-turn step ceiling (runaway backstop). Default raised above the old hard 40 so deep
-        # analysis/review turns aren't guillotined; overridable for heavier work (Kimi exposes a
-        # turns/tokens goal budget — this is the lean equivalent).
+        # analysis/review turns aren't guillotined; overridable for heavier work.
         v = self._get("budget", "max_steps", "AGENT_MAX_STEPS", None)
         try:
             n = int(v) if v not in (None, "") else None

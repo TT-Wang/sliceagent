@@ -1,5 +1,4 @@
-"""Cost + reliability metrics — the moat-MEASURING observer (borrowed from Kimi's usage/telemetry layer,
-re-expressed for the slice thesis).
+"""Cost + reliability metrics — the moat-MEASURING observer, expressed for the slice thesis.
 
 The project's whole bet is that per-turn cost stays FLAT as the conversation grows (the slice rebuilds a
 bounded seed each turn) while a transcript agent's climbs linearly. That bet is only credible if it's a

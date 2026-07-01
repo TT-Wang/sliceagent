@@ -1,4 +1,4 @@
-"""Experimental feature flags (Kimi-style): precedence master > per-flag env > default, live env read,
+"""Experimental feature flags: precedence master > per-flag env > default, live env read,
 typo-safe unknowns. No model, no pytest. Run: PYTHONPATH=src python tests/test_flags.py
 """
 import os

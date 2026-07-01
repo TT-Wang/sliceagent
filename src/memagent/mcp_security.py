@@ -1,4 +1,4 @@
-"""Security screen for user-configured MCP server entries (ported from Hermes hermes_cli/mcp_security.py).
+"""Security screen for user-configured MCP server entries.
 
 MCP stdio transports intentionally allow ARBITRARY local commands — a configured server is remote-code-
 execution by design. We don't try to sandbox that. We refuse two high-signal ABUSE SHAPES that a real MCP

@@ -63,7 +63,7 @@ def validate_flags_bad_enum_and_passes_good():
 @check
 def secret_values_are_masked():
     assert "sk-" not in envspec.current_value("LLM_API_KEY", {"LLM_API_KEY": "sk-supersecret-1234"})
-    assert envspec.current_value("AGENT_MODEL", {"AGENT_MODEL": "kimi"}) == "kimi"
+    assert envspec.current_value("AGENT_MODEL", {"AGENT_MODEL": "test-model"}) == "test-model"
 
 
 # ---- provider config plumbing (key/base_url from TOML, ENV wins) ------------

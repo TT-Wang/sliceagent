@@ -1,10 +1,10 @@
 """ToolRegistry — one registry, many sources (builtin / MCP / plugin / skill).
 
-Borrowed from Hermes' tools/registry.py (the `generation` counter + `check` availability
-gate) and Kimi's three-source single-registry projection. The ToolHost projects
-schemas()/run()/accesses() from here, so every tool — wherever it comes from —
-satisfies one contract and appears in one list. This is the keystone of Step ③:
-MCP, plugins, and skills all register into the SAME registry the loop already drives.
+A `generation` counter plus a `check` availability gate project the three sources into
+one registry. The ToolHost projects schemas()/run()/accesses() from here, so every
+tool — wherever it comes from — satisfies one contract and appears in one list. This is
+the keystone of Step ③: MCP, plugins, and skills all register into the SAME registry the
+loop already drives.
 """
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ class ToolRegistry:
         e = self._tools.get(name)
         if e is None:
             return ToolText(f'Error: unknown tool "{name}"', ok=False)
-        # Validate the call against the tool's declared required args (Kimi AJV-style) — a clear
+        # Validate the call against the tool's declared required args (JSON-schema-style) — a clear
         # "missing required argument" lets a no-transcript model self-correct, vs an opaque KeyError.
         missing = _missing_required(e.schema, args)
         if missing:

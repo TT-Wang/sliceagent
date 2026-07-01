@@ -56,8 +56,8 @@ def _int(x) -> int:
 
 
 def _usage_dict(raw) -> dict | None:
-    """Normalize a provider usage object into a typed token breakdown (borrowed from Kimi kosong
-    `TokenUsage`, usage.ts): `output` plus input split into cache-read / cache-creation / other. Keeps
+    """Normalize a provider usage object into a typed token breakdown: `output` plus input split into
+    cache-read / cache-creation / other. Keeps
     the legacy prompt_tokens/completion_tokens/cached_tokens keys so existing consumers keep working,
     and adds the typed fields the telemetry layer needs to measure per-turn FRESH-input cost (the moat).
     Provider-agnostic: every field defaults to 0, so a provider that omits a counter never crashes."""
@@ -76,7 +76,7 @@ def _usage_dict(raw) -> dict | None:
     input_other = max(0, prompt - cache_read - cache_create)
     usage = {
         "prompt_tokens": prompt, "completion_tokens": output,            # legacy / back-compat
-        "input_other": input_other, "output": output,                   # typed (Kimi TokenUsage shape)
+        "input_other": input_other, "output": output,                   # typed token fields
         "input_cache_read": cache_read, "input_cache_creation": cache_create,
     }
     if cache_read:
@@ -242,7 +242,7 @@ class OpenAILLM:
         self._cache_key: str | None = None
         # Optional LIVE token sink for interactive streaming (set by the cli/TUI). When set, complete()
         # STREAMS the completion and emits deltas (kind in {"content","reasoning"}) so a slow turn renders
-        # LIVE instead of freezing on one blocking call (borrowed periphery — Kimi-style live events).
+        # LIVE instead of freezing on one blocking call.
         # None → the blocking non-streaming path (eval/headless unchanged; byte-identical assembled result).
         self._on_delta = None
         # Sticky: set True once this provider 400s on reasoning_effort+tools (gpt-5.5 chat/completions);
@@ -679,7 +679,7 @@ class OpenAILLM:
             calls.append(ToolCall(id=getattr(tc, "id", "") or "", name=fn.name, args=args))
         # Degenerate completion — no content AND no tool calls (and not a content-filter stop). Some
         # providers/proxies occasionally emit an empty body; returning it stalls the loop, so raise a
-        # RETRYABLE error (Kimi APIEmptyResponseError) and let with_retry re-roll. content_filter is
+        # RETRYABLE error (empty-response) and let with_retry re-roll. content_filter is
         # excluded — re-rolling would just filter again.
         if not (msg.content or "").strip() and not calls and choice.finish_reason != "content_filter":
             from .errors import EmptyResponseError

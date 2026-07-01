@@ -1,15 +1,14 @@
 """Progressive subdirectory hint discovery — pure per-turn lookup, no transcript.
 
-Ported (shape) from /tmp/hermes-agent/agent/subdirectory_hints.py:
-  - the directory tracker            (:57  SubdirectoryHintTracker)
-  - the ancestor walk                (:120 _add_path_candidate)
-  - valid-subdir confinement to root (:169 _is_valid_subdir)
-  - first-match-per-dir hint load    (:198 _load_hints_for_directory)
+Four pieces:
+  - the directory tracker
+  - the ancestor walk
+  - valid-subdir confinement to root
+  - first-match-per-dir hint load
 
-ADAPTED TO THE NO-TRANSCRIPT MOAT
----------------------------------
-Hermes appends discovered hints onto a tool result that lives in a growing conversation.
-memagent has no transcript. Instead, ``hints_for(active_files)`` is a PURE per-turn lookup:
+NO-TRANSCRIPT MOAT
+------------------
+``hints_for(active_files)`` is a PURE per-turn lookup:
 the slice calls it every turn with the CURRENT working set and gets back the hint text for
 any subtree it has not surfaced yet THIS TASK. The model sees each new subtree's conventions
 exactly ONCE — re-surfacing it every turn would bloat the slice and waste the cache.

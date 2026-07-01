@@ -1,4 +1,4 @@
-"""Kimi-review fixes #1 (OPEN USER REPORT detection) and #2 (BudgetHook per-turn reset).
+"""Review fixes #1 (OPEN USER REPORT detection) and #2 (BudgetHook per-turn reset).
 No model, no pytest. Run: PYTHONPATH=src python tests/test_review_fixes.py
 """
 import os

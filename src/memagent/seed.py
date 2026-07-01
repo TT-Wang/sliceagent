@@ -380,12 +380,12 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # cache stability. (Pure reassociation of the former in-_system concat: byte-identical output.)
     # REPO MAP lives in the BYTE-STABLE system prefix (not the volatile user slice): it's session-static, so
     # placing it before the per-turn goal / per-agent role makes it a prompt-cache PREFIX shared by every
-    # turn AND every subagent (Kimi-style prefix-sharing) — instead of full-price ~11k re-sent each turn
+    # turn AND every subagent (prefix-sharing) — instead of full-price ~11k re-sent each turn
     # because the volatile OPEN FILES preceded it in the user message. Comes BEFORE agent_block so the parent
     # and its children share the identical prefix up to (and including) the map.
     repo_map_block = ("\n\n# REPO MAP (the project's file structure — your resident map; navigate from here, "
                       "do NOT re-list the tree)\n" + repo_map_text) if repo_map_text else ""
-    # AGENT ROLE — a per-agent system-prompt layer for a named subagent (Kimi-style extra-system-prompt).
+    # AGENT ROLE — a per-agent system-prompt layer for a named subagent.
     # Empty for the top-level agent; set by run_subagent from the spawned AgentSpec.system_prompt.
     agent_block = ("\n\n# AGENT ROLE (you are running as a named subagent for this sub-task)\n" + system_extra
                    ) if system_extra else ""

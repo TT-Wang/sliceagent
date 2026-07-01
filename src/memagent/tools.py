@@ -36,8 +36,8 @@ HOST_ERROR_SENTINELS = (
     "operation not permitted",
 )
 
-# Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action,
-# Hermes pattern). No imports needed by the model. The workspace is cwd and on sys.path,
+# Prepended to every execute_code script: the in-sandbox tool helpers (code-as-action).
+# No imports needed by the model. The workspace is cwd and on sys.path,
 # Strip a leading "cat -n" line-number prefix ("   123\t") from a str_replace snippet pasted back from the
 # numbered OPEN FILES render. Only fires when EVERY non-blank line has one (clearly cat -n output, not real
 # source), so a genuine match is never altered; used as a fallback in _t_str_replace.
@@ -749,7 +749,7 @@ class LocalToolHost:
     def _detect_crlf(full: str) -> bool:
         """True if the existing file uses Windows CRLF line endings (sample the head). Used to PRESERVE
         line endings on edit: the model emits '\\n', and writing that to a CRLF file rewrites every line
-        ending — a huge spurious diff / corruption on Windows-authored repos. Borrowed from Kimi kaos."""
+        ending — a huge spurious diff / corruption on Windows-authored repos."""
         try:
             with open(full, "rb") as f:
                 return b"\r\n" in f.read(65536)

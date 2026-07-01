@@ -1,4 +1,4 @@
-"""Debug-log sink: redact secrets on persist + rotate past a size cap (Kimi RotatingFileSink + the
+"""Debug-log sink: redact secrets on persist + rotate past a size cap (a rotating file sink over the
 existing safety.redact_text boundary). A .env read or a token in tool output must NOT land in the
 on-disk log in plaintext. No model, no pytest. Run: PYTHONPATH=src python tests/test_log_redaction.py
 """

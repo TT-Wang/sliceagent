@@ -1,7 +1,7 @@
 """Per-turn tool-call loop guardrail — the slice's anti-loop defense.
 
-Ported from /tmp/hermes-agent/agent/tool_guardrails.py (the ToolCallSignature /
-ToolCallGuardrailController design), adapted to memagent's no-transcript invariant.
+The ToolCallSignature / ToolCallGuardrailController design, adapted to memagent's
+no-transcript invariant.
 
 WHY THIS IS MOAT-CRITICAL
 -------------------------
@@ -22,12 +22,12 @@ top of run_turn). It feeds NO durable store and assumes NO growing message histo
 block decision becomes a synthetic tool RESULT (which the slice folds into its tiers like
 any other result) — never a message appended to a transcript.
 
-CONVENTIONS BORROWED FROM MEMAGENT (not from Hermes)
-----------------------------------------------------
+MEMAGENT CONVENTIONS
+--------------------
 - "failing" is memagent's existing convention (loop.py / regions.record_action /
-  neocortex.py): out.startswith("Error") or out.startswith("Exit code"). We do NOT port
-  Hermes's JSON exit-code classifier (memagent has no safe_json_loads and a different
-  result shape). Callers may pass `failed=` explicitly; otherwise we classify here.
+  neocortex.py): out.startswith("Error") or out.startswith("Exit code"). We do NOT use a
+  JSON exit-code classifier (memagent has no safe_json_loads and a different result
+  shape). Callers may pass `failed=` explicitly; otherwise we classify here.
 - The idempotent / mutating tool sets are memagent's actual builtins.
 """
 from __future__ import annotations
@@ -91,7 +91,7 @@ def is_failing_output(output: str | None) -> bool:
 class ToolCallGuardrailConfig:
     """Per-turn (= per-episode) loop-detection thresholds.
 
-    Defaults: HARD-BLOCK is ON (unlike Hermes, whose interactive CLI defaults to warn-only).
+    Defaults: HARD-BLOCK is ON (rather than warn-only).
     memagent is uniquely loop-prone because the slice erases failure memory, so the block
     floor must be active by default. Thresholds are intentionally low — by the time the same
     exact call has failed `exact_failure_block_after` times, the model is in a loop the slice

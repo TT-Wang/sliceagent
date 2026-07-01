@@ -1,4 +1,4 @@
-"""Same-step exact-call dedup (borrowed from Kimi tool-dedup.ts, layer 1 only — NOT the cross-step
+"""Same-step exact-call dedup (layer 1 only — NOT the cross-step
 streak/force-stop, which memagent's no-progress guardrail already covers).
 
 Lossless by construction: a duplicate (name, args) read-only call in ONE batch reuses the first call's
@@ -51,7 +51,7 @@ def identical_readonly_calls_execute_once_and_return_identical():
     tcs = [_TC("read_file", {"path": "a.py"}, "c1"), _TC("read_file", {"path": "a.py"}, "c2")]
     blocked, results = _batch(tcs, host)
     assert len(host.calls) == 1, f"read_file must run ONCE, ran {len(host.calls)}"
-    assert results[0]["output"] == results[1]["output"], "dup must be byte-identical to the original (Kimi toEqual)"
+    assert results[0]["output"] == results[1]["output"], "dup must be byte-identical to the original"
     assert results[0]["id"] == "c1" and results[1]["id"] == "c2", "every tool_call_id still gets a reply"
     assert blocked == 0
 

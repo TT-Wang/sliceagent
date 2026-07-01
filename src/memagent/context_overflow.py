@@ -1,14 +1,13 @@
 """Context-overflow classification — pure stdlib, never imports openai.
 
-Ported from Hermes `agent/error_classifier.py`:
-  - `_CONTEXT_OVERFLOW_PATTERNS` table (error_classifier.py:208)
-  - the cause-walk `_extract_status_code` (error_classifier.py:1266, max depth 5)
+Provides:
+  - the `_CONTEXT_OVERFLOW_PATTERNS` message table
+  - the cause-walk `_extract_status_code` (max depth 5)
   - the 400 / 413 / `context_length_exceeded` overflow rules
-    (error_classifier.py:1016, :1125, :838)
 
 The moat: memagent always has a slice it can TIGHTEN, so there is NO
-session-size / token-count heuristic here (Hermes' generic-400 + large-session
-proxy at :1054 is deliberately dropped). Overflow is decided purely from the
+session-size / token-count heuristic here — a generic-400 + large-session
+proxy is deliberately avoided. Overflow is decided purely from the
 error's text and HTTP status.
 
 Public surface (pinned in adopt_plan.md sec 1):
@@ -21,8 +20,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-# ── Pattern table (Hermes error_classifier.py:208) ──────────────────────────
-# Matched against str(error).lower(). Copied verbatim from the port source.
+# ── Pattern table ───────────────────────────────────────────────────────────
+# Matched against str(error).lower().
 _CONTEXT_OVERFLOW_PATTERNS = (
     "context length",
     "context size",
@@ -58,15 +57,14 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     # ("Limit: 30000 input tokens per minute"), misclassifying a 429 as a hard overflow.
 )
 
-# Structured error codes that unambiguously mean overflow
-# (Hermes error_classifier.py:1125).
+# Structured error codes that unambiguously mean overflow.
 _CONTEXT_OVERFLOW_CODES = frozenset({
     "context_length_exceeded",
     "max_tokens_exceeded",
 })
 
-# Payload-too-large message patterns (Hermes error_classifier.py:158) — a 413
-# surfaced in the message text when no status_code attr is present.
+# Payload-too-large message patterns — a 413 surfaced in the message text
+# when no status_code attr is present.
 _PAYLOAD_TOO_LARGE_PATTERNS = (
     "request entity too large",
     "payload too large",
@@ -99,9 +97,8 @@ def _error_text(error: Exception) -> str:
 def _extract_status_code(error: Exception) -> Optional[int]:
     """Walk the error and its cause chain to find an HTTP status code.
 
-    Port of Hermes `_extract_status_code` (error_classifier.py:1266); max depth
-    5 to bound the walk. Checks `.status_code` (int) then `.status` (sane int)
-    on each node, following `__cause__`/`__context__`.
+    Max depth 5 to bound the walk. Checks `.status_code` (int) then `.status`
+    (sane int) on each node, following `__cause__`/`__context__`.
     """
     current: Optional[BaseException] = error
     for _ in range(5):  # max depth to prevent infinite loops
@@ -157,7 +154,7 @@ def is_context_overflow(error: Exception) -> bool:
 
     A bare 400/404 is NOT treated as overflow unless its TEXT matches the
     overflow table — many non-overflow errors also use 400/404, and memagent
-    drops Hermes' session-size proxy (we always have a slice to tighten).
+    uses no session-size proxy (we always have a slice to tighten).
     """
     msg = _error_text(error)
     if "rate limit" in msg or "too many requests" in msg or "tokens per min" in msg:

@@ -86,7 +86,7 @@ class Slice:
     # (acceptance criteria): this is the step sequence + progress. Replace-all via the update_plan tool
     # (folded by slice_sink). Carried by seal() (continuity), wiped by reset(). Bounded (MAX_PLAN_ITEMS).
     plan: list[dict] = field(default_factory=list)  # [{"step": str, "status": pending|in_progress|done}]
-    # MISSION (Kimi goal mode) — the NORTH-STAR objective / "why" framing the agent sets to stay oriented
+    # MISSION — the NORTH-STAR objective / "why" framing the agent sets to stay oriented
     # over a long multi-step task, ABOVE the literal `goal`. ONE string (inherently bounded); set via
     # set_mission, cleared via mission_done. Self-suppresses when empty (no bloat). Carried by seal()
     # across the task's turns; wiped by reset() (a brand-new task) — same lifecycle as requirements/plan.

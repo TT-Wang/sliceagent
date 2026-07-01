@@ -1,13 +1,13 @@
-"""Guarded `grep` tool — Kimi-style ripgrep pagination + Hermes consecutive-search guard.
+"""Guarded `grep` tool — ripgrep pagination + a consecutive-search guard.
 
 The single discovery-on-demand seam (W7 deleted `code_index.snippets`; the model now
-greps for content instead). Two borrowed mechanisms:
+greps for content instead). Two mechanisms:
 
-- Kimi grep pagination (packages/agent-core/src/tools/builtin/file/grep.ts:277): run
-  ripgrep, then slice the result lines by offset/limit and append an explicit
-  "[truncated; use offset=N to see more]" notice when more remain.
-- Hermes consecutive-search guard (tools/file_tools.py:1399, the `{last_key, consecutive}`
-  tracker): the 4th identical-in-a-row call returns a BLOCKED message instead of re-running
+- Grep pagination: run ripgrep, then slice the result lines by offset/limit and
+  append an explicit "[truncated; use offset=N to see more]" notice when more
+  remain.
+- Consecutive-search guard (the `{last_key, consecutive}` tracker): the 4th
+  identical-in-a-row call returns a BLOCKED message instead of re-running
   the same search forever. The key INCLUDES offset, so paging through truncated results
   (a *different* offset each call) never trips the guard.
 
@@ -24,11 +24,11 @@ from .access import FileAccess
 from .registry import ToolEntry, ToolText
 
 # {host_id: {"last_key": tuple | None, "consecutive": int}} — module-level, per-host.
-# Mirrors Hermes' per-task _read_tracker shape. Not a transcript: a tiny durable counter.
+# A per-task tracker shape. Not a transcript: a tiny durable counter.
 GREP_GUARD: dict = {}
 _GREP_LOCK = threading.Lock()   # parallel explorers share GREP_GUARD; serialize the check-then-update
 
-_BLOCK_AFTER = 4          # 4th identical-in-a-row call is blocked (mirrors Hermes count>=4)
+_BLOCK_AFTER = 4          # 4th identical-in-a-row call is blocked (count>=4)
 _DEFAULT_LIMIT = 50
 _RG_MAX_FILESIZE = "300K"
 _RG_MAX_COLUMNS = "400"

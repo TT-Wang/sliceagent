@@ -293,7 +293,7 @@ def render_requirements(requirements: list[dict]) -> str:
 
 
 def render_plan(plan: list[dict]) -> str:
-    """The PLAN tier body: the model's ordered execution steps with live status (Kimi/Claude TodoWrite).
+    """The PLAN tier body: the model's ordered execution steps with live status (todo list).
     Numbered + status-marked ('[~]' in-progress, '[x]' done, '[ ]' pending). Self-suppresses when empty.
     Bounded by MAX_PLAN_ITEMS (folded in slice_sink). Volatile WORKING state — distinct from STANDING
     REQUIREMENTS (acceptance criteria): this is the step sequence and the agent's live progress through it."""
@@ -523,7 +523,7 @@ _USER_REPORT_RE = re.compile(
     r"|\b(?:no such file|command not found|traceback|exception|permission denied|"
     r"syntaxerror|nameerror|typeerror|modulenotfound|exit code|segmentation fault)\b"
     r"|:\s*no such file or directory\b"
-    # phrasings the first pass missed (Kimi-review #1): hangs / no-output, red|failing tests/build,
+    # phrasings the first pass missed: hangs / no-output, red|failing tests/build,
     # "didn't fix it", "same error still", HTTP 4xx/5xx in a failure context, ModuleNotFoundError.
     r"|\b(?:hang(?:s|ing|ed)?|frozen|freeze(?:s|ing)?|stuck)\b"
     r"|\bnothing (?:happen(?:s|ed)?|shows?|showed|loads?|loaded|renders?|rendered)\b"
@@ -615,7 +615,7 @@ REGION_ORDER = (
     # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
     # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
     # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
-    # MISSION — the session-spanning NORTH STAR (Kimi goal mode): the overarching objective that persists
+    # MISSION — the session-spanning NORTH STAR (goal mode): the overarching objective that persists
     # ACROSS topic switches, above any single topic's goal. Self-suppresses when unset → zero bytes by
     # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
     ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),

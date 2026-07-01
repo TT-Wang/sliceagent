@@ -1,11 +1,9 @@
 """Action-oriented guidance strings injected at denial / ceiling boundaries.
 
-Strings and pure functions only — no state, no imports. Wording is borrowed from
-Hermes `coding_context.py` ("re-read before retrying; don't repeat a stale call;
-after repeated failure switch approach") and Kimi `profile/default/system.md`
-("default to taking action with tools"; "determine your next action") and tuned to
-be ACTIONABLE so the model changes approach instead of spinning on the identical
-call.
+Strings and pure functions only — no state, no imports. The wording ("re-read before
+retrying; don't repeat a stale call; after repeated failure switch approach"; "default
+to taking action with tools"; "determine your next action") is tuned to be ACTIONABLE so
+the model changes approach instead of spinning on the identical call.
 
 These land in a DURABLE tier, not a transcript:
   - DENIAL_NO_PROMPT / DENIAL_USER flow through

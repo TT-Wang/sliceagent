@@ -1,4 +1,4 @@
-"""Append-only records journal (borrowed from Kimi agent-core/records + usage).
+"""Append-only records journal.
 
 A durable, per-session, TYPED event log that sits ABOVE the kernel: replay/resume and the cron /
 background subsystems read it. It NEVER feeds the live slice — replay rebuilds state on RESUME only,

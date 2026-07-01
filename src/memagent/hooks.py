@@ -1,4 +1,4 @@
-"""Hooks: the policy seam (from Kimi). The loop calls these; the host supplies them.
+"""Hooks: the policy seam. The loop calls these; the host supplies them.
 
 This is how policy stays OUT of the moat: the Oracle, permission gate, and token
 budget are all hooks, not hardcoded loop logic.
@@ -238,7 +238,7 @@ class PermissionHook(Hooks):
     (on_ask=None) deny an `ask` — safe by default.
 
     'always' memorizes a session approval — but keyed by the CALL, not the bare tool name
-    (Kimi-style rule patterns). Approving one shell command must NOT bless every shell command:
+    (rule patterns). Approving one shell command must NOT bless every shell command:
     run_command/execute_code are remembered by their exact command/code; other tools (already
     gated by policy) are remembered by name. `auto_approve` pre-seeds fnmatch rules matched
     against the command (e.g. ["git status*", "ls *"]) so safe read-only commands never prompt."""
@@ -294,7 +294,7 @@ class BudgetHook(Hooks):
 
     def reset_for_turn(self):
         # PER-TURN budget: reset the tally at the start of each user task (run_turn calls this). Without
-        # this, the cap silently became a whole-SESSION budget across the REPL (Kimi-review #2). A true
+        # this, the cap silently became a whole-SESSION budget across the REPL. A true
         # session-wide cap, if ever wanted, should be a separate named hook — not this one.
         self.spent = 0
 

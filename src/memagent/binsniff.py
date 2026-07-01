@@ -13,9 +13,6 @@ Two independent signals, in cost order:
 NO-TRANSCRIPT INVARIANT: pure functions over a path string + a head sample; no state, no growing
 context, no I/O of their own. The caller supplies the sample (already bounded to a file head).
 
-Ported from Hermes `tools/binary_extensions.py` (BINARY_EXTENSIONS + has_binary_extension) and the
-NUL / non-printable sniff in `tools/file_operations.py::_is_likely_binary`.
-
 PUBLIC SIGNATURES (pinned):
     BINARY_EXTENSIONS: frozenset[str]
     has_binary_extension(path: str) -> bool
@@ -23,7 +20,6 @@ PUBLIC SIGNATURES (pinned):
 """
 
 # Extensions whose contents can't be meaningfully treated as text.
-# Copied verbatim from Hermes tools/binary_extensions.py (itself ported from free-code).
 BINARY_EXTENSIONS = frozenset({
     # Images
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
@@ -54,7 +50,7 @@ BINARY_EXTENSIONS = frozenset({
 })
 
 # How many leading chars of the sample to inspect, and the non-printable fraction that
-# tips a decoded-but-not-text blob over into "binary" (mirrors Hermes _is_likely_binary).
+# tips a decoded-but-not-text blob over into "binary".
 _HEAD = 1000
 _NON_PRINTABLE_RATIO = 0.30
 

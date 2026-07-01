@@ -1,4 +1,4 @@
-"""Skills borrows (from Kimi agent-core/skill): when-to-use routing in the catalog, $ARGUMENTS / $N
+"""Skills: when-to-use routing in the catalog, $ARGUMENTS / $N
 parameter expansion, and a scan-depth bound. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_skill_metadata.py
 """

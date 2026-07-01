@@ -1,4 +1,4 @@
-"""Sandbox — the command-execution backend (borrowed pattern: Hermes environments/base.py).
+"""Sandbox — the command-execution backend.
 
 `BaseSandbox` owns the cross-cutting concern (output capping); each backend implements only
 `_exec()`. So swapping the isolation level never touches the ToolHost or the loop. Ships

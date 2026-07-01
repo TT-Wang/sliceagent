@@ -1,4 +1,4 @@
-"""Skills — reusable procedure prompt-packs (Kimi + Hermes converge on this exact shape).
+"""Skills — reusable procedure prompt-packs.
 
 A skill is a SKILL.md: frontmatter (name + description required) + a markdown body of
 instructions. Progressive disclosure: the `skill` tool's *description* carries the cheap
@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from .registry import ToolEntry, ToolText
 from .text_utils import one_line
 
-_MAX_SCAN_DEPTH = 8   # bound skill-root walk depth (Kimi MAX_SKILL_SCAN_DEPTH) — defensive vs deep trees
+_MAX_SCAN_DEPTH = 8   # bound skill-root walk depth — defensive vs deep trees
 
 
 def expand_skill_args(body: str, argstr: str) -> str:
-    """Substitute a skill's parameter placeholders (Kimi expandSkillParameters): `$ARGUMENTS` → the full
+    """Substitute a skill's parameter placeholders: `$ARGUMENTS` → the full
     arg string, `$1`/`$2`/… → positional tokens (shell-split). A skill with no placeholders is returned
     unchanged, so existing skills are unaffected."""
     if "$ARGUMENTS" not in body and not re.search(r"\$\d", body):
@@ -55,7 +55,7 @@ class Skill:
     path: str
     provenance: str = "user"   # "user" | "consolidation" (item 13); from `provenance:` frontmatter
     root: str = ""             # the discovery root this skill came from (where its .usage.json lives)
-    when_to_use: str = ""      # from `when-to-use:` frontmatter — shown in the catalog to improve routing (Kimi)
+    when_to_use: str = ""      # from `when-to-use:` frontmatter — shown in the catalog to improve routing
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -99,7 +99,7 @@ class SkillManager:
                 continue
             for dp, _dirs, files in os.walk(root):           # followlinks=False → no symlink cycles
                 if dp[len(root):].count(os.sep) > _MAX_SCAN_DEPTH:
-                    _dirs[:] = []                            # bound depth (Kimi MAX_SKILL_SCAN_DEPTH)
+                    _dirs[:] = []                            # bound depth
                     continue
                 for fn in files:
                     if fn == "SKILL.md" or (fn.endswith(".md") and dp == root):
@@ -165,7 +165,7 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
         return None
     names = [n for n, _ in cat]
 
-    def _line(n: str, d: str) -> str:                       # show when-to-use to improve routing (Kimi)
+    def _line(n: str, d: str) -> str:                       # show when-to-use to improve routing
         s = manager._skills.get(n)
         w = (s.when_to_use if s else "") or ""
         base = f"- {n}: {one_line(d, 140)}"

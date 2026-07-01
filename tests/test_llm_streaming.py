@@ -1,4 +1,4 @@
-"""Interactive STREAMING (borrowed Kimi-style live events): when a delta sink is wired, OpenAILLM streams
+"""Interactive STREAMING (live delta events): when a delta sink is wired, OpenAILLM streams
 the completion and emits content/reasoning deltas LIVE, while assembling the SAME AssistantMessage the
 blocking path returns (content, tool-calls parsed, usage incl. cached). No sink → blocking path unchanged
 (eval byte-identical). No network, no pytest. Run: PYTHONPATH=src python tests/test_llm_streaming.py
@@ -206,7 +206,7 @@ def explicit_effort_with_tools_routes_to_responses():
 
 @check
 def typed_usage_splits_cache_read_from_other():
-    # borrowed Kimi TokenUsage: input split into other / cache-read / cache-creation, output kept.
+    # TokenUsage: input split into other / cache-read / cache-creation, output kept.
     from memagent.llm import _usage_dict
     raw = NS(prompt_tokens=100, completion_tokens=20,
              prompt_tokens_details=NS(cached_tokens=30), cache_creation_input_tokens=10)

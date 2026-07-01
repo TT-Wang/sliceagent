@@ -1,4 +1,4 @@
-"""PermissionHook pattern-approval (Kimi-style): 'always' remembers the CALL pattern, not the bare tool
+"""PermissionHook pattern-approval: 'always' remembers the CALL pattern, not the bare tool
 name — approving one shell command must not bless every shell command. Plus pre-seeded auto-approve globs.
 No model, no pytest. Run: PYTHONPATH=src python tests/test_permission_patterns.py
 """

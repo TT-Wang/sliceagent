@@ -1,10 +1,10 @@
-"""Experimental feature flags (borrowed from Kimi agent-core/flags).
+"""Experimental feature flags.
 
 A tiny env-driven registry so a not-yet-default feature can ship gated and OFF by default, then be
 flipped on by setting its `default=True` once proven. State is read LIVE from the environment on every
 call (nothing cached) so tests and process-env changes take effect immediately.
 
-Precedence (Kimi resolver):
+Precedence:
   1. master switch AGENT_EXPERIMENTAL_ALL truthy  → every flag ON
   2. per-flag env AGENT_EXPERIMENTAL_<ID>         → forces ON/OFF when set to a recognized bool
   3. the flag's registered `default`

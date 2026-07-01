@@ -1,4 +1,4 @@
-"""Clock abstraction (borrowed from Kimi's clock seam).
+"""Clock abstraction.
 
 Wraps wall-clock time behind a tiny interface so timed logic (cron) is DETERMINISTICALLY testable:
 SystemClock in production, FakeClock in tests. Anything that needs "now" takes a clock instead of

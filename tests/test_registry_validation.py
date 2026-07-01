@@ -1,4 +1,4 @@
-"""Registry arg-schema validation (Kimi AJV-style): a missing required arg yields a clear, model-
+"""Registry arg-schema validation: a missing required arg yields a clear, model-
 actionable error instead of an opaque handler KeyError. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_registry_validation.py
 """

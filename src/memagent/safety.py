@@ -1,8 +1,8 @@
 """Slice re-injection safety — injection scanning + secret redaction.
 
-Ported from:
-  - /tmp/hermes-agent/tools/threat_patterns.py  (scan_for_threats + scopes + invisible-unicode)
-  - /tmp/hermes-agent/agent/redact.py           (redact_sensitive_text + prefix/JWT/etc patterns)
+Provides:
+  - scan_for_threats + scopes + invisible-unicode detection
+  - redact_sensitive_text + prefix/JWT/etc patterns
 
 WHY THIS IS MOAT-CRITICAL
 -------------------------
@@ -31,7 +31,7 @@ re-applied each turn — there is no persisted wrapped copy to drift). redact_te
 at the store boundary.
 
 This module is the SINGLE entry point; callers import redact_text / scan_for_threats /
-first_threat_message / wrap_untrusted from here, not from the Hermes files.
+first_threat_message / wrap_untrusted from here.
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     (r'you\s+must\s+(?:\w+\s+){0,3}(register|connect|report|beacon)\b', "forced_action", "context"),
     (r'only\s+use\s+one[\s\-]?liners?\b', "anti_forensic_oneliner", "context"),
     (r'never\s+(?:\w+\s+)*(?:create|write)\s+(?:\w+\s+)*(?:script|file)\s+(?:\w+\s+)*disk', "anti_forensic_disk", "context"),
-    (r'unset\s+\w*(?:CLAUDE|CODEX|HERMES|AGENT|OPENAI|ANTHROPIC|MEMAGENT|MEMEM)\w*', "env_var_unset_agent", "context"),
+    (r'unset\s+\w*(?:CLAUDE|CODEX|AGENT|OPENAI|ANTHROPIC|MEMAGENT|MEMEM)\w*', "env_var_unset_agent", "context"),
 
     # ── Known C2 / red-team framework names (warn-only by default) ──────
     (r'\b(?:praxis|cobalt\s*strike|sliver|havoc|mythic|metasploit|brainworm)\b', "known_c2_framework", "context"),

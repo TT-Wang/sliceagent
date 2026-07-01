@@ -1,8 +1,8 @@
 """Skill write-origin provenance (item 13) — distinguishes consolidation-AUTHORED skills
 from user-authored ones, so a future curator prunes ONLY auto skills, never the user's.
 
-PORTED from /tmp/hermes-agent/tools/skill_provenance.py (ContextVar shape) + the frontmatter
-provenance idea from skill_usage.py. memagent has no foreground tool that writes skills today —
+A ContextVar carries the write origin, paired with the frontmatter provenance field from
+skill_usage.py. memagent has no foreground tool that writes skills today —
 consolidate.render_skill is the ONLY writer — so we mark provenance two ways, belt-and-braces:
 
   1. A `provenance:` frontmatter field on auto-written SKILL.md (durable, survives a sidecar

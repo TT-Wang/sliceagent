@@ -1,4 +1,4 @@
-"""Conflict-aware tool scheduler (ported from Kimi Code's tool-scheduler).
+"""Conflict-aware tool scheduler.
 
 Runs a batch of tool calls with maximum safe concurrency: non-conflicting calls
 overlap, conflicting calls serialize, and results are returned in PROVIDER ORDER

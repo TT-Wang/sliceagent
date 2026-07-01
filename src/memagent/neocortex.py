@@ -9,7 +9,7 @@ Reads the lossless episodic cache for a session and PROMOTES durable knowledge, 
 (EverOS pattern: facts→memory, procedures→skills):
   - FACTS: a CORRECTIVE episode (pitfall hit, then ended clean) → a declarative "Pitfall/Resolution"
     lesson, deduped, secrets excluded, FREQUENCY-WEIGHTED (a recurring pitfall ranks first).
-  - PROCEDURES: a SMOOTH successful multi-step workflow → a reusable SKILL.md (Kimi format), deduped
+  - PROCEDURES: a SMOOTH successful multi-step workflow → a reusable SKILL.md, deduped
     by action-shape and frequency-weighted (repeated workflows first — EverOS "repeated patterns
     become skills"); capped to avoid skill spam.
 Both `promote_episodes` and `promote_procedures` are pure (no I/O, no LLM) → testable offline.
@@ -149,7 +149,7 @@ def promote_episodes(records: list[dict]) -> list[dict]:
     return out
 
 
-# ── B2: /learn — turn the session transcript into a reusable USER skill (Hermes pattern) ──────────
+# ── B2: /learn — turn the session transcript into a reusable USER skill ──────────
 _LEARN_STANDARDS = """\
 Author the skill to this standard:
 - name: lowercase-hyphenated, no spaces.
@@ -165,7 +165,7 @@ Author the skill to this standard:
 
 
 def build_learn_prompt(user_request: str = "") -> str:
-    """B2 (Hermes /learn pattern): build ONE prompt that has the LIVE agent distill a reusable skill from
+    """B2 (/learn): build ONE prompt that has the LIVE agent distill a reusable skill from
     the source the user named and save it via the `write_skill` tool. No separate distill engine + no new
     LLM seam (llm-agnostic, works on any backend); the agent reads THIS session from the CACHE via
     recall_history (never the slice), honoring the cache-only-distill invariant."""
@@ -275,7 +275,7 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
 
 
 def render_skill(proc: dict, *, origin: str = AUTO) -> str:
-    """A procedure → a SKILL.md (Kimi format: name/description frontmatter + When-to-use/Process).
+    """A procedure → a SKILL.md (name/description frontmatter + When-to-use/Process).
     DETERMINISTIC = a RECORDED procedure (the steps verbatim). `render_skill_llm` is the LLM-generalized
     upgrade. Stamps a `provenance:` field (item 13: AUTO=consolidation, USER=foreground /learn) so a
     curator prunes only auto skills."""

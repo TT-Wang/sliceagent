@@ -1,4 +1,4 @@
-"""Named-agent registry (file-defined subagent KINDS, borrowed from Kimi Code / Claude Code):
+"""Named-agent registry (file-defined subagent KINDS):
 AgentSpec + load_agents + the generic spawn_agent surface. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_agents.py
 """

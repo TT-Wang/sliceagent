@@ -1,4 +1,4 @@
-"""Resource-access model for safe tool parallelism (ported from Kimi Code's tool-access).
+"""Resource-access model for safe tool parallelism.
 
 Each tool declares what it touches; the scheduler runs non-conflicting tool calls
 concurrently and serializes conflicting ones. Two accesses conflict iff one is

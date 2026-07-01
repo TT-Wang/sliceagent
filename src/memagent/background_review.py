@@ -1,8 +1,7 @@
 """Async background-review fork (item 16) — OPT-IN, OFF by default, behind an env flag.
 
-PORTED INTENT from /tmp/hermes-agent/agent/background_review.py: after a turn, fork a daemon
-thread that critiques the just-finished episode and writes lessons to the memory store. Hermes
-forks a whole AIAgent and replays the conversation; memagent has NO transcript to replay, so
+After a turn, fork a daemon thread that critiques the just-finished episode and writes lessons
+to the memory store. memagent has NO transcript to replay, so
 the fork instead re-runs the EXISTING consolidation code (consolidate.promote_episodes /
 promote_procedures) over the durable episodic JSONL — same write surface as session-end
 consolidate, just incremental and off the critical path.

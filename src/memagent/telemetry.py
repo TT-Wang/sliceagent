@@ -1,11 +1,11 @@
 """Reconstruction-quality telemetry — measures whether the slice KEEPS what the model needs, so the
-slice's central bet becomes a NUMBER instead of an anecdote (Kimi core-review #8).
+slice's central bet becomes a NUMBER instead of an anecdote.
 
 A pure OBSERVER sink: it consumes the loop's events and accumulates counters. It emits no events and
 mutates no slice — completely off the moat. Deterministic, bounded, zero LLM. Wire it into a
 dispatcher alongside slice_sink (the eval harness does this) and read `.summary()` after the run.
 
-Signals (per Kimi's #8):
+Signals:
   - re_reads : a read_file on a path ALREADY read within the last `window` steps. Within a turn the prior
     read is still in the accumulated transcript, so a re-read signals the model isn't using its resident
     context; across turns it's the reconstruction-MISS signal (the seed/seal didn't carry what it needed).

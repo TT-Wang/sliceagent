@@ -1,9 +1,9 @@
-"""Error classification + retry (lifted in spirit from Hermes `error_classifier` + Kimi `chatWithRetry`).
+"""Error classification + retry.
 
 `classify` maps an exception to structured recovery hints; `with_retry` does
 abort-aware jittered backoff on retryable errors.
 
-The backoff is jittered (ported from Hermes `agent/retry_utils.py:19`): a
+The backoff is jittered: a
 lock-guarded monotonic counter seeds a per-call RNG so concurrent sessions
 hitting the same rate-limited provider don't all retry at the same instant
 (decorrelated uniform jitter).
@@ -21,7 +21,7 @@ from .events import ApiRetry, Dispatcher
 
 
 class ErrorKind(str, Enum):
-    """Typed failure taxonomy (the Pythonic form of Kimi kosong's error hierarchy). str-based so it stays
+    """Typed failure taxonomy. str-based so it stays
     backward-compatible: `classify(e)["kind"] == "rate_limit"` still works, and it's JSON-serializable for
     telemetry. ALL members let the metrics layer pre-register a counter per kind."""
     CONTEXT_OVERFLOW = "context_overflow"
@@ -35,13 +35,13 @@ class ErrorKind(str, Enum):
 
 
 class EmptyResponseError(Exception):
-    """The provider returned a degenerate completion — no content AND no tool calls (borrowed from
-    Kimi kosong `APIEmptyResponseError`, errors.ts). Some providers/proxies occasionally emit an empty
-    body; returning it stalls the loop. Classified RETRYABLE so `with_retry` re-rolls instead."""
+    """The provider returned a degenerate completion — no content AND no tool calls. Some
+    providers/proxies occasionally emit an empty body; returning it stalls the loop. Classified
+    RETRYABLE so `with_retry` re-rolls instead."""
 
 
 # Monotonic counter for jitter-seed uniqueness within the same process.
-# Lock-guarded to avoid races in concurrent retry paths (Hermes retry_utils.py:12).
+# Lock-guarded to avoid races in concurrent retry paths.
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
 
@@ -53,7 +53,7 @@ def jittered_backoff(
     max_delay: float = 5.0,
     jitter_ratio: float = 0.5,
 ) -> float:
-    """Compute a jittered exponential backoff delay (Hermes retry_utils.py:19).
+    """Compute a jittered exponential backoff delay.
 
     Args:
         attempt: 1-based retry attempt number.
@@ -100,13 +100,13 @@ def classify(error: Exception) -> dict:
     if "timeout" in msg or "timed out" in msg or "connection error" in msg or "econn" in msg:
         retryable = True
     if empty:
-        retryable = True  # degenerate empty completion — re-roll (Kimi isRetryableGenerateError)
+        retryable = True  # degenerate empty completion — re-roll
     if status in (401, 403):
         retryable = False  # auth — never retry
     if overflow:
         retryable = False  # tighten the slice, don't blindly re-send the oversized request
     # Bucket the failure for telemetry (orthogonal to `retryable`; lets the metrics layer count
-    # rate-limit vs timeout vs overflow vs empty — the Pythonic form of Kimi's typed error hierarchy).
+    # rate-limit vs timeout vs overflow vs empty).
     if overflow:
         kind = ErrorKind.CONTEXT_OVERFLOW
     elif status in (401, 403):

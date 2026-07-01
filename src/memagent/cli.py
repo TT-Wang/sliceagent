@@ -39,7 +39,7 @@ def _load_env(path: str = ".env") -> None:
         pass
 
 
-LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate the debug log past this (keep one prior) — Kimi RotatingFileSink
+LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate the debug log past this (keep one prior)
 
 
 def log_sink(root: str = ".", path: str | None = None):
@@ -297,7 +297,7 @@ def main() -> None:
     mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
     plugin_tool_count = sum(1 for e in base_tools.registry._tools.values()
                             if e.source.startswith("plugin:"))
-    # subagent activity → ONE dynamic line (Kimi-style), not a line per child tool call. Late-bound: the
+    # subagent activity → ONE dynamic line, not a line per child tool call. Late-bound: the
     # renderer is set once the rich sink exists (below); plain/headless leaves it None (the spawn tool's
     # result line carries the child's summary, so nothing is lost).
     _sub_render: dict = {"fn": None}
@@ -308,7 +308,7 @@ def main() -> None:
     tools = base_tools
     if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
         from .agents import load_agents
-        # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md (Kimi-style)
+        # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md
         agent_roots = list(cfg.skills_roots or []) + [root, os.path.join(root, ".memagent")]
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
                              policy=policy, max_depth=sub_depth, notify=_notify_subagent,
@@ -357,7 +357,7 @@ def main() -> None:
 
     # DEFAULT UI = the inline rich+prompt_toolkit REPL: it stays in the NORMAL terminal buffer, so native
     # copy / paste / scrollback work on ANY terminal (incl. macOS Terminal.app), with a pinned composer
-    # (patch_stdout, the Python analogue of Ink's <Static>+live-region that Hermes/Claude Code use) and
+    # (patch_stdout, which provides a pinned static region above a live-updating composer) and
     # streaming replies. AGENT_TUI=off → plain stdout (handled in tui_enabled). AGENT_TUI=live → the
     # always-pinned live composer: the bordered box stays at the bottom EVEN WHILE the agent streams (output
     # prints above it). Opt-in/experimental; the default REPL (box between turns) is the proven path, and
@@ -405,7 +405,7 @@ def main() -> None:
     if _tui:
         _rich = _tui.make_rich_sink(_console, _stats)
         sinks.append(_rich)
-        llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner (Kimi-style)
+        llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner
         # child agent activity → one dynamic spinner line. NOT in live mode: a rich console Status would
         # fight the pinned prompt_toolkit Application for the screen (garbled output) — let the spawn tool's
         # result line carry the child summary instead, as the plain/headless path does.
@@ -590,7 +590,7 @@ def main() -> None:
     _IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
     def _expand_mentions(text):
-        """@path mentions (Aider/Claude-Code style): pin each EXISTING workspace file referenced as @path into
+        """@path mentions: pin each EXISTING workspace file referenced as @path into
         the slice's OPEN FILES; an @image is ATTACHED as a vision content part for the next turn when the model
         supports vision (else skipped with a hint). Best-effort; leaves the text intact."""
         if "@" not in text or session.active_id is None:

@@ -2,13 +2,13 @@
 file, so neocortex.py can frequency-weight skills the way it already weights pitfalls and
 procedures, and a future curator can prune stale AUTO skills.
 
-PORTED (trimmed) from /tmp/hermes-agent/tools/skill_usage.py:
+Design:
   - sidecar (`.usage.json`) keyed by skill name, NOT frontmatter — keeps telemetry out of
     user-authored SKILL.md content (frontmatter carries only provenance, which is durable
     intent; usage is mutable observability).
   - atomic write (tempfile + os.replace).
   - best-effort everywhere: a broken sidecar never breaks a skill load.
-Dropped vs Hermes: lifecycle states, hub/bundled manifests, archive/restore, file locking
+Deliberately omitted: lifecycle states, hub/bundled manifests, archive/restore, file locking
 (memagent has no concurrent-process skill writes today — add fcntl only if that changes).
 
 NO-TRANSCRIPT INVARIANT: the sidecar is a durable store; it feeds consolidate's frequency

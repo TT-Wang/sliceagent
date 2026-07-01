@@ -7,9 +7,7 @@ the world, memoized at most for the session, never a durable store.
 
 Workspace snapshot for the system prompt — a one-shot, cache-stable probe.
 
-Ported (trimmed) from Hermes ``agent/coding_context.py`` (``_git`` :590,
-``_parse_status`` :603, ``_project_facts`` :638, ``build_coding_workspace_block``
-:687). The point is to hand the model its *verify loop* and current git posture up
+The point is to hand the model its *verify loop* and current git posture up
 front — which branch, how dirty the tree is, the exact test/lint/build commands —
 instead of making it rediscover them every session.
 
@@ -22,7 +20,7 @@ caller's brief tells the model to re-check with ``git`` before acting on it. The
 function is therefore deterministic per ``cwd`` within a session, never raises, and
 returns ``""`` outside a workspace (no repo / no marker / git missing / empty cwd).
 
-TRIMMED relative to Hermes: git **branch** + short **status counts**
+SCOPE: git **branch** + short **status counts**
 (staged/modified/untracked) + detected **verify command(s)**. Deliberately dropped:
 ahead/behind tracking, worktree detection, and the recent-commit log.
 """
@@ -142,7 +140,7 @@ def _git(cwd: Path, *args: str) -> str:
 def _parse_status(porcelain: str) -> tuple[str, dict[str, int]]:
     """Parse ``git status --porcelain=2 --branch`` into (branch_head, counts).
 
-    TRIMMED from Hermes: no upstream / ahead-behind tracking. Returns the branch
+    SCOPE: no upstream / ahead-behind tracking. Returns the branch
     head name (``""`` if absent) and counts of staged/modified/untracked/conflicts.
     """
     head = ""
@@ -286,7 +284,7 @@ def build_workspace_snapshot(cwd: str) -> str:
     Intended to be called ONCE per session; the caller bakes the result into the
     stable (cacheable) system-prompt tier and supplies its own header.
 
-    TRIMMED from Hermes: no ahead/behind, no worktree, no commit log. The leading
+    SCOPE: no ahead/behind, no worktree, no commit log. The leading
     "Root:" line is omitted — the caller's WORKSPACE header already frames it and
     a second absolute path tends to make the model run commands in the wrong dir.
     """

@@ -1,6 +1,6 @@
 """MCP client — connect external MCP servers, surface their tools in the registry (③.3).
 
-Borrowed: Kimi's `mcp__server__tool` namespacing + collision handling; Hermes' adapter
+Uses `mcp__server__tool` namespacing + collision handling and an adapter
 (MCP Tool → registry ToolEntry) + background-event-loop bridge. The official `mcp` SDK is
 async and the agent loop is sync, so we run ONE asyncio loop in a daemon thread and submit
 coroutines to it. Each server's connection lives in a SINGLE long-lived task (a worker that
@@ -25,7 +25,7 @@ _QUALIFY_MAX = 64
 
 
 def qualify(server: str, tool: str) -> str:
-    """mcp__<server>__<tool>, sanitized to [A-Za-z0-9_], hash-truncated if too long (Kimi)."""
+    """mcp__<server>__<tool>, sanitized to [A-Za-z0-9_], hash-truncated if too long."""
     name = re.sub(r"[^A-Za-z0-9_]", "_", f"mcp__{server}__{tool}")
     if len(name) > _QUALIFY_MAX:
         h = hashlib.sha1(name.encode()).hexdigest()[:8]

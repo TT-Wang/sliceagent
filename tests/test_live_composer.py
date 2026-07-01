@@ -84,7 +84,7 @@ def _drive_live(keys, run_one_turn, handle_slash=None):
     console, buf = _rec_console()
     with create_pipe_input() as pinp:
         pinp.send_text(keys)
-        app, state = build_live_app(console=console, stats={"model": "kimi", "topic": "demo"}, root=None,
+        app, state = build_live_app(console=console, stats={"model": "test-model", "topic": "demo"}, root=None,
                                     run_one_turn=run_one_turn, handle_slash=handle_slash,
                                     pt_input=pinp, pt_output=DummyOutput())
         app.run()

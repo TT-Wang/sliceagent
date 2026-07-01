@@ -1,4 +1,4 @@
-"""Subagents — bounded delegation (Kimi/Hermes pattern, on the slice architecture).
+"""Subagents — bounded delegation on the slice architecture.
 
 A large, decomposable task can be split: the parent spawns a CHILD agent for a
 sub-task; the child runs its own loop with a FRESH slice, does the work in the SAME
@@ -79,7 +79,7 @@ EXPLORER_READ_BUDGET = 64
 # EXPLORER PROFILE — reasoning intent for read-only explorer children. They NAVIGATE/READ (find files,
 # trace usages, summarize), which the model does well at low reasoning effort; running them at the parent's
 # (often "full") setting just burns wall-clock. Default "fast"; override for an A/B (set to "full" to match
-# the parent). Borrowed from Kimi Code's per-PROFILE subagent config. Applied via a per-child llm VIEW so the
+# the parent). A per-PROFILE subagent reasoning setting, applied via a per-child llm VIEW so the
 # shared parent llm is never mutated and parallel siblings never race on it.
 EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lower()
 
@@ -123,7 +123,7 @@ def _primary_arg(args) -> str:
 
 
 def _nested_sink(notify, depth: int):
-    """Surface a child agent's progress as ONE DYNAMIC line (Kimi-style): each tool call updates a single
+    """Surface a child agent's progress as ONE DYNAMIC line: each tool call updates a single
     status line with the current action + a running count, instead of printing a line per call. The renderer
     (RichSink.subagent_notify) overwrites in place; the child's final summary returns via the spawn tool's
     result, so there's no per-assistant-text spam here."""
@@ -264,8 +264,8 @@ class SubagentHost:
         return s
 
     def _agent_schema(self) -> dict:
-        """The generic `spawn_agent` tool — delegate to a NAMED agent kind from the registry (Kimi-style:
-        one Agent tool + a pluggable roster). The description enumerates the available kinds by name."""
+        """The generic `spawn_agent` tool — delegate to a NAMED agent kind from the registry (one Agent
+        tool + a pluggable roster). The description enumerates the available kinds by name."""
         roster = "; ".join(f"{n}: {sp.description}" for n, sp in self.agents.items())
         return {"type": "function", "function": {
             "name": "spawn_agent",

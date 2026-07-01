@@ -784,7 +784,7 @@ def slash_command_menu_renders():
             "composer has no completions-menu float → '/' computes matches but draws nothing"
 
 
-# ── FEATURE: two-tier selector menus (model→reasoning, mode) Kimi-style ────────────────────────────────
+# ── FEATURE: two-tier selector menus (model→reasoning, mode) ───────────────────────────────────────────
 @check
 def selector_menu_navigates_and_returns():
     import memagent.tui as t
@@ -879,7 +879,7 @@ def proxy_defaults_direct_for_every_endpoint():
         assert llm._choose_proxy(base, None) == "none", base                             # no explicit → DIRECT
 
 
-# ── FEATURE (★1 borrow): read_file bounds the in-slice VIEW + supports a line window, full file on disk ──
+# ── FEATURE: read_file bounds the in-slice VIEW + supports a line window, full file on disk ─────────────
 @check
 def read_file_bounds_view_and_supports_windowing():
     import os
@@ -927,7 +927,7 @@ def cost_chart_renders_flat_vs_rising():
     assert rem.render_cost_chart([]) == ""                           # empty rows → no crash
 
 
-# ── FEATURE (#12 borrow): model pricing is single-sourced in model_catalog; the cost meter delegates ──
+# ── FEATURE: model pricing is single-sourced in model_catalog; the cost meter delegates ────────────────
 @check
 def model_pricing_is_single_source():
     from memagent import model_catalog as mc
@@ -939,7 +939,7 @@ def model_pricing_is_single_source():
     assert tui._price("gpt-5.5") == mc.pricing("gpt-5.5")               # TUI meter reads the same source
 
 
-# ── FEATURE (quick-win borrows): str_replace replace_all + with_retry honors Retry-After ──────────────
+# ── FEATURE: str_replace replace_all + with_retry honors Retry-After ───────────────────────────────────
 @check
 def str_replace_replace_all_and_retry_after():
     import os
@@ -973,7 +973,7 @@ def str_replace_replace_all_and_retry_after():
     assert errors._retry_after_seconds(type("E3", (Exception,), {"retry_after": "soon"})()) is None  # HTTP-date unparsed
 
 
-# ── FEATURE (★2 borrow): grep output_mode/type + a glob file-finder (Kimi discovery surface) ──────────
+# ── FEATURE: grep output_mode/type + a glob file-finder (discovery surface) ────────────────────────────
 @check
 def grep_modes_and_glob_tool():
     import os

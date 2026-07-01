@@ -159,7 +159,7 @@ def richsink_streams_content_then_finalizes_once():
     for force in (False, True):                    # non-tty (fallback) AND tty-like (Live) must both be safe
         buf = io.StringIO()
         c = Console(file=buf, force_terminal=force, width=80, soft_wrap=False)
-        sink = make_rich_sink(c, {"model": "kimi"})
+        sink = make_rich_sink(c, {"model": "test-model"})
         sink(SliceBuilt("req"))                    # starts the thinking spinner
         sink.on_delta("content", "Hello ")         # deltas flip the live label to "writing…" (no preview)
         sink.on_delta("content", "world — the fix is X.")

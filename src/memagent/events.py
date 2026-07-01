@@ -1,4 +1,4 @@
-"""Event system (from Kimi Code): the loop's ONLY output path.
+"""Event system: the loop's ONLY output path.
 
 The core never prints or writes files — it dispatches events. The host composes a
 dispatcher from sinks (slice-updater, durable log, CLI/TUI, SDK). Sink failures are

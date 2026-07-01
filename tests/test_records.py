@@ -1,4 +1,4 @@
-"""Records journal + UsageRecorder (Kimi agent-core/records). Append-only typed JSONL, robust reads,
+"""Records journal + UsageRecorder. Append-only typed JSONL, robust reads,
 per-turn usage journaled on TurnEnd, simple cost aggregation. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_records.py
 """

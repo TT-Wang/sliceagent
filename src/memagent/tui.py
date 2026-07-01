@@ -1,11 +1,11 @@
 """Optional rich terminal UI (the `tui` extra: rich + prompt_toolkit).
 
-Borrowed periphery — NOT the moat. The loop already decouples rendering via the event
+Periphery — NOT the moat. The loop already decouples rendering via the event
 dispatcher; this is just (a) a rich rendering SINK over those events and (b) a prompt_toolkit
 input layer. loop.py / pfc.py / seed.py are never touched. The whole module is import-guarded behind the
 `tui` extra: core/headless/eval never import rich or prompt_toolkit.
 
-Design (borrowed from Hermes' rich+prompt_toolkit stack and Kimi's TUI UX):
+Design (a rich + prompt_toolkit terminal UI):
   - SCROLLBACK model: Rich prints finalized output to history; prompt_toolkit owns the input line.
     They are TEMPORALLY separate (output during the synchronous run_turn, input between turns), so
     there is no patch_stdout/threading minefield.
@@ -125,7 +125,7 @@ _PLAN_GLYPH = {"done": ("✓", "ok"), "in_progress": ("▶", "accent"), "pending
 
 
 def _render_plan(steps: list):
-    """A live PLAN/TODO checklist panel (borrowed Aider/Kimi UX): '✓ done', '▶ in-progress', '○ pending'.
+    """A live PLAN/TODO checklist panel: '✓ done', '▶ in-progress', '○ pending'.
     Surfaces the model's update_plan tier as first-class UI instead of a generic tool card."""
     lines = []
     for it in steps:
@@ -144,7 +144,7 @@ def _render_plan(steps: list):
 
 # ── the rendering sink (consumes the loop's events) ──────────────────────────────────────────
 def _box_width(console: Console) -> int:
-    """Bound the response box so long replies read as a column, not edge-to-edge (Hermes-style)."""
+    """Bound the response box so long replies read as a column, not edge-to-edge."""
     try:
         w = int(console.width)
     except Exception:
@@ -153,7 +153,7 @@ def _box_width(console: Console) -> int:
 
 
 def _response_panel(content: str, console: Console) -> Panel:
-    """The assistant reply as Rich Markdown in a clean HORIZONTALS box (borrowed from Hermes): light
+    """The assistant reply as Rich Markdown in a clean HORIZONTALS box: light
     top/bottom rules, a left-aligned label, generous padding, bounded width — vs bare full-width Markdown."""
     return Panel(
         Markdown(content),
@@ -764,10 +764,10 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
         app.run()
 
 
-# ── modal selectors (Kimi-style second-tier menus) ───────────────────────────────────────────
+# ── modal selectors (second-tier menus) ───────────────────────────────────────────
 def run_selector(title, rows, *, current=-1, hint="↑↓ move · Enter select · Esc cancel",
                  pt_input=None, pt_output=None):
-    """A modal single-choice list (Kimi's ChoicePicker, adapted to prompt_toolkit). ``rows`` is a list of
+    """A modal single-choice list (a prompt_toolkit choice picker). ``rows`` is a list of
     (label, description); returns the chosen INDEX, or None if cancelled. Non-full-screen + transient
     (erases on close), so it overlays the scrollback like the composer. Safe to call ONLY between turns
     (no other pt Application live) — the REPL slash path satisfies that; live mode falls back to typed args."""
@@ -903,8 +903,8 @@ _COMPLETE_IGNORE = {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__p
 
 
 def _repo_files(root: str, cap: int = 4000) -> list:
-    """A bounded, ignore-pruned list of repo-relative file paths for prompt file-completion (Aider-style:
-    let the user tab-complete a filename to reference it). Best-effort; empty on any error."""
+    """A bounded, ignore-pruned list of repo-relative file paths for prompt file-completion
+    (let the user tab-complete a filename to reference it). Best-effort; empty on any error."""
     out = []
     try:
         for dp, dirs, files in os.walk(root):
@@ -934,10 +934,10 @@ _SLASH_ARGS = {
 
 
 class _InputCompleter(Completer):
-    """Slash-command completion at line start (Kimi-style palette) + ARGUMENT suggestions for /model,
+    """Slash-command completion at line start (a command palette) + ARGUMENT suggestions for /model,
     /reasoning, /mode + filename completion on an explicit @mention (the same @path syntax cli.py's
     message parser already recognizes for pinning/attaching a file — see the `@([\\w./\\-]+)` scan).
-    Matching ANY plain word against the repo file list (the original Aider-style behavior) popped a
+    Matching ANY plain word against the repo file list (the original behavior) popped a
     completion menu on ordinary prose ("please edit util" → suggests util.py) — annoying enough in
     practice that gating it behind the @ the user already has to type to reference a file is strictly
     better: same capability, zero unsolicited popups."""
@@ -1020,7 +1020,7 @@ def _saved_dollars(stats: dict):
 
 
 def _toolbar(stats: dict):
-    """Hermes-style pinned status bar (re-rendered each redraw). FormattedText, not HTML — so a workspace
+    """A pinned status bar (re-rendered each redraw). FormattedText, not HTML — so a workspace
     name containing < & > can never break the markup."""
     _dim, _accent, _val = "fg:ansibrightblack", "fg:ansibrightcyan bold", "fg:ansicyan"
     sep = (_dim, "  │  ")
@@ -1068,7 +1068,7 @@ def _force_cooked_output() -> None:
 class TuiInput:
     """prompt_toolkit input with history, slash/file completion, and the status toolbar.
 
-    The composer is a BORDERED box pinned at the bottom (Claude-Code/Hermes look). It's a prompt_toolkit
+    The composer is a BORDERED box pinned at the bottom. It's a prompt_toolkit
     Application run full_screen=False with mouse_support=False — so it stays in the NORMAL terminal buffer:
     the conversation above is real scrollback, and native select/copy/paste keep working on EVERY terminal
     (incl. macOS Terminal.app). Degrades to a plain ❯ prompt if the

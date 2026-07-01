@@ -1,4 +1,4 @@
-"""Model capability catalog (Kimi modelCatalog): family + wire quirks (tokens-param rename, reasoning_effort
+"""Model capability catalog: family + wire quirks (tokens-param rename, reasoning_effort
 support). The single source of truth llm.py consults. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_model_catalog.py
 """

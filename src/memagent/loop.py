@@ -110,7 +110,7 @@ def _overflow_breadcrumb(consolidate) -> dict:
                "steps; recall_history for raw detail):\n" + snap) if snap else OVERFLOW_COMPACTED
     return {"role": "user", "content": content}
 
-# Micro-compaction (borrowed from Kimi's micro.ts): on overflow, the FIRST move is to clear the BODIES of
+# Micro-compaction: on overflow, the FIRST move is to clear the BODIES of
 # OLD tool-result messages — the bulky, stale part — while keeping the assistant reasoning skeleton and the
 # recent window. Strictly better than dropping whole exchanges (which loses the reasoning too), and it keeps
 # every tool_call↔reply pairing intact so the message sequence stays valid. The full output is archived in
@@ -273,7 +273,7 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks):
         # (which parked the turn). The tool then reports its missing required arg as a normal per-call error.
         raw_args = tc.args if isinstance(tc.args, dict) else {}
         call_args = {k: v for k, v in raw_args.items() if k != "note"}
-        # SAME-STEP exact-call dedup (lossless, borrowed from Kimi tool-dedup): an identical (name, args)
+        # SAME-STEP exact-call dedup (lossless): an identical (name, args)
         # read-only call already issued in THIS batch reuses the first call's result instead of executing
         # the tool a second time. Gated to read-only query tools (a re-run is byte-identical anyway) and
         # only when allowed — a blocked/spinning call still gets its block message, and mutating/unknown
@@ -454,7 +454,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         # steps (a per-step flag would stack duplicates). floor keeps it below the seed.
                         has_crumb = bool(messages[seed_len:]) and str(messages[seed_len].get("content", "")).startswith(_CRUMB_PREFIX)
                         floor = seed_len + (1 if has_crumb else 0)
-                        # MICRO-COMPACTION FIRST (Kimi-style): clear OLD tool-result BODIES — keeping the
+                        # MICRO-COMPACTION FIRST: clear OLD tool-result BODIES — keeping the
                         # assistant reasoning, the recent window, and valid tool pairings — before resorting
                         # to dropping a whole exchange. Lossless-by-default (full content in the episode cache).
                         micro = _micro_compact(messages, floor=floor)

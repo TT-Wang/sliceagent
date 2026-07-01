@@ -1,4 +1,4 @@
-"""Borrowed-from-Kimi context hygiene: (#74) page-out large tool output to a blob, (#77) micro-compaction
+"""Context hygiene: (#74) page-out large tool output to a blob, (#77) micro-compaction
 clears old tool-result bodies before dropping whole exchanges, (#76) configurable max_steps.
 No model, no pytest. Run: PYTHONPATH=src python tests/test_pageout_compaction.py
 """

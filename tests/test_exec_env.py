@@ -1,4 +1,4 @@
-"""Exec-env safety borrows (from Kimi kaos): line-ending PRESERVATION on edit. The model emits '\\n';
+"""Exec-env safety: line-ending PRESERVATION on edit. The model emits '\\n';
 writing that to a CRLF file would rewrite every line ending (corruption / huge spurious diff). No model,
 no pytest. Run: PYTHONPATH=src python tests/test_exec_env.py
 """

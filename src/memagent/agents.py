@@ -1,7 +1,7 @@
-"""Named-agent registry — file-defined subagent KINDS (borrowed structure from Kimi Code / Claude Code).
+"""Named-agent registry — file-defined subagent KINDS.
 
-memagent's subagents were two HARDCODED kinds (read-only explorer + writable). Kimi/Claude make the
-kinds a pluggable REGISTRY: each agent is a {name, description, tools-allowlist, reasoning, system-prompt}
+memagent's subagents were two HARDCODED kinds (read-only explorer + writable). The kinds are now a
+pluggable REGISTRY: each agent is a {name, description, tools-allowlist, reasoning, system-prompt}
 definition, discovered from `<root>/agents/*.md` (markdown + frontmatter — memagent's own SKILL.md idiom),
 and the model spawns one BY NAME via the generic `spawn_agent` tool. Built-ins (explorer, general) ship
 in-tree; user files add or override by name.
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history", "code_review")
 _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
-# Tools NO subagent may use, regardless of its allowlist (mirrors Kimi's SUBAGENT_EXCLUDED_TOOLS). A
+# Tools NO subagent may use, regardless of its allowlist. A
 # subagent must not stop to ask the END-USER — ambiguity is the parent's job; a child that blocks on input
 # is a stall (and racy/meaningless when several run in parallel). It returns its summary instead.
 SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user"})
@@ -74,7 +74,7 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
                       "work, then return a concise summary of what you changed and verified. Do NOT ask the "
                       "user; if the task is ambiguous, make the best reasonable choice and note it in the summary.",
     ),
-    # An independent ADVERSARIAL verifier (borrowed from Claude Code's verification agent). Runs in a FRESH
+    # An independent ADVERSARIAL verifier. Runs in a FRESH
     # slice and returns only a VERDICT + evidence — so it complements the parent's structural done-gates
     # (OracleHook/SelfCheckHook) with a second, skeptical opinion WITHOUT any context crossing the seal.
     # Read-only EXCEPT running checks: read/grep + run_command/execute_code (to build/test/probe), no edit
@@ -160,7 +160,7 @@ def _parse_agent_md(path: str) -> AgentSpec | None:
 
 def load_agents(roots) -> dict[str, AgentSpec]:
     """Built-in agents overlaid with user-defined `<root>/agents/*.md` (later roots / user files win by
-    name). `roots` are dirs that MAY contain an `agents/` subdir (mirrors Kimi's SUBAGENTS_DIRECTORY)."""
+    name). `roots` are dirs that MAY contain an `agents/` subdir."""
     out = dict(BUILTIN_AGENTS)
     for root in roots or []:
         adir = os.path.join(root, "agents")

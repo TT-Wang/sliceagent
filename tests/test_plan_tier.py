@@ -1,4 +1,4 @@
-"""PLAN / TodoWrite tier (Kimi/Claude borrow): the model maintains an ordered step list with status via
+"""PLAN / TodoWrite tier: the model maintains an ordered step list with status via
 update_plan (replace-all); it renders in the slice, is carried through seal(), wiped by reset(), and
 round-trips through TaskState. Distinct from STANDING REQUIREMENTS (acceptance criteria). No model, no
 pytest. Run: PYTHONPATH=src python tests/test_plan_tier.py

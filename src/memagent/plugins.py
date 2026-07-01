@@ -1,7 +1,6 @@
 """Plugins — packaging that feeds the existing seams (③.4).
 
-Lift-adapted from Hermes' register(ctx) facade + manifest + multi-source discovery, with
-Kimi's small-surface discipline. A plugin is a directory with a `plugin.toml` manifest and
+A plugin is a directory with a `plugin.toml` manifest and
 an `__init__.py` exposing `register(ctx)`. Through `ctx` it contributes to the SAME seams
 everything else uses — the tool registry, the skill manager, MCP servers, and hooks — so a
 plugin gets NO privileged surface and reuses all the sandbox/policy/scheduler machinery.

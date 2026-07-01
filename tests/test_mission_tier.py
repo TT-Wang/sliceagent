@@ -1,4 +1,4 @@
-"""MISSION tier (Kimi goal mode): a north-star objective set via set_mission, cleared via mission_done.
+"""MISSION tier (goal mode): a north-star objective set via set_mission, cleared via mission_done.
 Self-suppressing (no bloat when unset), carried by seal(), wiped by reset(), round-trips through TaskState.
 No model, no pytest. Run: PYTHONPATH=src python tests/test_mission_tier.py
 """

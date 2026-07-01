@@ -3,14 +3,14 @@
 install behind a proxy. Host-injected ToolEntries (the make_grep_tool pattern): registered only when
 wired in, absent otherwise.
 
-Design borrowed from Kimi Code's web tools (packages/agent-core/.../web) + memagent's own discipline:
+Design discipline:
   - SSRF GUARD: only http/https; reject localhost / private / loopback / link-local / CGNAT / IPv6 ULA,
     re-validated on every redirect hop (a tool must never become a gateway to the cloud metadata service
     or the LAN). Fails CLOSED — an unresolvable host is blocked.
   - PAGE, don't truncate: large fetched text goes through host._page_out (full body on disk, head+tail
     inline + a read_file locator) — the cap-audit rule, not a silent cut.
   - UNTRUSTED: every result is fenced with safety.wrap_untrusted(kind="web") + threat-scanned — web
-    content is attacker-controlled and must never be followed as instructions (Kimi skips this; we don't).
+    content is attacker-controlled and must never be followed as instructions.
 Network failures degrade to a clear one-line error; a handler never raises.
 """
 from __future__ import annotations
