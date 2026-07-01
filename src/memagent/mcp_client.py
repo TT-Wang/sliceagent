@@ -60,13 +60,18 @@ def _mcp_handler(server, tool, page_out):
     host page_out (eval/headless), returns the raw text (already OOM-capped by _result_to_text)."""
     def _handle(args):
         out = server.call(tool, args)
-        ok = getattr(out, "ok", True)   # preserve a failure flag (isError/unavailable) through page-out
+        ok = getattr(out, "ok", True)   # capture BEFORE page_out — str.translate() (inside page_out's
+        # control-char strip) always returns a plain str, silently dropping the ToolText subclass and
+        # its .ok flag even on the success path. Re-wrapping with the captured `ok` below (not just on
+        # the ok=False branch) is what makes run_tool_batch's `getattr(out, "ok", None)` see an explicit
+        # flag instead of None — the None case was falling back to prose-matching ("Error"/"Exit code"
+        # prefix), which false-flagged a legitimate success result whose text happened to start that way.
         if page_out:
             try:
                 out = page_out(out, label=f"mcp-{tool}")
             except Exception:  # noqa: BLE001 — paging must never fail the tool call
                 pass
-        return out if ok else ToolText(str(out), ok=False)
+        return ToolText(str(out), ok=ok)
     return _handle
 
 

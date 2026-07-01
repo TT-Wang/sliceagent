@@ -212,9 +212,13 @@ def _pack_episode_preview(h: dict) -> str:
 def _pack_thissession_preview(ln: dict) -> str:
     """One locator-line body for the PAGED-OUT HISTORY manifest: the turn's title + a PAYOFF
     breadcrumb (what the turn HOLDS), so the model can decide to page it back informedly. Locators
-    only — never step bodies/observations (those page in on demand via recall_history)."""
-    rec = ln.get("record", {}) or {}
-    meta = rec.get("meta", {}) or {}
+    only — never step bodies/observations (those page in on demand via recall_history). `ln` is a
+    raw line parsed from the on-disk episodic JSONL — a malformed/corrupt record (e.g. an older
+    schema, a hand-edited file) must degrade to an empty preview, never crash the manifest build."""
+    rec = ln.get("record")
+    rec = rec if isinstance(rec, dict) else {}
+    meta = rec.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
     title = normalize_ws(rec.get("title") or "(untitled)")[:52]
     flag = " · FAIL" if meta.get("failing") else ""
     crumb = _thissession_breadcrumb(rec, meta)
@@ -225,16 +229,23 @@ def _thissession_breadcrumb(rec: dict, meta: dict) -> str:
     """The payoff breadcrumb (≤60 chars). An empty breadcrumb was the pin/view killer — a locator
     with no visible payoff never gets called — so every line is GUARANTEED a content-derived hint:
     the model's own note if it left one, else the turn's edited files, else its distinct read/grep/run
-    actions. All from data already in the record (no extra read, no LLM)."""
+    actions. All from data already in the record (no extra read, no LLM). `rec`/`meta` are already
+    dict-guarded by the caller; `steps`/`action` entries are guarded here since they come from the
+    same untrusted on-disk record."""
     note = normalize_ws(rec.get("note"))
     if note:
         return ("note: " + note)[:60]
     files = meta.get("files") or []
+    files = files if isinstance(files, list) else []
     if files:
         return ("edited: " + ", ".join(os.path.basename(str(f)) for f in files))[:60]
     acts: list[str] = []
     for st in rec.get("steps", []) or []:
+        if not isinstance(st, dict):
+            continue
         for a in st.get("action", []) or []:
+            if not isinstance(a, dict):
+                continue
             name = a.get("name") or ""
             args = a.get("args", {}) if isinstance(a.get("args"), dict) else {}
             arg = args.get("path") or args.get("query") or args.get("command") or ""
