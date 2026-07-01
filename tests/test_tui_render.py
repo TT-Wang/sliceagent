@@ -72,9 +72,13 @@ def completer_does_slash_and_files():
     # slash palette at line start
     slash = [c.text for c in comp.get_completions(Document("/pl"), None)]
     assert "/plan" in slash, slash
-    # filename completion on the current word (basename-prefix first)
-    files = [c.text for c in comp.get_completions(Document("please edit util"), None)]
+    # filename completion on an explicit @mention (basename-prefix first) — the ONLY trigger; matches
+    # the @path syntax cli.py's message parser already recognizes for pinning/attaching a file.
+    files = [c.text for c in comp.get_completions(Document("please edit @util"), None)]
     assert "src/memagent/util.py" in files and "tests/test_util.py" in files, files
+    # plain prose (no @) must NOT pop a completion menu, even on a word that matches a real file —
+    # this is the exact annoyance the @-gating fixes.
+    assert list(comp.get_completions(Document("please edit util"), None)) == []
     # short words / mid-prose don't spam
     assert list(comp.get_completions(Document("a"), None)) == []
 

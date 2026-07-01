@@ -934,7 +934,12 @@ _SLASH_ARGS = {
 
 class _InputCompleter(Completer):
     """Slash-command completion at line start (Kimi-style palette) + ARGUMENT suggestions for /model,
-    /reasoning, /mode + filename completion on the current word anywhere (Aider-style)."""
+    /reasoning, /mode + filename completion on an explicit @mention (the same @path syntax cli.py's
+    message parser already recognizes for pinning/attaching a file — see the `@([\\w./\\-]+)` scan).
+    Matching ANY plain word against the repo file list (the original Aider-style behavior) popped a
+    completion menu on ordinary prose ("please edit util" → suggests util.py) — annoying enough in
+    practice that gating it behind the @ the user already has to type to reference a file is strictly
+    better: same capability, zero unsolicited popups."""
 
     def __init__(self, files=None):
         self._files = files or []
@@ -960,14 +965,14 @@ class _InputCompleter(Completer):
             return
         words = text.split()
         word = words[-1] if (words and not text.endswith(" ")) else ""
-        if len(word) < 2 or word.startswith("/"):              # file-path completion on the current word
+        if not word.startswith("@"):                            # file-path completion ONLY on @word
             return
-        wl = word.lower()
+        wl = word[1:].lower()
         starts = [p for p in self._files if os.path.basename(p).lower().startswith(wl)]
         starts_set = set(starts)   # O(1) membership — `p not in starts` (a list) was O(n) per file → O(n²)/keystroke
         subs = [p for p in self._files if wl in p.lower() and p not in starts_set]
         for p in (starts + subs)[:20]:                          # basename-prefix first, then substring
-            yield Completion(p, start_position=-len(word), display_meta="file")
+            yield Completion(p, start_position=-(len(word) - 1), display_meta="file")  # keep the "@", replace after it
 
 
 # rough public list prices, USD per 1M tokens: (input, cached_input, output). Substring-matched on the
