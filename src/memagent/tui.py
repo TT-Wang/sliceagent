@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from rich import box as _box
 from rich.console import Console, Group
@@ -35,7 +36,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 
-from .events import (AssistantText, ApiRetry, Event, LessonSaved, SliceBuilt, StepEnd,
+from .events import (AssistantText, ApiRetry, Event, LessonSaved, SliceBuilt, StepBegin, StepEnd,
                      ToolResult, ToolStarted, TurnEnd, TurnInterrupted)
 
 # ── theme (semantic tokens; one place to retheme) ───────────────────────────────────────────
@@ -203,6 +204,50 @@ def _pause_active_live() -> None:
             pass
 
 
+# running turn tally — bucket each completed tool by KIND so the status line shows "how far along" at a glance
+_VERB_BUCKET = {"read_file": "read", "list_files": "read", "grep": "read", "glob": "read",
+                "edit_file": "edit", "str_replace": "edit", "append_to_file": "edit",
+                "run_command": "cmd", "execute_code": "cmd"}
+
+
+def _fmt_tally(tally: dict) -> str:
+    """Compact 'N read · N edit · N cmd · N fail' — only non-zero buckets, in a stable order."""
+    return " · ".join(f"{tally[k]} {k}" for k in ("read", "edit", "cmd", "fail") if tally.get(k))
+
+
+class _LiveStatus:
+    """A Rich RichCast whose __rich__ RECOMPUTES the elapsed clocks every frame off the Status Live loop —
+    so the timer ticks with NO extra thread (console.status() already redraws ~12×/s to animate the dots).
+
+    HARD RULE: the object handed to console.status() must be THIS instance, never a Text/str — a static
+    body freezes the timer. __rich__ emits ONLY Text.assemble segments (never an f-string into markup), so a
+    bracketed path/command in the action label can't trigger a MarkupError. It reads its fields off the sink
+    under the sink's lock, so a parallel subagent write can't tear a frame; any error degrades to a bare Text
+    (a progress indicator must never crash the run)."""
+
+    def __init__(self, sink: "RichSink"):
+        self._sink = sink
+
+    def __rich__(self) -> Text:
+        s = self._sink
+        try:
+            with s._lock:
+                label, step = (s._subagent or s._label or "working…"), s._step
+                a0, t0, tally = s._action_t0, s._turn_t0, dict(s._tally)
+            now = time.monotonic()
+            a, turn = max(0.0, now - (a0 or now)), max(0.0, now - (t0 or now))
+            parts = []
+            if step:
+                parts.append((f"step {step} · ", TH["dim"]))
+            parts.append((str(label), TH["tool"]))          # str() + Text.assemble → never parsed as markup
+            parts.append((f" · {a:.0f}s", TH["dim"]))
+            tally_str = _fmt_tally(tally)
+            parts.append((f"   ·  {tally_str + ' · ' if tally_str else ''}{turn:.0f}s", TH["dim"]))
+            return Text.assemble(*parts)
+        except Exception:  # noqa: BLE001 — a progress indicator must never break the run
+            return Text("working…", style=TH["dim"])
+
+
 class RichSink:
     """An event sink that renders the live turn with Rich. Drop-in for cli_sink."""
 
@@ -217,6 +262,15 @@ class RichSink:
         self._live = None        # a transient Rich Live that streams the reply INTO content (not just a tail)
         self._stream = ""        # the assistant text streamed so far this step
         self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
+        # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
+        # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
+        self._body = None        # the _LiveStatus handed to console.status() (None ⇒ no live region)
+        self._label = "thinking…"
+        self._subagent = None
+        self._step = 0
+        self._action_t0 = None   # monotonic start of the CURRENT action (resets each step/tool)
+        self._turn_t0 = None     # monotonic start of the WHOLE turn (armed on SliceBuilt, survives step churn)
+        self._tally: dict = {}   # bucket -> count (read/edit/cmd/fail) for the "how far along" summary
 
     def _stop(self) -> None:
         """Tear down whichever live region is active (spinner OR the streaming-content Live). The Live is
@@ -231,27 +285,48 @@ class RichSink:
                 except Exception:  # noqa: BLE001
                     pass
                 self._live = None
+            self._body = None
 
     def _spin(self, label: str) -> None:
-        self._stop()
+        """Set the CURRENT action and ensure the ticking status region is live. MUTATES in place when the
+        region already exists (no tear-down → no flicker, and the turn clock keeps ticking); only creates the
+        Status the first time. On a non-tty, console.status() no-ops its animation (no ANSI, body never
+        refreshed) — same degraded behaviour as before, so on_delta's 'a step is active' gate still holds."""
         with self._lock:   # serialize vs parallel subagent_notify on _status
             self._stream = ""        # new step → reset the streamed reply
-            self._status = self.c.status(Text(label, style=TH["dim"]), spinner="dots")
-            self._status.start()
+            self._label = label
+            self._subagent = None
+            self._action_t0 = time.monotonic()
+            if self._turn_t0 is None:
+                self._turn_t0 = self._action_t0
+            if self._status is None and self._live is None:   # create once; a live stream owns the region alone
+                self._body = _LiveStatus(self)
+                self._status = self.c.status(self._body, spinner="dots")
+                self._status.start()
 
     def subagent_notify(self, text: str) -> None:
-        """A child agent's CURRENT activity → ONE dynamic spinner line (overwrites in place), so a subagent
-        doing 80 reads shows a single updating line, not 80. Updates the active spinner; starts one if none.
-        Called from PARALLEL explorer worker threads → guarded by self._lock (rich Status isn't thread-safe)."""
+        """A child agent's CURRENT activity → the status line's action segment (overwrites in place), so a
+        subagent doing 80 reads shows a single updating line, not 80. Called from PARALLEL explorer worker
+        threads → guarded by self._lock; each now writes ONE field instead of the non-thread-safe Status.update."""
         try:
             with self._lock:
-                if self._status is not None:
-                    self._status.update(Text(text, style=TH["dim"]))
-                elif self._live is None:
-                    self._status = self.c.status(Text(text, style=TH["dim"]), spinner="dots")
+                self._subagent = text
+                if self._action_t0 is None:
+                    self._action_t0 = time.monotonic()
+                if self._status is None and self._live is None:
+                    self._body = _LiveStatus(self)
+                    self._status = self.c.status(self._body, spinner="dots")
                     self._status.start()
         except Exception:  # noqa: BLE001 — a progress indicator must never break the run
             pass
+
+    def _bump_tally(self, name: str, failing: bool) -> None:
+        with self._lock:
+            if failing:
+                self._tally["fail"] = self._tally.get("fail", 0) + 1
+            bucket = _VERB_BUCKET.get(name)
+            if bucket:
+                self._tally[bucket] = self._tally.get(bucket, 0) + 1
 
     def _stream_panel(self, text: str) -> Panel:
         return Panel(Markdown(text), title=f"[bold {TH['accent']}]assistant[/] [grey50]streaming…[/]",
@@ -298,16 +373,22 @@ class RichSink:
 
     def __call__(self, e: Event) -> None:
         if isinstance(e, SliceBuilt):
+            self._turn_t0 = time.monotonic()              # arm the whole-turn clock (once per turn)
+            self._tally = {}
+            self._step = 0
             self._spin("thinking…")
+        elif isinstance(e, StepBegin):
+            self._step = e.step                           # the step counter the status line shows
+            self._spin("thinking…")                       # new step → reset the action clock, keep the turn clock
         elif isinstance(e, ToolStarted):
-            self._spin(f"{_tool_header(e.name, e.args)} …")
+            self._spin(_tool_header(e.name, e.args))       # the ticking action segment (spinner conveys "…")
         elif isinstance(e, ToolResult):
-            self._stop()
-            if e.name in _COALESCE and not e.failing:     # buffer a read-only run → one line on next event
-                self._reads.append((e.name, _primary(e.name, e.args)))
-                return
+            self._bump_tally(e.name, e.failing)            # grow the running "how far along" summary
+            if e.name in _COALESCE and not e.failing:      # buffer a read-only run → one line on next event; the
+                self._reads.append((e.name, _primary(e.name, e.args)))  # status stays LIVE so the timer keeps
+                return                                     # ticking through a 12-file read run (no dead air)
             self._flush_reads()                            # a mutating/failing tool ends the read run
-            self.c.print(_render_tool_result(e))
+            self.c.print(_render_tool_result(e))           # prints ABOVE the live status region
         elif isinstance(e, AssistantText):
             self._stop()
             self._flush_reads()
@@ -329,10 +410,12 @@ class RichSink:
             self.c.print(Text(f"  💡 learned: {_shorten(e.title, 70)}", style=TH["dim"]))
         elif isinstance(e, TurnInterrupted):
             self._stop()
+            self._turn_t0 = None                           # disarm the turn clock (next turn re-arms on SliceBuilt)
             self._flush_reads()
             self.c.print(Text(f"  ⚠ interrupted: {e.message or e.reason}", style=TH["warn"]))
         elif isinstance(e, TurnEnd):
             self._stop()
+            self._turn_t0 = None
             self._flush_reads()
             tok = (e.usage or {}).get("prompt_tokens", 0) + (e.usage or {}).get("completion_tokens", 0)
             self.c.print(Text(f"  ✓ done · {e.steps} steps · {tok} tokens", style=TH["dim"]))
