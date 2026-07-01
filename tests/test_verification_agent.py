@@ -1,5 +1,5 @@
-"""#14 — the dedicated adversarial VERIFICATION subagent kind (borrowed from Claude Code's verification
-agent). It must be registered, runnable (surfaces in the spawn_agent roster), able to RUN checks but not
+"""The dedicated adversarial VERIFICATION subagent kind. It must be registered, runnable
+(surfaces in the spawn_agent roster), able to RUN checks but not
 EDIT, and carry the adversarial 'try to break it' + VERDICT contract. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_verification_agent.py
 """

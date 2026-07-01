@@ -1,4 +1,4 @@
-"""CodeIndex — the RELATED CODE tier (borrowed periphery, behind the Retriever interface).
+"""CodeIndex — the RELATED CODE tier (behind the Retriever interface).
 
 Fills the slice's discovery tier from a real repository: given the task (and the
 agent's live focus, e.g. the current error), surface the most relevant *existing*

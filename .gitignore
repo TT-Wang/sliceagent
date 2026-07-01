@@ -35,7 +35,7 @@ brain/
 
 # local tooling artifacts (not part of the repo).
 # NOTE: gitignore has no inline comments — keep each pattern on its own line.
-# .claude/ = local Claude Code session dir · .coverage = coverage.py data · runs/ = eval outputs ·
+# .claude/ = local session dir · .coverage = coverage.py data · runs/ = eval outputs ·
 # *.pdf = decks/local docs (force-add if a real doc PDF is ever needed).
 .claude/
 .coverage
@@ -50,3 +50,9 @@ evals/
 prototype/
 docs/STEP3-PLAN.md
 docs/MEMEM-DIAGNOSIS.md
+
+# internal engineering roadmap (wave planning), not product docs — untracked 2026-07-02
+ROADMAP.md
+
+# all of docs/ is internal (architecture/spec/brand assets) — not published; untracked 2026-07-02
+docs/

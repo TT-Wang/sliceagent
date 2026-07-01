@@ -44,7 +44,7 @@ def oversized_result_hits_oom_safety_cap():
     assert len(out) < _MCP_SAFETY_CAP + 200 and "truncated" in out
 
 
-# ── _mcp_handler: page a large result OUT to a blob (the Context-Mode borrow) ─────────────────
+# ── _mcp_handler: page a large result OUT to a blob (context-mode paging) ─────────────────
 class _FakeServer:
     def __init__(self, text):
         self._text = text

@@ -18,10 +18,10 @@ this project aims for [Semantic Versioning](https://semver.org/).
 - **Lexical topic router** (default) — routing no longer costs an LLM round-trip per follow-up;
   `AGENT_ROUTER=llm` restores the classifier. Measured identical to the LLM router on continue/resume.
 - **Per-tool wall-clock timeout** (`AGENT_TOOL_TIMEOUT`, opt-in) — a stuck tool no longer hangs the turn.
-- Docs: `QUICKSTART.md`, `docs/OUTPUT.md`, `docs/TROUBLESHOOTING.md`, `CONTRIBUTING.md`.
+- Docs: `QUICKSTART.md`, `CONTRIBUTING.md`.
 - **One-command install** — `install.sh` (bootstraps `uv` → isolated tool install), a `Dockerfile`, and a
-  README `## Install` (uv / pipx / docker). MIT `LICENSE` declared in metadata; `NOTICE` credits the Hermes
-  (MIT) ports + Kimi-Code patterns; `SECURITY.md` documents the threat model + a disclosure path.
+  README `## Install` (uv / pipx / docker). MIT `LICENSE` declared in metadata; `NOTICE` records
+  third-party attributions; `SECURITY.md` documents the threat model + a disclosure path.
 - **Three permission modes** — `baby-sitter` / `teenager` (default) / `let-it-go`, all sharing a
   catastrophic-command floor; `/mode` + `/model` two-tier selector menus; **Esc = undo**.
 - **MCP spawn-security screen** (`mcp_security.py`) — refuses a shell-interpreter MCP entry that does network

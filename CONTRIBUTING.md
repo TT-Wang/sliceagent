@@ -41,10 +41,10 @@ The loop (`loop.py`) is the moat: one `while(true)` per turn over a **bounded sl
 (built once by `make_build_slice`), then working memory **accumulates** as native messages within the turn
 and is sealed to the durable cache at the turn boundary. The core depends only on contracts
 (`interfaces.py`): `LLMClient`, `ToolHost`, `Retriever`, `Oracle`, plus an event `dispatch` and `hooks`. It
-never imports implementations. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+never imports implementations.
 
 **Layering rule:** `loop.py`/`pfc.py`/`seed.py` are the moat — keep them stateless and contract-only. UI
-(`tui.py`, `tui_app.py`, `cli.py`), tools, providers, and extensions are periphery: borrow liberally,
+(`tui.py`, `cli.py`), tools, providers, and extensions are periphery: use well-known building blocks and
 keep them behind seams (event sinks, the tool registry, the `LLMClient`/`Memory` interfaces).
 
 ## Conventions

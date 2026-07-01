@@ -84,14 +84,14 @@ class TaskState:
 
 @runtime_checkable
 class LLMClient(Protocol):
-    """Provider-agnostic completion + tool-calling. (borrow: official SDKs / LiteLLM)
+    """Provider-agnostic completion + tool-calling. (implemented over an official LLM SDK)
     May optionally expose `is_retryable(error) -> bool` for the retry policy."""
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage: ...
 
 
 @runtime_checkable
 class ToolHost(Protocol):
-    """Executes tools, ideally behind a sandbox. (borrow: container / MCP / OpenHands runtime)"""
+    """Executes tools, ideally behind a sandbox. (backed by a container sandbox + MCP tools)"""
     def schemas(self) -> list[dict]: ...
     def run(self, name: str, args: dict) -> str: ...
     def read_text(self, path: str) -> str: ...   # reconstruct the artifacts tier (raises if missing)
@@ -140,5 +140,5 @@ class Memory(Protocol):
 
 @runtime_checkable
 class Oracle(Protocol):
-    """Ground-truth verification independent of retrieval. (borrow: the project's test/lint runners)"""
+    """Ground-truth verification independent of retrieval. (backed by the project's test/lint runners)"""
     def verify(self) -> tuple[bool, str]: ...

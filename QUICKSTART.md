@@ -52,12 +52,10 @@ UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned bo
 
 ## 4. Reading the output
 
-See **[docs/OUTPUT.md](docs/OUTPUT.md)** — what the banner, tool cards (`┊ ✓ …`), the plan checklist, the
-boxed reply, and the status bar (`model · net · policy · Σ tokens · fresh`) mean. The **fresh** number is the
-one to watch: it's the per-turn non-cached input cost, and memagent's whole design keeps it flat as a session
-grows.
+The status bar reads `model · net · policy · Σ tokens · fresh`. The **fresh** number is the one to watch:
+it's the per-turn non-cached input cost, and memagent's whole design keeps it flat as a session grows.
 
 ## Troubleshooting
 
-Stuck? See **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** (no API key, `rg` missing, proxy/region,
-MCP server failures, copy/paste per UI mode).
+Common snags: no API key (run `memagent init`), `rg` (ripgrep) not installed, or an MCP server that fails to
+start. `memagent config --list` shows every setting and its current value.

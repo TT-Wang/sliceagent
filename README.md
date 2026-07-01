@@ -4,7 +4,7 @@ A **memory-native coding agent**. Its core bet is a different memory model from 
 
 > **Don't accumulate the transcript — reconstruct a small, deterministic working state every turn.**
 
-Mainstream agents (and the strong open-source ones — OpenHands, Hermes) accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). memagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
+Mainstream agents accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). memagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
 
 ## Why
 
@@ -47,9 +47,7 @@ memagent                 # start the agent
 `init` writes the config so the next run needs no env vars. Already have them? `export LLM_API_KEY=…
 [LLM_BASE_URL=…]` and skip `init`. Discover every setting with `memagent config --list`.
 
-→ Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · reading the UI in **[docs/OUTPUT.md](docs/OUTPUT.md)**
-· **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** ·
-**[CHANGELOG.md](CHANGELOG.md)**
+→ Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Proof (the moat is measured, not asserted)
 
@@ -73,7 +71,7 @@ The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole 
 
 - **moat:** `pfc.py` (the `Slice` dataclass, typed tiers, `slice_sink`) + `seed.py` (the reconstruction seam `make_build_slice`) + `prompt.py` (`SYSTEM_PROMPT`), `loop.py` (`run_turn`/`run_step` — stateless core over contracts).
 - **contracts:** `interfaces.py` (`LLMClient`/`ToolHost`/`Retriever`/`Oracle`), `events.py` (the loop's only output path), `hooks.py` (policy seam: `OracleHook`/`PermissionHook`/`BudgetHook`).
-- **engineering (borrowed):** `access.py` + `scheduler.py` (Kimi's resource-conflict model → safe parallel tools), `errors.py` (Hermes-style classify + retry/backoff), `sandbox.py` (Hermes-style execution backend), `policy.py` (Kimi-style permission chain).
+- **engineering:** `access.py` + `scheduler.py` (resource-conflict model → safe parallel tools), `errors.py` (error classification + retry/backoff), `sandbox.py` (execution backend), `policy.py` (permission chain).
 - **default impls:** `tools.py` (`LocalToolHost`), `llm.py` (`OpenAILLM`), `code_index.py` (`RipgrepCodeIndex`) + `retriever.py` (`NullRetriever`), `oracle.py`, `cli.py` (event-sink host).
 
 The loop dispatches events; the host composes sinks (slice-updater, durable log, terminal). Ships a local `ToolHost` (workspace-confined file ops + sandboxed shell) and a ripgrep-backed `CodeIndex` (falls back to `NullRetriever` when `rg` isn't on PATH).
@@ -84,7 +82,7 @@ The loop dispatches events; the host composes sinks (slice-updater, durable log,
 
 **Subagents (`spawn_subagent`).** The slice thesis applied recursively: for large, decomposable work the model delegates a self-contained sub-task to a child agent. The child runs its OWN loop with a fresh slice in the SAME workspace, then returns **only a compact summary** — the parent's slice never sees the child's transcript, so parent context stays bounded no matter how much the child did. It's a ToolHost wrapper (`subagent.py`), so the loop is unchanged (one tool call → a summary string); depth-capped (`AGENT_SUBAGENT_DEPTH`, default 1) against runaway recursion, and the child runs under the same permission policy. Verified live: the model delegated two modules to two children that produced correct code, with the parent slice holding only the two `spawn_subagent` summaries.
 
-**Code-as-action (`execute_code`).** Beyond one-call-per-tool, the model can write a single Python script that performs many file/shell actions and prints one short result — collapsing N tool round-trips into one turn (Hermes pattern; the strongest context reducer). The script runs **in the LocalSandbox** (cwd-confined, secret-scrubbed, timed-out) with a no-import helper API (`read_file`/`write_file`/`append_file`/`str_replace`/`list_files`/`run`); the workspace is on `sys.path` so freshly-written modules import cleanly. Only stdout returns. Files it reads/edits via the helpers are folded back into the OPEN FILES working set (paths parsed from the script), so code-as-action coheres with the slice instead of bypassing it — the agent doesn't re-read what a script already touched. It carries the same trust level as `run_command` (arbitrary execution) and is gated by the same policy (`readonly` blocks it). RPC-back-to-parent for parent-only tools (memem/MCP) is the documented upgrade.
+**Code-as-action (`execute_code`).** Beyond one-call-per-tool, the model can write a single Python script that performs many file/shell actions and prints one short result — collapsing N tool round-trips into one turn (the strongest context reducer). The script runs **in the LocalSandbox** (cwd-confined, secret-scrubbed, timed-out) with a no-import helper API (`read_file`/`write_file`/`append_file`/`str_replace`/`list_files`/`run`); the workspace is on `sys.path` so freshly-written modules import cleanly. Only stdout returns. Files it reads/edits via the helpers are folded back into the OPEN FILES working set (paths parsed from the script), so code-as-action coheres with the slice instead of bypassing it — the agent doesn't re-read what a script already touched. It carries the same trust level as `run_command` (arbitrary execution) and is gated by the same policy (`readonly` blocks it). RPC-back-to-parent for parent-only tools (memem/MCP) is the documented upgrade.
 
 **Extensions (MCP · skills · plugins).** memagent extends through one tool registry that every source feeds:
 - *MCP* (`mcp_client.py`): declare servers in `[mcp_servers.*]`; their tools appear as `mcp__server__tool` (official MCP SDK, stdio).
@@ -99,23 +97,24 @@ The loop dispatches events; the host composes sinks (slice-updater, durable log,
 
 Configure via **`memagent.toml`** (persistent; see [`memagent.toml.example`](memagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `memagent.toml` > user `~/.memagent/config.toml` > default. Keys: `AGENT_POLICY` (`baby-sitter`/`teenager`/`let-it-go`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `MEMEM_VAULT` (enable memem), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
 
-## Architecture (build / borrow / plug)
+## Architecture (build / plug / integrate)
 
-The discipline: **own the thin differentiated core, borrow the thick commodity periphery.**
+The discipline: **own the thin differentiated core, keep the thick commodity periphery on well-known building blocks.**
 
 - **Build (the moat):** the slice loop, the typed memory tiers + per-tier compaction, the reconstruction. Plus thin glue: permission gate, verification orchestration, subagents, resume.
 - **Plug:** [memem](https://github.com/TT-Wang/memem) as the retrieval + cross-session memory engine (behind a `Retriever` interface).
-- **Borrow:** LLM SDKs, tree-sitter (repo map), ripgrep (search), a container sandbox, MCP (tool breadth), a TUI lib, SWE-bench (evals). Patterns from Aider / OpenHands / Hermes.
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component map, the four core interfaces, and the phased plan.
+- **Integrate:** LLM SDKs, tree-sitter (repo map), ripgrep (search), a container sandbox, MCP (tool breadth), a TUI lib, SWE-bench (evals).
 
 ## The differentiator, in one line
 
 > **Deterministic reconstruction from ground truth** — vs the incumbents' **accumulate-then-LLM-summarize**.
 
-## License & attribution
+## License
 
-**MIT** — see [LICENSE](LICENSE). memagent ports verbatim utilities from **Hermes** (MIT, Nous Research) and
-reimplements architecture/patterns from **Kimi-Code** (Moonshot AI); full credits in [NOTICE](NOTICE).
+**MIT** — see [LICENSE](LICENSE). Third-party components and their licenses are listed in [NOTICE](NOTICE).
 
 Security policy + threat model: **[SECURITY.md](SECURITY.md)**.
+
+## Acknowledgments
+
+memagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. With thanks to their authors.

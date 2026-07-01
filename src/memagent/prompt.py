@@ -223,7 +223,7 @@ MEMORY_ACCUMULATE = (
 # (schemas don't change mid-session → prompt-cache warm). Delegation is the SWARM realization of the moat:
 # breadth is paid for in CHILDREN's isolated slices (each returns only a bounded summary), so the parent's slice
 # never accumulates a whole repo's worth of reads — "present precisely what's needed, no passive history" at the
-# PROCESS level. Description-driven + effort-scaled fan-out, mirroring Claude Code / Anthropic-Research. The
+# PROCESS level. Description-driven + effort-scaled fan-out. The
 # single-vs-swarm line (fan out for decomposable breadth, stay single for tightly-coupled edits) is task-agnostic.
 DELEGATION_BLOCK = (
     "\n\n<delegation>\n"

@@ -1,4 +1,4 @@
-"""TUI rendering of the new tiers (Path-A borrow): the RichSink surfaces the PLAN checklist + MISSION
+"""TUI rendering of the new tiers: the RichSink surfaces the PLAN checklist + MISSION
 line and tracks FRESH-input cost. Skips cleanly if the `tui` extra (rich) isn't installed. No model.
 Run: PYTHONPATH=src python tests/test_tui_render.py
 """
