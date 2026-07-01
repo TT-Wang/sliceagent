@@ -177,35 +177,35 @@ def richsink_ondelta_noop_when_idle():
     from memagent.tui import make_rich_sink
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=False), {})
     sink.on_delta("content", "stray")
-    assert sink._live is None and sink._status is None
+    assert sink._status is None and sink._stream == ""
 
 
 @check
-def stream_panel_is_plain_text_and_height_bounded():
-    # Reported live: many stacked "assistant streaming…" panels instead of one updating in place.
-    # Root cause (traced with a real repro): (1) rendering Markdown on every delta — incomplete markdown
-    # syntax mid-stream makes the panel's rendered HEIGHT swing unpredictably, breaking Rich Live's
-    # line-count-based erase/redraw; (2) an unbounded, ever-growing panel eventually scrolls the terminal,
-    # and ANSI erase codes can't un-scroll content already in scrollback. Pin both fixes.
+def streaming_reply_uses_the_bounded_status_line_not_a_growing_panel():
+    # Reported live, TWICE: many stacked "assistant streaming…" panels instead of one updating in place —
+    # the first fix (plain text + a bounded tail on a separate rich.live.Live panel) reduced but did not
+    # eliminate it on a real terminal, because ANY panel tall enough to near the bottom of a short terminal
+    # window can still force a scroll, which ANSI erase codes cannot undo. Root fix: don't use a separate
+    # Live panel for the in-progress reply at all — stream into the SAME single-line status region the
+    # "thinking…" spinner already uses (console.status(), proven safe elsewhere in this file), bounded to
+    # a short tail. Pin: on_delta never creates a Live/Panel; _LiveStatus shows a bounded tail while
+    # streaming; the FULL reply still prints in full once done (unaffected, via AssistantText).
     import io
     from rich.console import Console
-    from rich.markdown import Markdown
-    from memagent.tui import make_rich_sink
+    from memagent.tui import make_rich_sink, _LiveStatus, _STATUS_TAIL_CHARS
+    from memagent.events import SliceBuilt
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
-    panel = sink._stream_panel("**bold** _partial markdown that never clos")
-    assert not isinstance(panel.renderable, Markdown), \
-        "the LIVE streaming panel must render plain Text, not Markdown (incomplete syntax mid-stream " \
-        "makes Markdown's rendered height unstable, which breaks Rich Live's erase/redraw)"
-    long_text = "x" * (sink._STREAM_TAIL_CHARS * 3)
-    panel = sink._stream_panel(long_text)
-    shown = panel.renderable.plain
-    assert len(shown) <= sink._STREAM_TAIL_CHARS + 1, \
-        f"the streaming panel must stay height-bounded (tail-truncated), got {len(shown)} chars shown"
-    assert shown.endswith("x" * 10) and shown.startswith("…"), \
-        "truncation must keep the TAIL (most recent text), marked with a leading ellipsis"
-    short_text = "short reply, no truncation needed"
-    panel = sink._stream_panel(short_text)
-    assert panel.renderable.plain == short_text, "text under the cap must render unchanged"
+    sink(SliceBuilt("req"))                             # arms the status region (like a real turn)
+    try:
+        assert not hasattr(sink, "_live"), "on_delta must not create a separate rich.live.Live panel"
+        long_text = "x" * (_STATUS_TAIL_CHARS * 3) + "y" * 10
+        sink.on_delta("content", long_text)
+        assert sink._stream == long_text, "the FULL streamed text must still accumulate untruncated"
+        shown = _LiveStatus(sink).__rich__().plain
+        assert shown.startswith("writing… ") and len(shown) <= len("writing… ") + _STATUS_TAIL_CHARS
+        assert shown.endswith("y" * 10), "the status line must show the TAIL (most recent text)"
+    finally:
+        sink._stop()   # a Status left running past the test would dangle a live region / refresh thread
 
 
 # ---- image input (vision) ----------------------------------------------------
