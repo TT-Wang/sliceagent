@@ -211,6 +211,10 @@ def main() -> None:
     policy = make_policy("letitgo" if CONFIRMS.get(canonical) else canonical)
     # model + reasoning resolution: explicit env wins, then the saved /model choice (prefs), then config.
     _model = os.environ.get("AGENT_MODEL") or _prefs.get("model") or cfg.model
+    if not _model:   # no built-in default — the user picks the model (parallels the API-key gate above)
+        print("No model configured. Run `memagent init` to pick a provider + model, "
+              "or set AGENT_MODEL to your model name.")
+        sys.exit(1)
     llm = OpenAILLM(model=_model)
     if _prefs.get("reasoning") and not (os.environ.get("AGENT_REASONING") or os.environ.get("AGENT_THINKING")):
         llm.reasoning = str(_prefs["reasoning"]).lower()   # apply the saved /reasoning choice

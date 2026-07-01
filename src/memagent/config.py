@@ -145,7 +145,8 @@ class Config:
         env = os.environ.get("AGENT_MODEL")
         if env:   # empty string → unset → fall through to config/default model, not ""
             return env
-        return self._provider_table().get("model") or self._get("agent", "model", None, "gpt-5.5")
+        # No built-in default model — the user chooses one (memagent init / AGENT_MODEL / config.toml).
+        return self._provider_table().get("model") or self._get("agent", "model", None, "")
 
     @property
     def policy(self) -> str:

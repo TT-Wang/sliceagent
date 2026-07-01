@@ -61,7 +61,7 @@ REGISTRY: list[EnvVar] = [
     EnvVar("LLM_BASE_URL", "provider", "OpenAI-compatible endpoint (e.g. https://api.moonshot.cn/v1).", ""),
     EnvVar("LLM_TIMEOUT", "provider", "Per-request timeout in seconds.", ""),
     EnvVar("LLM_TIMEOUT_SEC", "provider", "Alias for LLM_TIMEOUT.", ""),
-    EnvVar("AGENT_PROXY", "provider", "Proxy override: 'off', a URL, or unset for auto (foreign→ClashX, CN→direct).", ""),
+    EnvVar("AGENT_PROXY", "provider", "HTTP proxy URL for LLM calls; 'none'/'off' forces direct. Unset = direct (no proxy).", ""),
     EnvVar("OPENAI_API_KEY", "provider", "Legacy alias for LLM_API_KEY.", "", secret=True),
     EnvVar("MOONSHOT_API_KEY", "provider", "Legacy alias for LLM_API_KEY (Moonshot).", "", secret=True),
     EnvVar("OPENAI_BASE_URL", "provider", "Legacy alias for LLM_BASE_URL.", ""),

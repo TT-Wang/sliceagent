@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.llm import _CLASHX, _choose_proxy                      # noqa: E402
+from memagent.llm import _choose_proxy                              # noqa: E402
 from memagent.events import TurnInterrupted, make_dispatcher         # noqa: E402
 from memagent.hooks import CompositeHooks                            # noqa: E402
 from memagent.loop import run_turn                                   # noqa: E402
@@ -22,34 +22,20 @@ def check(fn):
     return fn
 
 
-# ── provider-aware proxy ─────────────────────────────────────────────────────
+# ── no proxy by default; an explicit setting wins ───────────────────────────
 @check
-def openai_endpoint_uses_clashx_only_when_a_local_proxy_is_up():
-    # The default is DIRECT for everyone; a foreign endpoint falls back to the local ClashX proxy ONLY if one
-    # is actually listening (so non-CN first runs don't fail on a refused 127.0.0.1:7890). Mock the probe so
-    # this is deterministic regardless of whether the CI/dev box happens to have a proxy running.
-    import memagent.llm as _llm
-    orig = _llm._local_proxy_listening
-    try:
-        _llm._local_proxy_listening = lambda url: True
-        assert _choose_proxy("https://api.openai.com/v1", None) == _CLASHX   # proxy present → use it (CN behind GFW)
-        _llm._local_proxy_listening = lambda url: False
-        assert _choose_proxy("https://api.openai.com/v1", None) == "none"    # no proxy → DIRECT (non-CN default)
-    finally:
-        _llm._local_proxy_listening = orig
-
-
-@check
-def cn_providers_go_direct_by_default():
-    assert _choose_proxy("https://api.deepseek.com", None) == "none"
-    assert _choose_proxy("https://api.moonshot.cn/v1", None) == "none"
-    assert _choose_proxy("http://127.0.0.1:11434/v1", None) == "none"   # local model
+def no_proxy_by_default_for_any_endpoint():
+    # Default is a DIRECT connection for every endpoint — there is no auto-proxy.
+    for base in ("https://api.openai.com/v1", "https://api.deepseek.com",
+                 "https://api.moonshot.cn/v1", "http://127.0.0.1:11434/v1", None):
+        assert _choose_proxy(base, None) == "none", base
 
 
 @check
 def explicit_proxy_always_wins():
-    assert _choose_proxy("https://api.openai.com/v1", "none") == "none"          # user forces direct
-    assert _choose_proxy("https://api.deepseek.com", "http://x:1") == "http://x:1"  # user forces proxy
+    assert _choose_proxy("https://api.openai.com/v1", "none") == "none"             # user forces direct
+    assert _choose_proxy("https://api.openai.com/v1", "off") == "none"             # 'off' alias → direct
+    assert _choose_proxy("https://api.deepseek.com", "http://x:1") == "http://x:1"  # user forces a proxy URL
 
 
 # ── ctrl-c during a 'thinking' (blocking) call aborts the turn ───────────────

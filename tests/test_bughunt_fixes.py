@@ -869,21 +869,14 @@ def legacy_policy_names_warn_loudly():
         assert legacy_warning(friendly) is None, friendly
 
 
-# ── FEATURE: proxy defaults DIRECT unless a local proxy is actually up (the wide-user first-run fix) ───
+# ── FEATURE: no proxy by default (direct for every endpoint); an explicit setting wins ───
 @check
-def proxy_defaults_direct_without_a_local_proxy():
+def proxy_defaults_direct_for_every_endpoint():
     from memagent import llm
     assert llm._choose_proxy("https://api.openai.com/v1", "off") == "none"               # explicit off wins
     assert llm._choose_proxy("https://api.openai.com/v1", "http://p:9") == "http://p:9"  # explicit url wins
-    assert llm._choose_proxy("https://api.deepseek.com/v1", None) == "none"              # CN-direct never proxies
-    orig = llm._local_proxy_listening
-    try:                                                                                  # foreign + no explicit:
-        llm._local_proxy_listening = lambda url: False
-        assert llm._choose_proxy("https://api.openai.com/v1", None) == "none"            #   proxy down -> DIRECT (fix)
-        llm._local_proxy_listening = lambda url: True
-        assert llm._choose_proxy("https://api.openai.com/v1", None) == llm._CLASHX       #   proxy up -> use it (CN ok)
-    finally:
-        llm._local_proxy_listening = orig
+    for base in ("https://api.openai.com/v1", "https://api.deepseek.com/v1", None):
+        assert llm._choose_proxy(base, None) == "none", base                             # no explicit → DIRECT
 
 
 # ── FEATURE (★1 borrow): read_file bounds the in-slice VIEW + supports a line window, full file on disk ──
