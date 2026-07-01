@@ -234,6 +234,22 @@ def init_merge_keeps_existing_providers():
 
 
 @check
+def reinit_blank_key_keeps_existing_key_for_the_same_provider():
+    # Re-running `memagent init` on an ALREADY-CONFIGURED provider and pressing Enter at the key
+    # prompt (no retype) must KEEP the saved key/model, not abort — the abort-on-blank behavior
+    # (init_aborts_without_a_key) is only correct for a provider with no existing entry.
+    home = tempfile.mkdtemp(prefix="init-reblank-")
+    onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
+    # 2nd init: "Add/update? [Y/n]" → "" (yes) → provider 1 (moonshot, already saved) → key "" (blank,
+    # keep existing) → model "" (blank, keep existing)
+    rc = onboarding.run_init(inp=_seq("", "1", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
+    assert rc == 0, "blank key on an already-configured provider must NOT abort"
+    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    assert data["providers"]["moonshot"]["api_key"] == "k-moon", "the existing key must be kept, not wiped"
+    assert data["providers"]["moonshot"]["model"] == "kimi-k2.7-code"
+
+
+@check
 def config_use_switches_default_provider():
     home = tempfile.mkdtemp(prefix="cfg-use-")
     onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k1"), llm_factory=lambda m: _OkLLM(), home=home)

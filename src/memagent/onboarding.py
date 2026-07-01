@@ -190,8 +190,18 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         pid, label, base_url, model = PROVIDERS.get(choice, PROVIDERS["1"])
         if pid == "custom":
             base_url = inp("  Base URL (OpenAI-compatible, e.g. https://host/v1): ").strip()
-        key = getpw("  API key (hidden): ").strip()
-        model = (inp(f"  Model [{model or 'required'}]: ").strip() or model)
+        # RE-CONFIGURING an ALREADY-SAVED provider (re-running `memagent init` to update the model,
+        # or just re-confirming) must not force a blind full-key retype: pressing Enter keeps the
+        # existing key/model. A BRAND-NEW provider has no existing entry, so blank still means "no
+        # key entered" and falls through to the abort below — same as before.
+        existing = _read_config(path).get("providers")
+        existing = existing.get(pid) if isinstance(existing, dict) else None
+        existing = existing if isinstance(existing, dict) else {}
+        existing_key = existing.get("api_key") or ""
+        key_prompt = "  API key (hidden, Enter to keep existing): " if existing_key else "  API key (hidden): "
+        key = getpw(key_prompt).strip() or existing_key
+        model = (inp(f"  Model [{existing.get('model') or model or 'required'}]: ").strip()
+                 or existing.get("model") or model)
     except (EOFError, KeyboardInterrupt):
         out("\n  cancelled."); return 1
     if not key:
