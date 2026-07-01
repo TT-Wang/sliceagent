@@ -83,6 +83,29 @@ def completer_does_slash_and_files():
     assert list(comp.get_completions(Document("a"), None)) == []
 
 
+@check
+def banner_decides_from_console_width_and_never_wraps_the_big_art():
+    # Root cause of "same terminal, different banner": the big-vs-compact choice was read from a SEPARATE
+    # shutil.get_terminal_size() call (which returns the 80x24 default when the tty size isn't readable at
+    # that instant) with the threshold sitting right on 80 (was 82) — so it flipped on an unchanged terminal,
+    # and 82-85 cols rendered the big art WRAPPED into garbage. Fix: decide from the SAME console width the
+    # panel is rendered at, threshold = the art's true minimum (86). Pin: >=86 -> big art, each row intact on
+    # one line (no wrap); <86 -> the compact one-liner.
+    from rich.console import Console
+    from memagent.tui import banner_panel, _WORDMARK
+    def render(width):
+        buf = io.StringIO()
+        c = Console(file=buf, width=width, force_terminal=True, color_system=None)
+        c.print(banner_panel(c, "info"))
+        return buf.getvalue()
+    big = render(86)                                  # exactly the art's minimum width
+    assert _WORDMARK[0] in big and _WORDMARK[-1] in big, \
+        "at 86 cols every big-wordmark row must render intact on one line (a wrap would split these)"
+    compact = render(85)                              # one column short → must fall back, cleanly
+    assert "█" not in compact and "m e m a g e n t" in compact, \
+        "below 86 cols must use the compact one-line wordmark, never a wrapped big one"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

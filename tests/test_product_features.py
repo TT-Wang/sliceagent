@@ -161,10 +161,10 @@ def richsink_streams_content_then_finalizes_once():
         c = Console(file=buf, force_terminal=force, width=80, soft_wrap=False)
         sink = make_rich_sink(c, {"model": "kimi"})
         sink(SliceBuilt("req"))                    # starts the thinking spinner
-        sink.on_delta("content", "Hello ")         # deltas stream into the live reply
+        sink.on_delta("content", "Hello ")         # deltas flip the live label to "writing…" (no preview)
         sink.on_delta("content", "world — the fix is X.")
-        assert sink._stream == "Hello world — the fix is X.", sink._stream
-        sink(AssistantText("Hello world — the fix is X."))   # finalize (transient live erased; panel printed)
+        assert sink._label == "writing…", sink._label
+        sink(AssistantText("Hello world — the fix is X."))   # finalize (live region torn down; panel printed)
         out = buf.getvalue()
         assert "fix is X" in out, f"(force_terminal={force}) reply missing: {out!r}"
 
@@ -177,7 +177,37 @@ def richsink_ondelta_noop_when_idle():
     from memagent.tui import make_rich_sink
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=False), {})
     sink.on_delta("content", "stray")
-    assert sink._live is None and sink._status is None
+    assert sink._status is None
+
+
+@check
+def streaming_reply_shows_a_fixed_single_line_status_not_a_growing_region():
+    # Reported live THREE times: stacked "assistant streaming…" panels instead of one region updating in
+    # place. Every earlier fix that still showed the GROWING reply — a Markdown rich.live.Live panel, then a
+    # plain-text bounded panel, then a bounded reply-tail INSIDE this status line — shared one root cause: a
+    # multi-row region whose height grows/wraps eventually reaches the bottom of the terminal and forces a
+    # scroll, and ANSI erase codes cannot un-scroll content already in scrollback, so stale frames pile up.
+    # Root fix: while streaming, show a FIXED single-line "writing…" status (the exact shape of the
+    # "thinking…" spinner, which has never misbehaved) — no reply preview at all. The full reply still prints
+    # once via AssistantText. Pin: on_delta creates no Live/Panel and embeds no reply text; the status render
+    # stays a short constant-length line no matter how long the reply gets.
+    import io
+    from rich.console import Console
+    from memagent.tui import make_rich_sink, _LiveStatus
+    from memagent.events import SliceBuilt
+    sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
+    sink(SliceBuilt("req"))                             # arms the status region (like a real turn)
+    try:
+        assert not hasattr(sink, "_live"), "on_delta must not create a separate rich.live.Live panel"
+        before = _LiveStatus(sink).__rich__().plain
+        sink.on_delta("content", "z" * 5000)           # a very long reply must not enlarge the status line
+        after = _LiveStatus(sink).__rich__().plain
+        assert "writing" in after, f"the status must reflect the writing phase, got {after!r}"
+        assert "z" * 40 not in after, "the status line must NOT embed the growing reply text"
+        assert len(after) < 120 and abs(len(after) - len(before)) < 20, \
+            f"the status must stay a short, fixed-length single line regardless of reply length ({len(after)})"
+    finally:
+        sink._stop()   # a Status left running past the test would dangle a live region / refresh thread
 
 
 # ---- image input (vision) ----------------------------------------------------

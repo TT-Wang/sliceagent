@@ -429,10 +429,8 @@ class RichSink:
         self.c = console
         self.stats = stats
         self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
-        #                                  all _status/_live spinner transitions (rich Status is not thread-safe)
+        #                                  all _status transitions (rich Status is not thread-safe)
         self._status = None
-        self._live = None        # a transient Rich Live that streams the reply INTO content (not just a tail)
-        self._stream = ""        # the assistant text streamed so far this step
         self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
         # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
         # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
@@ -445,19 +443,16 @@ class RichSink:
         self._tally: dict = {}   # bucket -> count (read/edit/cmd/fail) for the "how far along" summary
 
     def _stop(self) -> None:
-        """Tear down whichever live region is active (spinner OR the streaming-content Live). The Live is
-        TRANSIENT, so stopping it erases the in-progress render — the canonical panel then prints once."""
-        with self._lock:   # serialize vs parallel subagent_notify on _status/_live
+        """Tear down the live status region, if any, and reset the label to idle. The transient Status already
+        erases the visible line on stop; resetting _label/_subagent keeps the sink's resting state honest so a
+        stale 'writing…' can never render via a later path that reuses the region without going through _spin."""
+        with self._lock:   # serialize vs parallel subagent_notify on _status
             if self._status is not None:
                 self._status.stop()
                 self._status = None
-            if self._live is not None:
-                try:
-                    self._live.stop()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._live = None
             self._body = None
+            self._label = "thinking…"
+            self._subagent = None
 
     def _spin(self, label: str) -> None:
         """Set the CURRENT action and ensure the ticking status region is live. MUTATES in place when the
@@ -465,13 +460,12 @@ class RichSink:
         Status the first time. On a non-tty, console.status() no-ops its animation (no ANSI, body never
         refreshed) — same degraded behaviour as before, so on_delta's 'a step is active' gate still holds."""
         with self._lock:   # serialize vs parallel subagent_notify on _status
-            self._stream = ""        # new step → reset the streamed reply
             self._label = label
             self._subagent = None
             self._action_t0 = time.monotonic()
             if self._turn_t0 is None:
                 self._turn_t0 = self._action_t0
-            if self._status is None and self._live is None:   # create once; a live stream owns the region alone
+            if self._status is None:   # create once; MUTATE the same region for every later frame
                 self._body = _LiveStatus(self)
                 self._status = self.c.status(self._body, spinner="dots")
                 self._status.start()
@@ -485,7 +479,7 @@ class RichSink:
                 self._subagent = text
                 if self._action_t0 is None:
                     self._action_t0 = time.monotonic()
-                if self._status is None and self._live is None:
+                if self._status is None:
                     self._body = _LiveStatus(self)
                     self._status = self.c.status(self._body, spinner="dots")
                     self._status.start()
@@ -500,33 +494,24 @@ class RichSink:
             if bucket:
                 self._tally[bucket] = self._tally.get(bucket, 0) + 1
 
-    def _stream_panel(self, text: str) -> Panel:
-        return Panel(Markdown(text), title=f"[bold {TH['accent']}]assistant[/] [grey50]streaming…[/]",
-                     title_align="left", border_style=TH["dim"], box=_box.HORIZONTALS,
-                     padding=(1, 2), width=_box_width(self.c))
-
     def on_delta(self, kind: str, text: str) -> None:
-        """Live token sink wired to OpenAILLM.set_delta_sink. Content deltas stream INTO a live reply panel
-        (Rich Live, transient) — the actual text rendering as it arrives, not a 100-char spinner tail. The
-        Live is transient, so on stop it erases and AssistantText prints the canonical panel once (no
-        double-print). Falls back to a spinner tail if Live can't run (non-tty / edge). No-op until a step
-        is active (e.g. nothing to stream during routing)."""
-        if kind != "content" or not text or (self._status is None and self._live is None):
+        """Live token sink wired to OpenAILLM.set_delta_sink. While a reply streams, the live region just
+        flips its label to a calm, FIXED single-line "writing…" (same shape as the "thinking…" spinner, with
+        the running clock) — it does NOT render a live preview of the reply text. The full, formatted reply
+        prints once when streaming ends, via AssistantText → _response_panel.
+
+        Why no live preview: three separate live reports of stacked "assistant streaming…" panels traced to
+        one root cause shared by every variant that showed the GROWING reply (a Markdown rich.live.Live
+        panel, then a plain-text bounded panel, then a bounded text tail inside this status line). Any region
+        that grows/wraps eventually reaches the bottom of the terminal and forces a scroll, and ANSI
+        cursor-up/erase codes cannot un-scroll content already committed to scrollback — so stale frames pile
+        up. A fixed one-line indicator has no height to grow and nothing to scroll, which removes the whole
+        bug class regardless of terminal size or emulator. No-op until a step is active (nothing streams
+        during routing)."""
+        if kind != "content" or not text or self._status is None:
             return
-        self._stream += text
-        try:
-            if self._live is None:                    # first content delta → swap spinner for the live panel
-                if self._status is not None:
-                    self._status.stop(); self._status = None
-                from rich.live import Live
-                self._live = Live(console=self.c, refresh_per_second=12, transient=True)
-                self._live.start()
-            self._live.update(self._stream_panel(self._stream))
-        except Exception:  # noqa: BLE001 — Live unavailable → degrade to the spinner-tail behaviour
-            self._stop()        # tear down BOTH (a half-started Live + any spinner) for a clean fallback state
-            self._status = self.c.status(Text("writing…", style=TH["dim"]), spinner="dots")
-            self._status.start()
-            self._status.update(Text(f"writing… {' '.join(self._stream.split())[-100:]}", style=TH["dim"]))
+        with self._lock:
+            self._label = "writing…"   # thinking → writing: the status line reflects the phase (+ its clock)
 
     def _flush_reads(self) -> None:
         """Emit ONE compact dim line for a buffered run of read-only tools (📖 7 read · 🔍 3 grep · names),
@@ -624,6 +609,8 @@ class LiveSink:
             self.c.print(_render_tool_result(e))      # static card ABOVE the pinned box
             self._set_status("working…")
         elif isinstance(e, AssistantText):
+            self._set_status(None)     # reply complete → clear "writing…" BEFORE the panel, not at TurnEnd
+            self._stream = ""          # (else the final answer prints above a stale streaming spinner)
             if (e.content or "").strip():
                 self.c.print(_response_panel(e.content, self.c))
         elif isinstance(e, ApiRetry):
@@ -1315,13 +1302,23 @@ def user_echo(console: Console, text: str) -> None:
     console.print()
 
 
-def banner_panel(info: str) -> Panel:
+def banner_panel(console: Console, info: str) -> Panel:
     """The startup logo as a rich renderable (reused by the rich CLI and the live composer). RESPONSIVE:
-    the full ansi_shadow wordmark is ~74 cols (+emblem +padding ≈ 82); on a narrower terminal it wraps
-    into garbage, so fall back to a compact one-line wordmark that always fits."""
-    cols = shutil.get_terminal_size((80, 24)).columns
+    the full ansi_shadow wordmark needs 86 cols (80 for the art + emblem, +6 for the panel's border and
+    padding); below that it wraps into garbage, so fall back to a compact one-line wordmark that always fits.
+
+    Width MUST come from the SAME console that renders this panel — never a separate shutil.get_terminal_size()
+    call. That call silently returns the 80×24 default whenever the tty size isn't cleanly readable at that
+    instant, so with the old threshold sitting right on 80 (82) the banner flipped between the big font and
+    the compact fallback on an otherwise-unchanged terminal. One width source + a measured threshold makes
+    the choice deterministic per width, and makes a wrap-into-garbage render impossible (the number that
+    picks the layout is the number it's rendered at)."""
+    try:
+        cols = int(console.width)
+    except Exception:  # noqa: BLE001 — width unknown → the compact form always fits, so default to it
+        cols = 0
     rows = []
-    if cols >= 82:
+    if cols >= 86:
         for i, word in enumerate(_WORDMARK):
             blk, col = _EMBLEM[i]
             rows.append(Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}")))
@@ -1337,7 +1334,7 @@ def banner_panel(info: str) -> Panel:
 
 
 def banner(console: Console, info: str) -> None:
-    console.print(banner_panel(info))
+    console.print(banner_panel(console, info))
 
 
 def tui_enabled() -> bool:
