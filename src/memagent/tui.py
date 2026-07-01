@@ -286,6 +286,13 @@ class _EscSentinel:
         try:
             self._old_termios = termios.tcgetattr(self._fd)
             tty.setraw(self._fd)
+            # setraw() also clears OPOST (output post-processing), so while this sentinel holds the tty for
+            # the whole turn, the reply's '\n' is no longer mapped to '\r\n' — the output staircases to the
+            # right and the spinner cascades. Re-enable cooked OUTPUT (OPOST|ONLCR); INPUT stays raw so Esc
+            # and Ctrl-C still arrive as bytes (ISIG/ICANON off). This is the fix for the mid-turn garble.
+            a = termios.tcgetattr(self._fd)
+            a[1] |= (termios.OPOST | termios.ONLCR)   # oflag
+            termios.tcsetattr(self._fd, termios.TCSANOW, a)
             termios.tcflush(self._fd, termios.TCIFLUSH)   # drain type-ahead so a stray byte can't false-fire
             self._raw = True
         except Exception:  # noqa: BLE001 — a wedged/vanished tty must never crash the turn

@@ -210,6 +210,30 @@ def stop_restores_termios_and_leaves_no_thread():
     assert rc == 42, f"termios must be restored and the thread must be gone after stop(), got {rc}"
 
 
+# ── while the sentinel holds the tty, OUTPUT must stay cooked (OPOST on) so the turn's reply doesn't
+#    staircase — but INPUT must stay raw (ICANON off) so Esc/Ctrl-C read as bytes. Regression: tty.setraw
+#    clears OPOST, which made every reply drift right (a today regression from the Esc-interrupt feature).
+_CODE_OUTPUT_STAYS_COOKED = (
+    "import time, os, sys, termios\n"
+    "from memagent.tui import make_esc_sentinel\n"
+    "s = make_esc_sentinel(); s.start()\n"
+    "time.sleep(0.3)\n"                                  # let the sentinel enter raw mode
+    "a = termios.tcgetattr(sys.stdin.fileno())\n"
+    "opost_on = bool(a[1] & termios.OPOST)\n"            # output cooked -> \\n maps to \\r\\n -> no staircase
+    "icanon_off = not (a[3] & termios.ICANON)\n"         # input raw -> Esc/Ctrl-C arrive as bytes
+    "s.stop()\n"
+    "os._exit(60 if (opost_on and icanon_off) else 61)\n"
+)
+
+
+@check
+def output_stays_cooked_while_input_is_raw():
+    if _skip_if_no_pty():
+        return
+    rc = _run_child(_CODE_OUTPUT_STAYS_COOKED, [])
+    assert rc == 60, f"OPOST must stay ON (cooked output, no staircase) with ICANON OFF (raw input), got {rc}"
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:
