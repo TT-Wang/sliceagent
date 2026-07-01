@@ -443,12 +443,16 @@ class RichSink:
         self._tally: dict = {}   # bucket -> count (read/edit/cmd/fail) for the "how far along" summary
 
     def _stop(self) -> None:
-        """Tear down the live status region, if any."""
+        """Tear down the live status region, if any, and reset the label to idle. The transient Status already
+        erases the visible line on stop; resetting _label/_subagent keeps the sink's resting state honest so a
+        stale 'writing…' can never render via a later path that reuses the region without going through _spin."""
         with self._lock:   # serialize vs parallel subagent_notify on _status
             if self._status is not None:
                 self._status.stop()
                 self._status = None
             self._body = None
+            self._label = "thinking…"
+            self._subagent = None
 
     def _spin(self, label: str) -> None:
         """Set the CURRENT action and ensure the ticking status region is live. MUTATES in place when the
@@ -605,6 +609,8 @@ class LiveSink:
             self.c.print(_render_tool_result(e))      # static card ABOVE the pinned box
             self._set_status("working…")
         elif isinstance(e, AssistantText):
+            self._set_status(None)     # reply complete → clear "writing…" BEFORE the panel, not at TurnEnd
+            self._stream = ""          # (else the final answer prints above a stale streaming spinner)
             if (e.content or "").strip():
                 self.c.print(_response_panel(e.content, self.c))
         elif isinstance(e, ApiRetry):
