@@ -1050,6 +1050,23 @@ def _toolbar(stats: dict):
     return render
 
 
+def _force_cooked_output() -> None:
+    """Re-assert cooked tty OUTPUT (OPOST|ONLCR) so a bare '\\n' is mapped to '\\r\\n'. prompt_toolkit puts the
+    terminal in raw mode for its Application; on some terminals (verified: macOS Terminal.app) that output
+    mode LEAKS past the box, so the turn's Rich output prints line-feeds with no carriage return and
+    staircases to the right. Called after every prompt to guarantee the next turn prints left-aligned.
+    No-op off a real tty (tests/pipes/Windows)."""
+    try:
+        import sys
+        import termios
+        fd = sys.stdout.fileno()
+        a = termios.tcgetattr(fd)
+        a[1] |= (termios.OPOST | termios.ONLCR)   # oflag
+        termios.tcsetattr(fd, termios.TCSADRAIN, a)
+    except Exception:  # noqa: BLE001 — not a real tty → nothing to restore
+        pass
+
+
 class TuiInput:
     """prompt_toolkit input with history, slash/file completion, and the status toolbar.
 
@@ -1137,8 +1154,11 @@ class TuiInput:
         """The bordered, bottom-pinned composer (a non-full-screen prompt_toolkit Application)."""
         from prompt_toolkit.patch_stdout import patch_stdout
         app, _ta = self._build_composer()
-        with patch_stdout(raw=True):
-            return app.run()
+        try:
+            with patch_stdout(raw=True):
+                return app.run()
+        finally:
+            _force_cooked_output()   # undo any raw-output leak so the turn's reply isn't staircased right
 
     def _simple_prompt(self) -> str | None:
         from prompt_toolkit.patch_stdout import patch_stdout
@@ -1149,6 +1169,8 @@ class TuiInput:
                 return self.session.prompt(msg)   # PromptSession.prompt has no erase_when_done kwarg → it raised TypeError, crashing the input fallback
         except (EOFError, KeyboardInterrupt):
             return None
+        finally:
+            _force_cooked_output()   # undo any raw-output leak so the turn's reply isn't staircased right
 
 
 def _arrow_select(options: list[str], default: int = 0) -> "int | None":
