@@ -197,8 +197,20 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
     intent ("Let me…", "I'll…") are dropped — they're transcript, not established state. `source`
     tags where the fact came from ("observed" > "tool-note" > "claim"); a completion ("done") note
     is downgraded to "claim" unless the caller passed an observed source, so it can't ratchet into
-    an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call."""
-    note = one_line(text, MAX_FINDING_CHARS)
+    an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call.
+
+    RECALL BRIDGE (mirrors the RECENT CONVERSATION ring fix): a long AssistantText reply (e.g. a multi-item
+    bug-hunt report) folds in here as a "claim" via one_line(text, MAX_FINDING_CHARS) — a hard per-item cut,
+    since findings must stay compact. Without a signal, a later "what were those bugs" sees ONLY the
+    surviving fragment (findings carry no turn/episode number, so there's no exact recall_history(turns=[N])
+    to hand back) with no hint anything was cut, and re-derives from the code instead of recalling — the
+    fabrication reported after "explain item 2" was fixed for the ring but recurred here via this SEPARATE
+    truncation path. Fix: append a terse marker naming the cut + the two real recall paths (the PAGED-OUT
+    HISTORY manifest, or recall_history(search=...) by content) whenever the text was actually cut."""
+    TRUNC_MARK = " [cut — PARTIAL; see PAGED-OUT HISTORY or recall_history(search=...) for the rest, don't guess]"
+    was_cut = len(one_line(text, MAX_FINDING_CHARS + 1)) > MAX_FINDING_CHARS
+    note = (one_line(text, max(0, MAX_FINDING_CHARS - len(TRUNC_MARK))) + TRUNC_MARK) if was_cut \
+        else one_line(text, MAX_FINDING_CHARS)
     if not note:
         return False
     if _NARRATION_RE.match(note):   # pure intent/narration — carries no durable fact

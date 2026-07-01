@@ -218,6 +218,39 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
     assert "jobs_scored" in out and "131,142" in out, "recall_history(last=1) must return item 2's full text"
 
 
+@check
+def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
+    # SECOND, separate instance of the same bug class: a long AssistantText (e.g. a multi-item bug-hunt
+    # report) also folds into a FINDINGS entry via record_note(text, source="claim") — cut to
+    # MAX_FINDING_CHARS=300 with NO signal. TT hit this for real: 3 filler turns pushed the bug-hunt reply
+    # out of the RECENT CONVERSATION ring entirely, leaving ONLY this findings fragment — with no marker,
+    # the model saw a snippet of bug #1 and FABRICATED 3 replacement bugs instead of recalling the rest.
+    # Findings carry no turn number, so the fix points at the two GENERAL recall paths (the manifest, or
+    # recall_history(search=...)) rather than a specific turns=[N] call.
+    from memagent.slice import Slice, record_note
+
+    long_report = ("Bug Hunt: lib/db.ts\n\n" + "1. (BUG) jobs_updated column has broken indentation. " * 6
+                   + "\n\n2. (BUG) archetypeCounts() missing bd, finance, strategy. Build-breaking.\n"
+                   + "\n3. (BUG) no closeDb() on the error path.\n\n4. (BUG) duplicate closeDb() calls.\n")
+    from memagent.text_utils import normalize_ws
+    assert len(normalize_ws(long_report)) > 300, "test premise broken: the NORMALIZED report must exceed MAX_FINDING_CHARS"
+
+    s = Slice(); s.reset("bug hunt lib/db.ts")
+    is_new = record_note(s, long_report, source="claim")
+    assert is_new and s.findings, "a genuinely new claim must be recorded"
+    stored = s.findings[-1]
+
+    # bug #2's specifics (past the cut) must NOT silently appear as if part of the visible fragment
+    assert "archetypeCounts" not in stored, "test premise broken: bug #2 should be past the cut"
+    # the stored finding must clearly mark itself as partial and point at BOTH real recall paths
+    assert "PARTIAL" in stored, "a truncated finding must say it is partial, not silently drop the rest"
+    assert "PAGED-OUT HISTORY" in stored and "recall_history(search=" in stored, stored
+    assert "don't guess" in stored, "must explicitly warn against re-deriving instead of recalling"
+    # a SHORT note that fits within the cap must be stored VERBATIM, with no marker (no false positives)
+    s2 = Slice(); record_note(s2, "a short claim under the cap", source="claim")
+    assert s2.findings[-1] == "a short claim under the cap", s2.findings
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:
