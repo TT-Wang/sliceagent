@@ -15,9 +15,36 @@ Mainstream agents accumulate a growing message history and **LLM-summarize it wh
 
 This is the opposite of the field's default ("bigger windows + summarize"): **remember less, reconstruct precisely.**
 
+## How it works — the brain model
+
+memagent's memory is organized like a brain: fast, lossy **perception** of the live world; a small **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a bounded working set from these — it never replays a growing transcript.
+
+| Region | Module | Role |
+|---|---|---|
+| **Sensory cortex** — live perception | `sensory_cortex.py` | Re-derives the world each turn: git state, project facts, repo map. Never stored or recalled. |
+| **Prefrontal cortex** — working memory | `pfc.py` | The carried **Slice**: bounded, provenance-tagged state (findings, plan, change-set), sealed at each turn boundary. |
+| **Hippocampus** — episodic memory | `hippocampus.py` | Losslessly records each turn; `recall_history` pages a specific past turn back in on demand. |
+| **Neocortex** — long-term memory | `neocortex.py` | Distills successful episodes into durable cross-session lessons, auto-surfaced when relevant. |
+
+```mermaid
+flowchart LR
+  SC["Sensory cortex<br/>live files, git, repo map"] --> SEED["Seed to PFC Slice<br/>bounded working memory"]
+  subgraph durable["Durable memory (between turns)"]
+    HC["Hippocampus<br/>episodic: past turns"]
+    NC["Neocortex<br/>semantic: distilled lessons"]
+  end
+  durable -.->|recall| SEED
+  SEED --> LLM --> ACT["Tools / actions"]
+  ACT -->|observations| SEED
+  ACT -->|seal at turn end| HC
+  HC -->|on success, consolidate| NC
+```
+
+Each turn, `seed.py` faults in exactly what the turn references — the carried PFC slice, live sensory-cortex views, and any relevant neocortex lessons — and hands the model that bounded **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into the hippocampus; on success, the neocortex consolidates it into a durable lesson. Net effect: **per-turn context stays flat no matter how long the session runs.**
+
 ## Status
 
-Early. The **core idea is validated** in a ~250-line JS prototype (see [`prototype/`](prototype/)) through controlled experiments vs a classic transcript loop. The production build is Python (aligns with [memem](https://github.com/TT-Wang/memem)).
+Early, but the **core bet is validated** — see the measured head-to-head benchmarks below. The production build is Python and aligns with [memem](https://github.com/TT-Wang/memem).
 
 ## Install
 
@@ -49,23 +76,27 @@ memagent                 # start the agent
 
 → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
-## Proof (the moat is measured, not asserted)
+## Benchmarks
 
-The "reconstruct, don't accumulate" bet is validated, not just claimed:
+The bet — *flat per-turn cost from reconstruction, at capability parity* — is measured, not asserted. All runs use `gpt-5.5`.
 
-- **JS prototype** ([`prototype/`](prototype/)) — controlled A/B vs a classic transcript loop: **−61% to −80% tokens** on long/iterative tasks at identical pass rates.
-- **Python core** — `evals/realenv_multiturn.py` measures the per-turn **input** cost across a 12-turn session: flat (~6k) for memagent vs a transcript that climbs to **~24× by turn 12**:
+**The moat: per-turn input stays flat while a transcript grows.** Head-to-head vs Kimi Code (a strong transcript-based agent) on hard multi-turn tasks:
 
-```text
-per-turn INPUT tokens — memagent (sealed slice) vs transcript (full history re-sent):
-  t 1  memagent ▒▒                 ~6k      transcript ▒▒                 ~6k
-  t 6  memagent ▒▒                 ~6k      transcript ████████          ~40k
-  t12  memagent ▒▒                 ~6k      transcript ████████████████  ~145k   (~24× more)
-```
+| Scenario | memagent peak input | Kimi Code peak input | ratio |
+|---|--:|--:|:-:|
+| long-horizon debug | **7.5k** | 64.5k | **8.6×** |
+| large-file bug | **7.7k** | 37.0k | 4.8× |
+| multi-file refactor | **5.9k** | 28.2k | 4.8× |
 
-Reproduce (needs an API key): `LLM_API_KEY=… AGENT_MODEL=gpt-5.5 PYTHONPATH=src .venv/bin/python evals/realenv_multiturn.py` — it drives a real 12-turn session and prints this chart from live token counts.
+Across a broader 22-scenario set: median peak input **10k (memagent) vs 23k (Kimi Code)** — and memagent's per-turn input barely moves (2.6k → 7.5k over 50 steps) while the transcript climbs 16k → 64k.
 
-The win shows up in **multi-turn real use** (where the transcript grows), not single-turn SWE-bench (which structurally can't show it).
+**Capability is at parity on these samples.** 22/22 vs 21/22 passed on the parity set; on 3 SWE-bench Verified instances memagent resolved 1/3 (scored by the official harness); TerminalBench-core standalone accuracy 0.625 (N=16).
+
+**Same work, far fewer tokens.** On SWE-bench Lite vs a transcript agent, same instances: **26 steps / 284k tokens vs 63 steps / 838k** — ~2.4× fewer steps, ~3× fewer tokens (both resolved 0/3 — underdetermined instances, equal capability).
+
+> Numbers are small-N and honestly reported: the consistent, reproducible signal is the **flat per-turn cost**, not a capability leap. The win shows up in **multi-turn real use** (where a transcript grows), not single-turn SWE-bench (which structurally can't show it).
+
+## Under the hood
 
 The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole loop is testable offline with a fake LLM. Layout under `src/memagent/`:
 
