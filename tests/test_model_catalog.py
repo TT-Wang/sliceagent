@@ -45,6 +45,31 @@ def base_url_routes_when_model_name_is_generic():
     assert capability("x", "https://api.deepseek.com").family == "deepseek"
 
 
+@check
+def gpt5_named_model_on_a_non_openai_endpoint_does_not_get_the_responses_route():
+    # TT's crash: "/model gpt-5.5" while still connected to DeepSeek (switch() only changes the model
+    # STRING, never the endpoint) → capability() used to grant reasoning_effort/responses routing by MODEL
+    # NAME ALONE, so llm._effort() routed to /v1/responses on an endpoint that doesn't implement it →
+    # openai.NotFoundError (404) → "an internal error ended the turn". The pairing must degrade instead.
+    c = capability("gpt-5.5", "https://api.deepseek.com/v1")
+    assert c.supports_reasoning_effort is False, "must NOT claim OpenAI-only reasoning wire support off-endpoint"
+    assert c.tokens_param == "max_tokens", "must not apply the OpenAI max_completion_tokens rename either"
+    # real OpenAI (default AND explicit base_url) must be completely unaffected
+    for b in ("", "https://api.openai.com/v1"):
+        c2 = capability("gpt-5.5", b)
+        assert c2.supports_reasoning_effort is True and c2.tokens_param == "max_completion_tokens", (b, c2)
+
+
+@check
+def effort_never_routes_to_responses_api_off_openai():
+    # the actual decision point in llm.py: OpenAILLM._effort() must return None for this pairing, so
+    # complete() never calls self.client.responses.create() against a server without that route.
+    from memagent.llm import OpenAILLM
+    llm = OpenAILLM.__new__(OpenAILLM)   # bypass __init__ — _effort() only touches these 3 attrs
+    llm.model, llm._base_url, llm.reasoning = "gpt-5.5", "https://api.deepseek.com/v1", "high"
+    assert llm._effort() is None, "must fall through to plain chat/completions, never /v1/responses"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

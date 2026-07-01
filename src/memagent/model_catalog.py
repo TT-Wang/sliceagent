@@ -53,12 +53,24 @@ _VISION_HINTS = ("vision", "gpt-4o", "gpt-4.1", "gpt-5", "gpt-6", "claude-3", "c
                  "claude-opus", "claude-sonnet", "gemini", "-vl", "qwen-vl")
 
 
+def _is_openai_endpoint(base_url: str) -> bool:
+    """True only when `base_url` is OpenAI's real API — the default (unset → the SDK's own default) or an
+    explicit api.openai.com. reasoning_effort + the /v1/responses route are OpenAI-ONLY wire features; a
+    model literally NAMED "gpt-5.5"/"o3" served by a DIFFERENT endpoint (DeepSeek, Moonshot, a local proxy —
+    /model only switches the model string, never the endpoint) does NOT speak that protocol. Routing to
+    /v1/responses there 404s (openai.NotFoundError — the route doesn't exist on that server), which used to
+    surface as a cryptic 'internal error ended the turn'; gating on the endpoint keeps it on the universal
+    chat/completions path instead — degrade gracefully, never assume a wire feature from the name alone."""
+    b = (base_url or "").strip().lower()
+    return b == "" or "api.openai.com" in b
+
+
 def capability(model: str, base_url: str = "") -> ModelCapability:
     """Resolve the capability record for a model (first matching rule wins; specific before general)."""
     m = (model or "").lower()
     b = (base_url or "").lower()
     vis = any(h in m for h in _VISION_HINTS)
-    if m.startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")):   # #57: future o5/o6 + gpt-6 reasoning models
+    if m.startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")) and _is_openai_endpoint(b):
         return ModelCapability("openai-reasoning", tokens_param="max_completion_tokens",
                                supports_reasoning_effort=True, supports_vision=vis)
     if "deepseek" in m or "deepseek" in b:

@@ -122,12 +122,19 @@ def cli_sink(show_slice: bool = False):
 
 def _reasoning_note(llm) -> str:
     """One-line hint on whether the chosen reasoning effort will actually take effect, so /model isn't a
-    silent no-op (gpt-5 high/max needs /v1/responses; non-reasoning models have no effort knob)."""
+    silent no-op (gpt-5 high/max needs /v1/responses; non-reasoning models have no effort knob). /model only
+    switches the model STRING, never the endpoint — so 'gpt-5.5' while still connected to another provider
+    (deepseek/moonshot/a proxy) needs its own message: it's not that the model lacks the knob, it's that
+    THIS endpoint doesn't speak OpenAI's reasoning wire format (that pairing used to 404 mid-turn)."""
     from .model_catalog import capability
     eff = (getattr(llm, "reasoning", "full") or "full").lower()
     if eff == "full":
         return ""
-    if not capability(llm.model, getattr(llm, "_base_url", "")).supports_reasoning_effort:
+    base = getattr(llm, "_base_url", "")
+    if not capability(llm.model, base).supports_reasoning_effort:
+        if llm.model.lower().startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")) and base:
+            return (f"note: {llm.model} needs OpenAI's real endpoint for reasoning effort — you're connected "
+                    f"to {base}, so it runs at that provider's default. `config --use` to switch endpoints.")
         return f"note: {llm.model} has no reasoning-effort knob — it runs at the provider default."
     return "high/max run WITH tools via /v1/responses." if eff in ("high", "max") else ""
 
