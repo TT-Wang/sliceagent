@@ -1263,6 +1263,29 @@ def confirm_fallback_prompt_brackets_survive_rich_markup():
 
 
 @check
+def dynamic_content_prints_dont_parse_rich_markup():
+    # class bug hit 3×: recovery-note, /threads, @pin. DATA carrying a Rich CLOSING tag ([/learn]) or a
+    # bracketed path (app/jobs/[id]/x.tsx from Next.js) printed with markup ON crashes the whole CLI with
+    # MarkupError. Fix = markup=False on every data-bearing status print.
+    import io
+    from rich.console import Console
+    crash = "  [a1b2] open app/jobs/[id]/page.tsx — type [/learn] to save (open)"
+    raised = False
+    try:
+        Console(file=io.StringIO(), force_terminal=False).print(crash)   # markup ON
+    except Exception:
+        raised = True
+    assert raised, "test premise broken: Rich should choke on the closing-tag content"
+    Console(file=io.StringIO(), force_terminal=False).print(crash, markup=False)   # the fix must NOT raise
+    # guard the two confirmed crash sites keep the fix (fails if a refactor drops markup=False):
+    import inspect
+    import memagent.cli as _cli
+    src = inspect.getsource(_cli)
+    assert "for t in ts)), markup=False)" in src, "/threads print lost markup=False"
+    assert 'style="yellow", markup=False)' in src, "recovery-note print lost markup=False"
+
+
+@check
 def glob_finds_directories_not_just_files():
     # bug: glob was rg --files (files only) → "find a project called hunter" missed the hunter/ FOLDER.
     from memagent.code_grep import make_glob_tool

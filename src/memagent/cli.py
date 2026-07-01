@@ -420,13 +420,13 @@ def main() -> None:
             plan = getattr(s, "plan", None) if s else None
             mission = getattr(s, "mission", "") if s else ""
             if mission:
-                _console.print(f"  🎯 mission: {mission}")
+                _console.print(f"  🎯 mission: {mission}", markup=False)
             if not plan:
                 _console.print("  (no active plan — the agent sets one with update_plan on multi-step tasks)")
             else:
                 mark = {"done": "✓", "in_progress": "▶", "pending": "○"}
                 for it in plan:
-                    _console.print(f"  {mark.get(it.get('status'), '○')} {it.get('step', '')}")
+                    _console.print(f"  {mark.get(it.get('status'), '○')} {it.get('step', '')}", markup=False)
         elif cmd == "/cost":
             from .tui import _saved_dollars
             saved = _saved_dollars(_stats)
@@ -444,8 +444,9 @@ def main() -> None:
                                f"out={s['output']} retries={s['retries']} overflows={s['overflows']}")
         elif cmd == "/threads":
             ts = session.open_threads(include_active=True)
-            _console.print("  (no topics yet)" if not ts else
-                           "\n".join(f"  [{t.task_id}] {t.title} ({t.status})" for t in ts))
+            # markup=False: task_id/title are DATA — `[{t.task_id}]` renders as a Rich tag → MarkupError crash.
+            _console.print(("  (no topics yet)" if not ts else
+                            "\n".join(f"  [{t.task_id}] {t.title} ({t.status})" for t in ts)), markup=False)
         elif cmd in ("/switch", "/resume"):
             if not arg:
                 _console.print(f"  usage: {cmd} <task_id>")
@@ -453,9 +454,9 @@ def main() -> None:
                 try:
                     session.switch_topic(arg)
                     _stats["topic"] = one_line(session.active().goal, 40)
-                    _console.print(f"  switched to {arg}")
+                    _console.print(f"  switched to {arg}", markup=False)
                 except Exception:
-                    _console.print(f"  no such topic: {arg}")
+                    _console.print(f"  no such topic: {arg}", markup=False)
         elif cmd == "/undo":
             _console.print("  " + base_tools.undo_last())   # revert the last file edit
         elif cmd == "/plugins":
@@ -548,11 +549,11 @@ def main() -> None:
             # _reroot: re-roots file tools + run_command cwd + repo map + git; re-indexes; crash-recovery
             # follows the new root. (A running subagent host keeps the old code index until relaunch.)
             if not arg:
-                _console.print(f"  workspace: {base_tools.root()}")
+                _console.print(f"  workspace: {base_tools.root()}", markup=False)
             else:
                 _console.print("  ✓ " + _reroot(arg))
         else:
-            _console.print(f"  unknown command {cmd} (/help)")
+            _console.print(f"  unknown command {cmd} (/help)", markup=False)
         return True
 
     _IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -583,12 +584,12 @@ def main() -> None:
             else:
                 touch_file(session.active(), rel); pinned.append(rel)
         if _tui and _console is not None:
-            if pinned:
-                _console.print(f"  📎 pinned: {', '.join(pinned)}")
+            if pinned:   # paths like app/jobs/[id]/page.tsx contain [ ] → markup=False or Rich crashes
+                _console.print(f"  📎 pinned: {', '.join(pinned)}", markup=False)
             if images:
-                _console.print(f"  🖼  attached image: {', '.join(images)}")
+                _console.print(f"  🖼  attached image: {', '.join(images)}", markup=False)
             if skipped:
-                _console.print(f"  🖼  skipped (needs a vision-capable AGENT_MODEL): {', '.join(skipped)}")
+                _console.print(f"  🖼  skipped (needs a vision-capable AGENT_MODEL): {', '.join(skipped)}", markup=False)
 
     # AGENT_AUTO_APPROVE: comma-separated fnmatch globs over the command, pre-approved so safe read-only
     # commands never prompt (e.g. AGENT_AUTO_APPROVE="git status*,git diff*,ls *,cat *").
