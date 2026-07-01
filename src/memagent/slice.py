@@ -1028,7 +1028,14 @@ def slice_sink(state):
             if s.conversation and (event.content or "").strip():
                 # fill the assistant side of the in-progress exchange — the LAST AssistantText of the
                 # turn wins, so this ends up holding the final reply shown to the user (continuity).
-                s.conversation[-1]["assistant"] = one_line(event.content, CONVO_MSG_CHARS)
+                full = event.content
+                s.conversation[-1]["assistant"] = one_line(full, CONVO_MSG_CHARS)
+                # RECALL BRIDGE (core cross-turn continuity): flag when the reply was CUT to the gist, so
+                # the NEXT turn's RECENT CONVERSATION advertises the recall_history call to page the FULL
+                # reply back. Without this the model reads an 800-char gist as the complete reply and
+                # confabulates anything past it ("explain item 2" of a long report it can no longer see)
+                # instead of recalling — the failure the whole cache-not-log design exists to prevent.
+                s.conversation[-1]["truncated"] = len(one_line(full, CONVO_MSG_CHARS + 1)) > CONVO_MSG_CHARS
             return
         if isinstance(event, ToolResult):
             # the model's distilled conclusion rides on the tool call (the note arg) — fold it into

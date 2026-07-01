@@ -168,6 +168,56 @@ def pagetable_memory_lessons_unifies_recall():
     assert PageTable(memory=_LessonMem()).lookup("g", kind="memory-lessons", k=0) == []
 
 
+@check
+def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
+    """The 'explain item 2' bug: a long prior reply is stored in the RECENT CONVERSATION ring as an
+    800-char gist. If the ring doesn't SIGNAL the cut + how to page the rest, the model reads the gist as
+    the whole reply and confabulates the part it can't see (a cross-turn-continuity failure = the moat).
+    Fix: a truncated ring reply carries a recall_history(last=K) marker, and that call returns the full text."""
+    from memagent.episode import turn_markdown
+    from memagent.events import AssistantText
+    from memagent.history import make_history_tool
+    from memagent.slice import record_user, slice_sink
+
+    item2 = "2. lib/pipeline.ts:131,142 — jobs_scored column used for the jobs_updated value."
+    report = ("Bug Hunt Report\n\n1. queries.ts:233 build-blocker. "
+              + ("long item-1 detail that pushes item 2 well past the gist cap. " * 20)
+              + "\n\n" + item2 + "\n\n3. llm.ts:87 drops systemPrompt.\n")
+
+    class Mem:
+        is_durable = True
+        def __init__(self): self.eps = []
+        def append_episode(self, s, t, turn, rec):
+            self.eps.append({"v": 1, "session_id": s, "task_id": t, "turn": turn, "ts": "2026-07-01T12:00:00", "record": rec})
+        def read_episodes(self, s, *, limit=None):
+            out = [e for e in self.eps if e["session_id"] == s]; return out[-limit:] if limit else out
+        def episode_manifest(self, s, k):
+            out = [e for e in self.eps if e["session_id"] == s]; return out[-k:], len(out)
+        def recall(self, *a, **k): return []
+        def search_episodes(self, *a, **k): return []
+
+    mem, sid = Mem(), "s1"
+    st = Slice(); st.reset("do a bug hunt"); sink = slice_sink(st)
+    record_user(st, "do a bug hunt"); sink(AssistantText(report))    # turn 1: long report
+    mem.append_episode(sid, "t1", 1, {"title": "bug hunt", "note": report,
+        "steps": [{"slice": "", "action": [], "observation": []}],
+        "markdown": turn_markdown("bug hunt", [{"slice": "", "action": [], "observation": []}], report,
+                                  {"files": [], "stop_reason": "end_turn"}),
+        "meta": {"failing": False, "files": [], "stop_reason": "end_turn"}})
+
+    record_user(st, "explain item 2")                                # turn 2: build the slice
+    tools = LocalToolHost(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    user = make_build_slice(st, tools, None, mem, "explain item 2", sid)()[1]["content"]
+
+    # item 2 is NOT in the static slice (it was cut from the gist) — recall is REQUIRED to answer
+    assert "jobs_scored" not in user, "test premise broken: item 2 should be past the gist cap"
+    # ...but the ring advertises the exact recall call, so the model pages it back instead of guessing
+    assert "recall_history(last=1)" in user, "truncated ring reply must advertise recall_history(last=1)"
+    # and following that call returns the full reply, item 2 included
+    out = make_history_tool(mem, sid).handler({"last": 1})
+    assert "jobs_scored" in out and "131,142" in out, "recall_history(last=1) must return item 2's full text"
+
+
 if __name__ == "__main__":
     ok = 0
     for fn in CHECKS:

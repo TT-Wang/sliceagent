@@ -138,10 +138,16 @@ def render_conversation(s) -> str:
     if not prior:
         return ""
     lines = []
-    for e in prior:
+    n = len(prior)
+    for idx, e in enumerate(prior):
         lines.append(f"- user: {e['user']}")
         if e.get("assistant"):
             lines.append(f"  you:  {e['assistant']}")
+            if e.get("truncated"):
+                # the gist above is a CUT of a longer reply — advertise the exact recall so the model pages
+                # the FULL text back instead of confabulating detail past the cut (last=1 == this reply).
+                lines.append(f"        ⋯ (shortened to a gist — recall_history(last={n - idx}) for the FULL "
+                             f"reply before answering about its specifics; do NOT guess past the cut)")
     older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
     tail = (f"\n(+{older} earlier turn(s) this session not shown — they're listed in PAGED-OUT HISTORY "
             "below; recall_history(turns=[N]) to view any)") if older > 0 else ""
