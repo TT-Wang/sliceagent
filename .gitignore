@@ -37,9 +37,16 @@ brain/
 # NOTE: gitignore has no inline comments — keep each pattern on its own line.
 # .claude/ = local Claude Code session dir · .coverage = coverage.py data · runs/ = eval outputs ·
 # *.pdf = decks/local docs (force-add if a real doc PDF is ever needed).
-# evals/ is intentionally NOT ignored — kept local by choice but still visible to `git status`.
 .claude/
 .coverage
 runs/
 *.pdf
-evals/usersim_findings.json
+
+# ── internal-only: untracked 2026-07-02 for the public launch (files stay on disk locally) ──
+# evals/  = internal benchmark harness + ~127 MB of captured tbench/job run artifacts (deb/lz4/pt/logs)
+# prototype/ = superseded ~250-line JS proof-of-concept (its own README: "not the production codebase")
+# docs/STEP3-PLAN.md, docs/MEMEM-DIAGNOSIS.md = internal R&D planning notes, not user docs
+evals/
+prototype/
+docs/STEP3-PLAN.md
+docs/MEMEM-DIAGNOSIS.md
