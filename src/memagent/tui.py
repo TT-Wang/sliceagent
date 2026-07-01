@@ -12,8 +12,10 @@ Design (borrowed from Hermes' rich+prompt_toolkit stack and Kimi's TUI UX):
   - tool-call CARDS (spinner -> ✓/✗, primary-arg header, inline diff for edits),
   - a two-line STATUS footer (model · policy · workspace · tokens),
   - a SLASH-command palette wired to existing session ops (/new /switch /resume /threads /help /exit),
-  - graceful ctrl-c: a SIGINT handler sets run_turn's existing `signal=` Event (loop.py:139) so the
-    turn aborts at the next step boundary — no background thread.
+  - graceful ctrl-c AND esc: a physical Ctrl-C (SIGINT) aborts a running turn via Python's own
+    KeyboardInterrupt delivery; Esc does the SAME thing via `_EscSentinel`, a narrow background thread that
+    translates a bare Esc keypress into a real SIGINT (loop.py only checks a `signal=` Event at STEP
+    BOUNDARIES, never inside a blocking LLM/tool call, so only a real SIGINT interrupts promptly).
 """
 from __future__ import annotations
 
@@ -193,15 +195,185 @@ def _render_tool_result(e):
 # the input line, so the typed answer is invisible. `_pause_active_live()` stops it first; the next event
 # restarts a fresh region. Single point so EVERY mid-turn Rich prompt is covered (no per-call-site fix).
 _ACTIVE_RICH_SINK = None
+# The _EscSentinel (if any) watching for Esc during the current RICH-mode turn — SAME single-choke-point
+# idiom as _ACTIVE_RICH_SINK above. Must release the tty raw-mode fd before a confirm()/ask_user() prompt
+# does its OWN raw-mode read (_arrow_select), or the two would race for ownership of the same fd.
+_ACTIVE_ESC_SENTINEL = None
 
 
 def _pause_active_live() -> None:
+    """Stop the turn spinner AND release the Esc-sentinel's hold on the tty — the ONE choke point every
+    mid-turn synchronous read (confirm, ask_user) goes through before touching raw mode itself."""
     s = _ACTIVE_RICH_SINK
     if s is not None:
         try:
             s._stop()
         except Exception:  # noqa: BLE001 — pausing the live UI must never break the prompt
             pass
+    sentinel = _ACTIVE_ESC_SENTINEL
+    if sentinel is not None:
+        try:
+            sentinel.pause()
+        except Exception:  # noqa: BLE001 — pausing the sentinel must never break the prompt
+            pass
+
+
+def _resume_active_esc_sentinel() -> None:
+    """Re-arm the Esc-sentinel after a mid-turn confirm()/ask_user() read finishes — the counterpart to
+    the pause() in _pause_active_live(), called once the caller no longer needs raw-mode ownership."""
+    sentinel = _ACTIVE_ESC_SENTINEL
+    if sentinel is not None:
+        try:
+            sentinel.resume()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _EscSentinel:
+    """Translates a bare Esc keypress into a real SIGINT during a RICH-mode (non-live) turn, so Esc aborts
+    a running turn exactly like Ctrl-C already does. loop.py's `signal=` Event is checked ONLY at STEP
+    BOUNDARIES (never inside a blocking llm.complete() or a slow run_command) — an Event-only abort would
+    silently NOT interrupt a turn stuck on a slow model call or a hung command. A real SIGINT does: Python
+    always delivers it to the MAIN thread regardless of which thread calls os.kill, reaching the exact
+    `except KeyboardInterrupt` handlers a physical Ctrl-C already hits — zero new abort logic in loop.py.
+
+    Also RE-IMPLEMENTS physical Ctrl-C detection while active: putting the tty in raw mode (tty.setraw)
+    disables ISIG, which is what makes the tty driver auto-generate SIGINT on Ctrl-C in normal (cooked)
+    mode — so without this, a real Ctrl-C press would go SILENT for the whole time this sentinel holds
+    raw mode. Both \\x1b (Esc) and \\x03 (Ctrl-C/INTR) are handled identically here for that reason.
+
+    Owns the tty raw-mode fd only while ACTIVE; releases it (restores termios) before going idle on
+    pause(), so it never races a mid-turn confirm()/ask_user() call for the SAME fd (_arrow_select's own
+    comment: raw mode is process-global, main-thread-only — only one owner at a time). Runs entirely on a
+    second daemon thread; the turn itself NEVER leaves the main thread, so confirm()'s arrow-key selector
+    (Yes/No/Always) is completely unaffected — its own main-thread-only guard is never even exercised.
+
+    Lifetime: created + started immediately before ONE run_turn() call (RICH mode only, never live mode —
+    prompt_toolkit already owns all keystrokes there natively), stopped in a `finally` right after — never
+    persists between turns, never leaks a thread."""
+
+    def __init__(self):
+        self._thread = None
+        self._stop_flag = threading.Event()
+        self._pause_flag = threading.Event()
+        self._paused_ack = threading.Event()
+        self._fd = None
+        self._raw = False        # True iff THIS sentinel currently holds the fd in raw mode
+        self._old_termios = None
+
+    def start(self) -> None:
+        """No-op (never spawns a thread) unless this is a real POSIX tty on the MAIN thread — the SAME
+        safety gate _arrow_select uses, so a non-tty/headless/eval run is byte-for-byte unaffected."""
+        import sys
+        global _ACTIVE_ESC_SENTINEL
+        if threading.current_thread() is not threading.main_thread():
+            return
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return
+        try:
+            import termios
+            self._fd = sys.stdin.fileno()
+            termios.tcgetattr(self._fd)   # confirms this really is a controllable tty
+        except Exception:  # noqa: BLE001 — not a real terminal / no termios (e.g. Windows) → stay inert
+            return
+        _ACTIVE_ESC_SENTINEL = self
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _enter_raw(self) -> None:
+        import termios
+        import tty
+        try:
+            self._old_termios = termios.tcgetattr(self._fd)
+            tty.setraw(self._fd)
+            termios.tcflush(self._fd, termios.TCIFLUSH)   # drain type-ahead so a stray byte can't false-fire
+            self._raw = True
+        except Exception:  # noqa: BLE001 — a wedged/vanished tty must never crash the turn
+            self._raw = False
+
+    def _exit_raw(self) -> None:
+        if not self._raw:
+            return
+        import termios
+        try:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_termios)
+        except Exception:  # noqa: BLE001
+            try:
+                termios.tcsetattr(self._fd, termios.TCSANOW, self._old_termios)
+            except Exception:  # noqa: BLE001
+                pass
+        self._raw = False
+
+    def _run(self) -> None:
+        import select
+        import signal as _signal
+        self._enter_raw()
+        try:
+            while not self._stop_flag.is_set():
+                if self._pause_flag.is_set():
+                    self._exit_raw()
+                    self._paused_ack.set()
+                    # sleep in short increments (not a blocking read) so resume()/stop() are noticed
+                    # promptly WITHOUT holding raw mode while idle.
+                    while self._pause_flag.is_set() and not self._stop_flag.is_set():
+                        self._stop_flag.wait(0.05)
+                    if self._stop_flag.is_set():
+                        return
+                    self._enter_raw()
+                    continue
+                if not self._raw:      # a previous _enter_raw failed (tty went away) → stop, don't spin
+                    return
+                try:
+                    ready, _, _ = select.select([self._fd], [], [], 0.15)
+                except Exception:  # noqa: BLE001 — fd gone / select unsupported → stop, never crash the turn
+                    return
+                if not ready:
+                    continue
+                try:
+                    data = os.read(self._fd, 16)
+                except Exception:  # noqa: BLE001
+                    return
+                if data in (b"\x1b", b"\x03"):   # bare Esc, or Ctrl-C (\x03/INTR). raw mode (tty.setraw)
+                    # disables ISIG, so the tty driver's OWN auto-SIGINT-on-Ctrl-C is OFF while this
+                    # sentinel holds raw mode (exactly like _arrow_select already has to handle \x03
+                    # itself for the same reason, just for a much shorter window) — WITHOUT this, a
+                    # physical Ctrl-C would go silent for the whole turn instead of aborting it. An
+                    # arrow/CSI sequence also starts with 0x1b but is LONGER (e.g. \x1b[C); a lone
+                    # single-byte read of exactly \x1b means nothing followed.
+                    try:
+                        os.kill(os.getpid(), _signal.SIGINT)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return              # one-shot per turn, same as a physical Ctrl-C
+        finally:
+            self._exit_raw()
+
+    def pause(self) -> None:
+        """Release the fd BEFORE returning, so the caller's own raw-mode read (confirm/_arrow_select) can
+        never race this thread for ownership. Blocks briefly (bounded by the poll granularity) on an ack
+        so the caller only proceeds once the fd is provably free."""
+        if self._thread is None or not self._thread.is_alive():
+            return
+        self._paused_ack.clear()
+        self._pause_flag.set()
+        self._paused_ack.wait(timeout=1.0)   # generous bound; the sentinel acks within ~1 poll tick (~50ms)
+
+    def resume(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            return
+        self._pause_flag.clear()
+
+    def stop(self) -> None:
+        self._stop_flag.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.3)
+        global _ACTIVE_ESC_SENTINEL
+        if _ACTIVE_ESC_SENTINEL is self:
+            _ACTIVE_ESC_SENTINEL = None
+
+
+def make_esc_sentinel() -> "_EscSentinel":
+    return _EscSentinel()
 
 
 # running turn tally — bucket each completed tool by KIND so the status line shows "how far along" at a glance
@@ -556,9 +728,12 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
         ev.app.exit()
 
     @kb.add("escape")
-    def _(ev):                             # Esc clears a half-typed line; Esc on an EMPTY idle line = undo
+    def _(ev):                             # mid-turn: abort (same as ctrl-c); idle: clear the line, or undo
         if state["running"]:
-            return                         # never undo mid-turn
+            if state["signal"] is not None:
+                state["signal"].set()      # abort the running turn at the next step boundary
+                set_status("interrupting…")
+            return
         if ta.text.strip():
             ta.text = ""
         elif handle_slash is not None:
@@ -1071,19 +1246,22 @@ def confirm(console: Console, name: str, detail: str, reason: str) -> str:
     console.print(Text.assemble(
         Text("  ⚠ allow ", style=TH["warn"]), Text(name, style=TH["tool"]),
         Text(f" {_shorten(detail, 60)!r}? ", style=TH["dim"]), Text(f"({reason})", style=TH["dim"])))
-    _pause_active_live()        # stop the turn spinner so the prompt / typed answer is visible
+    _pause_active_live()        # stop the turn spinner + release the Esc-sentinel's hold on the tty
     try:
         console.file.flush()    # commit the "allow…" line before the selector's raw ANSI writes (no interleave)
     except Exception:  # noqa: BLE001
         pass
-    idx = _arrow_select(["Yes", "No", "Always"], default=0)
-    if idx is not None:                                       # selector ran (TTY): -1 cancel → no
-        return ("yes", "no", "always")[idx] if idx >= 0 else "no"
-    try:                                                      # fallback: \[y] escapes the Rich markup
-        ans = console.input(r"    \[y]es / \[n]o / \[a]lways ▸ ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return "no"
-    return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
+    try:
+        idx = _arrow_select(["Yes", "No", "Always"], default=0)
+        if idx is not None:                                       # selector ran (TTY): -1 cancel → no
+            return ("yes", "no", "always")[idx] if idx >= 0 else "no"
+        try:                                                      # fallback: \[y] escapes the Rich markup
+            ans = console.input(r"    \[y]es / \[n]o / \[a]lways ▸ ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "no"
+        return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
+    finally:
+        _resume_active_esc_sentinel()   # re-arm Esc watching for the rest of the turn, whichever path returned
 
 
 def ask_user(console: Console, question: str, options=None) -> str:
@@ -1094,14 +1272,17 @@ def ask_user(console: Console, question: str, options=None) -> str:
         for i, o in enumerate(options, 1):
             console.print(Text(f"     {i}. {o}", style=TH["dim"]))
         console.print(Text("     (type a number, or your own answer)", style=TH["dim"]))
-    _pause_active_live()        # stop the turn spinner so the typed answer echoes
+    _pause_active_live()        # stop the turn spinner + release the Esc-sentinel's hold on the tty
     try:
-        ans = console.input("  your answer ▸ ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return "(no answer)"
-    if options and ans.isdigit() and 1 <= int(ans) <= len(options):
-        return options[int(ans) - 1]
-    return ans or "(no answer)"
+        try:
+            ans = console.input("  your answer ▸ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "(no answer)"
+        if options and ans.isdigit() and 1 <= int(ans) <= len(options):
+            return options[int(ans) - 1]
+        return ans or "(no answer)"
+    finally:
+        _resume_active_esc_sentinel()   # re-arm Esc watching for the rest of the turn
 
 
 # memagent wordmark (figlet "ansi_shadow") + the vertical 3-layer emblem. Identity = the context kernel:

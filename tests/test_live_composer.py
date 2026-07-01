@@ -94,6 +94,27 @@ def live_app_submit_dispatches_a_turn_in_a_worker():
 
 
 @check
+def live_app_escape_aborts_a_running_turn_like_ctrl_c():
+    # Esc used to be a no-op mid-turn ("never undo mid-turn"); it must now abort exactly like ctrl-c does
+    # (same state["signal"].set() call) instead of being silently swallowed.
+    import time
+    seen = {}
+
+    def fake_turn(text, sink, signal):
+        seen["sig"] = signal
+        for _ in range(40):             # poll up to ~2s, return as soon as the abort signal is set
+            if signal.is_set():
+                return
+            time.sleep(0.05)
+
+    state, _ = _drive_live("do something slow\r\x1b\x04", fake_turn)   # submit, Esc, then ctrl-d to quit
+    for th in state.get("threads", []):
+        th.join(timeout=3)
+    assert "sig" in seen, "the turn must have started before Esc was sent"
+    assert seen["sig"].is_set(), "Esc mid-turn must set the SAME abort signal ctrl-c uses"
+
+
+@check
 def live_app_ctrl_d_quits_without_a_turn():
     calls = []
     state, _ = _drive_live("\x04", lambda *a: calls.append(a))   # bare ctrl-d

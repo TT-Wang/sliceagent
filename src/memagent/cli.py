@@ -810,14 +810,24 @@ def main() -> None:
                     print(f"  ⏱ slice build {(_tt.monotonic() - _s) * 1000:.0f} ms (spinner appears here; "
                           "the rest of the wait is the model's first token)", flush=True)
                     return r
-            # ctrl-c during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
+            # ctrl-c OR esc during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
             # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
+            # Esc is translated to a real SIGINT by a narrow background sentinel (a no-op on non-tty/eval —
+            # start() gates itself exactly like _arrow_select does), so it reaches the SAME KeyboardInterrupt
+            # path ctrl-c already uses instead of a separate abort mechanism.
+            _esc = _tui.make_esc_sentinel() if _tui else None
+            if _esc is not None:
+                _esc.start()
             import time as _time
             _t0 = _time.monotonic()
-            result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks,
-                              max_steps=cfg.max_steps,
-                              consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
-                              checkpoint=lambda m, s, _g=line: recovery.record(root, goal=_g, messages=m, step=s))
+            try:
+                result = run_turn(build_slice=build, llm=llm, tools=tools, dispatch=dispatch, hooks=hooks,
+                                  max_steps=cfg.max_steps,
+                                  consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
+                                  checkpoint=lambda m, s, _g=line: recovery.record(root, goal=_g, messages=m, step=s))
+            finally:
+                if _esc is not None:
+                    _esc.stop()
             recovery.clear(root)                               # clean/parked exit → drop the WAL
             _stats["last_turn_s"] = _time.monotonic() - _t0   # shown as ⏲ in the status bar
             if getattr(memory, "is_durable", False):           # durable checkpoint (no-op under NullMemory)
