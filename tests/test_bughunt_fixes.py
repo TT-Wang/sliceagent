@@ -1329,6 +1329,26 @@ def internal_logs_and_records_stay_out_of_the_workspace():
     assert os.path.isabs(state_dir("logs")), "state dir must be absolute (outside any workspace)"
 
 
+@check
+def model_switch_warns_when_the_endpoint_cant_serve_it():
+    # TT: '/model gpt-5.5' while connected to DeepSeek used to crash the NEXT turn with an opaque
+    # "internal error (NotFoundError)" (explicit reasoning effort) or "(BadRequestError)" (the plain-switch
+    # case, no effort — the far more common phrasing, and the gap the earlier fix alone didn't cover).
+    # /model must warn IMMEDIATELY at switch time instead of failing silently one turn later.
+    from memagent.cli import _reasoning_note
+
+    class LLM:
+        def __init__(self, model, base_url, reasoning="full"):
+            self.model, self._base_url, self.reasoning = model, base_url, reasoning
+
+    note = _reasoning_note(LLM("gpt-5.5", "https://api.deepseek.com/v1", "full"))
+    assert "OpenAI" in note and "deepseek" in note.lower() and "init" in note, note
+    # same provider, no mismatch → must stay silent (no false positive)
+    assert _reasoning_note(LLM("deepseek-chat", "https://api.deepseek.com/v1", "full")) == ""
+    # real OpenAI → completely unaffected
+    assert "OpenAI" not in _reasoning_note(LLM("gpt-5.5", "", "high"))
+
+
 def main():
     failed = 0
     for fn in CHECKS:

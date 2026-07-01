@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.model_catalog import capability  # noqa: E402
+from memagent.model_catalog import capability, likely_endpoint_mismatch  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -68,6 +68,31 @@ def effort_never_routes_to_responses_api_off_openai():
     llm = OpenAILLM.__new__(OpenAILLM)   # bypass __init__ — _effort() only touches these 3 attrs
     llm.model, llm._base_url, llm.reasoning = "gpt-5.5", "https://api.deepseek.com/v1", "high"
     assert llm._effort() is None, "must fall through to plain chat/completions, never /v1/responses"
+
+
+@check
+def likely_endpoint_mismatch_catches_the_common_no_effort_switch():
+    # TT's onboarding gap: `/model gpt-5.5` with NO explicit reasoning effort (the natural thing to type) —
+    # the earlier NotFoundError fix only covered the explicit-effort sub-case; this general check must catch
+    # the plain switch too, so the warning fires BEFORE the next turn 400s opaquely.
+    assert likely_endpoint_mismatch("gpt-5.5", "https://api.deepseek.com/v1") == "openai"
+    assert likely_endpoint_mismatch("kimi-k2.7-code", "https://api.deepseek.com/v1") == "moonshot"
+    assert likely_endpoint_mismatch("claude-sonnet-4", "https://api.deepseek.com/v1") == "anthropic"
+
+
+@check
+def likely_endpoint_mismatch_no_false_positive_on_matching_or_ambiguous_pairs():
+    # regression guard for a bug caught in review: _ENDPOINT_HOME entries must be a TUPLE of substrings,
+    # not a bare string — a bare string made `for k in keys` iterate individual CHARACTERS, so
+    # "deepseek.com" trivially character-matched "api.openai.com" and flagged deepseek-chat-on-deepseek
+    # as a false-positive mismatch (and silently missed the real gpt-5.5-on-deepseek mismatch).
+    assert likely_endpoint_mismatch("deepseek-chat", "https://api.deepseek.com/v1") is None
+    assert likely_endpoint_mismatch("kimi-k2.7-code", "https://api.moonshot.cn/v1") is None
+    assert likely_endpoint_mismatch("gpt-5.5", "") is None            # default endpoint IS OpenAI
+    assert likely_endpoint_mismatch("gpt-5.5", "https://api.openai.com/v1") is None
+    # a custom/proxy endpoint is ambiguous (could legitimately serve anything) — never warn there
+    assert likely_endpoint_mismatch("gpt-5.5", "https://my-proxy.internal/v1") is None
+    assert likely_endpoint_mismatch("some-future-model", "https://api.deepseek.com/v1") is None
 
 
 def main():

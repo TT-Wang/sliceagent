@@ -65,6 +65,46 @@ def _is_openai_endpoint(base_url: str) -> bool:
     return b == "" or "api.openai.com" in b
 
 
+# name substrings -> the ONE provider that actually serves that model. `/model` only switches the model
+# STRING, never the endpoint (that's `config --use`), so this is the general "will this even resolve"
+# check — broader than capability()'s narrower reasoning-effort gate.
+_NAME_HOME = (
+    (("o1", "o2", "o3", "o4", "o5", "o6", "gpt-3", "gpt-4", "gpt-5", "gpt-6"), "openai"),
+    (("deepseek",), "deepseek"),
+    (("kimi", "moonshot"), "moonshot"),
+    (("claude",), "anthropic"),
+)
+# base_url substring -> the ONE provider that endpoint actually is. An UNMATCHED base_url (custom domain,
+# a local proxy/router) is deliberately left unresolved — such a proxy can legitimately re-route ANY model
+# name to any backend, so warning there would be a false positive (same safe-UNKNOWN posture as capability()).
+_ENDPOINT_HOME = (
+    (("api.openai.com",), "openai"),
+    (("deepseek.com",), "deepseek"),
+    (("moonshot.cn",), "moonshot"),
+    (("anthropic.com",), "anthropic"),
+)
+
+
+def _home(s: str, table: tuple) -> "str | None":
+    # each entry is (tuple-of-substrings, home) — NOT a single bare string, else `for k in keys` iterates
+    # individual CHARACTERS and matches almost anything (caught by a test: deepseek.com false-matched "openai").
+    for keys, home in table:
+        if any(k in s for k in keys):
+            return home
+    return None
+
+
+def likely_endpoint_mismatch(model: str, base_url: str) -> "str | None":
+    """The model's own home provider, IF it's a well-known name (gpt-*/deepseek/kimi/claude) about to be
+    sent to a DIFFERENT well-known endpoint — e.g. 'gpt-5.5' while still connected to DeepSeek. Returns None
+    (never warn) when either side is unrecognized: a custom/proxy endpoint may legitimately serve any name,
+    so a false-positive warning there is worse than a missed one."""
+    m, b = (model or "").lower(), (base_url or "").strip().lower()
+    model_home = _home(m, _NAME_HOME)
+    endpoint_home = "openai" if _is_openai_endpoint(b) else _home(b, _ENDPOINT_HOME)
+    return model_home if (model_home and endpoint_home and model_home != endpoint_home) else None
+
+
 def capability(model: str, base_url: str = "") -> ModelCapability:
     """Resolve the capability record for a model (first matching rule wins; specific before general)."""
     m = (model or "").lower()

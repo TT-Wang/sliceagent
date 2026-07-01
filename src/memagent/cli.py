@@ -121,20 +121,25 @@ def cli_sink(show_slice: bool = False):
 
 
 def _reasoning_note(llm) -> str:
-    """One-line hint on whether the chosen reasoning effort will actually take effect, so /model isn't a
-    silent no-op (gpt-5 high/max needs /v1/responses; non-reasoning models have no effort knob). /model only
-    switches the model STRING, never the endpoint — so 'gpt-5.5' while still connected to another provider
-    (deepseek/moonshot/a proxy) needs its own message: it's not that the model lacks the knob, it's that
-    THIS endpoint doesn't speak OpenAI's reasoning wire format (that pairing used to 404 mid-turn)."""
-    from .model_catalog import capability
+    """One-line hint after a /model or /reasoning switch, so it's never a silent no-op. Checked in order of
+    how badly it fails: (1) the model's name implies a DIFFERENT provider than the current endpoint —
+    /model only switches the model STRING, never the endpoint (that's `config --use`), so 'gpt-5.5' while
+    still connected to DeepSeek used to 'succeed' silently and fail opaquely on the very next real turn (a
+    404 or a 400, always caught by the generic handler as an unhelpful 'internal error'); (2) the requested
+    reasoning effort has no route on this (model, endpoint) pair; (3) high/max needs /v1/responses."""
+    from .model_catalog import capability, likely_endpoint_mismatch
+    base = getattr(llm, "_base_url", "")
+    home = likely_endpoint_mismatch(llm.model, base)
+    if home:
+        label = {"openai": "an OpenAI", "deepseek": "a DeepSeek",
+                 "moonshot": "a Moonshot", "anthropic": "an Anthropic"}.get(home, f"a {home}")
+        return (f"note: {llm.model} looks like {label} model, but you're connected to {base or '(default)'}"
+                f" — it will likely fail on your next message. Run `memagent init` to add {label} provider, "
+                f"then `config --use <id>` to switch (or `/model` with no args to see what's configured).")
     eff = (getattr(llm, "reasoning", "full") or "full").lower()
     if eff == "full":
         return ""
-    base = getattr(llm, "_base_url", "")
     if not capability(llm.model, base).supports_reasoning_effort:
-        if llm.model.lower().startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")) and base:
-            return (f"note: {llm.model} needs OpenAI's real endpoint for reasoning effort — you're connected "
-                    f"to {base}, so it runs at that provider's default. `config --use` to switch endpoints.")
         return f"note: {llm.model} has no reasoning-effort knob — it runs at the provider default."
     return "high/max run WITH tools via /v1/responses." if eff in ("high", "max") else ""
 
