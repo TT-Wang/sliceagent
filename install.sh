@@ -96,9 +96,8 @@ cat <<'EOF'
 
   ✓ sliceagent installed.
 
-  Next:
-    sliceagent init     # guided setup: provider, API key, model (tests your key)
-    sliceagent          # start the agent
+  Next — just one command:
+    sliceagent          # first run walks you through setup (provider, API key), then you're chatting
 
   If 'sliceagent' isn't found, open a NEW terminal (PATH was just updated).
   Docs: https://github.com/TT-Wang/sliceagent

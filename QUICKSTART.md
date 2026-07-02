@@ -15,12 +15,14 @@ installed by default; everything still works without it (plain stdout).
 ## 2. Set up your provider
 
 ```bash
-sliceagent init
+sliceagent
 ```
 
-`init` walks you through it: pick a provider (Moonshot/Kimi, OpenAI, DeepSeek, or a custom OpenAI-compatible
-endpoint), paste your API key (hidden), choose a model. It then **tests the key with one request** and writes
-`~/.sliceagent/config.toml` (mode `0600` — it holds your key). The next `sliceagent` just works.
+Nothing to memorize — the **first run walks you through setup automatically**: pick a provider
+(Moonshot/Kimi, OpenAI, DeepSeek, or a custom OpenAI-compatible endpoint), paste your API key (hidden),
+choose a model. It **tests the key with one request**, writes `~/.sliceagent/config.toml` (mode `0600` —
+it holds your key), and drops you straight into the session. Every later `sliceagent` just starts.
+(Re-configure anytime — add or switch providers — with `sliceagent init`.)
 
 Prefer environment variables? Skip `init` and export them instead:
 

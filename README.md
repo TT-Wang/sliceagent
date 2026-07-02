@@ -112,11 +112,10 @@ Footprint is light (no torch). `pip install -e .` works for a clone too. Homebre
 ## Quickstart
 
 ```bash
-sliceagent init            # guided setup: provider, API key, model → ~/.sliceagent/config.toml (tests your key)
-sliceagent                 # start the agent
+sliceagent                 # that's it — first run walks you through setup (provider, API key, live-tested), then you're in
 ```
 
-`init` writes the config so the next run needs no env vars. Prefer env vars? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints) and skip `init` — there is no default model; sliceagent never picks one for you. Discover every setting with `sliceagent config --list`.
+Setup happens once, in-process, and writes `~/.sliceagent/config.toml` (0600) so every later run just starts. Re-configure anytime with `sliceagent init` (add/switch providers). Prefer env vars? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints) — there is no default model; sliceagent never picks one for you. Discover every setting with `sliceagent config --list`.
 
 → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
