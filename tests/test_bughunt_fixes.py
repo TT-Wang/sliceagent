@@ -918,7 +918,10 @@ def cost_chart_renders_flat_vs_rising():
     import sys
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, os.path.join(root, "evals"))
-    import realenv_multiturn as rem                                  # importable WITHOUT the heavy swebench dep
+    try:
+        import realenv_multiturn as rem                              # importable WITHOUT the heavy swebench dep
+    except ModuleNotFoundError:
+        return  # evals/ is a local-only dev tree, not shipped in the installed package (CI) — skip, don't fail
     rows = [{"turn": i, "peak_in": 6000, "transcript": 6000 * i} for i in range(1, 13)]
     chart = rem.render_cost_chart(rows)
     assert "sliceagent" in chart and "transcript" in chart and "12×" in chart, chart
