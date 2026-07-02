@@ -106,7 +106,18 @@ Iterative coding sessions where a transcript really piles up. Both `gpt-5.5` at 
 | wall · total | **534s** | 659s | **1.2×** |
 | **cost** (cache-aware $) | **$0.60** | $2.12 | **3.6×** |
 
-Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On the 6-turn long-horizon task, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+Per task — note how the transcript agent's peak input scales with the session while the slice stays flat:
+
+| scenario | agent | solved | peak input | total tokens | wall |
+|---|---|:--:|--:|--:|--:|
+| **s1** long-horizon (6 turns) | sliceagent | ✓ | **14,769** | 499k | 257s |
+| | Codex | ✓ | 1,655,714 | 5.17M | 465s |
+| **s2** large-file bug | sliceagent | ✓ | **27,457** | 264k | 150s |
+| | Codex | ✓ | 172,476 | 175k | 65s |
+| **s3** multi-file refactor | sliceagent | ✓ | **20,357** | 240k | 128s |
+| | Codex | ✓ | 166,577 | 172k | 129s |
+
+Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On `s1`, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
 
 > The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. Numbers are small-N, single-trial, same-model; "solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
 
