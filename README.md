@@ -86,12 +86,12 @@ Early, but the **core bet is validated** — see the measured head-to-head bench
 Straight from PyPI (any one of):
 
 ```bash
-uv tool install "sliceagent[tui]"     # uv (recommended)
-pipx install "sliceagent[tui]"        # pipx
-pip install "sliceagent[tui]"         # plain pip
+uv tool install --python 3.12 "sliceagent[tui]"     # uv (recommended — fetches Python itself)
+pipx install "sliceagent[tui]"                      # pipx (needs Python ≥ 3.11 on PATH)
+pip install "sliceagent[tui]"                       # plain pip (needs Python ≥ 3.11)
 ```
 
-Or the one-command bootstrap (installs `uv` if needed, then sliceagent in an isolated tool env):
+Or the one-command bootstrap (installs `uv` if needed, then sliceagent in an isolated tool env — **no prerequisites**, works even when your default Python is 3.9/3.10):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh

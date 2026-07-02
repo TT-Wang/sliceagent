@@ -44,8 +44,11 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 # 2. install (or upgrade) sliceagent as an isolated uv tool
+# --python 3.12: don't inherit whatever python happens to be on PATH (conda base = 3.10,
+# Ubuntu 22.04 = 3.10, macOS system = 3.9 — all below the >=3.11 floor). uv fetches a managed
+# CPython 3.12 automatically when none is installed, so the installer has zero prerequisites.
 info "Installing sliceagent …"
-uv tool install --force "$PKG"
+uv tool install --force --python 3.12 "$PKG"
 
 # 3. make sure uv's tool bin is on PATH for future shells
 uv tool update-shell >/dev/null 2>&1 || warn "Could not auto-update PATH — you may need to add uv's tool bin (see 'uv tool dir') to your PATH."
