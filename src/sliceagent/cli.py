@@ -831,7 +831,13 @@ def main() -> None:
             _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
             record_user(session.active(), line)  # short-range continuity: the RECENT CONVERSATION tier
             _expand_mentions(line)               # @path → pin the file into OPEN FILES
-            build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
+            try:
+                # slice-build phase happens BEFORE run_turn's own KeyboardInterrupt handling — a ctrl-c
+                # here (e.g. during the one-time repo-map build) must cancel the turn, not crash the REPL.
+                build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
+            except KeyboardInterrupt:
+                print("\n  · cancelled")
+                continue
             if os.environ.get("AGENT_TIMING"):   # per-turn latency breakdown (build vs model) → find the hang
                 import time as _tt
                 _b = build

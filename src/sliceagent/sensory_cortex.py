@@ -94,6 +94,17 @@ def _home() -> Optional[Path]:
         return None
 
 
+def _os_home() -> Optional[Path]:
+    """The account's home from the OS user database — independent of the $HOME env var. Guards the
+    home-is-not-a-project rule even when $HOME is overridden (containers, sudo, test sandboxes):
+    without this, a stray package.json in the real home turns the whole home dir into a 'project'."""
+    try:
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except (ImportError, KeyError, OSError):   # pwd is POSIX-only; degrade to the env-based home
+        return None
+
+
 def _marker_root(cwd: Path) -> Optional[Path]:
     """Nearest ancestor (≤6 levels) that looks like a project root, or ``None``.
 
@@ -104,11 +115,11 @@ def _marker_root(cwd: Path) -> Optional[Path]:
         current = cwd.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    home = _home()
+    homes = {h for h in (_home(), _os_home()) if h is not None}
     for depth, parent in enumerate([current, *current.parents]):
         if depth > 6:
             break
-        if parent == home:
+        if parent in homes:
             continue
         try:
             for marker in _PROJECT_MARKERS:
@@ -443,7 +454,8 @@ _CODE_SUFFIX = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb
                 ".exs", ".clj", ".r", ".jl", ".vue", ".sql")
 
 
-def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_chars: int = 12000) -> str:
+def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_chars: int = 12000,
+             max_dirs: int = 4000) -> str:
     """A compact, ignore-aware STRUCTURAL MAP of the project (SENSORY CORTEX — the derived-view tier-B
     resident view, memoized for the session, never a persisted store): directories with their files,
     pruned of VCS/venv/cache + asset/log noise, RANKED by source-density so the real code tree shows
@@ -456,8 +468,17 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_ch
     if not root or not os.path.isdir(root):
         return ""
     rows: list[tuple[str, list[str], int, int]] = []  # (rel, files, total, code_count)
+    walked = 0
     try:
         for dirpath, dirnames, filenames in os.walk(root):  # symlinks not followed
+            # HARD WALK BUDGET — the invariant is that repo_map completes in bounded time on ANY root.
+            # max_entries/max_chars cap the OUTPUT but only after the walk; without this, a huge root
+            # (a home dir mistaken for a project, a giant monorepo) hangs the first slice build for
+            # minutes inside os.walk. Past the budget we map what we saw — bounded beats complete.
+            walked += 1
+            if walked > max_dirs:
+                dirnames[:] = []
+                break
             dirnames[:] = sorted(d for d in dirnames if not _is_ignored(d))
             files = sorted(f for f in filenames
                            if not _is_ignored(f) and not f.endswith(_MAP_SKIP_SUFFIX))

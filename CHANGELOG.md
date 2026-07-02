@@ -5,6 +5,20 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-02
+
+Nothing may hang the user — three fixes from a live first-run reproduction.
+
+### Fixed
+- **Repo-map walk is hard-bounded** (`max_dirs` budget): the first slice build can no longer hang for
+  minutes when the workspace root is huge (a home directory mistaken for a project, a giant monorepo).
+  Output caps existed; now the walk itself is bounded — worst case ~1s, maps what it saw.
+- **The OS-account home never counts as a project root**, independent of `$HOME`: a stray
+  `package.json` in the real home no longer turns the entire home directory into a "project"
+  (the prior guard compared against `$HOME`, which containers/sandboxes/sudo can override).
+- **Ctrl-C during the slice build cancels the turn cleanly** (`· cancelled`) instead of crashing the
+  REPL with a traceback — the build phase ran before the turn's interrupt handling.
+
 ## [0.1.1] — 2026-07-02
 
 First-run onboarding, hardened by a live stranger walkthrough.
