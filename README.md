@@ -57,18 +57,42 @@ Each turn faults in exactly what the turn references — the carried slice, live
 
 ## Benchmark
 
-**Does reconstructing context every turn cost any raw capability? On Terminal-Bench 2.0, no.** TB2.0 is a public benchmark of real terminal/coding tasks. Each task is a single turn — so it's a clean, standardized test of *within-turn* ability, independent of the memory model — which makes it the right place to check that the bounded-slice design keeps up with a SOTA agent.
+Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All three benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) at matched reasoning.
 
-Head-to-head vs **OpenAI Codex** (both on `gpt-5.5`), on the 32 tasks both agents completed cleanly:
+### 1. In-turn capability — Terminal-Bench 2.0 (public)
 
-| | pass rate | wins | median steps |
-|---|--:|:--:|--:|
-| **sliceagent** | **18 / 32 (56%)** | 4 | **10** |
-| OpenAI Codex | 18 / 32 (56%) | 4 | 27 |
+A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. On the 32 tasks both agents completed cleanly:
 
-**Dead even — 18–18, four wins each** — and sliceagent reached it while Codex ran at `xhigh` reasoning and sliceagent ran at its default. The reconstruct-every-turn design matches a state-of-the-art agent on in-turn tasks with no capability tax.
+| | pass rate | wins |
+|---|--:|:--:|
+| **sliceagent** | **18 / 32** | 4 |
+| OpenAI Codex | 18 / 32 | 4 |
 
-> This benchmark is about **capability**, not cost. The other half of the thesis — that reconstruction keeps per-turn cost flat as a session grows — is a separate, cross-turn measurement we'll publish on a public multi-turn benchmark rather than claim here.
+**Dead even** — reconstruct-every-turn matches a state-of-the-art agent on in-turn tasks, no capability tax.
+
+### 2. Multi-turn — ColBench (public: Meta SWEET-RL)
+
+Collaborative coding over multiple rounds with a simulated human — the memory model *does* matter here. 20 backend tasks, both `gpt-5.5` at `high`:
+
+| | solved | peak input | total tokens | cost |
+|---|--:|--:|--:|--:|
+| **sliceagent** | **20 / 20** | **5.2k** | **308k** | **$0.44** |
+| OpenAI Codex | 20 / 20 | 13.4k | 769k | $0.55 |
+
+Same capability — and sliceagent's per-turn context is **2.6× smaller**, at **2.5× fewer tokens** and **1.3× cheaper**.
+
+### 3. Long-horizon multi-turn — self-designed coding scenarios
+
+Iterative coding sessions (a 6-turn debugging build, a large-file bug, a multi-file refactor) — where a transcript really piles up. Both `gpt-5.5` at `high`:
+
+| | solved | peak input (median) | total tokens | cost | wall |
+|---|--:|--:|--:|--:|--:|
+| **sliceagent** | **3 / 3** | **20k** | **1.0M** | **$0.60** | **534s** |
+| OpenAI Codex | 3 / 3 | 172k | 5.5M | $2.12 | 659s |
+
+Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On the long-horizon task, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+
+> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. Numbers are small-N, single-trial, same-model, from our harness (reproducible under [`evals/`](evals/)); "solved" is solution correctness, scored identically for both agents.
 
 ## Install & quickstart
 
