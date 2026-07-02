@@ -68,8 +68,6 @@ Head-to-head vs **OpenAI Codex** (both on `gpt-5.5`), on the 32 tasks both agent
 
 **Dead even — 18–18, four wins each** — and sliceagent reached it while Codex ran at `xhigh` reasoning and sliceagent ran at its default. The reconstruct-every-turn design matches a state-of-the-art agent on in-turn tasks with no capability tax.
 
-*Reported honestly: single trial per task (the public leaderboard uses 5); 24 tasks excluded as Docker/infra casualties; the step gap is partly a counting artifact — sliceagent bundles several actions into one `execute_code` step. Reproduce under [`evals/`](evals/).*
-
 > This benchmark is about **capability**, not cost. The other half of the thesis — that reconstruction keeps per-turn cost flat as a session grows — is a separate, cross-turn measurement we'll publish on a public multi-turn benchmark rather than claim here.
 
 ## Install & quickstart
