@@ -57,3 +57,6 @@ ROADMAP.md
 
 # all of docs/ is internal (architecture/spec/brand assets) — not published; untracked 2026-07-02
 docs/
+
+# ColBench raw HF dataset (huge; selected tasks are committed under evals/colbench/tasks/)
+evals/colbench/data/
