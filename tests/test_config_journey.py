@@ -48,6 +48,18 @@ def every_candidate_carries_its_provider_for_endpoint_switch():
 
 
 @check
+def env_current_model_is_labeled_honestly_not_as_a_provider():
+    class _EnvLlm:                                    # env model NOT in any configured provider's list
+        model = "gpt-5.5"
+        _base_url = "https://api.deepseek.com/v1"     # deepseek endpoint must NOT make it say "deepseek"
+        reasoning = "full"
+    cands = _model_candidates(_EnvLlm(), _CFG)
+    m, grp, pid = cands[0]
+    assert m == "gpt-5.5" and pid is None
+    assert grp == "current (env)", f"env model must not masquerade as a configured provider, got {grp!r}"
+
+
+@check
 def no_providers_configured_falls_back_to_known_set():
     cands = _model_candidates(_Llm(), Config({}))
     assert cands, "env-only setups still need a menu"

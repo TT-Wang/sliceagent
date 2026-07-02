@@ -5,6 +5,13 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-07-02
+
+### Fixed
+- `/model`: the current env-configured model row is now labeled `current (env)` instead of the
+  provider family name — it could masquerade as a configured provider (e.g. an env `gpt-5.5` on a
+  DeepSeek endpoint showed as "deepseek").
+
 ## [0.1.6] — 2026-07-02
 
 The clear config journey: one wizard, two doors, an honest /model.

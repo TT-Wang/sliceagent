@@ -849,8 +849,7 @@ def _model_candidates(llm, cfg):
                     out.append((m, pid, pid))
         out.sort(key=lambda t: (t[1], t[0]))
         if all(m != llm.model for m, _, _ in out):   # an env-overridden current model still shows first
-            base = getattr(llm, "_base_url", "")
-            out.insert(0, (llm.model, capability(llm.model, base).family, None))
+            out.insert(0, (llm.model, "current (env)", None))  # not a configured provider — label honestly
     else:
         known = ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat", "kimi-k2-0905-preview",
                  "claude-sonnet-5"]
