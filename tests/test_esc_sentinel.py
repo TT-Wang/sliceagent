@@ -26,9 +26,10 @@ def check(fn):
 
 
 def _run_child(code: str, presses: list, settle=0.35, timeout=8) -> int:
-    """Spawn `code` on a pty slave, wait `settle`s, send each byte string in `presses` with a small gap,
-    then wait for exit. Returns the child's exit code (or -1 on timeout, -2 if killed by a signal it
-    didn't catch)."""
+    """Spawn `code` on a pty slave, wait `settle`s, then walk `presses`: a bytes item is written to the
+    child's stdin (small gap after); a str item is a MARKER — block until the child has printed it (≤3s)
+    before continuing. Markers make key delivery deterministic (no fixed-sleep race against child startup
+    or a still-active sentinel window). Returns the child's exit code (or -1 on timeout)."""
     master, slave = pty.openpty()
     env = {**os.environ, "PYTHONPATH": os.path.abspath(_SRC)}
     p = subprocess.Popen([sys.executable, "-c", code], stdin=slave, stdout=slave,
@@ -37,18 +38,35 @@ def _run_child(code: str, presses: list, settle=0.35, timeout=8) -> int:
     import select
     import threading
     stop = threading.Event()
+    buf = bytearray()                    # everything the child has written, for marker waits
+    buf_lock = threading.Lock()
 
     def drain():
         while not stop.is_set():
             try:
                 r, _, _ = select.select([master], [], [], 0.1)
                 if r:
-                    os.read(master, 4096)
+                    data = os.read(master, 4096)
+                    with buf_lock:
+                        buf.extend(data)
             except OSError:      # master closed by the main thread while select()/read() was in flight
                 break
     threading.Thread(target=drain, daemon=True).start()
+
+    def wait_marker(marker: bytes, deadline: float = 3.0) -> None:
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            with buf_lock:
+                if marker in buf:
+                    return
+            time.sleep(0.02)
+        # fall through on timeout — the exit-code assertion reports the real failure
+
     time.sleep(settle)
     for chunk in presses:
+        if isinstance(chunk, str):       # marker: wait until the child says it's ready
+            wait_marker(chunk.encode())
+            continue
         try:
             os.write(master, chunk)
         except OSError:
@@ -147,8 +165,10 @@ _CODE_PAUSE_RESUME_ROUNDTRIP = (
     "s = make_esc_sentinel(); s.start()\n"
     "time.sleep(0.3)\n"
     "s.pause()\n"                                  # mirrors _pause_active_live() before a confirm() prompt
+    "print('MARK_SELECT_READY', flush=True)\n"     # handshake: selector owns the tty from here
     "idx = _arrow_select(['Yes', 'No', 'Always'], default=0)\n"
     "s.resume()\n"                                  # mirrors _resume_active_esc_sentinel() after confirm()
+    "print('MARK_RESUMED', flush=True)\n"          # handshake: sentinel re-armed, Esc may fire now
     "if idx != 1:\n"
     "    os._exit(60 + (idx if isinstance(idx, int) else 9))\n"   # arrow-select result wrong -> sentinel interfered
     "try:\n"
@@ -164,14 +184,11 @@ _CODE_PAUSE_RESUME_ROUNDTRIP = (
 def confirm_arrow_select_unaffected_by_a_paused_sentinel_and_resumes_after():
     if _skip_if_no_pty():
         return
-    # drive: right-arrow (default=0 -> idx=1), Enter (choose), THEN (after the child resumes) a bare Esc
-    rc = _run_child(_CODE_PAUSE_RESUME_ROUNDTRIP, [b"\x1b[C", b"\r"], settle=0.5)
-    # after the arrow+Enter, give _arrow_select+resume time to settle before the Esc lands — the driver
-    # already waits 0.15s between chunks; send the Esc as a THIRD chunk once the prior two are queued
-    if rc not in (42,):
-        # retry once with an explicit extra Esc after more settle time (arrow_select / resume timing is
-        # host-dependent under CI); a real flake here would indicate a genuine timing bug, not test noise
-        rc = _run_child(_CODE_PAUSE_RESUME_ROUNDTRIP, [b"\x1b[C", b"\r", b"\x1b"], settle=0.5)
+    # drive, handshake-gated: wait for the selector to own the tty -> right-arrow (default=0 -> idx=1) ->
+    # Enter (choose) -> wait for the sentinel to re-arm -> bare Esc. The markers eliminate the startup /
+    # sentinel-window races (keys can otherwise land while the sentinel still owns stdin and be consumed).
+    rc = _run_child(_CODE_PAUSE_RESUME_ROUNDTRIP,
+                    ["MARK_SELECT_READY", b"\x1b[C", b"\r", "MARK_RESUMED", b"\x1b"])
     assert rc == 42, (f"expected: arrow-select returns idx=1 (60+1=61 on mismatch) AND a later Esc still "
                       f"aborts (42) — got {rc}")
 

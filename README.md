@@ -43,18 +43,36 @@ memagent's memory is organized like a brain: fast, lossy **perception** of the l
 | **Hippocampus** — episodic memory | `hippocampus.py` | Losslessly records each turn; `recall_history` pages a specific past turn back in on demand. |
 | **Neocortex** — long-term memory | `neocortex.py` | Distills successful episodes into durable cross-session lessons, auto-surfaced when relevant. |
 
-```mermaid
-flowchart LR
-  SC["Sensory cortex<br/>live files, git, repo map"] --> SEED["Seed to PFC Slice<br/>bounded working memory"]
-  subgraph durable["Durable memory (between turns)"]
-    HC["Hippocampus<br/>episodic: past turns"]
-    NC["Neocortex<br/>semantic: distilled lessons"]
-  end
-  durable -.->|recall| SEED
-  SEED --> LLM --> ACT["Tools / actions"]
-  ACT -->|observations| SEED
-  ACT -->|seal at turn end| HC
-  HC -->|on success, consolidate| NC
+```text
+┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
+│        PFC        │ │  Sensory Cortex   │ │    Hippocampus    │ │     Neocortex     │
+│      pfc.py       │ │ sensory_cortex.py │ │  hippocampus.py   │ │   neocortex.py    │
+│  working memory   │ │  live perception  │ │  episodic memory  │ │  durable lessons  │
+└─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘
+          │                     │                     │                     │
+          └─────────────────────┴──────────┬──────────┴─────────────────────┘
+                                           │
+                                           ▼
+      ┌────────────────────────────────────────────────────────────────────────┐
+      │                 GLOBAL WORKSPACE  —  this turn's seed                  │
+      │                 seed.py  make_build_slice() / build()                  │
+      │           + prompt.py  (SYSTEM_PROMPT, stable cache prefix)            │
+      └────────────────────────────────────────────────────────────────────────┘
+                                           │
+                                           ▼
+                         ┌───────────────────────────────────┐
+                         │             LLM turn              │
+                         │ tool calls accumulate within-turn │
+                         └───────────────────────────────────┘
+                                           │
+                                           ▼
+                      ┌─────────────────────────────────────────┐
+                      │               PFC updated               │
+                      │ pfc.py  slice_sink() folds events back  │
+                      └─────────────────────────────────────────┘
+
+  ↻  next turn: the PFC slice carries forward —
+     everything else re-derives live from disk.
 ```
 
 Each turn, `seed.py` faults in exactly what the turn references — the carried PFC slice, live sensory-cortex views, and any relevant neocortex lessons — and hands the model that bounded **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into the hippocampus; on success, the neocortex consolidates it into a durable lesson. Net effect: **per-turn context stays flat no matter how long the session runs.**
@@ -76,10 +94,9 @@ Prefer to run it yourself (any one of):
 ```bash
 uv tool install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"    # uv
 pipx install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"       # pipx
-docker run -it -e LLM_API_KEY=$LLM_API_KEY -v "$PWD:/work" -w /work ghcr.io/tt-wang/memagent   # container
 ```
 
-Footprint is light (no torch). `pip install -e .` works for a clone too. PyPI / Homebrew arrive in v0.2 once `memem` is on PyPI.
+Footprint is light (no torch). `pip install -e .` works for a clone too. `ripgrep` is recommended (code search degrades gracefully without it). PyPI / Homebrew / Docker arrive in v0.2 once `memem` is on PyPI.
 
 ## Quickstart
 
@@ -88,8 +105,7 @@ memagent init            # guided setup: provider, API key, model → ~/.memagen
 memagent                 # start the agent
 ```
 
-`init` writes the config so the next run needs no env vars. Already have them? `export LLM_API_KEY=…
-[LLM_BASE_URL=…]` and skip `init`. Discover every setting with `memagent config --list`.
+`init` writes the config so the next run needs no env vars. Prefer env vars? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints) and skip `init` — there is no default model; memagent never picks one for you. Discover every setting with `memagent config --list`.
 
 → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
@@ -134,7 +150,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `AGENT_POLICY` | `teenager` | permission mode |
 | `AGENT_SANDBOX` | `local` | `local` or `docker` (isolated) |
 | `AGENT_MAX_STEPS` | `60` | per-turn step ceiling |
-| `MEMEM_VAULT` | *(unset)* | path that enables cross-session memory |
+| `MEMAGENT_VAULT` | `~/.memagent/vault` | where episodic memory + task state persist (cross-session memory is on by default) |
 | `AGENT_VERIFY_CMD` | *(unset)* | test command used as the verification oracle |
 
 ## Benchmarks
@@ -187,7 +203,7 @@ The loop dispatches events; the host composes sinks (slice-updater, durable log,
 - *Read:* each task recalls relevant lessons via memem's hybrid retrieval into the slice.
 - *Write (`neocortex.py`):* after a task **succeeds**, consolidation distills a durable lesson from what happened and `remember()`s it — so a future similar task recalls it. This is what makes memagent memory-*native*. It's an event sink, signal-dense by construction: it mines **only a validated episode** (a successful turn in which an error was hit and then cleared — no error / no success / no lesson), dedups within a session, and prints `💡 learned: …`. `AGENT_MINE=deterministic` (default — cheap, no extra LLM call) | `llm` (one-shot distillation for a crisper lesson) | `off`.
 
-Configure via **`memagent.toml`** (persistent; see [`memagent.toml.example`](memagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `memagent.toml` > user `~/.memagent/config.toml` > default. Keys: `AGENT_POLICY` (`baby-sitter`/`teenager`/`let-it-go`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `MEMEM_VAULT` (enable memem), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
+Configure via **`memagent.toml`** (persistent; see [`memagent.toml.example`](memagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `memagent.toml` > user `~/.memagent/config.toml` > default. Keys: `AGENT_POLICY` (`baby-sitter`/`teenager`/`let-it-go`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `MEMAGENT_VAULT` (memory location), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
 
 ## Architecture (build / plug / integrate)
 

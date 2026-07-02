@@ -26,7 +26,8 @@ class EnvVar:
 
 REGISTRY: list[EnvVar] = [
     # ── agent behaviour ───────────────────────────────────────────────────────────────────────
-    EnvVar("AGENT_MODEL", "agent", "LLM model id to drive the agent.", "gpt-5.5"),
+    EnvVar("AGENT_MODEL", "agent", "LLM model id to drive the agent. REQUIRED — no default; set it here "
+           "or pick a provider+model via `memagent init`.", ""),
     EnvVar("AGENT_MODEL_FALLBACK", "agent", "Larger-context model to switch to ONCE if the context overflows "
            "even after compaction (secondary net; the bounded slice is the primary).", ""),
     EnvVar("AGENT_PROVIDER", "agent", "Default provider id to use from the config's [providers.<id>] tables "

@@ -50,6 +50,12 @@ uv tool install --force "$PKG"
 # 3. make sure uv's tool bin is on PATH for future shells
 uv tool update-shell >/dev/null 2>&1 || warn "Could not auto-update PATH — you may need to add uv's tool bin (see 'uv tool dir') to your PATH."
 
+# 4. soft prerequisite: ripgrep powers the code index (memagent still runs without it, just searches less well)
+if ! command -v rg >/dev/null 2>&1; then
+  warn "ripgrep (rg) not found — memagent works without it, but code search is much better with it."
+  warn "Install it:  brew install ripgrep  |  apt install ripgrep  |  https://github.com/BurntSushi/ripgrep"
+fi
+
 cat <<'EOF'
 
   ✓ memagent installed.
