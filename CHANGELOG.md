@@ -5,6 +5,10 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-07-02
+
+First public release.
+
 ### Added
 - **`memagent init`** — guided first-run setup (provider, API key, model); tests the key and writes
   `~/.memagent/config.toml` (0600). Config-persisted keys mean the next run needs no env vars.
@@ -55,7 +59,7 @@ this project aims for [Semantic Versioning](https://semver.org/).
   re-rolls via retry when nothing was assembled).
 - Session teardown is guarded and bounded — a stuck MCP server / index write can't freeze exit.
 
-## [0.1.0]
-- Initial Python core: the slice/cache-not-log loop (`slice.py`, `loop.py`), typed memory tiers,
-  reconstruction seam, event-sink host. Tools, skills, subagents, MCP, plugins, sandbox, permission policy,
-  session/topic resume, durable memory (memem). Core idea validated in the JS `prototype/`.
+### Core
+- Initial Python core: the slice/cache-not-log loop, typed memory tiers, reconstruction seam,
+  event-sink host. Tools, skills, subagents, MCP, plugins, sandbox, permission policy,
+  session/topic resume, durable cross-session memory (memem).
