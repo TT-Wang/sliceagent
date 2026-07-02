@@ -61,38 +61,65 @@ Two questions decide whether reconstructing context every turn actually works: d
 
 ### 1. In-turn capability — Terminal-Bench 2.0 (public)
 
-A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. On the 32 tasks both agents completed cleanly:
+A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. On the 32 tasks both agents completed cleanly (sliceagent at default reasoning, Codex at `xhigh`):
 
-| | pass rate | wins |
-|---|--:|:--:|
-| **sliceagent** | **18 / 32** | 4 |
-| OpenAI Codex | 18 / 32 | 4 |
+| metric | sliceagent | OpenAI Codex |
+|---|--:|--:|
+| **pass rate** | **18 / 32 (56%)** | 18 / 32 (56%) |
+| wins (exclusive) | 4 | 4 |
+| median steps / task | **10** | 27 |
 
-**Dead even** — reconstruct-every-turn matches a state-of-the-art agent on in-turn tasks, no capability tax.
+**Dead even, 4 wins each** — reconstruct-every-turn matches a state-of-the-art agent on in-turn tasks with no capability tax.
 
 ### 2. Multi-turn — ColBench (public: Meta SWEET-RL)
 
 Collaborative coding over multiple rounds with a simulated human — the memory model *does* matter here. 20 backend tasks, both `gpt-5.5` at `high`:
 
-| | solved | peak input | total tokens | cost |
-|---|--:|--:|--:|--:|
-| **sliceagent** | **20 / 20** | **5.2k** | **308k** | **$0.44** |
-| OpenAI Codex | 20 / 20 | 13.4k | 769k | $0.55 |
+| metric | sliceagent | OpenAI Codex | ratio |
+|---|--:|--:|:--:|
+| **solved** | **20 / 20** | 20 / 20 | parity |
+| peak input · median | **5,191** | 13,415 | **2.6×** |
+| peak input · mean | **5,188** | 13,424 | **2.6×** |
+| input tokens · total | **284k** | 760k | 2.7× |
+| ↳ served from cache | 50% | 57% | — |
+| output tokens · total | 24.3k | 8.8k | 0.4× |
+| **total tokens** | **308k** | 769k | **2.5×** |
+| rounds · median | 3 | 3 | — |
+| wall · median/turn | 26s | 26s | ≈ |
+| **cost** (cache-aware $) | **$0.44** | $0.55 | **1.27×** |
 
-Same capability — and sliceagent's per-turn context is **2.6× smaller**, at **2.5× fewer tokens** and **1.3× cheaper**.
+Same capability — **2.6× smaller per-turn context, 2.5× fewer tokens, 1.3× cheaper**, at parity wall.
 
 ### 3. Long-horizon multi-turn — self-designed coding scenarios
 
-Iterative coding sessions (a 6-turn debugging build, a large-file bug, a multi-file refactor) — where a transcript really piles up. Both `gpt-5.5` at `high`:
+Iterative coding sessions where a transcript really piles up. Both `gpt-5.5` at `high`. Reproduce with [`benchmarks/run.py`](benchmarks/) (the scenarios are in [`benchmarks/multiturn_coding/`](benchmarks/multiturn_coding)):
 
-| | solved | peak input (median) | total tokens | cost | wall |
-|---|--:|--:|--:|--:|--:|
-| **sliceagent** | **3 / 3** | **20k** | **1.0M** | **$0.60** | **534s** |
-| OpenAI Codex | 3 / 3 | 172k | 5.5M | $2.12 | 659s |
+| metric | sliceagent | OpenAI Codex | ratio |
+|---|--:|--:|:--:|
+| **solved** | **3 / 3** | 3 / 3 | parity |
+| peak input · median | **20,357** | 172,476 | **8.5×** |
+| peak input · mean | **20,861** | 664,922 | **32×** |
+| input tokens · total | **977k** | 5.44M | 5.6× |
+| ↳ served from cache | 81% | 89% | — |
+| output tokens · total | **26.8k** | 77.9k | 2.9× |
+| **total tokens** | **1.0M** | 5.5M | **5.5×** |
+| wall · total | **534s** | 659s | **1.2×** |
+| **cost** (cache-aware $) | **$0.60** | $2.12 | **3.6×** |
 
-Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On the long-horizon task, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+Per task — note how the transcript agent's peak input scales with the session while the slice stays flat:
 
-> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. Numbers are small-N, single-trial, same-model, from our harness (reproducible under [`evals/`](evals/)); "solved" is solution correctness, scored identically for both agents.
+| scenario | agent | solved | steps | peak input | total tokens | wall |
+|---|---|:--:|--:|--:|--:|--:|
+| **s1** long-horizon (6 turns) | sliceagent | ✓ | 41 | **14,769** | 499k | 257s |
+| | Codex | ✓ | 6 | 1,655,714 | 5.17M | 465s |
+| **s2** large-file bug | sliceagent | ✓ | 12 | **27,457** | 264k | 150s |
+| | Codex | ✓ | 1 | 172,476 | 175k | 65s |
+| **s3** multi-file refactor | sliceagent | ✓ | 17 | **20,357** | 240k | 128s |
+| | Codex | ✓ | 1 | 166,577 | 172k | 129s |
+
+Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On `s1`, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+
+> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. Numbers are small-N, single-trial, same-model; "solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
 
 ## Install & quickstart
 

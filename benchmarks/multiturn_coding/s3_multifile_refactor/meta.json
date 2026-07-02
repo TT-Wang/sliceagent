@@ -1,0 +1,9 @@
+{
+  "name": "s3_multifile_refactor",
+  "stressor": "multi-file refactor: working set must hold ALL edited files without bloating",
+  "turns": 1,
+  "max_steps_per_turn": 28,
+  "use_code_index": true,
+  "source_note": "Purpose-built 'eventbus' package (16 Python modules) authored for this benchmark. Rename the core handler method handle(event) -> process(event, context) AND thread a new required Context parameter through the entire publish -> dispatcher -> middleware -> handler call chain. Exactly 8 files must change consistently (handler.py, 4 concrete handlers, middleware.py, dispatcher.py, bus.py); util.py / version.py are distractors that must NOT change (they contain the substring 'handle' as prose / an unrelated file-handle helper, so blanket find-replace breaks them).",
+  "discriminator": "A coherent rename+parameter-threading must be applied identically across 8 interdependent files (base class, 4 concrete handlers, dispatcher, 2 middleware classes wrapped in middleware.py, bus) AND the Context.depth must be threaded with child() per layer; a bounded-slice agent keeps all edited files in its working set and stays consistent, while a growing-transcript agent must re-derive the call chain repeatedly and tends to leave one site (a middleware, a handler, or the dispatcher terminal) on the old signature or forget to thread the context into one handler."
+}
