@@ -1,6 +1,6 @@
 # memagent
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml) [![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![CI](https://github.com/TT-Wang/memagent/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/memagent/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml) [![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 
 A **coding agent with a new context-engineering framework**, built for long-horizon work. Its core bet is a different memory model from every mainstream agent:
 

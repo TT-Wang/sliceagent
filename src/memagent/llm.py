@@ -215,7 +215,12 @@ class OpenAILLM:
         # the SDK's own (cleaner) timeout fires first when it can, and SIGALRM only catches the stalls
         # the read-timeout misses (silent mid-response connections).
         self._hard_timeout = max(int(timeout) + 15, 30)
-        self.model = model or os.environ.get("AGENT_MODEL") or "gpt-5.5"
+        # No built-in default model — the user picks (parallels the CLI's model gate; a silent
+        # fallback here would contradict it for library/embedding callers).
+        self.model = model or os.environ.get("AGENT_MODEL") or ""
+        if not self.model:
+            raise ValueError("No model configured. Pass model=... or set AGENT_MODEL "
+                             "(interactive setup: `memagent init`).")
         self._base_url = kwargs.get("base_url") or ""
         # Provider-AGNOSTIC reasoning intent: "full" (default) keeps the model's reasoning; "fast"
         # minimizes it (wall-clock tracks reasoning tokens, and the slice reconstructs ground-truth

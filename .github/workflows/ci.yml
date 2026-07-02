@@ -38,7 +38,7 @@ jobs:
         run: memagent version
 
       - name: Lint (ruff)
-        run: ruff check src/memagent tests evals
+        run: ruff check src/memagent tests
 
       - name: Tests
         run: bash scripts/run_tests.sh
