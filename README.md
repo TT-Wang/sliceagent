@@ -75,18 +75,18 @@ A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. 
 
 Collaborative coding over multiple rounds with a simulated human — the memory model *does* matter here. 20 backend tasks, both `gpt-5.5` at `high`:
 
-| metric | sliceagent | OpenAI Codex | ratio |
+| metric | sliceagent | OpenAI Codex | % of Codex |
 |---|--:|--:|:--:|
 | **solved** | **20 / 20** | 20 / 20 | parity |
-| peak input · median | **5,191** | 13,415 | **2.6×** |
-| peak input · mean | **5,188** | 13,424 | **2.6×** |
-| input tokens · total | **284k** | 760k | 2.7× |
+| peak input · median | **5,191** | 13,415 | **39%** |
+| peak input · mean | **5,188** | 13,424 | **39%** |
+| input tokens · total | **284k** | 760k | 37% |
 | ↳ served from cache | 50% | 57% | — |
-| output tokens · total | 24.3k | 8.8k | 0.4× |
-| **total tokens** | **308k** | 769k | **2.5×** |
+| output tokens · total | 24.3k | 8.8k | 276% |
+| **total tokens** | **308k** | 769k | **40%** |
 | rounds · median | 3 | 3 | — |
-| wall · median/turn | 26s | 26s | ≈ |
-| **cost** (cache-aware $) | **$0.44** | $0.55 | **1.27×** |
+| wall · median/turn | 26s | 26s | 100% |
+| **cost** (cache-aware $) | **$0.44** | $0.55 | **80%** |
 
 Same capability — **2.6× smaller per-turn context, 2.5× fewer tokens, 1.3× cheaper**, at parity wall.
 
@@ -94,17 +94,17 @@ Same capability — **2.6× smaller per-turn context, 2.5× fewer tokens, 1.3× 
 
 Iterative coding sessions where a transcript really piles up. Both `gpt-5.5` at `high`. Reproduce with [`benchmarks/run.py`](benchmarks/) (the scenarios are in [`benchmarks/multiturn_coding/`](benchmarks/multiturn_coding)):
 
-| metric | sliceagent | OpenAI Codex | ratio |
+| metric | sliceagent | OpenAI Codex | % of Codex |
 |---|--:|--:|:--:|
 | **solved** | **3 / 3** | 3 / 3 | parity |
-| peak input · median | **20,357** | 172,476 | **8.5×** |
-| peak input · mean | **20,861** | 664,922 | **32×** |
-| input tokens · total | **977k** | 5.44M | 5.6× |
+| peak input · median | **20,357** | 172,476 | **12%** |
+| peak input · mean | **20,861** | 664,922 | **3%** |
+| input tokens · total | **977k** | 5.44M | 18% |
 | ↳ served from cache | 81% | 89% | — |
-| output tokens · total | **26.8k** | 77.9k | 2.9× |
-| **total tokens** | **1.0M** | 5.5M | **5.5×** |
-| wall · total | **534s** | 659s | **1.2×** |
-| **cost** (cache-aware $) | **$0.60** | $2.12 | **3.6×** |
+| output tokens · total | **26.8k** | 77.9k | 34% |
+| **total tokens** | **1.0M** | 5.5M | **18%** |
+| wall · total | **534s** | 659s | **81%** |
+| **cost** (cache-aware $) | **$0.60** | $2.12 | **28%** |
 
 Per task — note how the transcript agent's peak input scales with the session while the slice stays flat:
 

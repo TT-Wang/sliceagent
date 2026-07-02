@@ -30,13 +30,13 @@ It drives sliceagent over each scenario's turns, scores the final repo with `ver
 
 ## Published results (sliceagent vs OpenAI Codex, both `gpt-5.5` at `high`)
 
-| metric | sliceagent | Codex | ratio |
+| metric | sliceagent | Codex | % of Codex |
 |---|--:|--:|--:|
 | solved | 3 / 3 | 3 / 3 | parity |
-| peak input (median) | **20k** | 172k | **8.5×** |
-| peak input (mean) | **21k** | 665k | **32×** |
-| total tokens | **1.0M** | 5.5M | **5.5×** |
-| cost (cache-aware) | **$0.60** | $2.12 | **3.6×** |
-| wall (total) | **534s** | 659s | **1.2×** |
+| peak input (median) | **20k** | 172k | **12%** |
+| peak input (mean) | **21k** | 665k | **3%** |
+| total tokens | **1.0M** | 5.5M | **18%** |
+| cost (cache-aware) | **$0.60** | $2.12 | **28%** |
+| wall (total) | **534s** | 659s | **81%** |
 
 On `s1` (6 turns), Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that widens with session length. See [`README.md`](../README.md#benchmark) for the full picture including the public [ColBench](https://huggingface.co/datasets/facebook/collaborative_agent_bench) run.
