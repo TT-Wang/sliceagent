@@ -27,8 +27,9 @@ scratch/
 evals/prompt_ab/variants/
 evals/prompt_ab/runs/
 
-# local memagent state / monitor runtime (personal; not part of the repo)
-.memagent/
+# local sliceagent state / monitor runtime (personal; not part of the repo)
+.sliceagent/
+.memagent/          # legacy pre-rename state dir (ignore so an upgraded checkout stays clean)
 monitor/
 brain/
 .mindmux/

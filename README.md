@@ -81,6 +81,8 @@ Each turn, `seed.py` faults in exactly what the turn references — the carried 
 
 Early, but the **core bet is validated** — see the measured head-to-head benchmarks below. The production build is Python and aligns with [memem](https://github.com/TT-Wang/memem).
 
+**Pre-1.0.** sliceagent follows [SemVer](https://semver.org/). While on `0.x`, CLI flags, config keys, env vars, and the Python API may change between releases; breaking changes are called out in the [CHANGELOG](CHANGELOG.md). Benchmark numbers are small-N and honestly reported — treat them as directional until the reproducible harness in [`evals/`](evals/) is run on your own hardware/model.
+
 ## Install
 
 One command — Linux, macOS, WSL2:
@@ -165,7 +167,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 
 ## Benchmarks
 
-The bet — *flat per-turn cost from reconstruction, at capability parity* — is measured, not asserted. All runs use `gpt-5.5`.
+The bet — *flat per-turn cost from reconstruction, at capability parity* — is measured, not asserted. All runs use `gpt-5.5` (any model works via `AGENT_MODEL`; the result is the relative per-turn-cost *shape*, which is model-independent). Reproduce with the harnesses under [`evals/`](evals/) (`h2h_run.py`, `realenv_multiturn.py`, `swebench/`).
 
 **The moat: per-turn input stays flat while a transcript grows.** Head-to-head vs Kimi Code (a strong transcript-based agent) on hard multi-turn tasks:
 

@@ -38,8 +38,16 @@ from .scheduler import run_scheduled
 
 def _as_text(out):
     """Preserve a ToolText (str subclass carrying .ok); coerce anything non-str defensively. Used so the
-    scheduler step does not strip the registry's structured success flag back to a plain string."""
-    return out if isinstance(out, str) else str(out)
+    scheduler step does not strip the registry's structured success flag back to a plain string.
+    None → "" (not the literal "None") and bytes → decoded text (not the b'…' repr) — a tool that returns
+    those must not poison the slice with a Python-object spelling."""
+    if isinstance(out, str):                 # includes ToolText (str subclass carrying .ok)
+        return out
+    if out is None:
+        return ""
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out).decode("utf-8", "replace")
+    return str(out)
 
 
 # Path-targeted file mutators — a read of a path written by one of these IN THE SAME BATCH must not be

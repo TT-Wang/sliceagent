@@ -1,5 +1,5 @@
 name = "hello"
 version = "0.1.0"
 description = "Reference plugin: contributes a tool and a skill via register(ctx)."
-# Drop a plugin directory like this into .memagent/plugins/ (project) or ~/.memagent/plugins/
-# (user), or point [plugins].dirs in memagent.toml at a parent directory of it.
+# Drop a plugin directory like this into .sliceagent/plugins/ (project) or ~/.sliceagent/plugins/
+# (user), or point [plugins].dirs in sliceagent.toml at a parent directory of it.

@@ -1421,6 +1421,15 @@ def slash_handlers_print_bracketed_paths_without_markup_crash():
     assert raised, "sanity: '[/]' DOES break Rich with markup on (so markup=False is load-bearing)"
 
 
+@check
+def as_text_coerces_none_and_bytes():
+    from sliceagent.loop import _as_text
+    assert _as_text(None) == "", "a tool returning None must become '' in the slice, not the literal 'None'"
+    assert _as_text(b"hi") == "hi", "bytes must decode, not become the b'…' repr"
+    assert _as_text(bytearray(b"ok")) == "ok"
+    assert _as_text("plain") == "plain" and _as_text(42) == "42"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from sliceagent import envspec  # noqa: E402
 
 
-def main() -> None:
+def render() -> str:
+    """The canonical CONFIGURATION.md content, derived purely from envspec.REGISTRY. Exposed so a test can
+    assert the committed doc matches (drift guard) without shelling out to this script."""
     by_group: dict[str, list] = {}
     for e in envspec.REGISTRY:
         by_group.setdefault(e.group, []).append(e)
@@ -51,10 +53,17 @@ def main() -> None:
             out.append(f"| {name} | {default} | {desc} |")
         out.append("")
 
+    return "\n".join(out)
+
+
+def main() -> None:
+    by_group: dict[str, list] = {}
+    for e in envspec.REGISTRY:
+        by_group.setdefault(e.group, []).append(e)
     os.makedirs(os.path.join(ROOT, "docs"), exist_ok=True)
     path = os.path.join(ROOT, "docs", "CONFIGURATION.md")
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(out))
+        f.write(render())
     print(f"wrote {path} — {len(envspec.REGISTRY)} vars, {len(by_group)} groups")
 
 

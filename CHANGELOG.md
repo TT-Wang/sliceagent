@@ -5,6 +5,27 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-07-03
+
+OSS-polish pass (triaged from two external reviews; the confirmed quick wins).
+
+### Fixed
+- `_as_text` (tool-result coercion): a tool returning `None` now becomes `""` (not the literal string
+  `"None"`) and `bytes` are decoded (not rendered as a `b'…'` repr) before entering the slice.
+- Rebrand leftovers: `sliceagent.toml.example`, the example plugin, and `.gitignore` still referenced
+  the old `memagent` / `.memagent/` name and paths — updated to `sliceagent` / `.sliceagent/`.
+- `.gitignore` now ignores `.sliceagent/` (a session writes paged-output blobs into a project-local
+  `.sliceagent/blobs/`, which was showing up as untracked repo cruft); `.dockerignore` excludes it too.
+- `docs/CONFIGURATION.md` regenerated from `envspec` — `AGENT_MODEL` correctly shows no default
+  (it is required), and a new drift-guard test fails if the doc goes stale.
+- `install.sh`: removed a dead `REPO` (git-URL) variable — the installer tracks the PyPI release, one
+  canonical path; `ROADMAP.md` updated to match (it still described the old `git+…` install).
+
+### Docs
+- README: the benchmark section now notes the model is swappable via `AGENT_MODEL` and points at the
+  reproducible `evals/` harnesses; added a **pre-1.0 stability** statement (SemVer, 0.x may change,
+  breaking changes in the changelog, numbers are directional).
+
 ## [0.1.10] — 2026-07-03
 
 ### Fixed
