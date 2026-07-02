@@ -13,11 +13,16 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _launch(extra=None):
+    import tempfile
     env = dict(os.environ)
     env.update({
         "PYTHONPATH": os.path.join(_ROOT, "src"),
+        "HOME": tempfile.mkdtemp(prefix="smoke-home-"),   # hermetic: the dev machine's ~/.sliceagent
+                                                          # config must not leak in (CI has none either)
         "AGENT_TUI": "off",                 # plain REPL — no prompt_toolkit app to drive
         "LLM_API_KEY": "sk-dummy-smoke", "OPENAI_API_KEY": "sk-dummy-smoke",
+        "AGENT_MODEL": "dummy-model-smoke", # required since the no-default-model gate — without it the
+                                            # CLI exits at the gate before the banner this test asserts on
         "AGENT_PROXY": "off",               # don't route through a local proxy that isn't there
     })
     env.update(extra or {})

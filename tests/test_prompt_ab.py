@@ -9,6 +9,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "evals"))
 
+# The prompt A/B harness lives in evals/, which is local-only dev tooling (not shipped in the public
+# repo) — skip cleanly where it's absent (e.g. CI on the public checkout), like the no-pty skips.
+if not os.path.isdir(os.path.join(ROOT, "evals", "prompt_ab")):
+    print("SKIP: evals/prompt_ab not present (local-only eval tooling)")
+    sys.exit(0)
+
 from prompt_ab import stats as S          # noqa: E402
 from prompt_ab import variants as V       # noqa: E402
 
