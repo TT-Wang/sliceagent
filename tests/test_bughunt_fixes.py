@@ -816,11 +816,11 @@ def model_menu_is_provider_aware():
         def providers(self):
             return {}
 
-    cands = t._model_candidates(_LLM(), _CFG())
-    models = [m for m, _ in cands]
+    cands = t._model_candidates(_LLM(), _CFG())   # 3-tuples since the configured-only journey
+    models = [m for m, _grp, _pid in cands]
     assert "deepseek-chat" in models and "gpt-5.5" in models      # current + known both present
     assert len(models) == len(set(models))                        # deduped
-    fams = [fam for _, fam in cands]
+    fams = [fam for _, fam, _pid in cands]
     assert fams == sorted(fams)                                   # grouped (sorted) by provider family
 
 
@@ -1337,7 +1337,7 @@ def model_switch_warns_when_the_endpoint_cant_serve_it():
             self.model, self._base_url, self.reasoning = model, base_url, reasoning
 
     note = _reasoning_note(LLM("gpt-5.5", "https://api.deepseek.com/v1", "full"))
-    assert "OpenAI" in note and "deepseek" in note.lower() and "init" in note, note
+    assert "OpenAI" in note and "deepseek" in note.lower() and "/config" in note, note
     # same provider, no mismatch → must stay silent (no false positive)
     assert _reasoning_note(LLM("deepseek-chat", "https://api.deepseek.com/v1", "full")) == ""
     # real OpenAI → completely unaffected

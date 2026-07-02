@@ -220,6 +220,7 @@ class OpenAILLM:
         # the SDK's own (cleaner) timeout fires first when it can, and SIGALRM only catches the stalls
         # the read-timeout misses (silent mid-response connections).
         self._hard_timeout = max(int(timeout) + 15, 30)
+        self._timeout = timeout                              # kept for live endpoint switches (switch())
         # No built-in default model — the user picks (parallels the CLI's model gate; a silent
         # fallback here would contradict it for library/embedding callers).
         self.model = model or os.environ.get("AGENT_MODEL") or ""
@@ -259,11 +260,32 @@ class OpenAILLM:
         # thereafter reasoning_effort is dropped when tools are present (graceful degrade, no re-400).
         self._drop_reasoning_effort = False
 
-    def switch(self, *, model: str | None = None, reasoning: str | None = None) -> None:
-        """Live-switch the model id and/or reasoning intent for SUBSEQUENT turns (mutates in place — the
-        loop passes this same llm object every turn, so the change applies from the next turn on). Resets
-        the reasoning_effort+tools degrade memory since a different model may support the pairing. Same
-        endpoint/client; switching to a DIFFERENT PROVIDER (base_url/key) is `sliceagent config --use`."""
+    def switch(self, *, model: str | None = None, reasoning: str | None = None,
+               base_url: str | None = None, api_key: str | None = None) -> None:
+        """Live-switch model / reasoning — and, when `base_url`/`api_key` are given, the PROVIDER too:
+        the client is rebuilt against the new endpoint (with the proxy re-chosen for it), so /model can
+        hop between configured providers in one action. Mutates in place — the loop passes this same llm
+        object every turn, so the change applies from the next turn on. base_url semantics: None = keep
+        the current endpoint; "" = the SDK's default endpoint (OpenAI). Resets the
+        reasoning_effort+tools degrade memory (a different model/provider may support the pairing)."""
+        if base_url is not None or api_key:
+            import httpx
+            from openai import OpenAI
+            new_base = self._base_url if base_url is None else base_url
+            new_key = api_key or getattr(self.client, "api_key", None)
+            proxy = _choose_proxy(new_base, os.environ.get("AGENT_PROXY")
+                                  or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"))
+            use_proxy = bool(proxy) and proxy != "none"
+            self.proxy_used = proxy if use_proxy else "direct"
+            timeout = getattr(self, "_timeout", 60.0)
+            http_client = (httpx.Client(proxy=proxy, timeout=timeout) if use_proxy
+                           else httpx.Client(timeout=timeout))
+            ckw: dict = {"api_key": new_key}
+            if new_base:
+                ckw["base_url"] = new_base
+            self.client = OpenAI(http_client=http_client, timeout=timeout, max_retries=2, **ckw)
+            self._base_url = new_base or ""
+            self._drop_reasoning_effort = False
         if model:
             self.model = model
             self._drop_reasoning_effort = False

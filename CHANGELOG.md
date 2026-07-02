@@ -5,6 +5,23 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-07-02
+
+The clear config journey: one wizard, two doors, an honest /model.
+
+### Added
+- **`/config`** — manage LLM providers *inside* sliceagent: the same wizard as first-run onboarding
+  (provider → model → key → live test), then the config hot-reloads and the new provider shows up
+  in `/model` immediately.
+- **`/model` switches providers for real** — the menu lists ONLY configured providers' models
+  (saved model + suggestions, labeled by provider), and picking one switches **model + endpoint +
+  key together** (the old menu changed the model string but never the endpoint). The last-picked
+  provider is remembered across sessions.
+
+### Changed
+- Typed `/model <name>` stays same-endpoint (documented as such); the mismatch warning now points
+  at `/config` + the `/model` menu instead of `config --use`.
+
 ## [0.1.5] — 2026-07-02
 
 ### Changed

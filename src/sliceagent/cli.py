@@ -134,8 +134,8 @@ def _reasoning_note(llm) -> str:
         label = {"openai": "an OpenAI", "deepseek": "a DeepSeek",
                  "moonshot": "a Moonshot", "anthropic": "an Anthropic"}.get(home, f"a {home}")
         return (f"note: {llm.model} looks like {label} model, but you're connected to {base or '(default)'}"
-                f" — it will likely fail on your next message. Run `sliceagent init` to add {label} provider, "
-                f"then `config --use <id>` to switch (or `/model` with no args to see what's configured).")
+                f" — it will likely fail on your next message. Add {label} provider with /config, then pick "
+                f"its model from the /model menu (the menu switches the endpoint too; typed /model doesn't).")
     eff = (getattr(llm, "reasoning", "full") or "full").lower()
     if eff == "full":
         return ""
@@ -162,10 +162,14 @@ def main() -> None:
     _load_env()
     # config-persisted key/endpoint (written by `sliceagent init`) populate the env BEFORE the gate, so a
     # configured user never has to export anything; ENV still wins for one-off overrides.
-    from .config import load_config
+    from .config import load_config, load_prefs
+    _boot_prefs = load_prefs()   # the last /model choice may pin a PROVIDER (endpoint+key), not just a model
 
-    def _env_from_config(c) -> None:
-        for _env, _val in (("LLM_API_KEY", c.api_key), ("LLM_BASE_URL", c.base_url)):
+    def _env_from_config(c, pid: str | None = None) -> None:
+        tbl = (c.providers() or {}).get(pid) if pid else None
+        key = (tbl or {}).get("api_key") or c.api_key
+        base = ((tbl or {}).get("base_url") if tbl and tbl.get("api_key") else None) or c.base_url
+        for _env, _val in (("LLM_API_KEY", key), ("LLM_BASE_URL", base)):
             if not os.environ.get(_env) and _val:
                 os.environ[_env] = _val
 
@@ -185,7 +189,7 @@ def main() -> None:
         return run_init() == 0
 
     cfg = load_config()
-    _env_from_config(cfg)
+    _env_from_config(cfg, _boot_prefs.get("provider"))
     if not _key_present() and _first_run_setup("Welcome! No API key configured yet"):
         cfg = load_config()          # the wizard just wrote ~/.sliceagent/config.toml — pick it up
         _env_from_config(cfg)
@@ -465,12 +469,33 @@ def main() -> None:
         return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
 
     def _handle_slash(line):  # TUI navigation palette — wired to existing session ops
+        nonlocal cfg          # /config hot-reloads the config after the in-session wizard
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if cmd == "/help":
-            _console.print("commands: /model · /mode · /cwd · /learn · /plan · /cost · /threads · /plugins · /mcp · "
-                           "/help · /exit\n  (type / for the menu · /cwd <path> switches workspace · "
-                           "Esc = undo last turn · say \"review my changes\" for code_review · @path pins a file)")
+            _console.print("commands: /config · /model · /mode · /cwd · /learn · /plan · /cost · /threads · "
+                           "/plugins · /mcp · /help · /exit\n  (type / for the menu · /config adds LLM "
+                           "providers · /cwd <path> switches workspace · Esc = undo last turn · "
+                           "say \"review my changes\" for code_review · @path pins a file)")
+        elif cmd == "/config":
+            # THE clear user journey: providers are managed INSIDE sliceagent — same wizard as first-run
+            # onboarding (provider → model → key → live test), then the new provider shows up in /model.
+            if sys.stdin.isatty() and not use_live:
+                from .onboarding import run_init
+                try:
+                    rc = run_init()
+                except (EOFError, KeyboardInterrupt):
+                    rc = 1
+                if rc == 0:
+                    from .config import load_config as _reload
+                    cfg = _reload()                      # hot-reload: /model now sees the new provider
+                    provs = cfg.providers()
+                    _console.print("  providers configured: "
+                                   + (", ".join(f"[bold]{k}[/] ({v.get('model', '?')})"
+                                                for k, v in provs.items()) or "(none)"))
+                    _console.print("  switch with [bold]/model[/] — it lists your configured providers' models.")
+            else:
+                _console.print("  /config needs an interactive terminal — run `sliceagent init` instead.")
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
@@ -562,23 +587,31 @@ def main() -> None:
                 from .tui import select_model_reasoning
                 choice = select_model_reasoning(llm, cfg)
                 if choice:
-                    llm.switch(model=choice[0], reasoning=choice[1])
+                    _model, _reasoning, _pid = choice
+                    _kw = {}
+                    if _pid:                              # a CONFIGURED provider → switch endpoint+key too
+                        _tbl = (cfg.providers() or {}).get(_pid) or {}
+                        if _tbl.get("api_key"):
+                            _kw = {"base_url": _tbl.get("base_url") or "", "api_key": _tbl["api_key"]}
+                    llm.switch(model=_model, reasoning=_reasoning, **_kw)
                     _stats["model"] = llm.model
-                    save_prefs({"model": llm.model, "reasoning": llm.reasoning})
+                    save_prefs({"model": llm.model, "reasoning": llm.reasoning,
+                                **({"provider": _pid} if _pid else {})})
                     note = _reasoning_note(llm)
-                    _console.print(f"  ✓ model → [bold]{llm.model}[/] · reasoning [bold]{llm.reasoning}[/] (saved)"
+                    _console.print(f"  ✓ model → [bold]{llm.model}[/]"
+                                   + (f" @ [bold]{_pid}[/]" if _pid else "")
+                                   + f" · reasoning [bold]{llm.reasoning}[/] (saved)"
                                    + (f"\n  {note}" if note else ""))
             elif not arg:
                 _console.print(f"  model: [bold]{llm.model}[/]  ·  reasoning: [bold]{llm.reasoning}[/]"
                                f"  ·  net: {getattr(llm, 'proxy_used', 'direct')}")
-                known = ("gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat",
-                         "kimi-k2-0905-preview", "claude-sonnet-4-6")
-                _console.print("  switch:  /model <name> [fast|full|high|max]")
-                _console.print("  known:   " + ", ".join(known))
+                _console.print("  switch:  /model <name> [fast|full|high|max]  (same endpoint)")
                 provs = cfg.providers()
                 if provs:
-                    _console.print("  providers (use `config --use <id>` to change endpoint): "
+                    _console.print("  configured providers (pick via the /model menu to switch endpoint too): "
                                    + ", ".join(f"{k}={v.get('model', '?')}" for k, v in provs.items()))
+                else:
+                    _console.print("  no providers configured yet — add one with [bold]/config[/]")
             else:
                 name, *rest = arg.split()
                 eff = rest[0].lower() if rest else None

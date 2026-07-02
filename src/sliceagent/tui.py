@@ -824,25 +824,42 @@ def run_selector(title, rows, *, current=-1, hint="↑↓ move · Enter select �
 
 
 def _model_candidates(llm, cfg):
-    """Models to offer in the /model menu: the current model + any configured providers' models + a known
-    set, deduped and grouped by inferred provider family. Returns [(model, family)] sorted by family."""
+    """Models to offer in the /model menu — CONFIGURED providers only (the user's clear-journey rule:
+    the switcher shows what you can actually use). Each configured provider (has an api_key)
+    contributes its saved model + its wizard suggestions, labeled with the provider id; picking one
+    lets the CLI switch model+endpoint+key together. Returns [(model, group_label, provider_id)].
+    provider_id None = the current env-configured model (no provider table to rebind to). Fallback
+    when NO providers are configured (pure env setup): current model + a small known set."""
     from .model_catalog import capability
-    known = ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat", "kimi-k2-0905-preview", "claude-sonnet-4-6"]
-    prov = []
     try:
-        for tbl in (cfg.providers() or {}).values():
-            m = tbl.get("model") if isinstance(tbl, dict) else None
-            if m:
-                prov.append(m)
+        provs = {pid: t for pid, t in (cfg.providers() or {}).items()
+                 if isinstance(t, dict) and t.get("api_key")}
     except Exception:  # noqa: BLE001 — a malformed providers table must not break the menu
-        pass
+        provs = {}
     out, seen = [], set()
-    for m in [llm.model] + prov + known:
-        if m and m not in seen:
-            seen.add(m)
-            base = getattr(llm, "_base_url", "") if m == llm.model else ""
-            out.append((m, capability(m, base).family))
-    out.sort(key=lambda mf: (mf[1], mf[0]))
+    if provs:
+        try:
+            from .onboarding import MODEL_SUGGESTIONS
+        except Exception:  # noqa: BLE001
+            MODEL_SUGGESTIONS = {}
+        for pid, tbl in provs.items():
+            for m in [tbl.get("model")] + list(MODEL_SUGGESTIONS.get(pid, [])):
+                if m and (pid, m) not in seen:
+                    seen.add((pid, m))
+                    out.append((m, pid, pid))
+        out.sort(key=lambda t: (t[1], t[0]))
+        if all(m != llm.model for m, _, _ in out):   # an env-overridden current model still shows first
+            base = getattr(llm, "_base_url", "")
+            out.insert(0, (llm.model, capability(llm.model, base).family, None))
+    else:
+        known = ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3", "deepseek-chat", "kimi-k2-0905-preview",
+                 "claude-sonnet-5"]
+        for m in [llm.model] + known:
+            if m and m not in seen:
+                seen.add(m)
+                base = getattr(llm, "_base_url", "") if m == llm.model else ""
+                out.append((m, capability(m, base).family, None))
+        out.sort(key=lambda t: (t[1], t[0]))
     return out
 
 
@@ -860,17 +877,18 @@ def _reasoning_levels(model, base_url):
 
 
 def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
-    """Two-tier picker: choose a model (grouped by provider) then its reasoning level (only the levels that
-    model supports). Returns (model, reasoning) to apply, or None if the model step was cancelled."""
+    """Two-tier picker: choose a model (from CONFIGURED providers) then its reasoning level (only the
+    levels that model supports). Returns (model, reasoning, provider_id) — provider_id is the configured
+    provider to switch endpoint+key to (None = keep the current endpoint) — or None if cancelled."""
     cands = _model_candidates(llm, cfg)
-    rows = [(m, f"provider: {fam}") for m, fam in cands]
-    cur_idx = next((i for i, (m, _) in enumerate(cands) if m == llm.model), -1)
+    rows = [(m, f"provider: {grp}") for m, grp, _pid in cands]
+    cur_idx = next((i for i, (m, _, _) in enumerate(cands) if m == llm.model), -1)
     pick = run_selector("Select model", rows, current=cur_idx,
                         hint="↑↓ move · Enter choose model → reasoning · Esc cancel",
                         pt_input=pt_input, pt_output=pt_output)
     if pick is None:
         return None
-    model = cands[pick][0]
+    model, _grp, pid = cands[pick]
     base = getattr(llm, "_base_url", "") if model == llm.model else ""
     levels = _reasoning_levels(model, base)
     lvl_rows = [(name, desc) for name, desc in levels]
@@ -879,12 +897,13 @@ def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
                          hint="↑↓ move · Enter select · Esc keep current",
                          pt_input=pt_input, pt_output=pt_output)
     reasoning = levels[lpick][0] if lpick is not None else llm.reasoning   # Esc on step 2 = keep current
-    return (model, reasoning)
+    return (model, reasoning, pid)
 
 
 # ── input layer (prompt_toolkit) ─────────────────────────────────────────────────────────────
 _SLASH = {
-    "/model":   "switch model + reasoning — opens a menu (or /model <name> [fast|full|high|max])",
+    "/config":  "add / update LLM providers (the setup wizard, in-session) — then /model to switch",
+    "/model":   "switch model + reasoning — menu lists YOUR configured providers (switches endpoint too)",
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
     "/cwd":     "switch workspace root (/cwd <path>) — re-roots repo map, file tools & commands",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
