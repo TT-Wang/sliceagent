@@ -4,6 +4,8 @@
 
 A **coding agent with a new context-engineering framework**, built for long-horizon work. Its core bet is a different memory model from every mainstream agent:
 
+> **Naming note:** this project is not affiliated with [MemAgent](https://github.com/BytedTsinghua-SIA/MemAgent) (ByteDance Seed / Tsinghua SIA-Lab, [arXiv:2507.02259](https://arxiv.org/abs/2507.02259)), an RL framework for long-context LLM training. This memagent is an interactive coding agent for your terminal.
+
 > **Don't accumulate the transcript — reconstruct a small, deterministic working state every turn.**
 
 Mainstream agents accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). memagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
