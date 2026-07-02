@@ -1464,10 +1464,17 @@ def banner_panel(console: Console, info: str) -> Panel:
     fallback). Each art row is no-wrap + crop, so a terminal narrower than the art (~86 cols) clips it
     cleanly on the right instead of wrapping into a staircase; a normal-width window shows it in full.
     `console` is kept in the signature for the callers, though the layout is now width-independent."""
+    # The wordmark itself is 79 cols. Full chrome (2-space row indent + 2-col panel padding + border) needs
+    # ~91 cols, so a ~86-col window CROPPED the right edge — the final "t". Shed the indent + horizontal
+    # padding as the window narrows so the WHOLE name shows down to ~85 cols (below that it still crops
+    # cleanly — no wrap; the emblem stays on every art row). Wide windows keep the roomy framing.
+    width = getattr(console, "width", 80) or 80
+    indent = "  " if width >= 91 else ""
+    hpad = 2 if width >= 91 else 0
     rows = []
     for i, word in enumerate(_WORDMARK):
         blk, col = _EMBLEM[i]
-        t = Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}"))
+        t = Text.assemble((indent, ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}"))
         t.no_wrap = True
         t.overflow = "crop"          # narrow terminal → clip the art, never wrap it into a staircase
         rows.append(t)
@@ -1477,7 +1484,7 @@ def banner_panel(console: Console, info: str) -> Panel:
         rows.append(Text("  " + info, style=TH["dim"]))
     return Panel(Group(*rows), border_style=TH["accent"], box=_box.ROUNDED,
                  title=f"[bold {TH['accent']}]sliceagent[/]", title_align="left",
-                 subtitle="[grey50]/help · ctrl-d to quit[/]", subtitle_align="right", padding=(1, 2))
+                 subtitle="[grey50]/help · ctrl-d to quit[/]", subtitle_align="right", padding=(1, hpad))
 
 
 def banner(console: Console, info: str) -> None:

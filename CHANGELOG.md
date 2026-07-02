@@ -5,6 +5,14 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-07-03
+
+### Fixed
+- Startup banner: the block wordmark clipped its right edge — the final "t" of "sliceagent" — on
+  terminals narrower than ~91 columns, because the frame's indent + padding + border overhead pushed
+  the 79-column art past the window. The layout now sheds that chrome as the window narrows, so the
+  full name renders from ~85 columns up (wide windows keep the roomy framing).
+
 ## [0.1.9] — 2026-07-03
 
 Bug-hunt round 2 (deep-core lenses, full 3-vote adversarial verify). Five confirmed fixes.

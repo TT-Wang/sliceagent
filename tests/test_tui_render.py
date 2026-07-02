@@ -98,6 +98,12 @@ def banner_always_uses_the_big_block_wordmark():
     wide = render(120)
     assert _WORDMARK[0] in wide and _WORDMARK[-1] in wide, "a wide terminal must show the full block wordmark"
     assert "m e m a g e n t" not in wide, "the compact fallback must be gone"
+    # a typical ~86-col window (just under the roomy-frame threshold) must still show the FULL wordmark —
+    # the last row present uncropped = the final 't' isn't clipped (regression: it clipped up to width 90,
+    # because full chrome needed ~91 cols; the adaptive layout now fits the 79-col art from width 85).
+    for w in (85, 86, 90):
+        out = render(w)
+        assert _WORDMARK[-1] in out, f"full wordmark (final 't') must show at width {w}, not clip"
     narrow = render(60)                               # narrower than the art → still big, just clipped
     assert "█" in narrow and "m e m a g e n t" not in narrow, \
         "even a narrow terminal must show the big block wordmark (clipped), never the compact one"
