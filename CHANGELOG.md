@@ -5,6 +5,12 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-07-02
+
+### Changed
+- Wizard step order is now **provider → model → key** ("choose what you want, then prove you can") —
+  the key is the last thing typed, so the live test follows it immediately.
+
 ## [0.1.4] — 2026-07-02
 
 ### Fixed

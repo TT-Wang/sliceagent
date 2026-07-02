@@ -261,12 +261,8 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         existing = _read_config(path).get("providers")
         existing = existing.get(pid) if isinstance(existing, dict) else None
         existing = existing if isinstance(existing, dict) else {}
-        existing_key = existing.get("api_key") or ""
-        key_prompt = ("  API key (typed as ******, Enter to keep existing): " if existing_key
-                      else "  API key (typed as ******): ") if fancy else (
-                      "  API key (hidden, Enter to keep existing): " if existing_key
-                      else "  API key (hidden): ")
-        key = (_masked_input(key_prompt, getpw) if fancy else getpw(key_prompt)).strip() or existing_key
+        # ORDER (user-decided): provider → MODEL → key. "Choose what you want, then prove you can" —
+        # the key is the last thing typed, so the live test follows it immediately.
         picked_model = None
         if fancy:
             cur = existing.get("model") or model
@@ -283,6 +279,12 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         else:
             model = (inp(f"  Model [{existing.get('model') or model or 'required'}]: ").strip()
                      or existing.get("model") or model)
+        existing_key = existing.get("api_key") or ""
+        key_prompt = ("  API key (typed as ******, Enter to keep existing): " if existing_key
+                      else "  API key (typed as ******): ") if fancy else (
+                      "  API key (hidden, Enter to keep existing): " if existing_key
+                      else "  API key (hidden): ")
+        key = (_masked_input(key_prompt, getpw) if fancy else getpw(key_prompt)).strip() or existing_key
     except (EOFError, KeyboardInterrupt):
         out("\n  cancelled."); return 1
     if not key:
