@@ -864,12 +864,16 @@ def _model_candidates(llm, cfg):
 
 def _reasoning_levels(model, base_url):
     """Reasoning levels valid for a model, derived from its capability (provider-aware). Effort-capable
-    models (gpt-5/o-series) expose all four; others only fast/full (high/max would degrade to default)."""
+    models (gpt-5/o-series) expose all four; OpenRouter exposes fast/full/high (its unified reasoning
+    object maps max→high, so offering max would be a lie); others only fast/full (high/max would
+    degrade to default)."""
     from .model_catalog import capability
     full4 = [("fast", "minimal reasoning — fastest, cheapest"),
              ("full", "provider default reasoning"),
              ("high", "deeper reasoning (effort=high, /v1/responses)"),
              ("max", "deepest reasoning (effort=xhigh)")]
+    if "openrouter" in (base_url or "").lower():   # unified reasoning object honors effort WITH tools
+        return full4[:2] + [("high", "deeper reasoning (unified reasoning, effort=high)")]
     if capability(model, base_url).supports_reasoning_effort:
         return full4
     return full4[:2]   # fast | full only — the model has no effort knob
@@ -888,7 +892,10 @@ def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
     if pick is None:
         return None
     model, _grp, pid = cands[pick]
-    base = getattr(llm, "_base_url", "") if model == llm.model else ""
+    if pid:   # the pick will REBIND to this provider — offer the levels ITS endpoint supports
+        base = ((cfg.providers() or {}).get(pid) or {}).get("base_url") or ""
+    else:
+        base = getattr(llm, "_base_url", "") if model == llm.model else ""
     levels = _reasoning_levels(model, base)
     lvl_rows = [(name, desc) for name, desc in levels]
     lvl_cur = next((i for i, (n, _) in enumerate(levels) if n == llm.reasoning), -1)

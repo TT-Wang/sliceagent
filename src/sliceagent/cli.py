@@ -151,6 +151,21 @@ def _ws_name(path: str) -> str:
     return "~" if p == os.path.realpath(os.path.expanduser("~")) else (os.path.basename(p) or p)
 
 
+def _env_from_config(c, pid: str | None = None) -> None:
+    """Populate LLM_API_KEY/LLM_BASE_URL from config (ENV still wins). A prefs-pinned provider `pid`
+    binds AS A UNIT: its key with ITS OWN endpoint — an absent base_url means the SDK default (OpenAI),
+    NOT the default provider's base_url (that fallback cross-wired an openai key onto the deepseek
+    endpoint after `/model`-hop + restart when default_provider pointed elsewhere)."""
+    tbl = (c.providers() or {}).get(pid) if pid else None
+    if isinstance(tbl, dict) and tbl.get("api_key"):
+        key, base = tbl["api_key"], tbl.get("base_url") or ""
+    else:                                    # no/unusable pin → the default provider's own pairing
+        key, base = c.api_key, c.base_url
+    for _env, _val in (("LLM_API_KEY", key), ("LLM_BASE_URL", base)):
+        if not os.environ.get(_env) and _val:
+            os.environ[_env] = _val
+
+
 def main() -> None:
     # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `sliceagent init` runs on a
     # machine with nothing configured yet. A bare `sliceagent` (or one with non-subcommand args) falls through.
@@ -164,14 +179,6 @@ def main() -> None:
     # configured user never has to export anything; ENV still wins for one-off overrides.
     from .config import load_config, load_prefs
     _boot_prefs = load_prefs()   # the last /model choice may pin a PROVIDER (endpoint+key), not just a model
-
-    def _env_from_config(c, pid: str | None = None) -> None:
-        tbl = (c.providers() or {}).get(pid) if pid else None
-        key = (tbl or {}).get("api_key") or c.api_key
-        base = ((tbl or {}).get("base_url") if tbl and tbl.get("api_key") else None) or c.base_url
-        for _env, _val in (("LLM_API_KEY", key), ("LLM_BASE_URL", base)):
-            if not os.environ.get(_env) and _val:
-                os.environ[_env] = _val
 
     def _key_present() -> bool:
         return bool(os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -189,6 +196,14 @@ def main() -> None:
         return run_init() == 0
 
     cfg = load_config()
+    # A prefs `provider` pin whose [providers.<id>] table was since removed from config.toml is STALE:
+    # its key/endpoint already fall back to the default provider (see _env_from_config), but its pinned
+    # MODEL would still win at the resolution below and get sent to the wrong endpoint (model_not_found
+    # every turn). Drop the whole stale pin so model/endpoint resolve together from the live config.
+    if _boot_prefs.get("provider") and _boot_prefs["provider"] not in (cfg.providers() or {}):
+        from .config import save_prefs as _sp
+        _sp({"provider": None, "model": None})       # None DELETES (see save_prefs)
+        _boot_prefs.pop("provider", None); _boot_prefs.pop("model", None)
     _env_from_config(cfg, _boot_prefs.get("provider"))
     if not _key_present() and _first_run_setup("Welcome! No API key configured yet"):
         cfg = load_config()          # the wizard just wrote ~/.sliceagent/config.toml — pick it up
@@ -468,6 +483,18 @@ def main() -> None:
         ans = input(f"  ⚠ allow {name} {str(detail)[:60]!r}? ({reason}) [y]es/[n]o/[a]lways: ").strip().lower()
         return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
 
+    def _live_pid():
+        """The configured provider the LIVE llm is actually bound to (endpoint+key match), or None.
+        Prefs must pin what's IN EFFECT, not the last menu pick — a typed `/model <name>` keeps the
+        endpoint, so blindly re-saving the old pin resurrected a dead endpoint+model pairing at boot."""
+        lbase = getattr(llm, "_base_url", "") or ""
+        lkey = getattr(llm.client, "api_key", None)
+        for p, t in (cfg.providers() or {}).items():
+            if isinstance(t, dict) and t.get("api_key") and t["api_key"] == lkey \
+                    and (t.get("base_url") or "") == lbase:
+                return p
+        return None
+
     def _handle_slash(line):  # TUI navigation palette — wired to existing session ops
         nonlocal cfg          # /config hot-reloads the config after the in-session wizard
         parts = line.split(maxsplit=1)
@@ -595,8 +622,9 @@ def main() -> None:
                             _kw = {"base_url": _tbl.get("base_url") or "", "api_key": _tbl["api_key"]}
                     llm.switch(model=_model, reasoning=_reasoning, **_kw)
                     _stats["model"] = llm.model
+                    # pin the provider ACTUALLY in effect (None DELETES a stale pin — see save_prefs)
                     save_prefs({"model": llm.model, "reasoning": llm.reasoning,
-                                **({"provider": _pid} if _pid else {})})
+                                "provider": _pid or _live_pid()})
                     note = _reasoning_note(llm)
                     _console.print(f"  ✓ model → [bold]{llm.model}[/]"
                                    + (f" @ [bold]{_pid}[/]" if _pid else "")
@@ -619,7 +647,9 @@ def main() -> None:
                     _console.print("  effort must be one of: fast | full | high | max"); return True
                 llm.switch(model=name, reasoning=eff)
                 _stats["model"] = llm.model
-                save_prefs({"model": llm.model, "reasoning": llm.reasoning})
+                # typed /model keeps the endpoint — re-resolve the pin against the LIVE binding so a
+                # stale provider pin can't resurrect the old endpoint under this model at next boot
+                save_prefs({"model": llm.model, "reasoning": llm.reasoning, "provider": _live_pid()})
                 note = _reasoning_note(llm)
                 _console.print(f"  ✓ model → [bold]{llm.model}[/]"
                                + (f" · reasoning [bold]{llm.reasoning}[/]" if eff else "")

@@ -52,12 +52,17 @@ def load_prefs() -> dict:
 
 
 def save_prefs(updates: dict) -> None:
-    """Merge non-empty `updates` into the prefs sidecar (atomic write). Best-effort; never raises."""
+    """Merge non-empty `updates` into the prefs sidecar (atomic write); an explicit None DELETES the
+    key (a stale `provider` pin must be removable — merge-only let an old endpoint pin resurrect at
+    the next boot under a model it doesn't serve). Best-effort; never raises."""
     try:
         import json
         path = _prefs_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         cur = load_prefs()
+        for k, v in updates.items():
+            if v is None:
+                cur.pop(k, None)
         cur.update({k: v for k, v in updates.items() if v})
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

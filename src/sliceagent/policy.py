@@ -96,11 +96,30 @@ def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
 # mode runs it without a confirm prompt. Deny-by-default: an unknown verb still asks. The catastrophic floor
 # (no_dangerous_commands) runs BEFORE this, so e.g. `cat /etc/passwd` is still denied.
 _RO_VERBS = frozenset((
-    "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "type", "env", "printenv", "date",
+    "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "type", "printenv", "date",
     "whoami", "hostname", "uname", "id", "groups", "tree", "stat", "file", "du", "df", "realpath",
-    "dirname", "basename", "grep", "rg", "egrep", "fgrep", "sort", "uniq", "nl", "cut", "column",
+    "dirname", "basename", "grep", "rg", "egrep", "fgrep", "sort", "nl", "cut", "column",
     "cksum", "md5", "md5sum", "sha1sum", "sha256sum", "true",
 ))
+# `env` and `uniq` were REMOVED from the allowlist: `env <program>` executes an arbitrary program, and
+# `uniq [IN] OUT` OVERWRITES its optional second positional — neither is provably read-only, so they now
+# take the normal confirm path. A few remaining allowlisted verbs stay read-only ONLY without a specific
+# WRITE/EXEC option; deny-by-default when that option is present (verb-scoped so read-only siblings like
+# `du -s` / `grep -o` keep auto-running). Value-taking flags match `-o`, `-o=…`, `-oFILE`, `--output=…`.
+_UNSAFE_OPTS = {
+    "sort": ("-o", "--output"),   # -o FILE / --output=FILE overwrite a file
+    "date": ("-s", "--set"),      # set the system clock (a mutation)
+    "tree": ("-o",),              # -o FILE writes the listing to a file
+}
+
+
+def _has_unsafe_opt(verb: str, toks: list) -> bool:
+    bad = _UNSAFE_OPTS.get(verb, ())
+    for t in toks[1:]:
+        for b in bad:
+            if t == b or t.startswith(b + "=") or (len(b) == 2 and len(t) > 2 and t.startswith(b)):
+                return True
+    return False
 # git subcommands with NO mutating form (excludes branch/tag/config/remote/stash/reflog, which can write).
 _RO_GIT_SUB = frozenset((
     "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "describe", "blame",
@@ -127,10 +146,15 @@ def _is_readonly_command(cmd: str) -> bool:
     verb = os.path.basename(toks[0])
     if verb == "git":
         sub = next((t for t in toks[1:] if not t.startswith("-")), "")
-        return sub in _RO_GIT_SUB
+        if sub not in _RO_GIT_SUB:
+            return False
+        # `git grep --open-files-in-pager[=<cmd>]` / `-O[<cmd>]` runs a PAGER program (arbitrary exec).
+        if sub == "grep" and any(t.startswith("--open-files-in-pager") or t.startswith("-O") for t in toks):
+            return False
+        return True
     if verb == "find":
         return not any(t in _FIND_MUTATORS for t in toks)
-    return verb in _RO_VERBS
+    return verb in _RO_VERBS and not _has_unsafe_opt(verb, toks)
 
 
 def ask_commands(name: str, args: dict) -> Optional[ToolDecision]:

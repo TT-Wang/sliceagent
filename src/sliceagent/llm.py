@@ -283,7 +283,13 @@ class OpenAILLM:
             ckw: dict = {"api_key": new_key}
             if new_base:
                 ckw["base_url"] = new_base
+            old_client = getattr(self, "client", None)
             self.client = OpenAI(http_client=http_client, timeout=timeout, max_retries=2, **ckw)
+            if old_client is not None:       # close the replaced connection pool — /model hops leaked fds
+                try:
+                    old_client.close()
+                except Exception:  # noqa: BLE001 — cleanup must never break the switch
+                    pass
             self._base_url = new_base or ""
             self._drop_reasoning_effort = False
         if model:

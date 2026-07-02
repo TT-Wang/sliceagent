@@ -5,6 +5,31 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-07-02
+
+Launch-day bug-hunt round: a security fix plus config-robustness and /model correctness.
+
+### Security
+- `run_command` in the default *teenager* mode no longer auto-runs exec/write commands disguised as
+  "read-only": `env <program>`, `sort -o FILE`, `date -s`, `tree -o FILE`, `uniq IN OUT`, and
+  `git grep --open-files-in-pager` now take the confirm path (arbitrary code-exec / file-overwrite
+  confirm-bypass). Read-only siblings like `du -s` / `grep -o` still auto-run.
+
+### Fixed
+- Boot no longer cross-wires a prefs-pinned provider's key with the DEFAULT provider's endpoint (an
+  env `gpt-5.5` @ OpenAI pin on a DeepSeek-default config used to 401 every call on relaunch).
+- A prefs `provider`/model pin whose `[providers.<id>]` table was removed from config.toml is now
+  dropped at boot instead of forcing a model onto the wrong endpoint.
+- The wizard no longer silently ERASES other providers' API keys when config.toml is unparseable —
+  the old file is moved to a non-clobbering `.bak` first (keys recoverable).
+- `sliceagent config` / `config --use` / the init wizard no longer crash on a non-UTF-8 config.toml
+  or a scalar value under `[providers]` (they degrade).
+- `llm.switch()` (a `/model` provider hop) closes the replaced HTTP client — no more fd leak per hop.
+- The `/model` reasoning menu offers `high` (not a misleading `max`) for OpenRouter models, and offers
+  the levels the *target* provider supports when the pick rebinds the endpoint.
+- The wizard's typed provider fallback rejects an unknown choice instead of silently configuring
+  OpenRouter.
+
 ## [0.1.7] — 2026-07-02
 
 ### Fixed
