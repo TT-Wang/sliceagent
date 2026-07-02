@@ -119,7 +119,9 @@ Per task — note how the transcript agent's peak input scales with the session 
 
 Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On `s1`, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
 
-> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. Numbers are small-N, single-trial, same-model; "solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
+> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
+>
+> **These are early, small-scale results** — modest task counts (N = 32 / 20 / 3), single trial per task, one model, one opponent. Treat them as a directional signal, not a settled claim. We're actively expanding to larger and more varied test sets, more trials, and more baselines, and will update these numbers as that work lands.
 
 ## Install & quickstart
 
