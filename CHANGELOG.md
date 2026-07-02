@@ -16,8 +16,9 @@ OSS-polish pass (triaged from two external reviews; the confirmed quick wins).
   the old `memagent` / `.memagent/` name and paths — updated to `sliceagent` / `.sliceagent/`.
 - `.gitignore` now ignores `.sliceagent/` (a session writes paged-output blobs into a project-local
   `.sliceagent/blobs/`, which was showing up as untracked repo cruft); `.dockerignore` excludes it too.
-- `docs/CONFIGURATION.md` regenerated from `envspec` — `AGENT_MODEL` correctly shows no default
-  (it is required), and a new drift-guard test fails if the doc goes stale.
+- The generated config reference (`docs/CONFIGURATION.md`, an internal/untracked doc) is regenerated
+  from `envspec` so `AGENT_MODEL` shows no default (it is required); a drift-guard test keeps it honest
+  and skips cleanly where the untracked doc is absent (CI / installed package).
 - `install.sh`: removed a dead `REPO` (git-URL) variable — the installer tracks the PyPI release, one
   canonical path; `ROADMAP.md` updated to match (it still described the old `git+…` install).
 
