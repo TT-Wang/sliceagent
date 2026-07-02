@@ -1347,6 +1347,80 @@ def model_switch_warns_when_the_endpoint_cant_serve_it():
     assert "OpenAI" not in _reasoning_note(LLM("gpt-5.5", "", "high"))
 
 
+# ── Round 2 (2026-07-03) — deep-core hunt confirmed fixes ─────────────────────────────────────
+@check
+def durable_log_redacts_secrets_in_NESTED_tool_args():
+    # HIGH: _scrub_args redacted only top-level string values → a secret in a nested dict/list arg
+    # (an MCP tool's {config:{api_key:…}} / {headers:{Authorization:…}}) hit the on-disk log in plaintext.
+    from sliceagent.cli import log_sink
+    from sliceagent.events import ToolResult
+    d = tempfile.mkdtemp(); path = os.path.join(d, "log.jsonl")
+    sink = log_sink(root=d, path=path)
+    secret = "sk-verylongsecretkey1234567890abcdefghij"
+    tok = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+    sink(ToolResult("mcp_call", {"config": {"api_key": secret}, "items": [tok]}, "ok", False))
+    body = open(path).read()
+    assert secret not in body, "a secret in a NESTED dict arg must be redacted before the durable log"
+    assert tok not in body, "a secret in a NESTED list arg must be redacted too"
+
+
+@check
+def detect_crlf_is_dominance_not_mere_presence():
+    from sliceagent.tools import LocalToolHost
+    h = LocalToolHost(tempfile.mkdtemp())
+    def probe(name, data):
+        p = os.path.join(h.root(), name); open(p, "wb").write(data); return h._detect_crlf(p)
+    assert probe("u_crlf", b"a\r\nb\r\nc\r\n") is True          # uniform CRLF → CRLF (pinned)
+    assert probe("u_lf", b"a\nb\nc\n") is False                 # uniform LF → LF (pinned)
+    assert probe("mixed", b'x = b"h\r\n"\np = 8080\nd = 1\n') is False   # mostly-LF + 1 CRLF → LF (the fix)
+    assert probe("winstray", b"a\r\nb\r\nc\r\nd\n") is True     # CRLF-dominant + 1 stray LF → CRLF
+
+
+@check
+def consolidation_survives_a_malformed_episodic_record():
+    from sliceagent.neocortex import promote_episodes, promote_procedures
+    good = [{"task_id": "t", "turn": 1, "record": {"meta": {"failing": True}}},
+            {"task_id": "t", "turn": 2, "record": {"meta": {"failing": False, "stop_reason": "end_turn"}}}]
+    for bad in (None, [1, 2], "str", 42, {"record": None}):     # each a malformed line among good ones
+        promote_episodes(good + [bad])                          # must not raise (was AttributeError → lost ALL lessons)
+        promote_procedures(good + [bad])
+
+
+@check
+def direct_llm_client_ignores_ambient_proxy_env():
+    import sliceagent.llm as _llm
+    saved = {k: os.environ.get(k) for k in ("AGENT_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "LLM_API_KEY")}
+    try:
+        os.environ.update({"AGENT_PROXY": "none", "HTTPS_PROXY": "http://ambient:7890", "LLM_API_KEY": "k"})
+        llm = _llm.OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+        assert llm.proxy_used == "direct"
+        assert llm.client._client.trust_env is False, "AGENT_PROXY=none must truly force direct (no ambient proxy)"
+        llm.switch(model="gpt-5.5", base_url="", api_key="k2")
+        assert llm.client._client.trust_env is False, "the switch() direct client must ignore ambient proxy too"
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+@check
+def slash_handlers_print_bracketed_paths_without_markup_crash():
+    # /undo and /cwd echo a workspace PATH; a Next.js '[id]' segment is a Rich tag → MarkupError.
+    from io import StringIO
+
+    from rich.console import Console
+    con = Console(file=StringIO(), force_terminal=False)
+    # a real /cwd echo: `_reroot("~/proj/[/]")` returns "not a directory: ~/proj/[/]" — '[/]' is a Rich
+    # closing tag with nothing to close (the verifiers' exact repro).
+    con.print("  ✓ not a directory: ~/proj/[/]", markup=False)                 # must not raise
+    con.print("  Undid the last edit to app/[id]/page.tsx (1 change).", markup=False)
+    raised = False
+    try:
+        con.print("not a directory: ~/proj/[/]")   # markup ON → the MarkupError the fix avoids
+    except Exception:  # noqa: BLE001
+        raised = True
+    assert raised, "sanity: '[/]' DOES break Rich with markup on (so markup=False is load-bearing)"
+
+
 def main():
     failed = 0
     for fn in CHECKS:

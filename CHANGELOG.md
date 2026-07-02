@@ -5,6 +5,27 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-07-03
+
+Bug-hunt round 2 (deep-core lenses, full 3-vote adversarial verify). Five confirmed fixes.
+
+### Security
+- The durable debug log's `_scrub_args` now redacts secrets in NESTED dict/list tool arguments
+  (e.g. an MCP call's `{config:{api_key:…}}` or `{headers:{Authorization:…}}`) — top-level-only
+  redaction leaked them to `~/.sliceagent/logs/**/durable-log.jsonl` in plaintext.
+- `AGENT_PROXY=none` (documented "force a DIRECT connection") now truly forces direct: the httpx
+  client is built with `trust_env=False`, so an ambient `HTTPS_PROXY` can no longer silently route
+  your API traffic through a proxy you told sliceagent to bypass (both first build and `/model` hops).
+
+### Fixed
+- `str_replace`/`edit_file` no longer flip a whole file to CRLF when it's mostly-LF but contains a
+  single embedded `\r\n` (a byte literal, an HTTP fixture, a merge artifact). CRLF is now detected by
+  DOMINANCE, not mere presence — uniformly-CRLF Windows files are still preserved.
+- Session-end consolidation no longer crashes (and silently discards ALL of a session's promoted
+  lessons/skills) when the episodic log contains one malformed record.
+- `/undo` and `/cwd` (and `/plugins`) no longer corrupt output or crash Rich with a MarkupError when a
+  path contains brackets — e.g. a Next.js `app/[id]/page.tsx` route or `~/proj/[slug]`.
+
 ## [0.1.8] — 2026-07-02
 
 Launch-day bug-hunt round: a security fix plus config-robustness and /model correctness.

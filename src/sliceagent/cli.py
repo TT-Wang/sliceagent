@@ -50,7 +50,15 @@ def log_sink(root: str = ".", path: str | None = None):
     path = path or os.path.join(state_dir("logs", root_key(root)), "durable-log.jsonl")
 
     def _scrub_args(args: dict) -> dict:          # redact string values (edit_file content, inline tokens)
-        return {k: (redact_text(v) if isinstance(v, str) else v) for k, v in (args or {}).items()}
+        def _rec(v):                              # RECURSE — a secret nested in a dict/list arg (e.g. an
+            if isinstance(v, str):                # MCP tool's {config:{api_key:…}} / {headers:{Authorization:…}})
+                return redact_text(v)             # must not reach the on-disk log in plaintext (top-level-only
+            if isinstance(v, dict):               # redaction leaked it; sibling hippocampus._clamp already recurses)
+                return {k: _rec(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_rec(x) for x in v]
+            return v
+        return _rec(args or {})
 
     def sink(e: Event) -> None:
         rec = None
@@ -566,12 +574,15 @@ def main() -> None:
                 except Exception:
                     _console.print(f"  no such topic: {arg}", markup=False)
         elif cmd == "/undo":
-            _console.print("  " + base_tools.undo_last())   # revert the last file edit
+            # markup=False: undo_last() embeds the edited file PATH; a Next.js-style '[id]'/'[...slug]'
+            # segment is parsed as a Rich tag → corrupted output or a MarkupError crash.
+            _console.print("  " + base_tools.undo_last(), markup=False)   # revert the last file edit
         elif cmd == "/plugins":
             tools = sorted(e.name for e in base_tools.registry._tools.values()
                            if getattr(e, "source", "") == "plugin")
-            _console.print(f"  plugin dirs: {', '.join(cfg.plugin_dirs) or '(none configured)'}")
-            _console.print(f"  plugin tools ({len(tools)}): {', '.join(tools) or '(none loaded)'}")
+            # markup=False: plugin dirs are filesystem PATHS that may contain '[...]' (same Rich-tag hazard)
+            _console.print(f"  plugin dirs: {', '.join(cfg.plugin_dirs) or '(none configured)'}", markup=False)
+            _console.print(f"  plugin tools ({len(tools)}): {', '.join(tools) or '(none loaded)'}", markup=False)
         elif cmd == "/mcp":
             configured = list(cfg.mcp_servers.keys())
             mtools = sorted(e.name for e in base_tools.registry._tools.values()
@@ -670,7 +681,7 @@ def main() -> None:
             if not arg:
                 _console.print(f"  workspace: {base_tools.root()}", markup=False)
             else:
-                _console.print("  ✓ " + _reroot(arg))
+                _console.print("  ✓ " + _reroot(arg), markup=False)   # path may contain '[...]' → Rich markup
         else:
             _console.print(f"  unknown command {cmd} (/help)", markup=False)
         return True

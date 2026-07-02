@@ -87,6 +87,8 @@ def _is_secret(text: str) -> bool:
 def _by_task(records: list[dict]) -> list[list[dict]]:
     groups: dict[str, list[dict]] = {}
     for r in records:
+        if not isinstance(r, dict):      # a malformed episodic line (null/list/partial write, old schema)
+            continue                     # must not crash consolidation → silently DISCARD ALL lessons this session
         groups.setdefault(r.get("task_id", ""), []).append(r)
     return [sorted(g, key=lambda r: r.get("turn", 0)) for g in groups.values()]
 
@@ -98,7 +100,7 @@ def promote_episodes(records: list[dict]) -> list[dict]:
     # pass 1: collect the corrective pitfall of each task + count signatures (frequency, #4)
     cand = []
     for recs in _by_task(records):
-        rmeta = [r.get("record", {}) for r in recs]
+        rmeta = [(r.get("record") if isinstance(r.get("record"), dict) else {}) for r in recs]  # {"record": null} → {} (not None)
         had_fail = any(m.get("meta", {}).get("failing") for m in rmeta)
         last = rmeta[-1].get("meta", {})
         if not (had_fail and last.get("stop_reason") == "end_turn" and not last.get("failing")):
@@ -222,7 +224,7 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
     EverOS rule), capped. Pure. Returns {kind, name, description, steps, files, freq, tags}."""
     cand = []
     for recs in _by_task(records):
-        rmeta = [r.get("record", {}) for r in recs]
+        rmeta = [(r.get("record") if isinstance(r.get("record"), dict) else {}) for r in recs]  # {"record": null} → {} (not None)
         if any(m.get("meta", {}).get("failing") for m in rmeta):
             continue                                   # corrective → a fact, not a procedure
         last = rmeta[-1].get("meta", {})

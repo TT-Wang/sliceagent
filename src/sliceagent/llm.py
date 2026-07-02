@@ -208,7 +208,11 @@ class OpenAILLM:
                               or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"))
         use_proxy = bool(proxy) and proxy != "none"
         self.proxy_used = proxy if use_proxy else "direct"   # exposed so the CLI can announce the route (A4)
-        http_client = httpx.Client(proxy=proxy, timeout=timeout) if use_proxy else httpx.Client(timeout=timeout)
+        # trust_env=False: the proxy is resolved EXPLICITLY above (AGENT_PROXY/HTTPS_PROXY/HTTP_PROXY →
+        # _choose_proxy), so httpx must NOT ALSO auto-read ambient proxy env — otherwise AGENT_PROXY=none
+        # ("force direct") still routes through an ambient HTTPS_PROXY (httpx defaults trust_env=True).
+        http_client = (httpx.Client(proxy=proxy, timeout=timeout, trust_env=False) if use_proxy
+                       else httpx.Client(timeout=timeout, trust_env=False))
 
         # Enforce the request timeout at the SDK layer too. The openai SDK applies its OWN per-request
         # timeout (default ~600s) which OVERRIDES the httpx client's, so without passing it here a
@@ -278,8 +282,8 @@ class OpenAILLM:
             use_proxy = bool(proxy) and proxy != "none"
             self.proxy_used = proxy if use_proxy else "direct"
             timeout = getattr(self, "_timeout", 60.0)
-            http_client = (httpx.Client(proxy=proxy, timeout=timeout) if use_proxy
-                           else httpx.Client(timeout=timeout))
+            http_client = (httpx.Client(proxy=proxy, timeout=timeout, trust_env=False) if use_proxy
+                           else httpx.Client(timeout=timeout, trust_env=False))   # explicit proxy only (see __init__)
             ckw: dict = {"api_key": new_key}
             if new_base:
                 ckw["base_url"] = new_base

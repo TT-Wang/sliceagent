@@ -747,14 +747,20 @@ class LocalToolHost:
 
     @staticmethod
     def _detect_crlf(full: str) -> bool:
-        """True if the existing file uses Windows CRLF line endings (sample the head). Used to PRESERVE
+        """True if the existing file is DOMINANTLY Windows CRLF (sample the head). Used to PRESERVE
         line endings on edit: the model emits '\\n', and writing that to a CRLF file rewrites every line
-        ending — a huge spurious diff / corruption on Windows-authored repos."""
+        ending — a huge spurious diff / corruption on Windows-authored repos. DOMINANCE (not mere
+        presence): a mostly-LF file with one embedded '\\r\\n' (a byte literal, an HTTP fixture, a merge
+        artifact) must NOT be flipped whole-file to CRLF — while a uniformly-CRLF file with one stray LF
+        still counts as CRLF. crlf ≥ (bare-LF) covers both, and keeps the pinned uniform cases."""
         try:
             with open(full, "rb") as f:
-                return b"\r\n" in f.read(65536)
+                head = f.read(65536)
         except OSError:
             return False
+        crlf = head.count(b"\r\n")
+        lf_only = head.count(b"\n") - crlf          # LFs that are NOT part of a CRLF
+        return crlf > 0 and crlf >= lf_only
 
     @staticmethod
     def _preserve_eol(text: str, crlf: bool) -> str:
