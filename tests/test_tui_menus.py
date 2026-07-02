@@ -24,7 +24,7 @@ def _drive(keys: str, current: int = 0):
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
-    from memagent.tui import run_selector
+    from sliceagent.tui import run_selector
     with create_pipe_input() as pinp:
         pinp.send_text(keys)
         return run_selector("pick", ROWS, current=current, pt_input=pinp, pt_output=DummyOutput())

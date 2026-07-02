@@ -8,7 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.code_index import RipgrepCodeIndex  # noqa: E402
+from sliceagent.code_index import RipgrepCodeIndex  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -153,7 +153,7 @@ def graph_degrades_to_lexical_without_edges():
 
 @check
 def treesitter_defs_precise_when_available():
-    from memagent.code_index import _ts_def_names, _ts_python
+    from sliceagent.code_index import _ts_def_names, _ts_python
     if _ts_python() is None:
         print("  (skip: tree-sitter not installed)"); return
     src = ('# comment with def fake_fn and class FakeCls\nS = "def string_trap"\n'

@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.model_catalog import capability, likely_endpoint_mismatch  # noqa: E402
+from sliceagent.model_catalog import capability, likely_endpoint_mismatch  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -64,7 +64,7 @@ def gpt5_named_model_on_a_non_openai_endpoint_does_not_get_the_responses_route()
 def effort_never_routes_to_responses_api_off_openai():
     # the actual decision point in llm.py: OpenAILLM._effort() must return None for this pairing, so
     # complete() never calls self.client.responses.create() against a server without that route.
-    from memagent.llm import OpenAILLM
+    from sliceagent.llm import OpenAILLM
     llm = OpenAILLM.__new__(OpenAILLM)   # bypass __init__ — _effort() only touches these 3 attrs
     llm.model, llm._base_url, llm.reasoning = "gpt-5.5", "https://api.deepseek.com/v1", "high"
     assert llm._effort() is None, "must fall through to plain chat/completions, never /v1/responses"

@@ -12,16 +12,16 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.subagent import (                       # noqa: E402
+from sliceagent.subagent import (                       # noqa: E402
     SubagentHost,
     read_only_schemas,
     run_subagent,
 )
-from memagent.tools import LocalToolHost              # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.seed import make_build_slice  # noqa: E402
-from memagent.memory import NullMemory                # noqa: E402
-from memagent.retriever import NullRetriever          # noqa: E402
+from sliceagent.tools import LocalToolHost              # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.seed import make_build_slice  # noqa: E402
+from sliceagent.memory import NullMemory                # noqa: E402
+from sliceagent.retriever import NullRetriever          # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -209,9 +209,9 @@ def explorer_keeps_reads_resident_no_eviction_churn():
     # default READ_BUDGET the early reads evict → the model re-reads the paged-out files → the anti-loop
     # guard flags the re-reads as no-progress → the child goes "stuck" before it can summarize. The
     # explorer budget (EXPLORER_READ_BUDGET) holds the exploration, so there is no eviction churn.
-    from memagent.subagent import EXPLORER_READ_BUDGET
-    from memagent.pfc import Slice, touch_file
-    from memagent.swap import READ_BUDGET
+    from sliceagent.subagent import EXPLORER_READ_BUDGET
+    from sliceagent.pfc import Slice, touch_file
+    from sliceagent.swap import READ_BUDGET
     assert EXPLORER_READ_BUDGET > READ_BUDGET
     # explorer budget: 10 distinct reads ALL stay resident (no eviction → no re-read churn)
     s = Slice(); s.reset("explore"); s.read_budget = s.read_ceiling = EXPLORER_READ_BUDGET
@@ -229,8 +229,8 @@ def explorer_keeps_reads_resident_no_eviction_churn():
 def explorer_guard_does_not_stuck_on_repeated_reads():
     # the explorer guard relaxes the READ axes: a repeated idempotent read (same result) must NOT be
     # hard-blocked (which is what drove review children to "stuck"); the DEFAULT guard still blocks it.
-    from memagent.guardrails import ToolCallGuardrailConfig
-    from memagent.hooks import GuardrailHook
+    from sliceagent.guardrails import ToolCallGuardrailConfig
+    from sliceagent.hooks import GuardrailHook
     relaxed = GuardrailHook(ToolCallGuardrailConfig(no_progress_block_after=10**6, result_repeat_block_after=10**6))
     for _ in range(8):                                  # same read, same result, many times
         assert relaxed.authorize_tool("read_file", {"path": "a.py"}).allow, "explorer guard blocked a re-read"
@@ -250,7 +250,7 @@ def explorer_profile_runs_fast_reasoning_without_mutating_parent():
     # EXPLORER profile: a read-only child runs at fast reasoning via a per-child llm VIEW; the shared parent
     # llm is never mutated and a writable child uses the parent unchanged.
     from types import SimpleNamespace
-    from memagent.subagent import _profile_llm
+    from sliceagent.subagent import _profile_llm
     parent = SimpleNamespace(reasoning="full")
     view = _profile_llm(parent, "fast")
     assert view.reasoning == "fast", view.reasoning

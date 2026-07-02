@@ -9,10 +9,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.sandbox import make_sandbox  # noqa: E402
-from memagent.policy import make_policy  # noqa: E402
-from memagent.tools import LocalToolHost  # noqa: E402
-from memagent.terminal import SessionManager  # noqa: E402
+from sliceagent.sandbox import make_sandbox  # noqa: E402
+from sliceagent.policy import make_policy  # noqa: E402
+from sliceagent.tools import LocalToolHost  # noqa: E402
+from sliceagent.terminal import SessionManager  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -39,7 +39,7 @@ def factories_reject_unknown_values():  # #27 / #28
 @check
 def shell_path_grant_skips_secret_dirs():  # #31
     home = os.path.expanduser("~")
-    base = tempfile.mkdtemp(dir=home, prefix=".memagent-sectest-")
+    base = tempfile.mkdtemp(dir=home, prefix=".sliceagent-sectest-")
     try:
         secret = os.path.join(base, ".aws"); os.makedirs(secret)
         open(os.path.join(secret, "credentials"), "w").write("x")
@@ -59,7 +59,7 @@ def terminal_open_failure_is_clean():  # #19
     sm = SessionManager()
     raised = False
     try:
-        sm.open("x", cwd="/no/such/dir/zzz-memagent")   # bad cwd → Popen raises
+        sm.open("x", cwd="/no/such/dir/zzz-sliceagent")   # bad cwd → Popen raises
     except Exception:  # noqa: BLE001
         raised = True
     assert raised, "open() with a bad cwd must raise, not hang"

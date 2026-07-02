@@ -12,8 +12,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.regions import record_note  # noqa: E402
-from memagent.pfc import Slice, touch_file  # noqa: E402
+from sliceagent.regions import record_note  # noqa: E402
+from sliceagent.pfc import Slice, touch_file  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -17,8 +17,8 @@ from rich.console import Console                                        # noqa: 
 from rich.live import Live                                             # noqa: E402
 from rich.text import Text                                             # noqa: E402
 
-from memagent.events import (SliceBuilt, StepBegin, ToolResult, ToolStarted)  # noqa: E402
-from memagent.tui import RichSink, _LiveStatus, _fmt_tally             # noqa: E402
+from sliceagent.events import (SliceBuilt, StepBegin, ToolResult, ToolStarted)  # noqa: E402
+from sliceagent.tui import RichSink, _LiveStatus, _fmt_tally             # noqa: E402
 
 CHECKS = []
 def check(fn):

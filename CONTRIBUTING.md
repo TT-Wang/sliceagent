@@ -11,12 +11,12 @@ testable offline with a fake LLM.
 
 ## Running the tests
 
-memagent uses a **dependency-free custom test runner** (no pytest): each `tests/test_*.py` is a standalone
+sliceagent uses a **dependency-free custom test runner** (no pytest): each `tests/test_*.py` is a standalone
 script with a tiny `@check` harness that exits non-zero on failure. Run the whole offline suite:
 
 ```bash
 bash scripts/run_tests.sh             # runs every tests/test_*.py, tallies, exits non-zero on any failure
-ruff check src/memagent tests evals   # lint (real-bug rules; house style configured in pyproject)
+ruff check src/sliceagent tests evals   # lint (real-bug rules; house style configured in pyproject)
 ```
 
 or a single file:

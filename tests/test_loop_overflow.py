@@ -12,13 +12,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.context_overflow import ContextOverflow                # noqa: E402
-from memagent.events import TurnInterrupted                          # noqa: E402
-from memagent.hooks import BudgetHook, Hooks, OracleHook             # noqa: E402
-from memagent.interfaces import Snippet                              # noqa: E402
-from memagent.loop import run_turn                                   # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.seed import make_build_slice  # noqa: E402
+from sliceagent.context_overflow import ContextOverflow                # noqa: E402
+from sliceagent.events import TurnInterrupted                          # noqa: E402
+from sliceagent.hooks import BudgetHook, Hooks, OracleHook             # noqa: E402
+from sliceagent.interfaces import Snippet                              # noqa: E402
+from sliceagent.loop import run_turn                                   # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -224,7 +224,7 @@ def throwing_build_slice_parks_not_crashes():
 @check
 def selfcheck_accepts_after_model_actually_verifies():
     # GROUNDED gate: 'done' -> forced verification feedback -> model RUNS a tool (real verify) -> 'done' accepted.
-    from memagent.hooks import SelfCheckHook
+    from sliceagent.hooks import SelfCheckHook
     llm = _ScriptLLM([_Resp(content="done", finish_reason="stop"),
                       _Resp(tool_calls=[_TC("noop", {}, "c1")]),         # the model does verification work
                       _Resp(content="verified, done", finish_reason="stop")])
@@ -239,7 +239,7 @@ def selfcheck_accepts_after_model_actually_verifies():
 @check
 def selfcheck_is_bounded_when_model_never_verifies():
     # A bare re-assertion of 'done' (no tool work) re-fires the gate, but only up to max_fires — never loops.
-    from memagent.hooks import SelfCheckHook
+    from sliceagent.hooks import SelfCheckHook
     llm = _ScriptLLM([_Resp(content="done", finish_reason="stop")] * 8)
     res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
                    dispatch=lambda e: None, hooks=SelfCheckHook(max_fires=2), max_steps=20)
@@ -251,7 +251,7 @@ def selfcheck_is_bounded_when_model_never_verifies():
 def micro_compaction_clears_old_tool_bodies_before_dropping():
     # >MICRO_KEEP_RECENT messages accumulated, then one overflow → micro clears an OLD tool BODY (keeping
     # the message, its tool_call_id, and the assistant reasoning) rather than dropping a whole exchange.
-    from memagent.loop import MICRO_MARKER
+    from sliceagent.loop import MICRO_MARKER
     script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
     script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
     llm = _ScriptLLM(script)
@@ -268,7 +268,7 @@ def micro_compaction_clears_old_tool_bodies_before_dropping():
 def overflow_breadcrumb_inserted_once_per_turn():
     # two SEPARATE overflow steps in one turn must yield EXACTLY ONE breadcrumb (the old per-step flag
     # stacked one per step). The breadcrumb is derived from the transcript now → idempotent.
-    from memagent.loop import OVERFLOW_COMPACTED
+    from sliceagent.loop import OVERFLOW_COMPACTED
     script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
     script += ["OVERFLOW", _Resp(tool_calls=[_TC("noop", {}, "cx")])]
     script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]

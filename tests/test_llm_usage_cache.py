@@ -9,8 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.context_overflow import ContextOverflow             # noqa: E402
-from memagent.llm import OpenAILLM                                 # noqa: E402
+from sliceagent.context_overflow import ContextOverflow             # noqa: E402
+from sliceagent.llm import OpenAILLM                                 # noqa: E402
 
 CHECKS = []
 def check(fn):

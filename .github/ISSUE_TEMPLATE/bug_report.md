@@ -15,7 +15,7 @@ labels: bug
 2.
 
 **Environment**
-- memagent version: <!-- `memagent version` -->
+- sliceagent version: <!-- `sliceagent version` -->
 - OS / Python:
 - Model / provider:
 - Install method: <!-- install.sh · uv · pipx · docker · pip -e -->

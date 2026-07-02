@@ -13,10 +13,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import ToolResult                         # noqa: E402
-from memagent.pfc import Slice, slice_sink, touch_file  # noqa: E402
-from memagent.seed import build_artifacts, make_build_slice  # noqa: E402
-from memagent.tools import LocalToolHost                       # noqa: E402
+from sliceagent.events import ToolResult                         # noqa: E402
+from sliceagent.pfc import Slice, slice_sink, touch_file  # noqa: E402
+from sliceagent.seed import build_artifacts, make_build_slice  # noqa: E402
+from sliceagent.tools import LocalToolHost                       # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -25,7 +25,7 @@ def check(fn):
 
 
 def _host():
-    d = tempfile.mkdtemp(prefix="memagent-reach-test-")
+    d = tempfile.mkdtemp(prefix="sliceagent-reach-test-")
     return LocalToolHost(root=os.path.realpath(d)), os.path.realpath(d)
 
 
@@ -59,7 +59,7 @@ def tilde_expands_to_home_first():
 def tilde_resolves_when_home_is_allowed():
     # add_root($HOME/<sub>) brings a ~-path into reach: expanduser + allowed_roots cooperate.
     h, _ = _host()
-    sub = tempfile.mkdtemp(prefix="memagent-reach-home-", dir=os.path.expanduser("~"))
+    sub = tempfile.mkdtemp(prefix="sliceagent-reach-home-", dir=os.path.expanduser("~"))
     try:
         h.add_root(sub)
         rel = os.path.join("~", os.path.relpath(sub, os.path.expanduser("~")), "f.txt")
@@ -90,7 +90,7 @@ def escape_error_is_prescriptive():
 @check
 def add_root_makes_external_dir_reachable():
     h, root = _host()
-    ext = tempfile.mkdtemp(prefix="memagent-reach-ext-")
+    ext = tempfile.mkdtemp(prefix="sliceagent-reach-ext-")
     try:
         # before: a path under ext escapes the workspace
         before = False
@@ -113,7 +113,7 @@ def add_root_makes_external_dir_reachable():
 def shell_written_file_is_readable_after_add_root():
     # the core I2 promise: a file the SHELL writes outside the workspace is readable back by file tools
     h, _ = _host()
-    ext = tempfile.mkdtemp(prefix="memagent-reach-shellext-")
+    ext = tempfile.mkdtemp(prefix="sliceagent-reach-shellext-")
     try:
         _write(ext, "made_by_shell.txt", "hello from shell")
         h.add_root(ext)
@@ -152,7 +152,7 @@ def open_files_not_created_for_missing():
 def open_files_outside_reach_for_escape():
     # a file that EXISTS on disk but is outside file-tool reach must NOT read "(not created yet)"
     h, _ = _host()
-    ext = tempfile.mkdtemp(prefix="memagent-reach-of-")
+    ext = tempfile.mkdtemp(prefix="sliceagent-reach-of-")
     try:
         ext_file = _write(ext, "real.txt", "exists on disk")  # exists, but outside allowed_roots
         s = Slice(); s.reset("t")

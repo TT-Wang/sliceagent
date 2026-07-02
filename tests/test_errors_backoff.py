@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent import errors                                # noqa: E402
-from memagent.errors import jittered_backoff, with_retry   # noqa: E402
+from sliceagent import errors                                # noqa: E402
+from sliceagent.errors import jittered_backoff, with_retry   # noqa: E402
 
 CHECKS = []
 def check(fn):

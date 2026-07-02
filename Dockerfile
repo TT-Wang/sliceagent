@@ -1,6 +1,6 @@
-# memagent — runnable container image.
-#   docker build -t memagent .
-#   docker run -it -e LLM_API_KEY=$LLM_API_KEY -v "$PWD:/work" -w /work memagent
+# sliceagent — runnable container image.
+#   docker build -t sliceagent .
+#   docker run -it -e LLM_API_KEY=$LLM_API_KEY -v "$PWD:/work" -w /work sliceagent
 # The agent edits files in the mounted workspace (/work); pass your key via -e (never bake it in).
 FROM python:3.12-slim
 
@@ -18,4 +18,4 @@ RUN useradd -m agent
 USER agent
 WORKDIR /work
 
-ENTRYPOINT ["memagent"]
+ENTRYPOINT ["sliceagent"]

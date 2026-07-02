@@ -7,10 +7,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import AssistantText                                  # noqa: E402
-from memagent.pfc import Slice, record_user, slice_sink  # noqa: E402
-from memagent.seed import render_slice  # noqa: E402
-from memagent.regions import MAX_CONVERSATION, render_conversation  # noqa: E402
+from sliceagent.events import AssistantText                                  # noqa: E402
+from sliceagent.pfc import Slice, record_user, slice_sink  # noqa: E402
+from sliceagent.seed import render_slice  # noqa: E402
+from sliceagent.regions import MAX_CONVERSATION, render_conversation  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -10,7 +10,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost                          # noqa: E402
+from sliceagent.tools import LocalToolHost                          # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -28,8 +28,8 @@ def _home_dirs():
 # ---- render (pure) -----------------------------------------------------------------------------
 @check
 def render_focus_renders_and_suppresses():
-    from memagent.regions import render_focus
-    ws, proj = HOME + "/x/memagent", HOME + "/x/hunter"
+    from sliceagent.regions import render_focus
+    ws, proj = HOME + "/x/sliceagent", HOME + "/x/hunter"
     out = render_focus(proj, [proj], home=HOME, workspace=ws)
     assert "~/x/hunter" in out and "read_file" in out and "RECENT CONVERSATION" in out, out
     assert render_focus(None, [], home=HOME, workspace=ws) == "", "single-workspace → suppressed"
@@ -58,7 +58,7 @@ def grant_shell_paths_sets_focus_and_file_reach():
 def focus_is_host_level_and_survives_a_seal():
     ws, proj = _home_dirs()
     try:
-        from memagent.pfc import Slice
+        from sliceagent.pfc import Slice
         host = LocalToolHost(root=ws)
         host._grant_shell_paths(f"cat {proj}/package.json")
         before = host.focus()
@@ -74,10 +74,10 @@ def focus_is_host_level_and_survives_a_seal():
 def active_focus_renders_in_the_built_slice():
     ws, proj = _home_dirs()
     try:
-        from memagent.memory import NullMemory
-        from memagent.retriever import NullRetriever
-        from memagent.pfc import Slice
-        from memagent.seed import make_build_slice
+        from sliceagent.memory import NullMemory
+        from sliceagent.retriever import NullRetriever
+        from sliceagent.pfc import Slice
+        from sliceagent.seed import make_build_slice
         host = LocalToolHost(root=ws)
         host._grant_shell_paths(f"ls {proj}")
         s = Slice(); s.reset("look into index.ts")
@@ -94,7 +94,7 @@ def active_focus_renders_in_the_built_slice():
 # ---- the framing rule --------------------------------------------------------------------------
 @check
 def system_prompt_resolves_referents_before_asking():
-    from memagent.prompt import SYSTEM_PROMPT
+    from sliceagent.prompt import SYSTEM_PROMPT
     low = SYSTEM_PROMPT.lower()
     assert "current project" in low, "prompt must reference the CURRENT PROJECT tier"
     assert "resolve before asking" in low, "prompt must teach resolve-before-asking"
@@ -120,8 +120,8 @@ def resolution_base_follows_current_project_but_floor_stays():
 @check
 def open_files_stay_truthful_after_the_project_moves():
     # I2 guard: a workspace pin must NOT re-resolve against the moved base and lie '(not created yet)'.
-    from memagent.pfc import Slice, touch_file
-    from memagent.seed import build_artifacts
+    from sliceagent.pfc import Slice, touch_file
+    from sliceagent.seed import build_artifacts
     ws, proj = _home_dirs()
     try:
         host = LocalToolHost(root=ws)

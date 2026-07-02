@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import memagent.flags as flags  # noqa: E402
-from memagent.flags import Flag  # noqa: E402
+import sliceagent.flags as flags  # noqa: E402
+from sliceagent.flags import Flag  # noqa: E402
 
 CHECKS = []
 def check(fn):

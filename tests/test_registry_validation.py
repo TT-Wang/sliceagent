@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.registry import ToolEntry, ToolRegistry  # noqa: E402
+from sliceagent.registry import ToolEntry, ToolRegistry  # noqa: E402
 
 CHECKS = []
 def check(fn):

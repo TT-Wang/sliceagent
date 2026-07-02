@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.llm import OpenAILLM  # noqa: E402
+from sliceagent.llm import OpenAILLM  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -207,7 +207,7 @@ def explicit_effort_with_tools_routes_to_responses():
 @check
 def typed_usage_splits_cache_read_from_other():
     # TokenUsage: input split into other / cache-read / cache-creation, output kept.
-    from memagent.llm import _usage_dict
+    from sliceagent.llm import _usage_dict
     raw = NS(prompt_tokens=100, completion_tokens=20,
              prompt_tokens_details=NS(cached_tokens=30), cache_creation_input_tokens=10)
     u = _usage_dict(raw)
@@ -225,7 +225,7 @@ def typed_usage_splits_cache_read_from_other():
 
 @check
 def empty_completion_raises_retryable():
-    from memagent.errors import EmptyResponseError, classify
+    from sliceagent.errors import EmptyResponseError, classify
     resp = NS(choices=[NS(message=NS(content=None, tool_calls=[]), finish_reason="stop")],
               usage=NS(prompt_tokens=5, completion_tokens=0, prompt_tokens_details=None))
     class _Blocking:
@@ -249,7 +249,7 @@ def empty_completion_raises_retryable():
 
 @check
 def classify_buckets_failures_for_telemetry():
-    from memagent.errors import classify
+    from sliceagent.errors import classify
     assert classify(RuntimeError("429 rate limit exceeded"))["kind"] == "rate_limit"
     assert classify(RuntimeError("connection error: econnreset"))["kind"] == "connection"
     e = RuntimeError("server blew up"); e.status_code = 503
@@ -274,7 +274,7 @@ def reasoning_intent_maps_to_effort():  # #51
 def watchdog_is_daemon_and_times_out():  # #47
     import time
     llm = _stub([], on_delta=None); llm._hard_timeout = 1; llm._base_url = ""
-    from memagent.llm import _import_api_timeout_error
+    from sliceagent.llm import _import_api_timeout_error
     APITimeoutError = _import_api_timeout_error()
 
     class _Slow:

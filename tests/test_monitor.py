@@ -8,9 +8,9 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import (  # noqa: E402
+from sliceagent.events import (  # noqa: E402
     AssistantText, SliceBuilt, StepEnd, ToolResult, TurnEnd, TurnInterrupted)
-from memagent.monitor import SliceMonitor, serve  # noqa: E402
+from sliceagent.monitor import SliceMonitor, serve  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -155,7 +155,7 @@ def live_server_smoke():
 def file_sink_persists_snapshot():
     import os
     import tempfile
-    from memagent.monitor import _session_files, make_file_monitor_sink
+    from sliceagent.monitor import _session_files, make_file_monitor_sink
     d = tempfile.mkdtemp()
     sink = make_file_monitor_sink("sess-A", dir=d)
     sink(sb("SYS", "USER-SLICE"))
@@ -176,7 +176,7 @@ def persistent_server_idle_and_sessions():
     import time
     import urllib.request
     from http.server import ThreadingHTTPServer
-    from memagent.monitor import IDLE_SECONDS, _PersistentHandler, make_file_monitor_sink
+    from sliceagent.monitor import IDLE_SECONDS, _PersistentHandler, make_file_monitor_sink
     d = tempfile.mkdtemp()
     srv = ThreadingHTTPServer(("127.0.0.1", 7793), _PersistentHandler)
     srv.monitor_dir = d
@@ -255,7 +255,7 @@ def live_step_survives_trim_and_keeps_growing():
 def file_write_is_off_the_hot_path_and_flushes():
     # MON2: the sink publishes to a background writer; StepEnd flushes. After drain the file is current.
     import tempfile
-    from memagent.monitor import make_file_monitor_sink
+    from sliceagent.monitor import make_file_monitor_sink
     d = tempfile.mkdtemp()
     sink = make_file_monitor_sink("sess-w", dir=d)
     for k in range(30):                                  # a burst of hot-path events
@@ -272,7 +272,7 @@ def file_write_is_off_the_hot_path_and_flushes():
 def file_snapshot_ring_is_bounded_on_disk():
     # MON1+MON2: the persisted snapshot is O(cap) — a long session never grows the file unboundedly.
     import tempfile
-    from memagent.monitor import _RING_CAP, make_file_monitor_sink
+    from sliceagent.monitor import _RING_CAP, make_file_monitor_sink
     d = tempfile.mkdtemp()
     sink = make_file_monitor_sink("sess-big", dir=d)
     for k in range(_RING_CAP + 25):
@@ -288,7 +288,7 @@ def prune_drops_stale_keeps_newest():
     # MON3: files older than the TTL are dropped, but the freshest is NEVER deleted (even if stale).
     import tempfile
     import time as _t
-    from memagent.monitor import _prune_sessions
+    from sliceagent.monitor import _prune_sessions
     d = tempfile.mkdtemp()
     for sid in ("old-a", "old-b", "fresh"):
         with open(os.path.join(d, f"{sid}.json"), "w") as f:
@@ -308,7 +308,7 @@ def prune_keeps_freshest_even_when_all_stale():
     # MON3 guarantee: even if EVERY file is stale, the most-recent one stays so the active session shows.
     import tempfile
     import time as _t
-    from memagent.monitor import _prune_sessions
+    from sliceagent.monitor import _prune_sessions
     d = tempfile.mkdtemp()
     for i, sid in enumerate(("s0", "s1", "s2")):
         p = os.path.join(d, f"{sid}.json")
@@ -325,7 +325,7 @@ def prune_caps_to_most_recent_m():
     # MON3: keep only the most-recent M files (newest never deleted).
     import tempfile
     import time as _t
-    from memagent.monitor import _prune_sessions
+    from sliceagent.monitor import _prune_sessions
     d = tempfile.mkdtemp()
     for i in range(6):
         p = os.path.join(d, f"s{i}.json")

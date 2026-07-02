@@ -7,9 +7,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.neocortex import (  # noqa: E402
+from sliceagent.neocortex import (  # noqa: E402
     build_learn_prompt, promote_episodes, promote_procedures, render_skill, render_skill_llm)
-from memagent.memory import make_write_skill_tool  # noqa: E402
+from sliceagent.memory import make_write_skill_tool  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -78,7 +78,7 @@ def secret_excluded():
 @check
 def consolidate_reads_cache_if_memem():
     try:
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
         m = MememMemory()
     except Exception:
         print("  (skip: memem not importable)")
@@ -161,11 +161,11 @@ def procedures_dedup_by_shape_repeated_first():
 @check
 def consolidate_routes_facts_and_procedures_if_memem():
     try:
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
     except Exception:
         print("  (skip: memem not importable)"); return
     m = MememMemory(); m._vault = tempfile.mkdtemp()
-    sk = tempfile.mkdtemp(); os.environ["MEMAGENT_SKILLS_DIR"] = sk
+    sk = tempfile.mkdtemp(); os.environ["SLICEAGENT_SKILLS_DIR"] = sk
     captured = []
     m.remember = lambda content, *, title="", scope="default", tags="", paths=None: captured.append(title)
     try:
@@ -187,7 +187,7 @@ def consolidate_routes_facts_and_procedures_if_memem():
         body = open(os.path.join(sk, skills[0], "SKILL.md")).read()  # one PROCEDURE skill
         assert body.startswith("---\nname:") and "## Process" in body and "read_file" in body
     finally:
-        os.environ.pop("MEMAGENT_SKILLS_DIR", None)
+        os.environ.pop("SLICEAGENT_SKILLS_DIR", None)
 
 
 # --- R1: lessons tagged with files (paths_context bonus) + paths threaded read-side ---------------
@@ -200,7 +200,7 @@ def promote_episodes_tags_lesson_with_files():
 
 @check
 def lookup_threads_paths_to_recall():
-    from memagent.pagetable import PageTable
+    from sliceagent.pagetable import PageTable
     captured = {}
     class _M:
         def recall(self, query, k=6, paths=None):
@@ -288,7 +288,7 @@ def learn_prompt_drives_write_skill_from_the_cache():
 
 @check
 def write_skill_tool_writes_user_provenance_and_validates():
-    sk = tempfile.mkdtemp(); os.environ["MEMAGENT_SKILLS_DIR"] = sk
+    sk = tempfile.mkdtemp(); os.environ["SLICEAGENT_SKILLS_DIR"] = sk
     try:
         tool = make_write_skill_tool()
         out = tool.handler({"name": "Deploy Flow", "description": "deploy the app to staging",
@@ -300,7 +300,7 @@ def write_skill_tool_writes_user_provenance_and_validates():
         assert "deploy-flow" in body[:80]                                        # name slugged
         assert "need a name" in tool.handler({"name": "x"}).lower()              # validation
     finally:
-        os.environ.pop("MEMAGENT_SKILLS_DIR", None)
+        os.environ.pop("SLICEAGENT_SKILLS_DIR", None)
 
 
 def main():

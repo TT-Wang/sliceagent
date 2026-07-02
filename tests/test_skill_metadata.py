@@ -8,7 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.skills import SkillManager, expand_skill_args, make_skill_tool  # noqa: E402
+from sliceagent.skills import SkillManager, expand_skill_args, make_skill_tool  # noqa: E402
 
 CHECKS = []
 def check(fn):

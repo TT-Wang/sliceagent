@@ -6,10 +6,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.finding_types import (  # noqa: E402
+from sliceagent.finding_types import (  # noqa: E402
     DECISION, FILE_TOUCHED, NOTE, RESOLVED, RULED_OUT, badge, classify_finding,
 )
-from memagent.tool_summary import summarize_tool_result  # noqa: E402
+from sliceagent.tool_summary import summarize_tool_result  # noqa: E402
 
 CHECKS = []
 def check(fn):

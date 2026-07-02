@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.background_review import (  # noqa: E402
+from sliceagent.background_review import (  # noqa: E402
     BackgroundReviewer, background_review_enabled, make_background_reviewer,
 )
 

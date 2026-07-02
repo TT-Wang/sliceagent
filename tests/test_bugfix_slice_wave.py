@@ -7,8 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import memagent.regions as regions  # noqa: E402
-from memagent.memory import MememMemory, NullMemory  # noqa: E402
+import sliceagent.regions as regions  # noqa: E402
+from sliceagent.memory import MememMemory, NullMemory  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -20,7 +20,7 @@ def _drive(keys: str):
     """Build the composer, feed `keys` through a pipe input, run it, return app.run()'s result."""
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
-    from memagent.tui import TuiInput
+    from sliceagent.tui import TuiInput
 
     ti = TuiInput({"model": "test-model", "policy": "guard", "topic": "demo"}, root=None)
     with create_pipe_input() as pinp:
@@ -57,7 +57,7 @@ def composer_layout_builds_with_frame_and_status():
     # the Application must construct with the bordered Frame + status window (catches a bad layout import)
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.input.defaults import create_pipe_input
-    from memagent.tui import TuiInput
+    from sliceagent.tui import TuiInput
     ti = TuiInput({"model": "test-model"}, root=None)
     with create_pipe_input() as pinp:
         app, ta = ti._build_composer(pt_input=pinp, pt_output=DummyOutput())
@@ -73,7 +73,7 @@ def composer_is_transient_to_avoid_duplicate_echo():
     # twice. The echo is the persistent record; the input box is transient.
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.input.defaults import create_pipe_input
-    from memagent.tui import TuiInput
+    from sliceagent.tui import TuiInput
     ti = TuiInput({"model": "test-model"}, root=None)
     with create_pipe_input() as pinp:
         app, _ta = ti._build_composer(pt_input=pinp, pt_output=DummyOutput())
@@ -84,7 +84,7 @@ def composer_is_transient_to_avoid_duplicate_echo():
 def prompt_falls_back_when_app_errors():
     # if the framed Application raises a non-exit error, prompt() must fall back to the plain prompt
     # (so input is NEVER broken). Force _pinned_prompt to raise; stub _simple_prompt to observe the fallback.
-    from memagent.tui import TuiInput
+    from sliceagent.tui import TuiInput
     ti = TuiInput({"model": "test-model"}, root=None)
     ti._pinned_prompt = lambda: (_ for _ in ()).throw(RuntimeError("no tty"))
     ti._simple_prompt = lambda: "FELL_BACK"

@@ -1,6 +1,6 @@
 """Off-main-thread LLM hard-timeout watchdog (the TB ThreadPoolExecutor hang fix).
 
-memagent's wall-clock backstop for a wedged LLM connection was a SIGALRM, which only arms on the MAIN
+sliceagent's wall-clock backstop for a wedged LLM connection was a SIGALRM, which only arms on the MAIN
 thread. Terminal-Bench (and any concurrent host) runs the agent in a ThreadPoolExecutor worker, where
 SIGALRM cannot arm — so a silently-stalled completion hung the turn forever. _create_watchdog enforces
 the same deadline with a futures watchdog, on any thread. No network. Run:
@@ -12,7 +12,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.llm import OpenAILLM, _import_api_timeout_error  # noqa: E402
+from sliceagent.llm import OpenAILLM, _import_api_timeout_error  # noqa: E402
 
 APITimeoutError = _import_api_timeout_error()
 

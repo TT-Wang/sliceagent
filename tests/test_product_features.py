@@ -9,7 +9,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost                          # noqa: E402
+from sliceagent.tools import LocalToolHost                          # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -86,7 +86,7 @@ def code_review_is_registered_as_a_tool():
 # ---- D4: cost meter ----------------------------------------------------------
 @check
 def cost_accrues_for_known_model_only():
-    from memagent.tui import _accrue_cost, _price
+    from sliceagent.tui import _accrue_cost, _price
     assert _price("kimi-k2.7-code") is not None
     assert _price("some-unknown-model") is None
     stats = {"model": "kimi-k2.7-code"}
@@ -103,7 +103,7 @@ def cost_accrues_for_known_model_only():
 @check
 def model_fallback_swaps_once_when_configured():
     from types import SimpleNamespace
-    from memagent.loop import _try_model_fallback
+    from sliceagent.loop import _try_model_fallback
     os.environ.pop("AGENT_MODEL_FALLBACK", None)
     llm = SimpleNamespace(model="small-ctx")
     assert _try_model_fallback(llm) is False                       # nothing configured → no swap
@@ -120,8 +120,8 @@ def model_fallback_swaps_once_when_configured():
 def plain_sink_is_readable_and_quiet_on_reads():
     import contextlib
     import io
-    from memagent.cli import cli_sink
-    from memagent.events import AssistantText, ToolResult
+    from sliceagent.cli import cli_sink
+    from sliceagent.events import AssistantText, ToolResult
     s = cli_sink()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -141,8 +141,8 @@ def plain_sink_survives_none_usage():
     # review round 1: cli_sink must not crash if TurnEnd.usage is None (guard like every other sink)
     import contextlib
     import io
-    from memagent.cli import cli_sink
-    from memagent.events import TurnEnd
+    from sliceagent.cli import cli_sink
+    from sliceagent.events import TurnEnd
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cli_sink()(TurnEnd("end_turn", 5, None))
@@ -154,8 +154,8 @@ def plain_sink_survives_none_usage():
 def richsink_streams_content_then_finalizes_once():
     import io
     from rich.console import Console
-    from memagent.events import AssistantText, SliceBuilt
-    from memagent.tui import make_rich_sink
+    from sliceagent.events import AssistantText, SliceBuilt
+    from sliceagent.tui import make_rich_sink
     for force in (False, True):                    # non-tty (fallback) AND tty-like (Live) must both be safe
         buf = io.StringIO()
         c = Console(file=buf, force_terminal=force, width=80, soft_wrap=False)
@@ -174,7 +174,7 @@ def richsink_ondelta_noop_when_idle():
     # a content delta with no active step (e.g. during routing) must not crash or start a live region
     import io
     from rich.console import Console
-    from memagent.tui import make_rich_sink
+    from sliceagent.tui import make_rich_sink
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=False), {})
     sink.on_delta("content", "stray")
     assert sink._status is None
@@ -193,8 +193,8 @@ def streaming_reply_shows_a_fixed_single_line_status_not_a_growing_region():
     # stays a short constant-length line no matter how long the reply gets.
     import io
     from rich.console import Console
-    from memagent.tui import make_rich_sink, _LiveStatus
-    from memagent.events import SliceBuilt
+    from sliceagent.tui import make_rich_sink, _LiveStatus
+    from sliceagent.events import SliceBuilt
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
     sink(SliceBuilt("req"))                             # arms the status region (like a real turn)
     try:
@@ -212,10 +212,10 @@ def streaming_reply_shows_a_fixed_single_line_status_not_a_growing_region():
 
 # ---- image input (vision) ----------------------------------------------------
 def _slice_msgs(host, goal="do the thing"):
-    from memagent.memory import NullMemory
-    from memagent.retriever import NullRetriever
-    from memagent.pfc import Slice
-    from memagent.seed import make_build_slice
+    from sliceagent.memory import NullMemory
+    from sliceagent.retriever import NullRetriever
+    from sliceagent.pfc import Slice
+    from sliceagent.seed import make_build_slice
     s = Slice(); s.reset(goal)
     return make_build_slice(s, host, NullRetriever(), NullMemory(), goal)()
 
@@ -265,7 +265,7 @@ def attach_image_rejects_spoofed_and_sniffs_real_type():
 
 @check
 def vision_capability_is_gated_by_model_name():
-    from memagent.model_catalog import capability
+    from sliceagent.model_catalog import capability
     assert capability("kimi-k2.7-code").supports_vision is False, "the default code model is text-only"
     assert capability("moonshot-v1-8k-vision").supports_vision is True
     assert capability("gpt-4o").supports_vision is True
@@ -276,8 +276,8 @@ def vision_capability_is_gated_by_model_name():
 # ---- subagent activity → ONE dynamic line (not a line per child tool call) ---
 @check
 def subagent_activity_is_compact_counting_not_json_spam():
-    from memagent.events import ToolStarted
-    from memagent.subagent import _nested_sink
+    from sliceagent.events import ToolStarted
+    from sliceagent.subagent import _nested_sink
     lines = []
     sink = _nested_sink(lambda t: lines.append(t), depth=1)
     for i in range(5):
@@ -291,7 +291,7 @@ def subagent_activity_is_compact_counting_not_json_spam():
 def richsink_subagent_notify_is_safe_and_quiet():
     import io
     from rich.console import Console
-    from memagent.tui import make_rich_sink
+    from sliceagent.tui import make_rich_sink
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=False, width=80), {})
     for i in range(40):                              # 40 child tool calls → one updating line, never a crash
         sink.subagent_notify(f"↳ read_file f{i}.py · {i + 1} calls")

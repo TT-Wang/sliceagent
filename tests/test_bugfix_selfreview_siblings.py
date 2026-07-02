@@ -10,10 +10,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.policy import make_policy  # noqa: E402
-from memagent.guardrails import _NON_MUTATORS  # noqa: E402
-from memagent.memory import MememMemory  # noqa: E402
-from memagent.interfaces import TaskState  # noqa: E402
+from sliceagent.policy import make_policy  # noqa: E402
+from sliceagent.guardrails import _NON_MUTATORS  # noqa: E402
+from sliceagent.memory import MememMemory  # noqa: E402
+from sliceagent.interfaces import TaskState  # noqa: E402
 
 CHECKS = []
 def check(fn):

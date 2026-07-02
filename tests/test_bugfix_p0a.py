@@ -7,10 +7,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.regions import MAX_FINDINGS, record_action, record_note  # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.memory import _parse_task_md, _render_task_md  # noqa: E402
-from memagent.interfaces import TaskState  # noqa: E402
+from sliceagent.regions import MAX_FINDINGS, record_action, record_note  # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.memory import _parse_task_md, _render_task_md  # noqa: E402
+from sliceagent.interfaces import TaskState  # noqa: E402
 
 CHECKS = []
 def check(fn):

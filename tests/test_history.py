@@ -7,8 +7,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.hippocampus import make_history_tool, render_full, render_index, render_trace  # noqa: E402
-from memagent.memory import NullMemory  # noqa: E402
+from sliceagent.hippocampus import make_history_tool, render_full, render_index, render_trace  # noqa: E402
+from sliceagent.memory import NullMemory  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -22,7 +22,7 @@ def _rec(title, note, steps, failing=False):
 
 
 def _memem():
-    from memagent.memory import MememMemory
+    from sliceagent.memory import MememMemory
     m = MememMemory()
     m._vault = tempfile.mkdtemp()
     return m
@@ -139,9 +139,9 @@ def repeat_redirected_but_distinct_search_allowed():
 
 @check
 def ratchet_folds_lookback_into_slice():
-    from memagent.events import ToolResult
-    from memagent.pfc import Slice, slice_sink
-    from memagent.regions import render_reviewed
+    from sliceagent.events import ToolResult
+    from sliceagent.pfc import Slice, slice_sink
+    from sliceagent.regions import render_reviewed
     s = Slice(); s.reset("task")
     sink = slice_sink(s)
     sink(ToolResult("recall_history", {}, "index", False))            # index lookback
@@ -161,9 +161,9 @@ def ratchet_folds_lookback_into_slice():
 @check
 def reviewed_is_temporal_not_permanent():
     # the ratchet must clear between directives/turns, or a past lookback contaminates future moves
-    from memagent.memory import NullMemory
-    from memagent.session import Session
-    from memagent.pfc import Slice
+    from sliceagent.memory import NullMemory
+    from sliceagent.session import Session
+    from sliceagent.pfc import Slice
     s = Slice(); s.reset("task A"); s.reviewed = ["index", "turns=[3]"]
     s.reset("task B")
     assert s.reviewed == []                              # new_topic / reset → clean slate

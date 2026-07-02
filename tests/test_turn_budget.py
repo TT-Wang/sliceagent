@@ -8,13 +8,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import ToolResult, TurnInterrupted              # noqa: E402
-from memagent.guidance import BUDGET_EXHAUSTED, DENIAL_NO_PROMPT, DENIAL_USER  # noqa: E402
-from memagent.hooks import PermissionHook, ToolDecision, Hooks       # noqa: E402
-from memagent.interfaces import Snippet                              # noqa: E402
-from memagent.loop import run_tool_batch, run_turn                   # noqa: E402
-from memagent.pfc import Slice, slice_sink  # noqa: E402
-from memagent.seed import make_build_slice  # noqa: E402
+from sliceagent.events import ToolResult, TurnInterrupted              # noqa: E402
+from sliceagent.guidance import BUDGET_EXHAUSTED, DENIAL_NO_PROMPT, DENIAL_USER  # noqa: E402
+from sliceagent.hooks import PermissionHook, ToolDecision, Hooks       # noqa: E402
+from sliceagent.interfaces import Snippet                              # noqa: E402
+from sliceagent.loop import run_tool_batch, run_turn                   # noqa: E402
+from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
 def check(fn):

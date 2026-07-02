@@ -13,8 +13,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent import code_grep                               # noqa: E402
-from memagent.code_grep import GREP_GUARD, make_grep_tool    # noqa: E402
+from sliceagent import code_grep                               # noqa: E402
+from sliceagent.code_grep import GREP_GUARD, make_grep_tool    # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -39,7 +39,7 @@ class _Host:
 
 
 def _workspace(files: dict):
-    d = tempfile.mkdtemp(prefix="memagent-grep-")
+    d = tempfile.mkdtemp(prefix="sliceagent-grep-")
     for name, content in files.items():
         p = os.path.join(d, name)
         os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(name) else None

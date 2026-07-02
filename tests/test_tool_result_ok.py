@@ -16,9 +16,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.registry import ToolEntry, ToolRegistry, ToolText  # noqa: E402
-from memagent.loop import run_tool_batch                          # noqa: E402
-from memagent.hooks import Hooks                                  # noqa: E402
+from sliceagent.registry import ToolEntry, ToolRegistry, ToolText  # noqa: E402
+from sliceagent.loop import run_tool_batch                          # noqa: E402
+from sliceagent.hooks import Hooks                                  # noqa: E402
 
 CHECKS = []
 def check(fn):

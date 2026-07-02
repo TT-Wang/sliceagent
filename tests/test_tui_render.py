@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from rich.console import Console  # noqa: E402
-    from memagent.tui import RichSink, _render_plan  # noqa: E402
-    from memagent.events import StepEnd, ToolResult   # noqa: E402
+    from sliceagent.tui import RichSink, _render_plan  # noqa: E402
+    from sliceagent.events import StepEnd, ToolResult   # noqa: E402
 except Exception as _e:  # noqa: BLE001 — tui extra (rich) not installed → skip, don't fail the suite
     print(f"SKIP test_tui_render (tui extra not available: {_e})")
     sys.exit(0)
@@ -67,15 +67,15 @@ def render_plan_handles_empty_and_bad_input():
 @check
 def completer_does_slash_and_files():
     from prompt_toolkit.document import Document
-    from memagent.tui import _InputCompleter
-    comp = _InputCompleter(files=["src/memagent/util.py", "tests/test_util.py", "README.md"])
+    from sliceagent.tui import _InputCompleter
+    comp = _InputCompleter(files=["src/sliceagent/util.py", "tests/test_util.py", "README.md"])
     # slash palette at line start
     slash = [c.text for c in comp.get_completions(Document("/pl"), None)]
     assert "/plan" in slash, slash
     # filename completion on an explicit @mention (basename-prefix first) — the ONLY trigger; matches
     # the @path syntax cli.py's message parser already recognizes for pinning/attaching a file.
     files = [c.text for c in comp.get_completions(Document("please edit @util"), None)]
-    assert "src/memagent/util.py" in files and "tests/test_util.py" in files, files
+    assert "src/sliceagent/util.py" in files and "tests/test_util.py" in files, files
     # plain prose (no @) must NOT pop a completion menu, even on a word that matches a real file —
     # this is the exact annoyance the @-gating fixes.
     assert list(comp.get_completions(Document("please edit util"), None)) == []
@@ -89,7 +89,7 @@ def banner_always_uses_the_big_block_wordmark():
     # Each art row is no-wrap+crop, so a wide terminal shows it in full and a narrow one clips it cleanly on
     # the right (a single line per row), never wrapping into a staircase.
     from rich.console import Console
-    from memagent.tui import banner_panel, _WORDMARK
+    from sliceagent.tui import banner_panel, _WORDMARK
     def render(width):
         buf = io.StringIO()
         c = Console(file=buf, width=width, force_terminal=True, color_system=None)

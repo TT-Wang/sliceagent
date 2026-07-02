@@ -7,10 +7,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.hippocampus import EpisodeSink, make_episode_sink   # noqa: E402
-from memagent.events import (AssistantText, SliceBuilt, ToolResult,   # noqa: E402
+from sliceagent.hippocampus import EpisodeSink, make_episode_sink   # noqa: E402
+from sliceagent.events import (AssistantText, SliceBuilt, ToolResult,   # noqa: E402
                              TurnEnd, TurnInterrupted)
-from memagent.memory import NullMemory   # noqa: E402
+from sliceagent.memory import NullMemory   # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -111,7 +111,7 @@ def note_from_assistant_text():
 @check
 def nullmemory_noop():
     tmp = tempfile.mkdtemp()
-    os.environ["MEMAGENT_VAULT"] = tmp
+    os.environ["SLICEAGENT_VAULT"] = tmp
     m = NullMemory()
     assert m.is_durable is False
     assert m.append_episode("s", "t", 1, {}) is None

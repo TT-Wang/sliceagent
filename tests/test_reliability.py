@@ -8,9 +8,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.access import none                                   # noqa: E402
-from memagent.loop import _safe_advisory, _safe_authorize, run_tool_batch  # noqa: E402
-from memagent.scheduler import run_scheduled                       # noqa: E402
+from sliceagent.access import none                                   # noqa: E402
+from sliceagent.loop import _safe_advisory, _safe_authorize, run_tool_batch  # noqa: E402
+from sliceagent.scheduler import run_scheduled                       # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -83,7 +83,7 @@ def _chunk(content=None, finish=None):
 
 
 def _mk_llm():
-    from memagent.llm import OpenAILLM
+    from sliceagent.llm import OpenAILLM
     llm = object.__new__(OpenAILLM)          # bypass __init__ (no key needed) — the supported test-stub path
     llm._on_delta = None
     llm.model = "test-model"
@@ -179,9 +179,9 @@ def stream_drops_incomplete_tool_call():
 # ---- review round 1: budget accounting fails CLOSED (loop.py) -----------------
 @check
 def crashing_budget_hook_parks_the_turn_fail_closed():
-    from memagent.events import make_dispatcher
-    from memagent.hooks import Hooks
-    from memagent.loop import run_turn
+    from sliceagent.events import make_dispatcher
+    from sliceagent.hooks import Hooks
+    from sliceagent.loop import run_turn
 
     class _BudgetCrash(Hooks):
         def record_step_usage(self, usage):       # the budget accountant blows up
@@ -209,8 +209,8 @@ def crashing_budget_hook_parks_the_turn_fail_closed():
 @check
 def wal_record_pending_clear_roundtrip():
     import tempfile
-    from memagent import recovery
-    os.environ["MEMAGENT_CACHE_DIR"] = tempfile.mkdtemp(prefix="wal-cache-")
+    from sliceagent import recovery
+    os.environ["SLICEAGENT_CACHE_DIR"] = tempfile.mkdtemp(prefix="wal-cache-")
     try:
         root = tempfile.mkdtemp(prefix="ws-")
         assert recovery.pending(root) is None
@@ -227,15 +227,15 @@ def wal_record_pending_clear_roundtrip():
         recovery.record(root, goal="g", messages=msgs, step=1)
         assert recovery.pending(other) is None and recovery.pending(root) is not None
     finally:
-        os.environ.pop("MEMAGENT_CACHE_DIR", None)
+        os.environ.pop("SLICEAGENT_CACHE_DIR", None)
 
 
 @check
 def wal_strips_image_base64():
     import json
     import tempfile
-    from memagent import recovery
-    os.environ["MEMAGENT_CACHE_DIR"] = tempfile.mkdtemp(prefix="wal-img-")
+    from sliceagent import recovery
+    os.environ["SLICEAGENT_CACHE_DIR"] = tempfile.mkdtemp(prefix="wal-img-")
     try:
         root = tempfile.mkdtemp(prefix="ws-img-")
         msgs = [{"role": "user", "content": [{"type": "text", "text": "look"},
@@ -245,13 +245,13 @@ def wal_strips_image_base64():
         assert "HUGEB64BLOB" not in blob, "image base64 must be stripped from the WAL (size + privacy)"
         assert "[image attached]" in blob
     finally:
-        os.environ.pop("MEMAGENT_CACHE_DIR", None)
+        os.environ.pop("SLICEAGENT_CACHE_DIR", None)
 
 
 @check
 def wal_record_never_raises_when_mkstemp_fails():
     import tempfile
-    from memagent import recovery
+    from sliceagent import recovery
     orig = tempfile.mkstemp
     tempfile.mkstemp = lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
     try:
@@ -264,9 +264,9 @@ def wal_record_never_raises_when_mkstemp_fails():
 
 @check
 def run_turn_checkpoints_before_each_llm_call():
-    from memagent.events import make_dispatcher
-    from memagent.hooks import Hooks
-    from memagent.loop import run_turn
+    from sliceagent.events import make_dispatcher
+    from sliceagent.hooks import Hooks
+    from sliceagent.loop import run_turn
     calls = []
 
     def build_slice():
@@ -290,9 +290,9 @@ def run_turn_checkpoints_before_each_llm_call():
 @check
 def run_turn_survives_a_crashing_checkpoint():
     # a broken checkpoint (best-effort WAL) must NEVER break the turn
-    from memagent.events import make_dispatcher
-    from memagent.hooks import Hooks
-    from memagent.loop import run_turn
+    from sliceagent.events import make_dispatcher
+    from sliceagent.hooks import Hooks
+    from sliceagent.loop import run_turn
 
     class _LLM:
         def complete(self, messages, schemas):
@@ -311,7 +311,7 @@ def run_turn_survives_a_crashing_checkpoint():
 # ---- loop guard: deduped reads must NOT kill a long run (only real spin counts as STUCK) -------
 @check
 def deduped_read_block_is_not_stuck():
-    from memagent.hooks import GuardrailHook
+    from sliceagent.hooks import GuardrailHook
     g = GuardrailHook()
     for _ in range(8):
         d = g.authorize_tool("read_file", {"path": "a.py"})
@@ -324,7 +324,7 @@ def deduped_read_block_is_not_stuck():
 
 @check
 def repeated_failing_call_is_stuck():
-    from memagent.hooks import GuardrailHook
+    from sliceagent.hooks import GuardrailHook
     g = GuardrailHook()
     for _ in range(8):
         d = g.authorize_tool("run_command", {"command": "x"})
@@ -337,7 +337,7 @@ def repeated_failing_call_is_stuck():
 
 @check
 def run_tool_batch_counts_only_hard_blocks():
-    from memagent.hooks import ToolDecision
+    from sliceagent.hooks import ToolDecision
 
     class _Soft:
         def authorize_tool(self, n, a):

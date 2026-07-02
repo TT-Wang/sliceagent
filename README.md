@@ -1,14 +1,12 @@
-# memagent
+# sliceagent
 
-[![CI](https://github.com/TT-Wang/memagent/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/memagent/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml) [![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![CI](https://github.com/TT-Wang/sliceagent/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/sliceagent/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml) [![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 
 A **coding agent with a new context-engineering framework**, built for long-horizon work. Its core bet is a different memory model from every mainstream agent:
 
-> **Naming note:** this project is not affiliated with [MemAgent](https://github.com/BytedTsinghua-SIA/MemAgent) (ByteDance Seed / Tsinghua SIA-Lab, [arXiv:2507.02259](https://arxiv.org/abs/2507.02259)), an RL framework for long-context LLM training. This memagent is an interactive coding agent for your terminal.
-
 > **Don't accumulate the transcript — reconstruct a small, deterministic working state every turn.**
 
-Mainstream agents accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). memagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
+Mainstream agents accumulate a growing message history and **LLM-summarize it when it nears the context window** ("transcript + compaction"). sliceagent never accumulates: each turn it rebuilds a bounded **Active Memory Slice** from ground truth — the live files, the last error (verbatim), a counted action tally, recent actions, and retrieved context — and sends only that.
 
 **Contents:** [Why](#why) · [What it can do](#what-it-can-do) · [How it works](#how-it-works--the-brain-model) · [Install](#install) · [Quickstart](#quickstart) · [Usage](#usage) · [Benchmarks](#benchmarks) · [Under the hood](#under-the-hood) · [License](#license)
 
@@ -23,7 +21,7 @@ This is the opposite of the field's default ("bigger windows + summarize"): **re
 
 ## What it can do
 
-memagent is an interactive terminal coding agent. Point it at a repo, describe the task in plain language, and it investigates, edits, and verifies.
+sliceagent is an interactive terminal coding agent. Point it at a repo, describe the task in plain language, and it investigates, edits, and verifies.
 
 - **Edit code** — create, modify, and refactor files. Edits are workspace-confined and reversible with `/undo`.
 - **Run commands** — execute shell commands, launch background processes, and drive interactive terminals (REPLs, servers, `ssh`) through a sandbox — `local` by default, `docker` for full isolation.
@@ -36,7 +34,7 @@ memagent is an interactive terminal coding agent. Point it at a repo, describe t
 
 ## How it works — the brain model
 
-memagent's memory is organized like a brain: fast, lossy **perception** of the live world; a small **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a bounded working set from these — it never replays a growing transcript.
+sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; a small **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a bounded working set from these — it never replays a growing transcript.
 
 | Region | Module | Role |
 |---|---|---|
@@ -85,35 +83,36 @@ Early, but the **core bet is validated** — see the measured head-to-head bench
 
 ## Install
 
-**One command** — installs `uv` if needed, then memagent in an isolated tool env:
+Straight from PyPI (any one of):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TT-Wang/memagent/main/install.sh | sh
+uv tool install "sliceagent[tui]"     # uv (recommended)
+pipx install "sliceagent[tui]"        # pipx
+pip install "sliceagent[tui]"         # plain pip
 ```
 
-Prefer to run it yourself (any one of):
+Or the one-command bootstrap (installs `uv` if needed, then sliceagent in an isolated tool env):
 
 ```bash
-uv tool install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"    # uv
-pipx install "memagent[tui] @ git+https://github.com/TT-Wang/memagent"       # pipx
+curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
-Footprint is light (no torch). `pip install -e .` works for a clone too. `ripgrep` is recommended (code search degrades gracefully without it). PyPI / Homebrew / Docker arrive in v0.2 once `memem` is on PyPI.
+Footprint is light (no torch). `pip install -e .` works for a clone too. `ripgrep` is recommended (code search degrades gracefully without it). Homebrew / Docker arrive in v0.2.
 
 ## Quickstart
 
 ```bash
-memagent init            # guided setup: provider, API key, model → ~/.memagent/config.toml (tests your key)
-memagent                 # start the agent
+sliceagent init            # guided setup: provider, API key, model → ~/.sliceagent/config.toml (tests your key)
+sliceagent                 # start the agent
 ```
 
-`init` writes the config so the next run needs no env vars. Prefer env vars? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints) and skip `init` — there is no default model; memagent never picks one for you. Discover every setting with `memagent config --list`.
+`init` writes the config so the next run needs no env vars. Prefer env vars? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints) and skip `init` — there is no default model; sliceagent never picks one for you. Discover every setting with `sliceagent config --list`.
 
 → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)** · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Usage
 
-Run `memagent` in your project and type what you want in plain language. It rebuilds its working context, investigates, edits (auto-applied or confirmed, per your mode), and can run your tests to verify. A turn looks like:
+Run `sliceagent` in your project and type what you want in plain language. It rebuilds its working context, investigates, edits (auto-applied or confirmed, per your mode), and can run your tests to verify. A turn looks like:
 
 ```text
 ❯ why does retry_with_backoff drop the last attempt? fix it
@@ -144,7 +143,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/plan` | draft a plan before it starts editing |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
-**Configuration.** `memagent config --list` prints every setting. Set them persistently in `~/.memagent/config.toml` (written by `init`), or override any one via an environment variable:
+**Configuration.** `sliceagent config --list` prints every setting. Set them persistently in `~/.sliceagent/config.toml` (written by `init`), or override any one via an environment variable:
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -152,7 +151,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `AGENT_POLICY` | `teenager` | permission mode |
 | `AGENT_SANDBOX` | `local` | `local` or `docker` (isolated) |
 | `AGENT_MAX_STEPS` | `60` | per-turn step ceiling |
-| `MEMAGENT_VAULT` | `~/.memagent/vault` | where episodic memory + task state persist (cross-session memory is on by default) |
+| `SLICEAGENT_VAULT` | `~/.sliceagent/vault` | where episodic memory + task state persist (cross-session memory is on by default) |
 | `AGENT_VERIFY_CMD` | *(unset)* | test command used as the verification oracle |
 
 ## Benchmarks
@@ -161,15 +160,15 @@ The bet — *flat per-turn cost from reconstruction, at capability parity* — i
 
 **The moat: per-turn input stays flat while a transcript grows.** Head-to-head vs Kimi Code (a strong transcript-based agent) on hard multi-turn tasks:
 
-| Scenario | memagent peak input | Kimi Code peak input | ratio |
+| Scenario | sliceagent peak input | Kimi Code peak input | ratio |
 |---|--:|--:|:-:|
 | long-horizon debug | **7.5k** | 64.5k | **8.6×** |
 | large-file bug | **7.7k** | 37.0k | 4.8× |
 | multi-file refactor | **5.9k** | 28.2k | 4.8× |
 
-Across a broader 22-scenario set: median peak input **10k (memagent) vs 23k (Kimi Code)** — and memagent's per-turn input barely moves (2.6k → 7.5k over 50 steps) while the transcript climbs 16k → 64k.
+Across a broader 22-scenario set: median peak input **10k (sliceagent) vs 23k (Kimi Code)** — and sliceagent's per-turn input barely moves (2.6k → 7.5k over 50 steps) while the transcript climbs 16k → 64k.
 
-**Capability is at parity on these samples.** 22/22 vs 21/22 passed on the parity set; on 3 SWE-bench Verified instances memagent resolved 1/3 (scored by the official harness); TerminalBench-core standalone accuracy 0.625 (N=16).
+**Capability is at parity on these samples.** 22/22 vs 21/22 passed on the parity set; on 3 SWE-bench Verified instances sliceagent resolved 1/3 (scored by the official harness); TerminalBench-core standalone accuracy 0.625 (N=16).
 
 **Same work, far fewer tokens.** On SWE-bench Lite vs a transcript agent, same instances: **26 steps / 284k tokens vs 63 steps / 838k** — ~2.4× fewer steps, ~3× fewer tokens (both resolved 0/3 — underdetermined instances, equal capability).
 
@@ -177,7 +176,7 @@ Across a broader 22-scenario set: median peak input **10k (memagent) vs 23k (Kim
 
 ## Under the hood
 
-The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole loop is testable offline with a fake LLM. Layout under `src/memagent/`:
+The core is `openai`-free (only `llm.py`/`cli.py` import the SDK), so the whole loop is testable offline with a fake LLM. Layout under `src/sliceagent/`:
 
 - **moat:** `pfc.py` (the `Slice` dataclass, typed tiers, `slice_sink`) + `seed.py` (the reconstruction seam `make_build_slice`) + `prompt.py` (`SYSTEM_PROMPT`), `loop.py` (`run_turn`/`run_step` — stateless core over contracts).
 - **contracts:** `interfaces.py` (`LLMClient`/`ToolHost`/`Retriever`/`Oracle`), `events.py` (the loop's only output path), `hooks.py` (policy seam: `OracleHook`/`PermissionHook`/`BudgetHook`).
@@ -194,18 +193,18 @@ The loop dispatches events; the host composes sinks (slice-updater, durable log,
 
 **Code-as-action (`execute_code`).** Beyond one-call-per-tool, the model can write a single Python script that performs many file/shell actions and prints one short result — collapsing N tool round-trips into one turn (the strongest context reducer). The script runs **in the LocalSandbox** (cwd-confined, secret-scrubbed, timed-out) with a no-import helper API (`read_file`/`write_file`/`append_file`/`str_replace`/`list_files`/`run`); the workspace is on `sys.path` so freshly-written modules import cleanly. Only stdout returns. Files it reads/edits via the helpers are folded back into the OPEN FILES working set (paths parsed from the script), so code-as-action coheres with the slice instead of bypassing it — the agent doesn't re-read what a script already touched. It carries the same trust level as `run_command` (arbitrary execution) and is gated by the same policy (`readonly` blocks it). RPC-back-to-parent for parent-only tools (memem/MCP) is the documented upgrade.
 
-**Extensions (MCP · skills · plugins).** memagent extends through one tool registry that every source feeds:
+**Extensions (MCP · skills · plugins).** sliceagent extends through one tool registry that every source feeds:
 - *MCP* (`mcp_client.py`): declare servers in `[mcp_servers.*]`; their tools appear as `mcp__server__tool` (official MCP SDK, stdio).
-- *Skills* (`skills.py`): `SKILL.md` prompt-packs (see above) discovered from `.memagent/skills`.
-- *Plugins* (`plugins.py`): a directory with `plugin.toml` + an `__init__.py` exposing `register(ctx)`. Through `ctx` a plugin contributes tools/skills/MCP-servers/hooks into the **existing** seams — no privileged surface; plugin tools run through the same sandbox + policy + scheduler. Discovered from `.memagent/plugins` (+ `[plugins].dirs`). See [`examples/plugins/hello`](examples/plugins/hello).
+- *Skills* (`skills.py`): `SKILL.md` prompt-packs (see above) discovered from `.sliceagent/skills`.
+- *Plugins* (`plugins.py`): a directory with `plugin.toml` + an `__init__.py` exposing `register(ctx)`. Through `ctx` a plugin contributes tools/skills/MCP-servers/hooks into the **existing** seams — no privileged surface; plugin tools run through the same sandbox + policy + scheduler. Discovered from `.sliceagent/plugins` (+ `[plugins].dirs`). See [`examples/plugins/hello`](examples/plugins/hello).
 
 **Code-discovery tier (CodeIndex).** `code_index.py` fills the RELATED CODE tier from a real repo: each turn it ripgreps the working tree for the identifiers in the task **plus the current error** (which usually names the missing symbol), ranks files by how many distinct query terms they hit, and returns line-numbered context windows — deterministic, no embeddings, no network. `repo_map()` gives a compact file→definitions skeleton for orientation (not folded into every turn, to keep context bounded). tree-sitter is the precision upgrade for definition extraction (drop-in at `_defs_in()`); v1 uses ripgrep + regex.
 
 **Memory tier (memem) — a closed read/write loop.** `memory.py` plugs [memem](https://github.com/TT-Wang/memem) in as the cross-session `Memory` (the RELEVANT MEMORY tier). It's behind the `Memory` interface; memem indexes a curated lesson vault, *not* source code (code discovery is the separate `CodeIndex` above).
 - *Read:* each task recalls relevant lessons via memem's hybrid retrieval into the slice.
-- *Write (`neocortex.py`):* after a task **succeeds**, consolidation distills a durable lesson from what happened and `remember()`s it — so a future similar task recalls it. This is what makes memagent memory-*native*. It's an event sink, signal-dense by construction: it mines **only a validated episode** (a successful turn in which an error was hit and then cleared — no error / no success / no lesson), dedups within a session, and prints `💡 learned: …`. `AGENT_MINE=deterministic` (default — cheap, no extra LLM call) | `llm` (one-shot distillation for a crisper lesson) | `off`.
+- *Write (`neocortex.py`):* after a task **succeeds**, consolidation distills a durable lesson from what happened and `remember()`s it — so a future similar task recalls it. This is what makes sliceagent memory-*native*. It's an event sink, signal-dense by construction: it mines **only a validated episode** (a successful turn in which an error was hit and then cleared — no error / no success / no lesson), dedups within a session, and prints `💡 learned: …`. `AGENT_MINE=deterministic` (default — cheap, no extra LLM call) | `llm` (one-shot distillation for a crisper lesson) | `off`.
 
-Configure via **`memagent.toml`** (persistent; see [`memagent.toml.example`](memagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `memagent.toml` > user `~/.memagent/config.toml` > default. Keys: `AGENT_POLICY` (`baby-sitter`/`teenager`/`let-it-go`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `MEMAGENT_VAULT` (memory location), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
+Configure via **`sliceagent.toml`** (persistent; see [`sliceagent.toml.example`](sliceagent.toml.example)) or env vars (one-off overrides). Precedence: env > project `sliceagent.toml` > user `~/.sliceagent/config.toml` > default. Keys: `AGENT_POLICY` (`baby-sitter`/`teenager`/`let-it-go`), `AGENT_MINE`, `AGENT_SUBAGENT_DEPTH`, `AGENT_MODEL`, `SLICEAGENT_VAULT` (memory location), `AGENT_VERIFY_CMD` (tests as the Oracle), `AGENT_MAX_TOKENS`, `SHOW_SLICE=1`; plus `[skills]`, `[mcp_servers]`, `[plugins]` sections.
 
 ## Architecture (build / plug / integrate)
 
@@ -227,4 +226,4 @@ Security policy + threat model: **[SECURITY.md](SECURITY.md)**.
 
 ## Acknowledgments
 
-memagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. With thanks to their authors.
+sliceagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. With thanks to their authors.

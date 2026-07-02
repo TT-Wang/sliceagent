@@ -26,8 +26,8 @@ def _rec_console():
 
 @check
 def livesink_status_transitions_and_prints_above():
-    from memagent.tui import LiveSink
-    from memagent.events import SliceBuilt, ToolStarted, ToolResult, AssistantText, TurnEnd
+    from sliceagent.tui import LiveSink
+    from sliceagent.events import SliceBuilt, ToolStarted, ToolResult, AssistantText, TurnEnd
     console, buf = _rec_console()
     statuses = []
     sink = LiveSink(console, {}, lambda s: statuses.append(s))
@@ -54,8 +54,8 @@ def livesink_clears_the_writing_status_when_the_response_arrives():
     # AssistantText means the reply is done → the "writing…" status must clear THEN, not linger until
     # TurnEnd, so the finished panel isn't shown above a stale streaming spinner. (RichSink already stops its
     # transient status on AssistantText; this gives LiveSink the same guarantee.)
-    from memagent.tui import LiveSink
-    from memagent.events import SliceBuilt, AssistantText
+    from sliceagent.tui import LiveSink
+    from sliceagent.events import SliceBuilt, AssistantText
     console, _ = _rec_console()
     statuses = []
     sink = LiveSink(console, {}, lambda s: statuses.append(s))
@@ -69,8 +69,8 @@ def livesink_clears_the_writing_status_when_the_response_arrives():
 @check
 def livesink_read_card_is_header_only_like_richsink():
     # parity with RichSink: read/list cards show no content dump (shared _render_tool_result)
-    from memagent.tui import LiveSink
-    from memagent.events import ToolResult
+    from sliceagent.tui import LiveSink
+    from sliceagent.events import ToolResult
     console, buf = _rec_console()
     LiveSink(console, {}, lambda s: None)(ToolResult("read_file", {"path": "x.py"}, "SECRET-CONTENT", False))
     assert "SECRET-CONTENT" not in buf.getvalue(), "read card should not dump file content"
@@ -80,7 +80,7 @@ def livesink_read_card_is_header_only_like_richsink():
 def _drive_live(keys, run_one_turn, handle_slash=None):
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
-    from memagent.tui import build_live_app
+    from sliceagent.tui import build_live_app
     console, buf = _rec_console()
     with create_pipe_input() as pinp:
         pinp.send_text(keys)
@@ -97,7 +97,7 @@ def _drive_live(keys, run_one_turn, handle_slash=None):
 def live_app_submit_dispatches_a_turn_in_a_worker():
     calls = []
     def fake_turn(text, sink, signal):
-        from memagent.events import AssistantText
+        from sliceagent.events import AssistantText
         calls.append((text, signal))
         sink(AssistantText("worker reply"))
     state, out = _drive_live("explain the parser\r\x04", fake_turn)   # submit, then ctrl-d to quit
@@ -151,8 +151,8 @@ def live_app_slash_is_handled_not_run_as_a_turn():
 def richsink_refactor_is_render_identical():
     # the shared _render_tool_result must produce the SAME output RichSink did before extraction:
     # plan panel, mission line, gutter card with ✓/✗, and read-card header-only.
-    from memagent.tui import _render_tool_result
-    from memagent.events import ToolResult
+    from sliceagent.tui import _render_tool_result
+    from sliceagent.events import ToolResult
     from rich.console import Console
 
     def render(e):

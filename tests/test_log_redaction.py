@@ -9,9 +9,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.cli import LOG_MAX_BYTES, log_sink  # noqa: E402
-from memagent.events import ToolResult  # noqa: E402
-from memagent.safety import redact_text  # noqa: E402
+from sliceagent.cli import LOG_MAX_BYTES, log_sink  # noqa: E402
+from sliceagent.events import ToolResult  # noqa: E402
+from sliceagent.safety import redact_text  # noqa: E402
 
 CHECKS = []
 def check(fn):

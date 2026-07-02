@@ -28,7 +28,7 @@ class _FakeConsole:
 @check
 def ask_user_pauses_the_live_spinner_before_reading():
     from rich.console import Console
-    from memagent import tui
+    from sliceagent import tui
     sink = tui.RichSink(Console(), {})        # registers itself as the active live sink
     sink._spin("working…")
     assert sink._status is not None, "precondition: a turn spinner is live"
@@ -41,7 +41,7 @@ def ask_user_pauses_the_live_spinner_before_reading():
 @check
 def confirm_pauses_the_live_spinner_before_reading():
     from rich.console import Console
-    from memagent import tui
+    from sliceagent import tui
     sink = tui.RichSink(Console(), {})
     sink._spin("working…")
     assert sink._status is not None

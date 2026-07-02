@@ -1,4 +1,4 @@
-"""Onboarding & config: the envspec registry (coverage + validation) and the `memagent init` wizard
+"""Onboarding & config: the envspec registry (coverage + validation) and the `sliceagent init` wizard
 (driven headlessly with stubbed input/getpass/llm). No model, no pytest.
 Run: PYTHONPATH=src python tests/test_onboarding.py
 """
@@ -10,9 +10,9 @@ import tomllib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent import envspec                                       # noqa: E402
-from memagent import onboarding                                    # noqa: E402
-from memagent.config import Config                                 # noqa: E402
+from sliceagent import envspec                                       # noqa: E402
+from sliceagent import onboarding                                    # noqa: E402
+from sliceagent.config import Config                                 # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -25,8 +25,8 @@ def check(fn):
 def every_env_var_read_in_code_is_registered():
     # scan src for our-namespace env-var string literals; each must be documented in envspec (or be a
     # known external/standard one). Prevents a new os.environ.get from going undocumented.
-    src_dir = os.path.join(os.path.dirname(__file__), "..", "src", "memagent")
-    pat = re.compile(r'"(AGENT_[A-Z_]+|LLM_[A-Z_]+|MEMAGENT_[A-Z_]+|SHOW_SLICE)"')
+    src_dir = os.path.join(os.path.dirname(__file__), "..", "src", "sliceagent")
+    pat = re.compile(r'"(AGENT_[A-Z_]+|LLM_[A-Z_]+|SLICEAGENT_[A-Z_]+|SHOW_SLICE)"')
     found = set()
     for fn in os.listdir(src_dir):
         if fn.endswith(".py"):
@@ -98,7 +98,7 @@ def config_resolves_from_default_provider():
 
 @check
 def emit_toml_handles_dotted_id_and_newlines():
-    from memagent.onboarding import _emit_toml
+    from sliceagent.onboarding import _emit_toml
     data = {"agent": {"default_provider": "my.host"},
             "providers": {"my.host": {"api_key": "k\nwith\nnewlines", "base_url": "http://x/v1", "model": "m"}}}
     rt = tomllib.loads(_emit_toml(data))     # must be VALID TOML and round-trip exactly
@@ -139,7 +139,7 @@ def init_writes_a_valid_config_on_success():
         llm_factory=lambda model: _OkLLM(),
         home=home)
     assert rc == 0
-    path = os.path.join(home, ".memagent", "config.toml")
+    path = os.path.join(home, ".sliceagent", "config.toml")
     assert os.path.exists(path)
     data = tomllib.load(open(path, "rb"))
     assert data["providers"]["moonshot"]["api_key"] == "sk-test-key"
@@ -172,7 +172,7 @@ def init_offers_to_save_after_a_failed_key_test():
         llm_factory=_boom,
         home=home)
     assert rc == 0
-    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert data["providers"]["openai"]["api_key"] == "bad-key" and data["agent"]["model"] == "gpt-x"
 
 
@@ -185,7 +185,7 @@ def init_custom_provider_prompts_base_url():
         llm_factory=lambda model: _OkLLM(),
         home=home)
     assert rc == 0
-    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert data["providers"]["custom"]["base_url"] == "https://my.host/v1"
     assert data["providers"]["custom"]["model"] == "my-model"
 
@@ -195,7 +195,7 @@ def init_aborts_without_a_key():
     home = tempfile.mkdtemp(prefix="init-nokey-")
     rc = onboarding.run_init(inp=_seq("1", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
     assert rc == 1, "no key → abort"
-    assert not os.path.exists(os.path.join(home, ".memagent", "config.toml"))
+    assert not os.path.exists(os.path.join(home, ".sliceagent", "config.toml"))
 
 
 @check
@@ -216,7 +216,7 @@ def write_config_is_atomic_and_cleans_up_on_failure():
     finally:
         os.write = orig
     assert raised, "a write failure must propagate"
-    leftover = [f for f in os.listdir(os.path.dirname(path)) if f.startswith(".memagent-cfg-")]
+    leftover = [f for f in os.listdir(os.path.dirname(path)) if f.startswith(".sliceagent-cfg-")]
     assert not leftover, f"temp file (holds the key!) leaked on failure: {leftover}"
     assert open(path).read() == "EXISTING\n", "the existing config must be intact (atomic write)"
 
@@ -227,7 +227,7 @@ def init_merge_keeps_existing_providers():
     onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
     # 2nd init on the existing config: "Add/update? [Y/n]" → "" (yes) → provider 2 (openai) → model ""
     onboarding.run_init(inp=_seq("", "2", ""), getpw=_seq("k-oai"), llm_factory=lambda m: _OkLLM(), home=home)
-    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert set(data["providers"]) == {"moonshot", "openai"}, data["providers"]
     assert data["providers"]["moonshot"]["api_key"] == "k-moon", "the first provider must be preserved"
     assert data["agent"]["default_provider"] == "openai", "the newly-added provider becomes default"
@@ -235,7 +235,7 @@ def init_merge_keeps_existing_providers():
 
 @check
 def reinit_blank_key_keeps_existing_key_for_the_same_provider():
-    # Re-running `memagent init` on an ALREADY-CONFIGURED provider and pressing Enter at the key
+    # Re-running `sliceagent init` on an ALREADY-CONFIGURED provider and pressing Enter at the key
     # prompt (no retype) must KEEP the saved key/model, not abort — the abort-on-blank behavior
     # (init_aborts_without_a_key) is only correct for a provider with no existing entry.
     home = tempfile.mkdtemp(prefix="init-reblank-")
@@ -244,7 +244,7 @@ def reinit_blank_key_keeps_existing_key_for_the_same_provider():
     # keep existing) → model "" (blank, keep existing)
     rc = onboarding.run_init(inp=_seq("", "1", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
     assert rc == 0, "blank key on an already-configured provider must NOT abort"
-    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert data["providers"]["moonshot"]["api_key"] == "k-moon", "the existing key must be kept, not wiped"
     assert data["providers"]["moonshot"]["model"] == "kimi-k2.7-code"
 
@@ -255,7 +255,7 @@ def config_use_switches_default_provider():
     onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k1"), llm_factory=lambda m: _OkLLM(), home=home)
     onboarding.run_init(inp=_seq("", "2", ""), getpw=_seq("k2"), llm_factory=lambda m: _OkLLM(), home=home)
     assert onboarding.run_config(["--use", "moonshot"], home=home) == 0
-    data = tomllib.load(open(os.path.join(home, ".memagent", "config.toml"), "rb"))
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert data["agent"]["default_provider"] == "moonshot"
     assert onboarding.run_config(["--use", "nope"], home=home) == 1, "unknown provider → exit 1"
 

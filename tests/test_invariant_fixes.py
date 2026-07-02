@@ -9,10 +9,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.guardrails import ToolCallGuardrail                      # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.regions import MAX_ACTION_LOG, MAX_ACTION_SHOWN, action_sig, record_action, render_action_history  # noqa: E402
-from memagent.tools import LocalToolHost                                # noqa: E402
+from sliceagent.guardrails import ToolCallGuardrail                      # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.regions import MAX_ACTION_LOG, MAX_ACTION_SHOWN, action_sig, record_action, render_action_history  # noqa: E402
+from sliceagent.tools import LocalToolHost                                # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -24,8 +24,8 @@ def check(fn):
 @check
 def shell_grant_makes_external_dir_reachable():
     home = os.path.realpath(os.path.expanduser("~"))
-    ext = tempfile.mkdtemp(dir=home, prefix=".memagent-test-")   # under HOME, outside the workspace
-    ws = tempfile.mkdtemp(prefix="memagent-ws-")
+    ext = tempfile.mkdtemp(dir=home, prefix=".sliceagent-test-")   # under HOME, outside the workspace
+    ws = tempfile.mkdtemp(prefix="sliceagent-ws-")
     try:
         host = LocalToolHost(ws)
         threw = False
@@ -45,7 +45,7 @@ def shell_grant_makes_external_dir_reachable():
 @check
 def shell_grant_refuses_home_and_ancestors():
     home = os.path.realpath(os.path.expanduser("~"))
-    ws = tempfile.mkdtemp(prefix="memagent-ws-")
+    ws = tempfile.mkdtemp(prefix="sliceagent-ws-")
     try:
         host = LocalToolHost(ws)
         host._grant_shell_paths(f'ls "{home}"')                  # HOME itself must NOT be granted

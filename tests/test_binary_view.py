@@ -9,7 +9,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost  # noqa: E402
+from sliceagent.tools import LocalToolHost  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -45,7 +45,7 @@ def magic_line_present():
 def text_still_reads_normally():
     wd, h = _host()
     open(os.path.join(wd, "a.txt"), "w").write("hello world\n")
-    from memagent.tools import _strip_line_numbers      # read_file now returns cat -n numbered content
+    from sliceagent.tools import _strip_line_numbers      # read_file now returns cat -n numbered content
     assert _strip_line_numbers(h.run("read_file", {"path": "a.txt"})).strip() == "hello world"
 
 

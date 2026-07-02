@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost   # noqa: E402
+from sliceagent.tools import LocalToolHost   # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -17,7 +17,7 @@ def check(fn):
 
 def _host():
     """A LocalToolHost pinned to a fresh temp workspace root."""
-    d = tempfile.mkdtemp(prefix="memagent-tools-test-")
+    d = tempfile.mkdtemp(prefix="sliceagent-tools-test-")
     return LocalToolHost(root=d), d
 
 
@@ -35,10 +35,10 @@ def _read(root, rel):
 
 
 def _no_temp_files(root):
-    """True if no .memagent-tmp-* leftover anywhere under root."""
+    """True if no .sliceagent-tmp-* leftover anywhere under root."""
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
-            if name.startswith(".memagent-tmp-"):
+            if name.startswith(".sliceagent-tmp-"):
                 return False
     return True
 
@@ -51,7 +51,7 @@ def edit_file_leaves_no_temp():
     out = h._t_edit_file({"path": "a.txt", "content": "hello world"})
     assert _read(root, "a.txt") == "hello world"
     assert "Wrote" in out
-    assert _no_temp_files(root), "stray .memagent-tmp-* left behind by edit_file"
+    assert _no_temp_files(root), "stray .sliceagent-tmp-* left behind by edit_file"
 
 
 @check

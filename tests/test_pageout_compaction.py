@@ -9,7 +9,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost                          # noqa: E402
+from sliceagent.tools import LocalToolHost                          # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -32,7 +32,7 @@ def page_out_pages_large_output_to_a_readable_blob():
     assert len(big) > 16000
     out = host._page_out(big, label="command output")
     assert len(out) < len(big), "inline view must be BOUNDED"
-    assert "paged out" in out and "read_file('.memagent/blobs/" in out, out
+    assert "paged out" in out and "read_file('.sliceagent/blobs/" in out, out
     assert big[:40] in out and big[-40:] in out, "head + tail must be inlined"
     # the reference pages the FULL output back via read_file (L1→L2 recall, not a cut)
     rel = re.search(r"read_file\('([^']+)'\)", out).group(1)
@@ -67,7 +67,7 @@ def page_out_never_fails_the_tool_on_write_error():
 # ---- #77: micro-compaction (clear old tool bodies, keep reasoning + recent) ------------------
 @check
 def micro_compact_clears_old_tool_bodies_keeps_reasoning_and_recent():
-    from memagent.loop import MICRO_MARKER, _micro_compact
+    from sliceagent.loop import MICRO_MARKER, _micro_compact
     msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]   # seed (len 2)
     for i in range(6):
         msgs.append({"role": "assistant", "content": f"thinking {i}", "tool_calls": [{"id": f"c{i}"}]})
@@ -83,7 +83,7 @@ def micro_compact_clears_old_tool_bodies_keeps_reasoning_and_recent():
 
 @check
 def micro_compact_returns_false_when_nothing_to_clear():
-    from memagent.loop import _micro_compact
+    from sliceagent.loop import _micro_compact
     msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
             {"role": "assistant", "content": "thinking"}]   # no tool messages
     assert _micro_compact(msgs, floor=2, keep_recent=4) is False
@@ -92,7 +92,7 @@ def micro_compact_returns_false_when_nothing_to_clear():
 # ---- #76: configurable max_steps ------------------------------------------------------------
 @check
 def max_steps_is_configurable_default_60():
-    from memagent.config import load_config
+    from sliceagent.config import load_config
     os.environ.pop("AGENT_MAX_STEPS", None)
     assert load_config().max_steps == 60, "default ceiling is 60 (raised from the old hard 40)"
     os.environ["AGENT_MAX_STEPS"] = "120"
@@ -106,7 +106,7 @@ def max_steps_is_configurable_default_60():
 
 @check
 def agent_max_steps_is_documented_in_envspec():
-    from memagent.envspec import REGISTRY
+    from sliceagent.envspec import REGISTRY
     assert any(v.name == "AGENT_MAX_STEPS" for v in REGISTRY), "AGENT_MAX_STEPS must be in the env registry"
 
 

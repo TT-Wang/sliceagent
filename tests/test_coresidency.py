@@ -6,9 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.pfc import Slice, touch_file  # noqa: E402
-from memagent.seed import build_artifacts, render_slice  # noqa: E402
-from memagent.swap import DEP_CEILING, READ_BUDGET  # noqa: E402
+from sliceagent.pfc import Slice, touch_file  # noqa: E402
+from sliceagent.seed import build_artifacts, render_slice  # noqa: E402
+from sliceagent.swap import DEP_CEILING, READ_BUDGET  # noqa: E402
 
 CHECKS = []
 def check(fn):

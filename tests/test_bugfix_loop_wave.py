@@ -8,9 +8,9 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.loop import run_turn, _assistant_message  # noqa: E402
-from memagent.events import StepEnd, TurnEnd, TurnInterrupted  # noqa: E402
-from memagent.metrics import CostMetrics  # noqa: E402
+from sliceagent.loop import run_turn, _assistant_message  # noqa: E402
+from sliceagent.events import StepEnd, TurnEnd, TurnInterrupted  # noqa: E402
+from sliceagent.metrics import CostMetrics  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -15,8 +15,8 @@ import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.hippocampus import _MAX_RECORD_VALUE_BYTES  # noqa: E402
-from memagent.memory import MememMemory  # noqa: E402
+from sliceagent.hippocampus import _MAX_RECORD_VALUE_BYTES  # noqa: E402
+from sliceagent.memory import MememMemory  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -180,11 +180,11 @@ def _run_consolidate(records_for_session, skills_root):
         m = _mem_no_init()
         m._vault = vault
         _write_episodes(vault, "S", records_for_session)
-        os.environ["MEMAGENT_SKILLS_DIR"] = skills_root
+        os.environ["SLICEAGENT_SKILLS_DIR"] = skills_root
         try:
             m.consolidate("S")
         finally:
-            os.environ.pop("MEMAGENT_SKILLS_DIR", None)
+            os.environ.pop("SLICEAGENT_SKILLS_DIR", None)
 
 
 @check

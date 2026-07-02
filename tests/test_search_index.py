@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.search_index import (  # noqa: E402
+from sliceagent.search_index import (  # noqa: E402
     EpisodeIndex, episode_searchable_text, fts5_available, make_episode_index,
 )
 
@@ -107,19 +107,19 @@ def inactive_index_is_a_noop():
 
 @check
 def recency_breaks_ties_among_comparable_hits():
-    # the live-use bug: "no.3 findings for memagent" recalled the OLDER 'investigate memagent' turn over
+    # the live-use bug: "no.3 findings for sliceagent" recalled the OLDER 'investigate sliceagent' turn over
     # the NEWER 'core loop review' turn because BM25 is purely lexical. Among comparably-relevant hits the
     # recency blend must now prefer the more recent turn (the latest review).
     with tempfile.TemporaryDirectory() as d:
         idx = make_episode_index(os.path.join(d, "idx.db"))
         sid = "s-1"
         idx.index_episode(session_id=sid, task_id="t", turn=3, ts="2026-06-25T11:49:00Z",
-                          title="investigate the memagent project", note="findings about memagent",
-                          text="memagent findings investigation memagent project findings notable")
+                          title="investigate the sliceagent project", note="findings about sliceagent",
+                          text="sliceagent findings investigation sliceagent project findings notable")
         idx.index_episode(session_id=sid, task_id="t", turn=8, ts="2026-06-25T11:55:00Z",
-                          title="close review of the core agent loop", note="memagent loop findings",
-                          text="memagent findings review core agent loop memagent guardrail findings")
-        hits = idx.search("memagent findings", only_session=sid, limit=5)
+                          title="close review of the core agent loop", note="sliceagent loop findings",
+                          text="sliceagent findings review core agent loop sliceagent guardrail findings")
+        hits = idx.search("sliceagent findings", only_session=sid, limit=5)
         assert hits and hits[0]["turn"] == 8, [h["turn"] for h in hits]   # newest review wins the tie
         idx.close()
 
@@ -144,7 +144,7 @@ def recency_does_not_override_stronger_relevance():
 @check
 def memory_search_episodes_noop_without_index():
     # NullMemory must expose search_episodes returning [] (contract parity)
-    from memagent.memory import NullMemory
+    from sliceagent.memory import NullMemory
     assert NullMemory().search_episodes("anything") == []
 
 

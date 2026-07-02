@@ -9,10 +9,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.memory import (MememMemory, _parse_task_md, _render_task_md,  # noqa: E402
+from sliceagent.memory import (MememMemory, _parse_task_md, _render_task_md,  # noqa: E402
                              _write_atomic)
-from memagent.interfaces import TaskState  # noqa: E402
-from memagent.search_index import EpisodeIndex, fts5_available  # noqa: E402
+from sliceagent.interfaces import TaskState  # noqa: E402
+from sliceagent.search_index import EpisodeIndex, fts5_available  # noqa: E402
 
 CHECKS = []
 def check(fn):

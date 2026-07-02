@@ -1,4 +1,4 @@
-"""Regression tests for the bugs memagent's self-review found (real misses in the earlier #8/#35 work):
+"""Regression tests for the bugs sliceagent's self-review found (real misses in the earlier #8/#35 work):
   #1 execute_code's list_files() bypassed workspace confinement
   #2 episodic redaction missed the top-level record fields (title/note/markdown/meta)
   #3 read_only classification treated unknown/plugin/MCP tools as read-only (optimistic)
@@ -10,9 +10,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import _CODE_PRELUDE  # noqa: E402
-from memagent.memory import MememMemory  # noqa: E402
-from memagent.agents import AgentSpec, READ_ONLY_TOOLS  # noqa: E402
+from sliceagent.tools import _CODE_PRELUDE  # noqa: E402
+from sliceagent.memory import MememMemory  # noqa: E402
+from sliceagent.agents import AgentSpec, READ_ONLY_TOOLS  # noqa: E402
 
 CHECKS = []
 def check(fn):

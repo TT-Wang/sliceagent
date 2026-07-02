@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.session import route, route_topic_lexical   # noqa: E402
+from sliceagent.session import route, route_topic_lexical   # noqa: E402
 
 CHECKS = []
 def check(fn):

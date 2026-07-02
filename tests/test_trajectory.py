@@ -14,16 +14,16 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.guardrails import (                          # noqa: E402
+from sliceagent.guardrails import (                          # noqa: E402
     ToolCallGuardrail,
     ToolCallGuardrailConfig,
     op_kind,
 )
-from memagent.memory import NullMemory                     # noqa: E402
-from memagent.session import Session                       # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.seed import render_slice  # noqa: E402
-from memagent.regions import capture_user_report, is_user_report  # noqa: E402
+from sliceagent.memory import NullMemory                     # noqa: E402
+from sliceagent.session import Session                       # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.seed import render_slice  # noqa: E402
+from sliceagent.regions import capture_user_report, is_user_report  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -9,8 +9,8 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.mcp_client import _MCP_SAFETY_CAP, _result_to_text, _mcp_handler  # noqa: E402
-from memagent.tools import LocalToolHost                                         # noqa: E402
+from sliceagent.mcp_client import _MCP_SAFETY_CAP, _result_to_text, _mcp_handler  # noqa: E402
+from sliceagent.tools import LocalToolHost                                         # noqa: E402
 
 CHECKS = []
 def check(fn):

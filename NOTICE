@@ -1,4 +1,4 @@
-memagent
+sliceagent
 Copyright (c) 2026 TT-Wang
 Licensed under the MIT License — see LICENSE.
 
@@ -10,13 +10,13 @@ Hermes — https://github.com/NousResearch/hermes   (MIT License)
 Copyright (c) 2025 Nous Research
 
   Verbatim / closely-ported source:
-    src/memagent/binsniff.py          ← tools/binary_extensions.py
-    src/memagent/fuzzy.py             ← fuzzy_match.py (_calculate_line_positions)
-    src/memagent/context_overflow.py  ← overflow-pattern matcher
-    src/memagent/mcp_security.py      ← hermes_cli/mcp_security.py
+    src/sliceagent/binsniff.py          ← tools/binary_extensions.py
+    src/sliceagent/fuzzy.py             ← fuzzy_match.py (_calculate_line_positions)
+    src/sliceagent/context_overflow.py  ← overflow-pattern matcher
+    src/sliceagent/mcp_security.py      ← hermes_cli/mcp_security.py
   Pattern / structure adapted:
-    src/memagent/errors.py (classify + retry/backoff), src/memagent/sandbox.py
-    (execution backend), src/memagent/subdir_hints.py, and the execute_code
+    src/sliceagent/errors.py (classify + retry/backoff), src/sliceagent/sandbox.py
+    (execution backend), src/sliceagent/subdir_hints.py, and the execute_code
     (code-as-action) pattern.
 
   The MIT License text for Hermes is reproduced under THIRD-PARTY-LICENSES below

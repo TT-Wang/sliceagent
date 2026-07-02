@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost, _CODE_PRELUDE  # noqa: E402
+from sliceagent.tools import LocalToolHost, _CODE_PRELUDE  # noqa: E402
 
 CHECKS = []
 def check(fn):

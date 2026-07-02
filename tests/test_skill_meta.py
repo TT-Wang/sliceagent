@@ -7,13 +7,13 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent import skill_usage  # noqa: E402
-from memagent.neocortex import render_skill  # noqa: E402
-from memagent.skill_provenance import (  # noqa: E402
+from sliceagent import skill_usage  # noqa: E402
+from sliceagent.neocortex import render_skill  # noqa: E402
+from sliceagent.skill_provenance import (  # noqa: E402
     AUTO, USER, current_authoring_origin, is_auto, provenance_of,
     reset_authoring_origin, set_authoring_origin,
 )
-from memagent.skills import SkillManager, parse_frontmatter  # noqa: E402
+from sliceagent.skills import SkillManager, parse_frontmatter  # noqa: E402
 
 CHECKS = []
 def check(fn):

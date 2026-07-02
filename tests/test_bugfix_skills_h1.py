@@ -10,9 +10,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.skills import expand_skill_args  # noqa: E402
-from memagent.memory import MememMemory  # noqa: E402
-from memagent.interfaces import TaskState  # noqa: E402
+from sliceagent.skills import expand_skill_args  # noqa: E402
+from sliceagent.memory import MememMemory  # noqa: E402
+from sliceagent.interfaces import TaskState  # noqa: E402
 
 CHECKS = []
 def check(fn):

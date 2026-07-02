@@ -8,9 +8,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.plugins import load_plugins  # noqa: E402
-from memagent.registry import ToolRegistry  # noqa: E402
-from memagent.tools import LocalToolHost  # noqa: E402
+from sliceagent.plugins import load_plugins  # noqa: E402
+from sliceagent.registry import ToolRegistry  # noqa: E402
+from sliceagent.tools import LocalToolHost  # noqa: E402
 
 CHECKS = []
 def check(fn):

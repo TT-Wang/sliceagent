@@ -9,8 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.pfc import Slice  # noqa: E402
-from memagent.regions import EXPLORE_NUDGE_AFTER, render_convergence  # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.regions import EXPLORE_NUDGE_AFTER, render_convergence  # noqa: E402
 
 CHECKS = []
 def check(fn):

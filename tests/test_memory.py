@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.neocortex import _memory_relevant   # noqa: E402
+from sliceagent.neocortex import _memory_relevant   # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -29,7 +29,7 @@ def recall_gates_noise_and_reinforces_relevant():
     try:
         import memem.obsidian_store
         import memem.retrieve
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
     except Exception:
         print("  (skip: memem not importable)"); return
 
@@ -59,7 +59,7 @@ def recall_gates_noise_and_reinforces_relevant():
 def mark_used_delegates_to_bump_access():
     try:
         import memem.obsidian_store
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
     except Exception:
         print("  (skip: memem not importable)"); return
     got = []
@@ -76,7 +76,7 @@ def mark_used_delegates_to_bump_access():
 
 @check
 def nullmemory_recall_and_mark_used_safe():
-    from memagent.memory import NullMemory
+    from sliceagent.memory import NullMemory
     m = NullMemory()
     assert m.recall("x") == []
     m.mark_used("anything")            # no-op, no crash

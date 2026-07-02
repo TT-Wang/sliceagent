@@ -20,7 +20,7 @@ def check(fn):
 @check
 def inline_repl_echoes_before_route_topic():
     # cli.main(): _tui.user_echo(...) must appear BEFORE route_topic(...) in the source.
-    from memagent import cli
+    from sliceagent import cli
     # scope to the REPL while-loop — the _run_one_turn helper (LIVE path, echoes in run_live) also calls
     # route(llm) and is defined BEFORE the loop, so a whole-source search would match the wrong call.
     repl = inspect.getsource(cli.main)
@@ -38,7 +38,7 @@ def inline_repl_echoes_before_route_topic():
 def inline_repl_routing_has_a_spinner():
     # the silent-gap fix: routing must be covered by a status spinner so the UI isn't frozen+silent during an
     # AGENT_ROUTER=llm round-trip (RichSink only spins on SliceBuilt, which fires later inside run_turn).
-    from memagent import cli
+    from sliceagent import cli
     repl = inspect.getsource(cli.main)
     repl = repl[repl.find("while True:"):]
     assert "routing…" in repl or "routing..." in repl, (
@@ -51,7 +51,7 @@ def live_path_echoes_before_dispatching_the_turn():
     # the LIVE composer (build_live_app): user_echo must precede spawning the turn worker thread, so the
     # message paints the instant Enter is pressed (same invariant as the REPL + Textual paths).
     try:
-        from memagent import tui
+        from sliceagent import tui
     except Exception as e:  # noqa: BLE001
         print(f"  (skip live check: {type(e).__name__})")
         return

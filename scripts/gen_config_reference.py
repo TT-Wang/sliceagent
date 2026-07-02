@@ -1,6 +1,6 @@
 """Generate docs/CONFIGURATION.md from envspec.REGISTRY — the single source of truth for env knobs.
 
-Keeps the user-facing config reference in lockstep with the code: every env var memagent reads is registered
+Keeps the user-facing config reference in lockstep with the code: every env var sliceagent reads is registered
 in envspec (a startup test enforces this), so this doc can never silently drift. Secrets are redacted.
 
 Run: PYTHONPATH=src python scripts/gen_config_reference.py
@@ -13,7 +13,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from memagent import envspec  # noqa: E402
+from sliceagent import envspec  # noqa: E402
 
 
 def main() -> None:
@@ -24,12 +24,12 @@ def main() -> None:
     out = [
         "# Configuration reference",
         "",
-        "_Auto-generated from `src/memagent/envspec.py` — do not edit by hand "
+        "_Auto-generated from `src/sliceagent/envspec.py` — do not edit by hand "
         "(`python scripts/gen_config_reference.py`)._",
         "",
-        f"memagent reads **{len(envspec.REGISTRY)}** environment variables across "
+        f"sliceagent reads **{len(envspec.REGISTRY)}** environment variables across "
         f"**{len(by_group)}** groups; every value is validated at startup (a misspelled enum warns instead "
-        "of silently defaulting). Run `memagent config --list` to see the resolved value of each on your "
+        "of silently defaulting). Run `sliceagent config --list` to see the resolved value of each on your "
         "machine. Secrets (🔒) are read from the environment / config and never printed.",
         "",
     ]

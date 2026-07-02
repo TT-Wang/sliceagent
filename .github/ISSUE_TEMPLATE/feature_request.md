@@ -11,5 +11,5 @@ labels: enhancement
 <!-- What you'd like to happen. -->
 
 **Moat note (if relevant)**
-<!-- memagent's moat is the bounded, reconstructed per-turn slice (no transcript accumulation). If your
+<!-- sliceagent's moat is the bounded, reconstructed per-turn slice (no transcript accumulation). If your
      idea touches context/memory, note how it stays moat-safe — see CONTRIBUTING.md / ARCHITECTURE.md. -->

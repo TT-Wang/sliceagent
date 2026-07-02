@@ -11,9 +11,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.hippocampus import render_search                 # noqa: E402
-from memagent.pagetable import PageTable                   # noqa: E402
-from memagent.search_index import EpisodeIndex, _fts_match_query, fts5_available  # noqa: E402
+from sliceagent.hippocampus import render_search                 # noqa: E402
+from sliceagent.pagetable import PageTable                   # noqa: E402
+from sliceagent.search_index import EpisodeIndex, _fts_match_query, fts5_available  # noqa: E402
 
 CHECKS = []
 def check(fn):

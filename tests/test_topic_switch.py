@@ -7,8 +7,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.memory import NullMemory   # noqa: E402
-from memagent.session import Session     # noqa: E402
+from sliceagent.memory import NullMemory   # noqa: E402
+from sliceagent.session import Session     # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -95,7 +95,7 @@ def switch_unknown_raises():
 @check
 def cross_session_resume_if_memem():
     try:
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
         m = MememMemory()
     except Exception:
         print("  (skip: memem not importable)")
@@ -115,9 +115,9 @@ def cross_session_resume_if_memem():
 
 @check
 def build_renders_other_threads_and_follows_active():
-    from memagent.retriever import NullRetriever
-    from memagent.seed import make_build_slice
-    from memagent.tools import LocalToolHost
+    from sliceagent.retriever import NullRetriever
+    from sliceagent.seed import make_build_slice
+    from sliceagent.tools import LocalToolHost
     sess = fresh()
     a_id = sess.new_topic("fix the parser")
     b_id = sess.new_topic("write the docs")        # B active, A parked
@@ -134,7 +134,7 @@ def build_renders_other_threads_and_follows_active():
 
 @check
 def topic_tools_drive_routing():
-    from memagent.session import make_topic_tools
+    from sliceagent.session import make_topic_tools
     sess = fresh()
     by = {t.name: t for t in make_topic_tools(sess)}
     a_id = sess.new_topic("task A")
@@ -148,7 +148,7 @@ class FakeLLM:
     def __init__(self, content):
         self._c = content
     def complete(self, messages, tools):
-        from memagent.interfaces import AssistantMessage
+        from sliceagent.interfaces import AssistantMessage
         return AssistantMessage(content=self._c, tool_calls=[], usage={}, finish_reason="stop")
 
 
@@ -172,7 +172,7 @@ def continue_topic_preserves_context():
 
 @check
 def router_classifies():
-    from memagent.session import route_topic
+    from sliceagent.session import route_topic
     sess = fresh()
     assert route_topic(FakeLLM('{"action":"continue"}'), "hi", sess) == ("new", "")   # no active → new, no call
     a_id = sess.new_topic("task A")

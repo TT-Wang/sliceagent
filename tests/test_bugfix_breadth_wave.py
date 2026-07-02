@@ -9,10 +9,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.records import Journal, UsageRecorder, total_usage  # noqa: E402
-from memagent.model_catalog import capability  # noqa: E402
-from memagent.agents import _parse_agent_md  # noqa: E402
-from memagent.events import StepEnd, TurnEnd, TurnInterrupted  # noqa: E402
+from sliceagent.records import Journal, UsageRecorder, total_usage  # noqa: E402
+from sliceagent.model_catalog import capability  # noqa: E402
+from sliceagent.agents import _parse_agent_md  # noqa: E402
+from sliceagent.events import StepEnd, TurnEnd, TurnInterrupted  # noqa: E402
 
 CHECKS = []
 def check(fn):

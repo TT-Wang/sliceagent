@@ -1,5 +1,5 @@
 """Same-step exact-call dedup (layer 1 only — NOT the cross-step
-streak/force-stop, which memagent's no-progress guardrail already covers).
+streak/force-stop, which sliceagent's no-progress guardrail already covers).
 
 Lossless by construction: a duplicate (name, args) read-only call in ONE batch reuses the first call's
 result instead of executing the tool twice, and every tool_call_id still gets a (byte-identical) reply.
@@ -11,11 +11,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.registry import ToolText                     # noqa: E402
-from memagent.loop import run_tool_batch                   # noqa: E402
-from memagent.hooks import Hooks                           # noqa: E402
-from memagent.guardrails import canonical_tool_args        # noqa: E402
-from memagent.events import ToolResult, ToolStarted        # noqa: E402
+from sliceagent.registry import ToolText                     # noqa: E402
+from sliceagent.loop import run_tool_batch                   # noqa: E402
+from sliceagent.hooks import Hooks                           # noqa: E402
+from sliceagent.guardrails import canonical_tool_args        # noqa: E402
+from sliceagent.events import ToolResult, ToolStarted        # noqa: E402
 
 CHECKS = []
 def check(fn):

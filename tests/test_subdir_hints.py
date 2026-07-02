@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.subdir_hints import SubdirHints   # noqa: E402
+from sliceagent.subdir_hints import SubdirHints   # noqa: E402
 
 CHECKS = []
 def check(fn):

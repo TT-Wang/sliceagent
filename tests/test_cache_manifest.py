@@ -13,12 +13,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.memory import NullMemory                              # noqa: E402
-from memagent.pagetable import PageTable                           # noqa: E402
-from memagent.regions import MANIFEST_TURNS, render_cache_manifest # noqa: E402
-from memagent.pfc import Slice  # noqa: E402
-from memagent.seed import make_build_slice  # noqa: E402
-from memagent.tools import LocalToolHost                           # noqa: E402
+from sliceagent.memory import NullMemory                              # noqa: E402
+from sliceagent.pagetable import PageTable                           # noqa: E402
+from sliceagent.regions import MANIFEST_TURNS, render_cache_manifest # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.seed import make_build_slice  # noqa: E402
+from sliceagent.tools import LocalToolHost                           # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -59,7 +59,7 @@ def manifest_renders_with_fetch_calls():
     mem = _DurableMem([
         _line(1, "find Config.load callers", note="3 callers: api.py:40, cli.py:88, test_cfg.py:12"),
         _line(2, "read the settings schema", note="schema rejects null timeout"),
-        _line(3, "repro the KeyError", note="fails only when MEMAGENT_VAULT unset", failing=True),
+        _line(3, "repro the KeyError", note="fails only when SLICEAGENT_VAULT unset", failing=True),
     ])
     user = _build_user(mem)
     assert "# PAGED-OUT HISTORY" in user, "manifest region missing from slice"
@@ -145,8 +145,8 @@ def pagetable_memory_lessons_unifies_recall():
     """The RELEVANT MEMORY recall now flows through the ONE read seam (kind='memory-lessons'),
     distinct from raw episode-xsession. PageRefs wrap recall's Snippets; render is byte-identical
     to the former render_memory(memory.recall(...)) path; absent/empty/skip all collapse to ''."""
-    from memagent.interfaces import Snippet
-    from memagent.seed import render_memory
+    from sliceagent.interfaces import Snippet
+    from sliceagent.seed import render_memory
 
     class _LessonMem:
         def recall(self, q, k=6, paths=None):
@@ -175,10 +175,10 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
     800-char gist. If the ring doesn't SIGNAL the cut + how to page the rest, the model reads the gist as
     the whole reply and confabulates the part it can't see (a cross-turn-continuity failure = the moat).
     Fix: a truncated ring reply carries a recall_history(last=K) marker, and that call returns the full text."""
-    from memagent.hippocampus import turn_markdown
-    from memagent.events import AssistantText
-    from memagent.hippocampus import make_history_tool
-    from memagent.pfc import record_user, slice_sink
+    from sliceagent.hippocampus import turn_markdown
+    from sliceagent.events import AssistantText
+    from sliceagent.hippocampus import make_history_tool
+    from sliceagent.pfc import record_user, slice_sink
 
     item2 = "2. lib/pipeline.ts:131,142 — jobs_scored column used for the jobs_updated value."
     report = ("Bug Hunt Report\n\n1. queries.ts:233 build-blocker. "
@@ -228,13 +228,13 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
     # the model saw a snippet of bug #1 and FABRICATED 3 replacement bugs instead of recalling the rest.
     # Findings carry no turn number, so the fix points at the two GENERAL recall paths (the manifest, or
     # recall_history(search=...)) rather than a specific turns=[N] call.
-    from memagent.pfc import Slice
-    from memagent.regions import record_note
+    from sliceagent.pfc import Slice
+    from sliceagent.regions import record_note
 
     long_report = ("Bug Hunt: lib/db.ts\n\n" + "1. (BUG) jobs_updated column has broken indentation. " * 6
                    + "\n\n2. (BUG) archetypeCounts() missing bd, finance, strategy. Build-breaking.\n"
                    + "\n3. (BUG) no closeDb() on the error path.\n\n4. (BUG) duplicate closeDb() calls.\n")
-    from memagent.text_utils import normalize_ws
+    from sliceagent.text_utils import normalize_ws
     assert len(normalize_ws(long_report)) > 300, "test premise broken: the NORMALIZED report must exceed MAX_FINDING_CHARS"
 
     s = Slice(); s.reset("bug hunt lib/db.ts")
@@ -260,11 +260,11 @@ def truncated_user_report_also_advertises_recall():
     # turn also shows the message in full via CURRENT REQUEST, but a LATER turn only sees this bounded
     # field — if it was silently cut, part of the user's own spec of what's broken would be lost with no
     # recovery path. Both this and the findings fix now share the SAME _cut_with_recall_marker helper.
-    from memagent.regions import capture_user_report
-    from memagent.pfc import Slice
+    from sliceagent.regions import capture_user_report
+    from sliceagent.pfc import Slice
 
     long_report = "it's broken - " + ("when I click X, Y happens instead of Z. " * 8)
-    from memagent.text_utils import normalize_ws
+    from sliceagent.text_utils import normalize_ws
     assert len(normalize_ws(long_report)) > 280, "test premise broken: must exceed MAX_REPORT_CHARS"
 
     s = Slice(); s.reset("x")

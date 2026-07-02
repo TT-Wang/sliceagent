@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.guardrails import (                          # noqa: E402
+from sliceagent.guardrails import (                          # noqa: E402
     GuardrailDecision,
     IDEMPOTENT_TOOL_NAMES,
     MUTATING_TOOL_NAMES,
@@ -28,7 +28,7 @@ from memagent.guardrails import (                          # noqa: E402
     guardrail_blocked_result,
     is_failing_output,
 )
-from memagent.registry import ToolText
+from sliceagent.registry import ToolText
 
 CHECKS = []
 def check(fn):

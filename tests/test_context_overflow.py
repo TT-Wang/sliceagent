@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.context_overflow import (  # noqa: E402
+from sliceagent.context_overflow import (  # noqa: E402
     ContextOverflow,
     classify,
     is_context_overflow,
@@ -127,7 +127,7 @@ def exception_wraps_original_and_status():
 
 @check
 def never_imports_openai():
-    import memagent.context_overflow as mod
+    import sliceagent.context_overflow as mod
     src = open(mod.__file__).read()
     assert "import openai" not in src and "from openai" not in src
 

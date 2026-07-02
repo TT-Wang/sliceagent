@@ -10,7 +10,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.mcp_client import McpRuntime  # noqa: E402
+from sliceagent.mcp_client import McpRuntime  # noqa: E402
 
 CHECKS = []
 def check(fn):

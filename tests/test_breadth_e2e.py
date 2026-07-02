@@ -13,16 +13,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import ToolResult, make_dispatcher           # noqa: E402
-from memagent.hooks import CompositeHooks                         # noqa: E402
-from memagent.loop import run_turn                                # noqa: E402
-from memagent.memory import NullMemory                            # noqa: E402
-from memagent.registry import ToolEntry                           # noqa: E402
-from memagent.retriever import NullRetriever                      # noqa: E402
-from memagent.skills import make_skill_manager, make_skill_tool   # noqa: E402
-from memagent.pfc import Slice, slice_sink  # noqa: E402
-from memagent.seed import make_build_slice  # noqa: E402
-from memagent.tools import LocalToolHost                          # noqa: E402
+from sliceagent.events import ToolResult, make_dispatcher           # noqa: E402
+from sliceagent.hooks import CompositeHooks                         # noqa: E402
+from sliceagent.loop import run_turn                                # noqa: E402
+from sliceagent.memory import NullMemory                            # noqa: E402
+from sliceagent.registry import ToolEntry                           # noqa: E402
+from sliceagent.retriever import NullRetriever                      # noqa: E402
+from sliceagent.skills import make_skill_manager, make_skill_tool   # noqa: E402
+from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.seed import make_build_slice  # noqa: E402
+from sliceagent.tools import LocalToolHost                          # noqa: E402
 
 CHECKS = []
 def check(fn):

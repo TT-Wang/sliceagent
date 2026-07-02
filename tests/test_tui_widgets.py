@@ -23,7 +23,7 @@ def check(fn):
 
 
 _CODE = (
-    "import sys; from memagent.tui import _arrow_select; import os; "
+    "import sys; from sliceagent.tui import _arrow_select; import os; "
     "r=_arrow_select(['Yes','No','Always']); os._exit(r if isinstance(r,int) and r>=0 else 9)"
 )
 

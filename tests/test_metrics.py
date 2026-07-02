@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import ApiRetry, SliceTightened, StepEnd, ToolResult, TurnEnd  # noqa: E402
-from memagent.metrics import CostMetrics  # noqa: E402
+from sliceagent.events import ApiRetry, SliceTightened, StepEnd, ToolResult, TurnEnd  # noqa: E402
+from sliceagent.metrics import CostMetrics  # noqa: E402
 
 CHECKS = []
 def check(fn):

@@ -7,14 +7,14 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.interfaces import TaskState   # noqa: E402
-from memagent.memory import (_now_iso, _parse_session_index, _parse_task_md,   # noqa: E402
+from sliceagent.interfaces import TaskState   # noqa: E402
+from sliceagent.memory import (_now_iso, _parse_session_index, _parse_task_md,   # noqa: E402
                              _render_task_md, _upsert_session_index)
-from memagent.pfc import Slice  # noqa: E402
-from memagent.seed import build_artifacts  # noqa: E402
-from memagent.regions import render_convergence  # noqa: E402
-from memagent.taskstate import slice_to_task_state, task_state_to_slice   # noqa: E402
-from memagent.tools import LocalToolHost   # noqa: E402
+from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.seed import build_artifacts  # noqa: E402
+from sliceagent.regions import render_convergence  # noqa: E402
+from sliceagent.taskstate import slice_to_task_state, task_state_to_slice   # noqa: E402
+from sliceagent.tools import LocalToolHost   # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -101,7 +101,7 @@ def session_index_is_bounded_per_session():
 @check
 def memem_disk_roundtrip_if_available():
     try:
-        from memagent.memory import MememMemory
+        from sliceagent.memory import MememMemory
         m = MememMemory()
     except Exception:
         print("  (skip: memem not importable)")

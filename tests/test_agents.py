@@ -8,9 +8,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.agents import AgentSpec, BUILTIN_AGENTS, load_agents  # noqa: E402
-from memagent.subagent import SubagentHost                          # noqa: E402
-from memagent.access import AllAccess, ReadAllAccess                # noqa: E402
+from sliceagent.agents import AgentSpec, BUILTIN_AGENTS, load_agents  # noqa: E402
+from sliceagent.subagent import SubagentHost                          # noqa: E402
+from sliceagent.access import AllAccess, ReadAllAccess                # noqa: E402
 
 CHECKS = []
 def check(fn):

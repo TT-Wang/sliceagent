@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.fuzzy import fuzzy_find_unique          # noqa: E402
+from sliceagent.fuzzy import fuzzy_find_unique          # noqa: E402
 
 CHECKS = []
 def check(fn):

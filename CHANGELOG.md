@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to memagent. Format follows [Keep a Changelog](https://keepachangelog.com/);
+All notable changes to sliceagent. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
@@ -10,11 +10,11 @@ this project aims for [Semantic Versioning](https://semver.org/).
 First public release.
 
 ### Added
-- **`memagent init`** — guided first-run setup (provider, API key, model); tests the key and writes
-  `~/.memagent/config.toml` (0600). Config-persisted keys mean the next run needs no env vars.
-- **`memagent config` / `config --list` / `config --path`** — discover every setting, its default, and
+- **`sliceagent init`** — guided first-run setup (provider, API key, model); tests the key and writes
+  `~/.sliceagent/config.toml` (0600). Config-persisted keys mean the next run needs no env vars.
+- **`sliceagent config` / `config --list` / `config --path`** — discover every setting, its default, and
   current value. New central env-var registry (`envspec.py`) is the single source of truth.
-- **`memagent help` / `version`** subcommands.
+- **`sliceagent help` / `version`** subcommands.
 - **Startup config validation** — a typo'd enum (e.g. `AGENT_POLICY`) now warns instead of silently
   defaulting.
 - **Always-pinned live UI** (`AGENT_TUI=live`) — a bordered input box stays at the bottom while output

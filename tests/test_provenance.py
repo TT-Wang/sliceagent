@@ -7,12 +7,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.events import AssistantText, ToolResult  # noqa: E402
-from memagent.neocortex import is_self_inflicted, pitfall_signature  # noqa: E402
-from memagent.pfc import Slice, slice_sink  # noqa: E402
-from memagent.seed import render_slice  # noqa: E402
-from memagent.prompt import SYSTEM_PROMPT  # noqa: E402
-from memagent.regions import is_done_claim, record_note, render_findings  # noqa: E402
+from sliceagent.events import AssistantText, ToolResult  # noqa: E402
+from sliceagent.neocortex import is_self_inflicted, pitfall_signature  # noqa: E402
+from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.seed import render_slice  # noqa: E402
+from sliceagent.prompt import SYSTEM_PROMPT  # noqa: E402
+from sliceagent.regions import is_done_claim, record_note, render_findings  # noqa: E402
 
 CHECKS = []
 def check(fn):

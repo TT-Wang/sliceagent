@@ -7,9 +7,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.hippocampus import make_episode_sink, turn_markdown  # noqa: E402
-from memagent.hippocampus import make_history_tool  # noqa: E402
-from memagent.events import SliceBuilt, ToolResult, TurnEnd  # noqa: E402
+from sliceagent.hippocampus import make_episode_sink, turn_markdown  # noqa: E402
+from sliceagent.hippocampus import make_history_tool  # noqa: E402
+from sliceagent.events import SliceBuilt, ToolResult, TurnEnd  # noqa: E402
 
 CHECKS = []
 def check(fn):

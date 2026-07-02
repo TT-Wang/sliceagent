@@ -1,4 +1,4 @@
-"""End-to-end launch smoke test: `memagent` must reach the input prompt WITHOUT crashing.
+"""End-to-end launch smoke test: `sliceagent` must reach the input prompt WITHOUT crashing.
 
 Regression guard for the cli.py banner `NameError: name 'policy_mode' is not defined` (the var was
 renamed to the resolved `_eff_mode`/`canonical` in the 3-modes change but the banner still referenced the
@@ -22,7 +22,7 @@ def _launch(extra=None):
     })
     env.update(extra or {})
     return subprocess.run(
-        [sys.executable, "-c", "from memagent.cli import main; main()"],
+        [sys.executable, "-c", "from sliceagent.cli import main; main()"],
         cwd=_ROOT, env=env, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=120,
     )

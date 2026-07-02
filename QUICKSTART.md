@@ -5,22 +5,22 @@ Get from zero to your first completed task in ~5 minutes.
 ## 1. Install
 
 ```bash
-git clone https://github.com/TT-Wang/memagent && cd memagent
+git clone https://github.com/TT-Wang/sliceagent && cd sliceagent
 uv sync                      # or: pip install -e .
 ```
 
-memagent needs Python ≥ 3.11. The interactive UI (rich + prompt_toolkit) ships in the `tui` extra and is
+sliceagent needs Python ≥ 3.11. The interactive UI (rich + prompt_toolkit) ships in the `tui` extra and is
 installed by default; everything still works without it (plain stdout).
 
 ## 2. Set up your provider
 
 ```bash
-memagent init
+sliceagent init
 ```
 
 `init` walks you through it: pick a provider (Moonshot/Kimi, OpenAI, DeepSeek, or a custom OpenAI-compatible
 endpoint), paste your API key (hidden), choose a model. It then **tests the key with one request** and writes
-`~/.memagent/config.toml` (mode `0600` — it holds your key). The next `memagent` just works.
+`~/.sliceagent/config.toml` (mode `0600` — it holds your key). The next `sliceagent` just works.
 
 Prefer environment variables? Skip `init` and export them instead:
 
@@ -30,12 +30,12 @@ export LLM_BASE_URL="https://api.moonshot.cn/v1"   # omit for OpenAI
 export AGENT_MODEL="kimi-k2.7-code"
 ```
 
-Env vars always override the config file. See every knob with `memagent config --list`.
+Env vars always override the config file. See every knob with `sliceagent config --list`.
 
 ## 3. Run it
 
 ```bash
-memagent
+sliceagent
 ```
 
 You get an inline prompt with a pinned input box. Type a task — e.g. *"add a `--json` flag to the CLI and a
@@ -53,9 +53,9 @@ UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned bo
 ## 4. Reading the output
 
 The status bar reads `model · net · policy · Σ tokens · fresh`. The **fresh** number is the one to watch:
-it's the per-turn non-cached input cost, and memagent's whole design keeps it flat as a session grows.
+it's the per-turn non-cached input cost, and sliceagent's whole design keeps it flat as a session grows.
 
 ## Troubleshooting
 
-Common snags: no API key (run `memagent init`), `rg` (ripgrep) not installed, or an MCP server that fails to
-start. `memagent config --list` shows every setting and its current value.
+Common snags: no API key (run `sliceagent init`), `rg` (ripgrep) not installed, or an MCP server that fails to
+start. `sliceagent config --list` shows every setting and its current value.

@@ -9,9 +9,9 @@ for security problems. We aim to acknowledge within 7 days and will credit repor
 
 Pre-1.0: only the latest release (and `main`) receives security fixes.
 
-## Threat model — what to know before running memagent
+## Threat model — what to know before running sliceagent
 
-memagent runs **model-authored shell commands and edits files in your workspace.** Treat it like any
+sliceagent runs **model-authored shell commands and edits files in your workspace.** Treat it like any
 agent with shell access. Four independent layers contain that:
 
 - **Sandbox** (`sandbox.py`) — commands run **cwd-confined**, with **secret-env scrubbing** (your

@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.guidance import (                              # noqa: E402
+from sliceagent.guidance import (                              # noqa: E402
     BUDGET_EXHAUSTED,
     DENIAL_NO_PROMPT,
     DENIAL_USER,

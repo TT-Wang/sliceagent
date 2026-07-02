@@ -99,7 +99,7 @@ def _skip_if_no_pty() -> bool:
 # ── bare Esc delivers SIGINT, promptly, even during a simulated blocking call ──────────────────────────
 _CODE_ESC_ABORTS = (
     "import time, os\n"
-    "from memagent.tui import make_esc_sentinel\n"
+    "from sliceagent.tui import make_esc_sentinel\n"
     "s = make_esc_sentinel(); s.start()\n"
     "t0 = time.monotonic()\n"
     "try:\n"
@@ -123,7 +123,7 @@ def bare_esc_delivers_sigint_promptly_even_mid_blocking_call():
 # ── an arrow/CSI escape sequence must NOT be mistaken for a bare Esc ───────────────────────────────────
 _CODE_NO_FALSE_FIRE = (
     "import time, os\n"
-    "from memagent.tui import make_esc_sentinel\n"
+    "from sliceagent.tui import make_esc_sentinel\n"
     "s = make_esc_sentinel(); s.start()\n"
     "try:\n"
     "    time.sleep(2.0)\n"
@@ -161,7 +161,7 @@ def physical_ctrl_c_still_aborts_while_sentinel_holds_raw_mode():
 # keys) -> resume -> a LATER bare Esc still aborts. This is the central "UX preserved, not traded" claim ──
 _CODE_PAUSE_RESUME_ROUNDTRIP = (
     "import time, os\n"
-    "from memagent.tui import make_esc_sentinel, _arrow_select\n"
+    "from sliceagent.tui import make_esc_sentinel, _arrow_select\n"
     "s = make_esc_sentinel(); s.start()\n"
     "time.sleep(0.3)\n"
     "s.pause()\n"                                  # mirrors _pause_active_live() before a confirm() prompt
@@ -201,7 +201,7 @@ def confirm_arrow_select_unaffected_by_a_paused_sentinel_and_resumes_after():
 # not something introduced here. Every OTHER termios field (iflag/oflag/cflag/speeds/cc[]) must match exactly.
 _CODE_CLEAN_STOP = (
     "import termios, sys, time, threading, os\n"
-    "from memagent.tui import make_esc_sentinel\n"
+    "from sliceagent.tui import make_esc_sentinel\n"
     "fd = sys.stdin.fileno()\n"
     "before = termios.tcgetattr(fd)\n"
     "s = make_esc_sentinel(); s.start()\n"
@@ -232,7 +232,7 @@ def stop_restores_termios_and_leaves_no_thread():
 #    clears OPOST, which made every reply drift right (a today regression from the Esc-interrupt feature).
 _CODE_OUTPUT_STAYS_COOKED = (
     "import time, os, sys, termios\n"
-    "from memagent.tui import make_esc_sentinel\n"
+    "from sliceagent.tui import make_esc_sentinel\n"
     "s = make_esc_sentinel(); s.start()\n"
     "time.sleep(0.3)\n"                                  # let the sentinel enter raw mode
     "a = termios.tcgetattr(sys.stdin.fileno())\n"

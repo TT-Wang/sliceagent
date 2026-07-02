@@ -12,7 +12,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.tools import LocalToolHost  # noqa: E402
+from sliceagent.tools import LocalToolHost  # noqa: E402
 
 PY = shlex.quote(sys.executable)
 CHECKS = []

@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from memagent.safety import (                              # noqa: E402
+from sliceagent.safety import (                              # noqa: E402
     INVISIBLE_CHARS,
     first_threat_message,
     is_safe_to_persist,
