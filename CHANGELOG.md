@@ -5,6 +5,23 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-02
+
+First-run onboarding, hardened by a live stranger walkthrough.
+
+### Added
+- **Auto-onboarding** — a bare interactive `sliceagent` with nothing configured now drops straight
+  into the guided setup wizard (provider → key → model → live test), then continues into the session.
+  No more "go run `sliceagent init`" bounce. Piped/CI runs keep the print-and-exit gate.
+- **Installer handles everything** — `install.sh` now also installs ripgrep (brew when available,
+  else an isolated ~2 MB static binary; no sudo) and pins `uv tool install --python 3.12`, so the
+  curl path has zero prerequisites even when the default Python is 3.9/3.10 (conda base, Ubuntu 22.04).
+
+### Changed
+- README: the curl installer is the primary install path; PyPI/pip is the "you manage the Python"
+  alternative. (Project renamed memagent → sliceagent the same day, before 0.1.1: PyPI's
+  name-similarity check blocks "memagent".)
+
 ## [0.1.0] — 2026-07-02
 
 First public release.

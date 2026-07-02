@@ -163,12 +163,32 @@ def main() -> None:
     # config-persisted key/endpoint (written by `sliceagent init`) populate the env BEFORE the gate, so a
     # configured user never has to export anything; ENV still wins for one-off overrides.
     from .config import load_config
+
+    def _env_from_config(c) -> None:
+        for _env, _val in (("LLM_API_KEY", c.api_key), ("LLM_BASE_URL", c.base_url)):
+            if not os.environ.get(_env) and _val:
+                os.environ[_env] = _val
+
+    def _key_present() -> bool:
+        return bool(os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+                    or os.environ.get("MOONSHOT_API_KEY"))
+
+    def _first_run_setup(reason: str) -> bool:
+        """First-run UX: a bare interactive `sliceagent` with nothing configured drops STRAIGHT into the
+        init wizard instead of bouncing the user to a separate command. Non-interactive (piped/CI) keeps
+        the print-and-exit gate — never prompt into a pipe. Returns True when the wizard completed."""
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        print(f"  {reason} — starting guided setup.\n")
+        from .onboarding import run_init
+        return run_init() == 0
+
     cfg = load_config()
-    for _env, _val in (("LLM_API_KEY", cfg.api_key), ("LLM_BASE_URL", cfg.base_url)):
-        if not os.environ.get(_env) and _val:
-            os.environ[_env] = _val
-    if not (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("MOONSHOT_API_KEY")):
+    _env_from_config(cfg)
+    if not _key_present() and _first_run_setup("Welcome! No API key configured yet"):
+        cfg = load_config()          # the wizard just wrote ~/.sliceagent/config.toml — pick it up
+        _env_from_config(cfg)
+    if not _key_present():
         print("No API key found. Run `sliceagent init` for guided setup, or set LLM_API_KEY (e.g. in a .env file).")
         sys.exit(1)
     # validate enum env vars (warn + use default; never crash) — a typo'd AGENT_POLICY is now visible.
@@ -211,6 +231,10 @@ def main() -> None:
     policy = make_policy("letitgo" if CONFIRMS.get(canonical) else canonical)
     # model + reasoning resolution: explicit env wins, then the saved /model choice (prefs), then config.
     _model = os.environ.get("AGENT_MODEL") or _prefs.get("model") or cfg.model
+    if not _model and _first_run_setup("No model configured yet"):
+        cfg = load_config()          # wizard picks provider+model → re-resolve from the fresh config
+        _env_from_config(cfg)
+        _model = os.environ.get("AGENT_MODEL") or _prefs.get("model") or cfg.model
     if not _model:   # no built-in default — the user picks the model (parallels the API-key gate above)
         print("No model configured. Run `sliceagent init` to pick a provider + model, "
               "or set AGENT_MODEL to your model name.")

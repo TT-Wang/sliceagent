@@ -83,23 +83,31 @@ Early, but the **core bet is validated** — see the measured head-to-head bench
 
 ## Install
 
-Straight from PyPI (any one of):
-
-```bash
-uv tool install --python 3.12 "sliceagent[tui]"     # uv (recommended — fetches Python itself)
-pipx install "sliceagent[tui]"                      # pipx (needs Python ≥ 3.11 on PATH)
-pip install "sliceagent[tui]"                       # plain pip (needs Python ≥ 3.11)
-```
-
-Or the one-command bootstrap (installs `uv` if needed, then sliceagent in an isolated tool env — **no prerequisites**, works even when your default Python is 3.9/3.10):
+One command — Linux, macOS, WSL2:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
-**Python too old?** (`pip` says `Requires-Python >=3.11` — common with conda base envs and Ubuntu 22.04's system 3.10): either use the `curl` installer above, or make a 3.12 env first: `conda create -n sliceagent python=3.12 -y && conda activate sliceagent`.
+**The installer handles everything**: `uv`, its own Python 3.12, ripgrep, and sliceagent — in an isolated tool env, no sudo, no prerequisites, no conflicts with any Python you already have (conda base at 3.10? Rosetta-Intel conda on an M-series Mac? Doesn't matter). Then:
 
-Footprint is light (no torch). `pip install -e .` works for a clone too. `ripgrep` is recommended (code search degrades gracefully without it). Homebrew / Docker arrive in v0.2.
+```bash
+sliceagent          # first run drops you straight into guided setup, then start chatting
+```
+
+<details>
+<summary><b>Alternative: install from PyPI yourself</b> (you manage the Python — needs ≥ 3.11)</summary>
+
+```bash
+uv tool install --python 3.12 "sliceagent[tui]"     # uv — fetches Python itself
+pipx install "sliceagent[tui]"                      # pipx
+pip install "sliceagent[tui]"                       # plain pip (use a venv)
+```
+
+If `pip` refuses with `Requires-Python >=3.11`: `conda create -n sliceagent python=3.12 -y && conda activate sliceagent`, then pip install. `ripgrep` is recommended (code search degrades gracefully without it).
+</details>
+
+Footprint is light (no torch). `pip install -e .` works for a clone too. Homebrew / Docker arrive in v0.2.
 
 ## Quickstart
 
