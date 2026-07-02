@@ -1267,6 +1267,102 @@ def _arrow_select(options: list[str], default: int = 0) -> "int | None":
     return idx
 
 
+def _menu_select(options: list[str], default: int = 0) -> "int | None":
+    """VERTICAL arrow-key menu — one option per row: ↑/↓ (or ←/→) move, Enter chooses, Esc/Ctrl-C
+    cancels. Exists because the single-line _arrow_select WRAPS with long/many options, and its
+    clear-one-line redraw then stacks copies of itself down the screen (live-repro'd in the init
+    wizard's 6-entry provider menu). This sibling owns EXACTLY len(options) rows: labels are clamped
+    below the terminal width so a row can never wrap, and each redraw walks the cursor up over its
+    own rows. Raw-mode note: OPOST is off, so every line break is an explicit \\r\\n (the staircase
+    lesson). Same gates + return contract as _arrow_select: index | -1 cancelled | None when a
+    selector can't safely run (caller falls back to typed input)."""
+    import shutil
+    import sys
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        import termios
+        import tty
+    except Exception:  # noqa: BLE001 — non-POSIX → typed fallback
+        return None
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except Exception:  # noqa: BLE001
+        return None
+    width = max(20, shutil.get_terminal_size((80, 24)).columns - 8)
+    rows = [o if len(o) <= width else o[: width - 1] + "…" for o in options]
+    idx = default if 0 <= default < len(rows) else 0
+
+    def draw(first: bool = False) -> None:
+        if not first:
+            sys.stdout.write(f"\x1b[{len(rows)}A")            # walk back up over OUR rows only
+        parts = []
+        for i, o in enumerate(rows):
+            body = f"\x1b[7m ▸ {o} \x1b[0m" if i == idx else f"\x1b[2m   {o} \x1b[0m"
+            parts.append("\r\x1b[2K  " + body)
+        sys.stdout.write("\r\n".join(parts) + "\r\n")         # explicit \r\n: raw mode, OPOST off
+        sys.stdout.flush()
+
+    raw_entered = False
+    try:
+        tty.setraw(fd)
+        raw_entered = True
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:  # noqa: BLE001
+            pass
+        draw(first=True)
+        while True:
+            try:
+                data = os.read(fd, 16)                        # raw fd read — see _arrow_select's note
+            except OSError:
+                idx = -1
+                break
+            if not data:
+                idx = -1
+                break
+            if data[:1] in (b"\r", b"\n"):                     # Enter → choose
+                break
+            if data[:1] == b"\x03":                           # Ctrl-C → cancel
+                idx = -1
+                break
+            if data[:1] == b"\x1b":
+                if len(data) == 1:                            # bare ESC → cancel
+                    idx = -1
+                    break
+                if data[1:2] in (b"[", b"O"):
+                    arrow = data[2:3]
+                    if arrow in (b"B", b"C"):                 # ↓ / →
+                        idx = (idx + 1) % len(rows)
+                    elif arrow in (b"A", b"D"):               # ↑ / ←
+                        idx = (idx - 1) % len(rows)
+                    draw()
+                    if b"\r" in data[3:] or b"\n" in data[3:]:
+                        break
+                continue
+    except Exception:  # noqa: BLE001 — any I/O error → typed fallback, never corrupt the terminal
+        idx = None
+    finally:
+        if raw_entered:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:  # noqa: BLE001
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, old)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                sys.stdout.write("\r")                        # cursor already sits below the block
+                sys.stdout.flush()
+            except Exception:  # noqa: BLE001
+                pass
+    return idx
+
+
 def confirm(console: Console, name: str, detail: str, reason: str) -> str:
     """Approval prompt used by the permission hook when the TUI is active. Synchronous (no pt app
     is live mid-run), returns 'yes' | 'no' | 'always'. Arrow-key selectable; falls back to a typed

@@ -5,6 +5,14 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-07-02
+
+### Fixed
+- **Wizard menus render as a proper vertical list.** The single-line selector wrapped with six long
+  provider labels, and its clear-one-line redraw stacked copies of itself down the screen. New
+  `_menu_select`: one option per row, width-clamped labels (wrap impossible), in-place cursor-up
+  redraws, explicit `\r\n` in raw mode. PTY-tested, including the anti-stacking invariant.
+
 ## [0.1.3] — 2026-07-02
 
 The five-door provider lineup + a wizard that feels like one.

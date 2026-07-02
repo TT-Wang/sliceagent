@@ -58,14 +58,15 @@ def _masked_input(prompt_text: str, fallback):
 
 
 def _pick(options: list, default: int = 0):
-    """Arrow-key selector for the wizard (reuses the TUI's _arrow_select: ↑/↓ or ←/→ + Enter).
-    Returns the index; raises KeyboardInterrupt on Esc (→ the wizard's normal 'cancelled' path);
-    returns None when a selector can't safely run so the caller falls back to typed input."""
+    """Arrow-key selector for the wizard — the VERTICAL menu (_menu_select: one option per row), NOT
+    the single-line _arrow_select, whose one-line redraw wraps and stacks with 6 long provider labels
+    (live-repro'd). Returns the index; raises KeyboardInterrupt on Esc (→ the wizard's normal
+    'cancelled' path); returns None when a selector can't safely run → caller falls back to typed."""
     try:
-        from .tui import _arrow_select
+        from .tui import _menu_select
     except ImportError:
         return None
-    idx = _arrow_select(options, default=default)
+    idx = _menu_select(options, default=default)
     if idx == -1:
         raise KeyboardInterrupt
     return idx
