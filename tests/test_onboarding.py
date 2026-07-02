@@ -134,7 +134,7 @@ class _OkLLM:
 def init_writes_a_valid_config_on_success():
     home = tempfile.mkdtemp(prefix="init-")
     rc = onboarding.run_init(
-        inp=_seq("1", ""),                 # provider=moonshot, model=default
+        inp=_seq("5", ""),                 # provider=moonshot (menu slot 5), model=default
         getpw=_seq("sk-test-key"),
         llm_factory=lambda model: _OkLLM(),
         home=home)
@@ -180,7 +180,7 @@ def init_offers_to_save_after_a_failed_key_test():
 def init_custom_provider_prompts_base_url():
     home = tempfile.mkdtemp(prefix="init-custom-")
     rc = onboarding.run_init(
-        inp=_seq("4", "https://my.host/v1", "my-model"),   # custom → base url → model
+        inp=_seq("6", "https://my.host/v1", "my-model"),   # custom → base url → model (menu: 6 = custom)
         getpw=_seq("k"),
         llm_factory=lambda model: _OkLLM(),
         home=home)
@@ -193,7 +193,7 @@ def init_custom_provider_prompts_base_url():
 @check
 def init_aborts_without_a_key():
     home = tempfile.mkdtemp(prefix="init-nokey-")
-    rc = onboarding.run_init(inp=_seq("1", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
+    rc = onboarding.run_init(inp=_seq("5", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
     assert rc == 1, "no key → abort"
     assert not os.path.exists(os.path.join(home, ".sliceagent", "config.toml"))
 
@@ -224,7 +224,7 @@ def write_config_is_atomic_and_cleans_up_on_failure():
 @check
 def init_merge_keeps_existing_providers():
     home = tempfile.mkdtemp(prefix="init-merge-")
-    onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
+    onboarding.run_init(inp=_seq("5", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
     # 2nd init on the existing config: "Add/update? [Y/n]" → "" (yes) → provider 2 (openai) → model ""
     onboarding.run_init(inp=_seq("", "2", ""), getpw=_seq("k-oai"), llm_factory=lambda m: _OkLLM(), home=home)
     data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
@@ -239,10 +239,10 @@ def reinit_blank_key_keeps_existing_key_for_the_same_provider():
     # prompt (no retype) must KEEP the saved key/model, not abort — the abort-on-blank behavior
     # (init_aborts_without_a_key) is only correct for a provider with no existing entry.
     home = tempfile.mkdtemp(prefix="init-reblank-")
-    onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
+    onboarding.run_init(inp=_seq("5", ""), getpw=_seq("k-moon"), llm_factory=lambda m: _OkLLM(), home=home)
     # 2nd init: "Add/update? [Y/n]" → "" (yes) → provider 1 (moonshot, already saved) → key "" (blank,
     # keep existing) → model "" (blank, keep existing)
-    rc = onboarding.run_init(inp=_seq("", "1", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
+    rc = onboarding.run_init(inp=_seq("", "5", ""), getpw=_seq(""), llm_factory=lambda m: _OkLLM(), home=home)
     assert rc == 0, "blank key on an already-configured provider must NOT abort"
     data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
     assert data["providers"]["moonshot"]["api_key"] == "k-moon", "the existing key must be kept, not wiped"
@@ -252,7 +252,7 @@ def reinit_blank_key_keeps_existing_key_for_the_same_provider():
 @check
 def config_use_switches_default_provider():
     home = tempfile.mkdtemp(prefix="cfg-use-")
-    onboarding.run_init(inp=_seq("1", ""), getpw=_seq("k1"), llm_factory=lambda m: _OkLLM(), home=home)
+    onboarding.run_init(inp=_seq("5", ""), getpw=_seq("k1"), llm_factory=lambda m: _OkLLM(), home=home)
     onboarding.run_init(inp=_seq("", "2", ""), getpw=_seq("k2"), llm_factory=lambda m: _OkLLM(), home=home)
     assert onboarding.run_config(["--use", "moonshot"], home=home) == 0
     data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))

@@ -19,7 +19,7 @@ sliceagent
 ```
 
 Nothing to memorize — the **first run walks you through setup automatically**: pick a provider
-(Moonshot/Kimi, OpenAI, DeepSeek, or a custom OpenAI-compatible endpoint), paste your API key (hidden),
+(OpenRouter — hundreds of models with one key — or OpenAI, Anthropic/Claude, DeepSeek, Moonshot/Kimi, or a custom OpenAI-compatible endpoint), paste your API key (hidden),
 choose a model. It **tests the key with one request**, writes `~/.sliceagent/config.toml` (mode `0600` —
 it holds your key), and drops you straight into the session. Every later `sliceagent` just starts.
 (Re-configure anytime — add or switch providers — with `sliceagent init`.)

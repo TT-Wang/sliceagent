@@ -81,6 +81,9 @@ def _usage_dict(raw) -> dict | None:
     }
     if cache_read:
         usage["cached_tokens"] = cache_read                              # legacy key (only when present)
+    _cost = getattr(raw, "cost", None)                                   # OpenRouter: authoritative $ per call
+    if isinstance(_cost, (int, float)) and _cost >= 0:
+        usage["cost_usd"] = float(_cost)
     return usage
 
 
@@ -189,7 +192,9 @@ class OpenAILLM:
         # export OPENAI_API_KEY) — the surface the user configures says "LLM", not a provider name.
         # Resolve the ENDPOINT first: the proxy choice below depends on which provider it is.
         kwargs: dict = {"api_key": api_key or os.environ.get("LLM_API_KEY")
-                        or os.environ.get("OPENAI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")}
+                        or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+                        or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+                        or os.environ.get("MOONSHOT_API_KEY")}
         resolved_base = base_url or os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
         if not resolved_base and os.environ.get("MOONSHOT_API_KEY") and not (
                 os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")):
@@ -466,6 +471,12 @@ class OpenAILLM:
         from .model_catalog import capability
         r = self.reasoning
         model, base = self.model.lower(), self._base_url.lower()
+        if "openrouter" in base:
+            # OpenRouter's UNIFIED reasoning object translates effort per upstream vendor (OpenAI
+            # reasoning_effort / Anthropic thinking budget / Gemini thinkingLevel) and — unlike raw
+            # reasoning_effort on chat/completions — works WITH tools. "full" stays provider-default.
+            effort = {"fast": "low", "high": "high", "max": "high"}.get(r)
+            return {"extra_body": {"reasoning": {"effort": effort}}} if effort else {}
         if "deepseek" in model or "deepseek" in base:
             return {"extra_body": {"thinking": {"type": "disabled"}}} if r == "fast" else {}
         if not capability(self.model, self._base_url).supports_reasoning_effort:
@@ -637,6 +648,12 @@ class OpenAILLM:
         self._merge_kwargs(kwargs, self._cache_routing_kwargs())  # session-stable cache routing (0 added tokens)
         self._merge_kwargs(kwargs, self._reasoning_kwargs())
         self._merge_kwargs(kwargs, self._cache_kwargs(messages))
+        if "openrouter" in self._base_url.lower() and tools:
+            # OpenRouter routes one model slug across MANY hosts; some serve quantizations with broken
+            # tool calling, and unsupported params are DROPPED silently by default. require_parameters
+            # pins routing to hosts that honor every param we sent — a silent degrade becomes a visible
+            # error instead (the exact failure class behind the old reasoning-effort ceiling).
+            self._merge_kwargs(kwargs, {"extra_body": {"provider": {"require_parameters": True}}})
         # Provider quirk (isolated here, llm-agnostic): some reasoning models (gpt-5.5) reject
         # reasoning_effort TOGETHER with function tools on /v1/chat/completions (400 — "use /v1/responses").
         # Once seen, drop reasoning_effort whenever tools are present so we degrade to default reasoning

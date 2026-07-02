@@ -13,12 +13,62 @@ import os
 from .envspec import GROUPS, REGISTRY, current_value
 
 # provider presets: key → (label, base_url, default_model). 'custom' prompts for the base_url.
+# The lineup: one AGGREGATOR door (OpenRouter — breadth, one key) + four first-party doors
+# (OpenAI, Anthropic, DeepSeek, Moonshot). Anthropic rides its OpenAI-compatible endpoint, so all
+# five share the single OpenAILLM adapter — no per-provider SDKs.
 PROVIDERS = {
-    "1": ("moonshot", "Moonshot (Kimi)", "https://api.moonshot.cn/v1", "kimi-k2.7-code"),
+    "1": ("openrouter", "OpenRouter (hundreds of models, one key)", "https://openrouter.ai/api/v1", "openai/gpt-5.5"),
     "2": ("openai", "OpenAI", "", "gpt-5.5"),
-    "3": ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-    "4": ("custom", "Custom OpenAI-compatible endpoint", "", ""),
+    "3": ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com/v1", "claude-sonnet-5"),
+    "4": ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+    "5": ("moonshot", "Moonshot (Kimi)", "https://api.moonshot.cn/v1", "kimi-k2.7-code"),
+    "6": ("custom", "Custom OpenAI-compatible endpoint", "", ""),
 }
+
+# wizard model MENU per provider — suggestions for the arrow picker, NOT a cap: "type another…"
+# always accepts any model id (the catalog/pricing layers stay the capability source of truth).
+MODEL_SUGGESTIONS = {
+    "openrouter": ["openai/gpt-5.5", "anthropic/claude-sonnet-5", "deepseek/deepseek-chat",
+                   "moonshotai/kimi-k2.7"],
+    "openai": ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3"],
+    "anthropic": ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "moonshot": ["kimi-k2.7-code", "kimi-k2-0905-preview"],
+    "custom": [],
+}
+
+
+def _tty() -> bool:
+    import sys
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _masked_input(prompt_text: str, fallback):
+    """API-key entry with VISIBLE feedback — asterisks per keystroke (prompt_toolkit is_password)
+    instead of getpass's fully-invisible field, which first-run users read as 'nothing is happening'.
+    Falls back to getpass when the TUI stack is absent or anything goes wrong."""
+    try:
+        from prompt_toolkit import prompt as _ptk_prompt
+        return _ptk_prompt(prompt_text, is_password=True)
+    except (ImportError, OSError, EOFError):
+        return fallback(prompt_text)
+
+
+def _pick(options: list, default: int = 0):
+    """Arrow-key selector for the wizard (reuses the TUI's _arrow_select: ↑/↓ or ←/→ + Enter).
+    Returns the index; raises KeyboardInterrupt on Esc (→ the wizard's normal 'cancelled' path);
+    returns None when a selector can't safely run so the caller falls back to typed input."""
+    try:
+        from .tui import _arrow_select
+    except ImportError:
+        return None
+    idx = _arrow_select(options, default=default)
+    if idx == -1:
+        raise KeyboardInterrupt
+    return idx
 
 
 def _version() -> str:
@@ -182,11 +232,24 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         if ans in ("n", "no"):
             out("  Leaving the existing config unchanged. Run `sliceagent` to start."); return 0
 
-    out("\n  Choose a provider:")
-    for k, (_id, label, base, model) in PROVIDERS.items():
-        out(f"    {k}. {label}" + (f"  ({model})" if model else ""))
+    # arrow-key niceties only on a REAL interactive run with the default input hooks — injected
+    # inp/getpw (tests, scripted runs) keep the typed flow byte-for-byte.
+    fancy = inp is input and getpw is __import__("getpass").getpass and _tty()
+    keys = sorted(PROVIDERS)
     try:
-        choice = inp("  > ").strip() or "1"
+        out("\n  Choose a provider (↑/↓ + Enter):" if fancy else "\n  Choose a provider:")
+        idx = None
+        if fancy:
+            labels = [f"{PROVIDERS[k][1]}" + (f"  — {PROVIDERS[k][3]}" if PROVIDERS[k][3] else "")
+                      for k in keys]
+            idx = _pick(labels)                       # Esc → KeyboardInterrupt → 'cancelled' below
+        if idx is not None:
+            choice = keys[idx]
+        else:                                          # typed fallback (no tty / selector unavailable)
+            for k in keys:
+                _id, label, _base, model0 = PROVIDERS[k]
+                out(f"    {k}. {label}" + (f"  ({model0})" if model0 else ""))
+            choice = inp("  > ").strip() or "1"
         pid, label, base_url, model = PROVIDERS.get(choice, PROVIDERS["1"])
         if pid == "custom":
             base_url = inp("  Base URL (OpenAI-compatible, e.g. https://host/v1): ").strip()
@@ -198,10 +261,27 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         existing = existing.get(pid) if isinstance(existing, dict) else None
         existing = existing if isinstance(existing, dict) else {}
         existing_key = existing.get("api_key") or ""
-        key_prompt = "  API key (hidden, Enter to keep existing): " if existing_key else "  API key (hidden): "
-        key = getpw(key_prompt).strip() or existing_key
-        model = (inp(f"  Model [{existing.get('model') or model or 'required'}]: ").strip()
-                 or existing.get("model") or model)
+        key_prompt = ("  API key (typed as ******, Enter to keep existing): " if existing_key
+                      else "  API key (typed as ******): ") if fancy else (
+                      "  API key (hidden, Enter to keep existing): " if existing_key
+                      else "  API key (hidden): ")
+        key = (_masked_input(key_prompt, getpw) if fancy else getpw(key_prompt)).strip() or existing_key
+        picked_model = None
+        if fancy:
+            cur = existing.get("model") or model
+            opts = [m for m in ([cur] if cur else []) + MODEL_SUGGESTIONS.get(pid, []) if m]
+            opts = list(dict.fromkeys(opts)) + ["type another model id…"]
+            out("  Model (↑/↓ + Enter):")
+            midx = _pick(opts)
+            if midx is not None:
+                picked_model = None if opts[midx].startswith("type another") else opts[midx]
+                if picked_model is None:
+                    picked_model = inp("  Model id: ").strip()
+        if picked_model:
+            model = picked_model
+        else:
+            model = (inp(f"  Model [{existing.get('model') or model or 'required'}]: ").strip()
+                     or existing.get("model") or model)
     except (EOFError, KeyboardInterrupt):
         out("\n  cancelled."); return 1
     if not key:

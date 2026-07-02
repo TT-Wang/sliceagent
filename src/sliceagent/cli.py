@@ -171,7 +171,8 @@ def main() -> None:
 
     def _key_present() -> bool:
         return bool(os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-                    or os.environ.get("MOONSHOT_API_KEY"))
+                    or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+                    or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("MOONSHOT_API_KEY"))
 
     def _first_run_setup(reason: str) -> bool:
         """First-run UX: a bare interactive `sliceagent` with nothing configured drops STRAIGHT into the

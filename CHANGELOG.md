@@ -5,6 +5,25 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-07-02
+
+The five-door provider lineup + a wizard that feels like one.
+
+### Added
+- **Providers**: OpenRouter (hundreds of models, one key — now the first door), OpenAI,
+  **Anthropic/Claude** (new — via Anthropic's OpenAI-compatible endpoint), DeepSeek, Moonshot/Kimi,
+  plus custom endpoints. All five ride the single adapter — zero new dependencies.
+- **OpenRouter quirks**: reasoning intent maps to OpenRouter's unified `reasoning` object (works
+  WITH tools — the raw `reasoning_effort` param never could); tool-calling requests pin routing to
+  hosts that honor every param (`require_parameters`) so nothing silently degrades; per-call
+  `usage.cost` is parsed into the cost meter.
+- `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` accepted as key fallbacks.
+
+### Changed
+- **Wizard UX**: API key shows `******` as you type (no more invisible field); provider and model
+  are arrow-key menus (↑/↓ + Enter, Esc cancels) with per-provider model suggestions +
+  "type another model id…". Scripted/CI runs keep the plain typed flow.
+
 ## [0.1.2] — 2026-07-02
 
 Nothing may hang the user — three fixes from a live first-run reproduction.
