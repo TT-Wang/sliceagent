@@ -97,6 +97,8 @@ Or the one-command bootstrap (installs `uv` if needed, then sliceagent in an iso
 curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
+**Python too old?** (`pip` says `Requires-Python >=3.11` — common with conda base envs and Ubuntu 22.04's system 3.10): either use the `curl` installer above, or make a 3.12 env first: `conda create -n sliceagent python=3.12 -y && conda activate sliceagent`.
+
 Footprint is light (no torch). `pip install -e .` works for a clone too. `ripgrep` is recommended (code search degrades gracefully without it). Homebrew / Docker arrive in v0.2.
 
 ## Quickstart
