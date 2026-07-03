@@ -16,14 +16,18 @@ cleanly). Children run in their own process group so ``close`` takes down the wh
 from __future__ import annotations
 
 import codecs
-import fcntl
 import os
-import pty
 import re
 import select
 import signal
 import subprocess
 import time
+
+try:  # POSIX-only stdlib; guarded so this module still IMPORTS on Windows (sessions refuse to open there)
+    import fcntl
+    import pty
+except ImportError:  # Windows
+    fcntl = pty = None  # type: ignore[assignment]
 
 from .sandbox import _scrub_env
 
@@ -54,6 +58,9 @@ class SessionManager:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def open(self, name: str, *, cwd: str, command: str | None = None) -> str:
+        if pty is None:
+            raise ValueError("interactive PTY sessions aren't available on Windows yet — use "
+                             "run_command for one-shot commands or proc_start for background processes")
         if name in self._s:
             raise ValueError(f"session {name!r} is already open (close it first, or use another name)")
         master, slave = pty.openpty()

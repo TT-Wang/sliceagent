@@ -78,6 +78,7 @@ REGISTRY: list[EnvVar] = [
     EnvVar("SLICEAGENT_VAULT", "memory", "sliceagent's STATE vault (episodic cache + task-state records).", ""),
     EnvVar("MEMEM_VAULT", "memory", "memem's lesson vault (markdown long-term memories), if memem is installed.", ""),
     EnvVar("SLICEAGENT_SKILLS_DIR", "memory", "Extra directory to discover skills from.", ""),
+    EnvVar("SLICEAGENT_BASH", "agent", "Windows only: bash.exe that runs shell commands (default: auto-detect Git Bash).", ""),
     EnvVar("AGENT_BACKGROUND_REVIEW", "agent", "Set truthy to run an off-thread reviewer that consolidates "
            "lessons after each turn.", ""),
     EnvVar("SLICEAGENT_CACHE_DIR", "memory", "Directory for the episodic cache / durable log.", ""),

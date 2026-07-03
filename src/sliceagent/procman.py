@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+
+from .platform_compat import SIG_KILL, kill_tree, popen_group_kwargs, sh as _sh
 import tempfile
 
 from .sandbox import _scrub_env
@@ -72,9 +74,9 @@ class ProcManager:
         """Launch the background process. OVERRIDABLE SEAM: a container variant relaunches via
         `docker exec` so the process runs INSIDE the task container, streaming to this host logfile."""
         return subprocess.Popen(
-            command, shell=True, cwd=cwd, env=env,
+            **_sh(command), cwd=cwd, env=env,
             stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **popen_group_kwargs(),
         )
 
     def poll(self, handle: str) -> str:
@@ -110,7 +112,7 @@ class ProcManager:
             try:
                 p.popen.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self._signal_group(p, signal.SIGKILL)
+                self._signal_group(p, SIG_KILL)
                 try:
                     p.popen.wait(timeout=2)
                 except subprocess.TimeoutExpired:
@@ -178,10 +180,6 @@ class ProcManager:
 
     @staticmethod
     def _signal_group(p: _Proc, sig: int) -> None:
-        try:
-            os.killpg(os.getpgid(p.popen.pid), sig)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                p.popen.send_signal(sig)
-            except OSError:
-                pass
+        # POSIX: the same killpg→send_signal ladder as always (now living in platform_compat);
+        # win32: taskkill /T tree-kill.
+        kill_tree(p.popen, sig)

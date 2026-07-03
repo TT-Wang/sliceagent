@@ -14,6 +14,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12"]
+        include:
+          - os: windows-latest   # native Windows (Hermes pattern): imports, lint, and suite must hold
+            python: "3.12"
+    defaults:
+      run:
+        shell: bash              # Git Bash on the Windows runner — same shell the agent itself uses
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +31,8 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update && sudo apt-get install -y ripgrep
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            choco install ripgrep -y
           else
             brew install ripgrep
           fi

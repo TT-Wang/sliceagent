@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import subprocess
 
+from .platform_compat import sh as _sh
+
 
 class CommandOracle:
     """Runs a verification command (e.g. the project's test suite). Pass/fail by exit code."""
@@ -16,7 +18,7 @@ class CommandOracle:
 
     def verify(self) -> tuple[bool, str]:
         try:
-            r = subprocess.run(self.cmd, shell=True, capture_output=True, text=True, timeout=self.timeout)
+            r = subprocess.run(**_sh(self.cmd), capture_output=True, text=True, timeout=self.timeout)
         except subprocess.TimeoutExpired as e:
             # A timed-out verification is a FAILURE, not a thrown exception — otherwise it propagates out
             # of the oracle and silently BYPASSES the done-gate (a hung test would mark the task complete).
