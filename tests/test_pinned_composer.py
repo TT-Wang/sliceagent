@@ -5,6 +5,11 @@ layout / key binding that a mere "does it import" check would miss.
 
 No model, no pytest. Run: PYTHONPATH=src python tests/test_pinned_composer.py
 """
+import sys as _sys
+if _sys.platform == "win32":
+    print("SKIP: prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none "
+          "(NoConsoleScreenBufferError) — works in a real terminal")
+    _sys.exit(0)
 import os
 import sys
 

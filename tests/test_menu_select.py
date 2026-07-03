@@ -5,7 +5,12 @@ and (c) redraw IN PLACE — cursor-up over exactly its own N rows (the anti-stac
 Run: PYTHONPATH=src python tests/test_menu_select.py   (skips cleanly where no pty is available)
 """
 import os
-import pty
+try:
+    import pty
+except ImportError:  # Windows: no pty — this drives a real POSIX terminal
+    print("SKIP: no pty module on this platform")
+    import sys as _sys
+    _sys.exit(0)
 import select
 import subprocess
 import sys
