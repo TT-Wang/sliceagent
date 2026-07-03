@@ -57,7 +57,7 @@ Each turn faults in exactly what the turn references — the carried slice, live
 
 ## Benchmark
 
-On public benchmarks, sliceagent matches Codex's solve rate while using 2.5× fewer tokens and 1.3× less cost on ColBench, and up to 112× smaller peak input on long sessions.
+On public benchmarks, sliceagent matches Codex's solve rate while using 2.5× fewer tokens and 1.3× less cost on ColBench, and up to 149× smaller peak input on long sessions.
 
 Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All three benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) at matched reasoning.
 
@@ -94,32 +94,32 @@ Same capability — **2.6× smaller per-turn context, 2.5× fewer tokens, 1.3× 
 
 ### 3. Long-horizon multi-turn — self-designed coding scenarios
 
-Iterative coding sessions where a transcript really piles up. Both `gpt-5.5` at `high`. Reproduce with [`benchmarks/run.py`](benchmarks/) (the scenarios are in [`benchmarks/multiturn_coding/`](benchmarks/multiturn_coding)):
+Iterative coding sessions where a transcript really piles up. Each scenario is a **fixed sequence of 6–10 dependent, pre-written turns revealed one at a time** — later turns build on (and regress) earlier work, so **no agent can one-shot them** and byte-identical turns go to both agents. Both `gpt-5.5` at `high`. Reproduce with [`benchmarks/run.py`](benchmarks/) (the scenarios are in [`benchmarks/multiturn_coding/`](benchmarks/multiturn_coding)):
 
 | metric | sliceagent | OpenAI Codex | % of Codex |
 |---|--:|--:|:--:|
 | **solved** | **3 / 3** | 3 / 3 | parity |
-| peak input · median | **20,357** | 172,476 | **12%** |
-| peak input · mean | **20,861** | 664,922 | **3%** |
-| input tokens · total | **977k** | 5.44M | 18% |
-| ↳ served from cache | 81% | 89% | — |
-| output tokens · total | **26.8k** | 77.9k | 34% |
-| **total tokens** | **1.0M** | 5.5M | **18%** |
-| wall · total | **534s** | 659s | **81%** |
-| **cost** (cache-aware $) | **$0.60** | $2.12 | **28%** |
+| peak input · median | **16,330** | 2,075,987 | **0.8%** |
+| peak input · mean | **16,734** | 2,056,732 | **0.8%** |
+| input tokens · total | **2.21M** | 26.4M | 8% |
+| ↳ served from cache | 84% | 91% | — |
+| output tokens · total | **63.4k** | 355.4k | 18% |
+| **total tokens** | **2.28M** | 26.7M | **9%** |
+| wall · total | **1,069s** | 1,761s | **61%** |
+| **cost** (cache-aware $) | **$1.30** | $9.43 | **14%** |
 
 Per task — note how the transcript agent's peak input scales with the session while the slice stays flat:
 
 | scenario | agent | solved | peak input | total tokens | wall |
 |---|---|:--:|--:|--:|--:|
-| **s1** long-horizon (6 turns) | sliceagent | ✓ | **14,769** | 499k | 257s |
+| **s1** long-horizon debug (6 turns) | sliceagent | ✓ | **14,769** | 499k | 257s |
 | | Codex | ✓ | 1,655,714 | 5.17M | 465s |
-| **s2** large-file bug | sliceagent | ✓ | **27,457** | 264k | 150s |
-| | Codex | ✓ | 172,476 | 175k | 65s |
-| **s3** multi-file refactor | sliceagent | ✓ | **20,357** | 240k | 128s |
-| | Codex | ✓ | 166,577 | 172k | 129s |
+| **s2** dependency-DAG scheduler (10 turns) | sliceagent | ✓ | **19,104** | 924k | 461s |
+| | Codex | ✓ | 2,075,987 | 10.0M | 656s |
+| **s3** interval-set algebra (10 turns) | sliceagent | ✓ | **16,330** | 854k | 351s |
+| | Codex | ✓ | 2,438,496 | 11.5M | 641s |
 
-Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On `s1`, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+Same capability — **109–149× smaller peak context, 11.7× fewer tokens, 7.3× cheaper, 1.6× faster.** On `s3`, Codex's transcript reached a **2.44M-token** single-request peak while sliceagent held **16k** — a 149× gap that **widens the longer the session runs.**
 
 <details>
 <summary><b>How the cost numbers are calculated</b> (exact token counts × published rates)</summary>
@@ -146,12 +146,12 @@ Applied to the summed token counts from the runs above:
 
 | line item | sliceagent | OpenAI Codex |
 |---|--:|--:|
-| fresh input | 182,567 × $1.25/M = $0.228 | 583,858 × $1.25/M = $0.730 |
-| cached input | 794,112 × $0.125/M = $0.099 | 4,854,144 × $0.125/M = $0.607 |
-| output | 26,768 × $10/M = $0.268 | 77,932 × $10/M = $0.779 |
-| **total** | **$0.595** | **$2.116** |
+| fresh input | 347,238 × $1.25/M = $0.434 | 2,293,552 × $1.25/M = $2.867 |
+| cached input | 1,866,752 × $0.125/M = $0.233 | 24,075,264 × $0.125/M = $3.009 |
+| output | 63,372 × $10/M = $0.634 | 355,365 × $10/M = $3.554 |
+| **total** | **$1.301** | **$9.430** |
 
-One honest wrinkle worth naming: Codex's append-only transcript actually earns a *higher* cache-hit rate (57% vs 50% on ColBench, 89% vs 81% here) — a long stable prefix caches well. It still costs more, because its raw input volume is several times larger; a cheaper per-token rate can't outrun many more tokens. That's the whole point of the slice: fewer tokens to bill in the first place.
+One honest wrinkle worth naming: Codex's append-only transcript actually earns a *higher* cache-hit rate (57% vs 50% on ColBench, 91% vs 84% here) — a long stable prefix caches well. It still costs more, because its raw input volume is an order of magnitude larger; a cheaper per-token rate can't outrun many more tokens. That's the whole point of the slice: fewer tokens to bill in the first place.
 
 *Line items are rounded to the nearest $0.001; each total is the exact sum of unrounded per-token costs, and matches the cost row in the tables above.*
 

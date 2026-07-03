@@ -12,9 +12,6 @@ Usage (needs `pip install "sliceagent[tui]"` and an LLM configured — LLM_API_K
     python benchmarks/run.py                         # all three scenarios
     python benchmarks/run.py --scenario s1_longhorizon_debug
     AGENT_REASONING=high python benchmarks/run.py    # match the published run
-
-Note: s2_largefile_bug plants its bug in a copy of CPython 3.13's argparse, so its setup() must run under
-Python 3.13 (the agent + verifier are version-independent). Run that one on a 3.13 interpreter.
 """
 from __future__ import annotations
 
@@ -125,8 +122,7 @@ def main():
         try:
             r = run(load_scenario(name))
         except Exception as e:  # noqa: BLE001
-            print(f"{name}: setup/run error — {type(e).__name__}: {e}"
-                  f"{'  (s2 needs Python 3.13 for setup)' if 's2' in name else ''}")
+            print(f"{name}: setup/run error — {type(e).__name__}: {e}")
             continue
         print(f"\n{r['scenario']}: {'PASS' if r['passed'] else 'FAIL'}  "
               f"steps={r['steps']} peak_in={r['peak_in']:,} "
