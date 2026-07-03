@@ -34,6 +34,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .platform_compat import norm_rel
+
 # Project-root signals that mark a directory as a code workspace even when it
 # isn't (yet) a git repo. Cheap filename checks — no parsing.
 _PROJECT_MARKERS = (
