@@ -9,7 +9,12 @@ sentinel; termios/threads must be fully cleaned up on stop().
 Run: PYTHONPATH=src python tests/test_esc_sentinel.py   (skips cleanly where no pty is available)
 """
 import os
-import pty
+try:
+    import pty
+except ImportError:  # Windows: no pty — the Esc sentinel is POSIX-only by design (inert on Windows)
+    print("SKIP: no pty module on this platform")
+    import sys as _sys
+    _sys.exit(0)
 import subprocess
 import sys
 import time

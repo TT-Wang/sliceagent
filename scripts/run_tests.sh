@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.." || exit 2
 PY="${PYTHON:-.venv/bin/python}"
 command -v "$PY" >/dev/null 2>&1 || PY="python3"   # CI installs the package, so a plain python3 works too
 export PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUTF8=1   # Windows console defaults to cp1252; test output contains UTF-8 (no-op on POSIX)
 
 pass=0; fail=0; failed=""
 log="$(mktemp)"

@@ -68,6 +68,8 @@ def terminal_open_failure_is_clean():  # #19
 
 @check
 def wait_pattern_is_bounded():  # #20
+    if sys.platform == "win32":
+        return  # PTY sessions are deliberately unavailable on Windows (Phase 2: pywinpty bridge)
     sm = SessionManager()
     wd = tempfile.mkdtemp(prefix="term-")
     sm.open("s", cwd=wd)

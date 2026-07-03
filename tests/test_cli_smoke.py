@@ -71,7 +71,10 @@ def interactive_first_run_auto_starts_the_wizard():
     init wizard — proven on a REAL pty by the wizard header + provider menu appearing unprompted.
     (The abort path is covered in-process below; macOS getpass on a detached pty is not reliably
     drivable, and the wizard's own logic has an injectable seam for exactly that reason.)"""
-    import pty
+    try:
+        import pty
+    except ImportError:
+        return   # Windows: no pty module — this check is POSIX-only by nature
     import select
     import signal
     import time
