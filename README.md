@@ -20,7 +20,7 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
 
 <p align="center">
   <img src="assets/sliceagent-core-loop.gif" width="840"
-       alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a fixed-size seed from the carried slice, live files, and lessons, then seals each turn to disk — peak input stays ~12-15k, 112x smaller by turn 6. Real per-turn numbers from the s1 benchmark.">
+       alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a fixed-size seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stays ~12-15k, 112x smaller by turn 6. Real per-turn numbers from the s1 benchmark.">
 </p>
 
 sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; a small **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a bounded working set from these — it never replays a growing transcript.
