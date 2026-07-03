@@ -63,7 +63,7 @@ Two questions decide whether reconstructing context every turn actually works: d
 
 ### 1. In-turn capability — Terminal-Bench 2.0 (public)
 
-A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. On the 32 tasks both agents completed cleanly (sliceagent at default reasoning, Codex at `xhigh`):
+A TB2.0 task is a single turn, so it's a clean test of raw within-turn ability. On the 32 tasks both agents completed cleanly:
 
 | metric | sliceagent | OpenAI Codex |
 |---|--:|--:|
