@@ -57,6 +57,8 @@ Each turn faults in exactly what the turn references — the carried slice, live
 
 ## Benchmark
 
+On public benchmarks, sliceagent matches Codex's solve rate while using 2.5× fewer tokens and 1.3× less cost on ColBench, and up to 112× smaller peak input on long sessions.
+
 Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All three benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) at matched reasoning.
 
 ### 1. In-turn capability — Terminal-Bench 2.0 (public)
@@ -118,6 +120,42 @@ Per task — note how the transcript agent's peak input scales with the session 
 | | Codex | ✓ | 166,577 | 172k | 129s |
 
 Same capability — **8–32× smaller per-turn context, 5.5× fewer tokens, 3.6× cheaper, 1.2× faster.** On `s1`, Codex's transcript reached a **1.65M-token** single-request peak while sliceagent held **15k** — a 112× gap that **widens the longer the session runs.**
+
+<details>
+<summary><b>How the cost numbers are calculated</b> (exact token counts × published rates)</summary>
+
+Cache-aware, at `gpt-5.5` list rates — **$1.25 / 1M** fresh input, **$0.125 / 1M** cached input (a 10× discount on the prompt prefix the provider serves from its cache), **$10 / 1M** output:
+
+```
+cost = fresh_in × $1.25/M  +  cached_in × $0.125/M  +  output × $10/M
+       where  fresh_in = total input − cached input
+```
+
+Applied to the summed token counts from the runs above:
+
+**ColBench** (N = 20, all tasks summed)
+
+| line item | sliceagent | OpenAI Codex |
+|---|--:|--:|
+| fresh input | 140,403 × $1.25/M = $0.176 | 330,719 × $1.25/M = $0.413 |
+| cached input | 143,125 × $0.125/M = $0.018 | 429,719 × $0.125/M = $0.054 |
+| output | 24,265 × $10/M = $0.243 | 8,786 × $10/M = $0.088 |
+| **total** | **$0.436** | **$0.555** |
+
+**Self-designed long-horizon** (N = 3, summed)
+
+| line item | sliceagent | OpenAI Codex |
+|---|--:|--:|
+| fresh input | 182,567 × $1.25/M = $0.228 | 583,858 × $1.25/M = $0.730 |
+| cached input | 794,112 × $0.125/M = $0.099 | 4,854,144 × $0.125/M = $0.607 |
+| output | 26,768 × $10/M = $0.268 | 77,932 × $10/M = $0.779 |
+| **total** | **$0.595** | **$2.116** |
+
+One honest wrinkle worth naming: Codex's append-only transcript actually earns a *higher* cache-hit rate (57% vs 50% on ColBench, 89% vs 81% here) — a long stable prefix caches well. It still costs more, because its raw input volume is several times larger; a cheaper per-token rate can't outrun many more tokens. That's the whole point of the slice: fewer tokens to bill in the first place.
+
+*Line items are rounded to the nearest $0.001; each total is the exact sum of unrounded per-token costs, and matches the cost row in the tables above.*
+
+</details>
 
 > The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
 >
