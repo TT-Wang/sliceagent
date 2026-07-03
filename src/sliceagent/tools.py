@@ -18,6 +18,7 @@ import tempfile
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
+from .platform_compat import IS_WINDOWS, is_win_abs, msys_to_win, win_path_candidates
 from .procman import ProcManager
 from .registry import ToolEntry, ToolRegistry, ToolText
 from .sandbox import LocalSandbox
@@ -476,6 +477,10 @@ class LocalToolHost:
         # never widen reach to the whole filesystem or the bare home dir
         if full == os.sep or full == os.path.realpath(os.path.expanduser("~")):
             return None
+        # win32: '/' realpaths to the CURRENT DRIVE's root ('C:\'), which the os.sep check
+        # above can't see — refuse any drive root / UNC share root too (splitdrive tail).
+        if IS_WINDOWS and os.path.splitdrive(full)[1] in ("", os.sep, "/"):
+            return None
         if full == self.root() or full in self._extra_roots:
             return full
         self._extra_roots.append(full)
@@ -540,10 +545,15 @@ class LocalToolHost:
         home = os.path.realpath(os.path.expanduser("~"))
         root = self.root()
         # quoted paths (may contain spaces) OR bare ~/-rooted tokens up to a shell metachar/space
-        for q, uq in re.findall(
-                r"""['"]([^'"]*/[^'"]*)['"]|(?<![\w'"])((?:~|/)[^\s'"|&;<>()]+)""", text):
-            cand = (q or uq).strip()
-            if not (cand.startswith("/") or cand.startswith("~")):
+        cands = [(q or uq).strip() for q, uq in re.findall(
+                r"""['"]([^'"]*/[^'"]*)['"]|(?<![\w'"])((?:~|/)[^\s'"|&;<>()]+)""", text)]
+        if IS_WINDOWS:
+            # win32 (Git Bash): commands carry 'C:\x' / "C:/x" / bare C:\x tokens the POSIX
+            # extractor can't see, plus MSYS '/c/x' mounts. Seam logic in platform_compat.
+            cands = [msys_to_win(c) for c in cands] + win_path_candidates(text)
+        for cand in cands:
+            if not (cand.startswith("/") or cand.startswith("~")
+                    or (IS_WINDOWS and is_win_abs(cand))):
                 continue
             full = os.path.realpath(os.path.expanduser(cand))
             d = full if os.path.isdir(full) else os.path.dirname(full)
@@ -682,7 +692,7 @@ class LocalToolHost:
         try:
             import hashlib
             digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-            rel = os.path.join(".sliceagent", "blobs", f"{label.replace(' ', '-')}-{digest}.txt")
+            rel = f".sliceagent/blobs/{label.replace(' ', '-')}-{digest}.txt"   # forward slashes on BOTH platforms: the model-visible ref must match the bash-flavored tool contract (and Windows file APIs accept '/')
             full = self._resolve(rel)
             self._mkparent(full)
             if not os.path.exists(full):

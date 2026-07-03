@@ -21,6 +21,17 @@ IS_WINDOWS = sys.platform == "win32"
 SIG_KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+def norm_rel(path: str) -> str:
+    """win32 only: normalize separators to '/' in model-facing relative paths (repo-map
+    keys/heads, hint labels). ripgrep and os.path emit backslashes on Windows, but the
+    agent's shell commands run under Git Bash, which speaks '/'.
+    POSIX: IDENTITY — backslash is a legal filename character there, never rewrite it.
+    """
+    if not IS_WINDOWS:
+        return path
+    return path.replace("\\", "/")
+
+
 def find_bash() -> str | None:
     """win32 only: the bash.exe that runs the agent's sh-syntax commands (Git Bash).
 
@@ -95,3 +106,39 @@ def kill_tree(popen: subprocess.Popen, sig: int) -> None:
             popen.kill() if force else popen.terminate()
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# win32 shell-path extraction (used by tools._grant_shell_paths, gated on IS_WINDOWS
+# at the call site — POSIX never calls these).
+# ---------------------------------------------------------------------------
+import re as _re  # noqa: E402  (kept local to this win32-only section)
+
+# Absolute drive-letter path: C:\x or C:/x (either separator).
+_WIN_ABS_RE = _re.compile(r"^[A-Za-z]:[\\/]")
+# Drive-letter path tokens the POSIX extractor can't see: quoted (may contain spaces)
+# OR bare, up to a shell metachar/space — the exact mirror of the POSIX token regex.
+_WIN_TOKEN_RE = _re.compile(
+    r"""['"]([A-Za-z]:[\\/][^'"]*)['"]|(?<![\w'"])([A-Za-z]:[\\/][^\s'"|&;<>()]+)""")
+# Git-Bash (MSYS) drive mount: /c/Users/x  ->  C:/Users/x
+_MSYS_DRIVE_RE = _re.compile(r"^/([A-Za-z])(?:/|$)")
+
+
+def win_path_candidates(text: str) -> list[str]:
+    """win32 only: drive-letter path tokens ('C:\\x', "C:/x", bare C:\\x) in one
+    sh-syntax command string. Returns [] when none are present."""
+    return [(q or uq).strip() for q, uq in _WIN_TOKEN_RE.findall(text)]
+
+
+def msys_to_win(path: str) -> str:
+    """win32 only: translate a Git-Bash mount path '/c/Users/x' -> 'C:/Users/x'.
+    Any other string (including a plain POSIX-looking '/etc/hosts') is returned unchanged."""
+    m = _MSYS_DRIVE_RE.match(path)
+    if m and len(path) > 2:
+        return m.group(1).upper() + ":" + path[2:]
+    return path
+
+
+def is_win_abs(path: str) -> bool:
+    """True iff *path* is an absolute drive-letter path (C:\\... or C:/...)."""
+    return bool(_WIN_ABS_RE.match(path))

@@ -1154,7 +1154,8 @@ def floor_catches_etc_cred_globs():
 @check
 def oracle_timeout_with_output_no_crash():
     from sliceagent.oracle import CommandOracle
-    cmd = "python3 -u -c \"import sys,time; print('partial'); sys.stdout.flush(); time.sleep(5)\""
+    py = "python" if sys.platform == "win32" else "python3"   # windows-latest Git Bash has python.exe but no python3 shim
+    cmd = f"{py} -u -c \"import sys,time; print('partial'); sys.stdout.flush(); time.sleep(5)\""
     ok, out = CommandOracle(cmd, timeout=0.5).verify()
     assert ok is False and "timed out" in out   # must RETURN a failure, never raise
 
