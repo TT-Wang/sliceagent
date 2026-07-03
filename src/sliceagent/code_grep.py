@@ -16,6 +16,7 @@ live from the workspace via ripgrep; no growing message history is assumed.
 """
 from __future__ import annotations
 
+from .platform_compat import IS_WINDOWS, norm_rel
 import shutil
 import subprocess
 import threading
@@ -130,7 +131,7 @@ def make_grep_tool(host) -> ToolEntry:
             # Quiet, non-failing: degrade gracefully when ripgrep is absent.
             return "grep: ripgrep (rg) is not available in this environment; no results."
 
-        cmd = [rg]
+        cmd = [rg] + (["--path-separator", "/"] if IS_WINDOWS else [])  # model-facing paths: '/' on all platforms
         if mode == "files_with_matches":
             cmd += ["-l", "--sortr", "modified"]      # just the files, newest-changed first (cheap relevance)
         elif mode == "count":
@@ -237,7 +238,7 @@ def _glob_walk(root: str, pattern: str, cap: int) -> list:
             full = _os.path.join(dp, fn)
             rel = _os.path.relpath(full, root)
             if any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(fn, p) for p in pats):
-                hits.append(full)
+                hits.append(norm_rel(full))
         if len(hits) >= cap * 4:                       # gather generously, then mtime-sort + cap
             break
     hits.sort(key=lambda f: -(_os.path.getmtime(f) if _os.path.exists(f) else 0.0))
@@ -272,7 +273,7 @@ def _dir_matches(root: str, pats: list, cap: int, maxdepth: int = 12) -> list:
                 continue
             rel = _os.path.relpath(e.path, root)
             if any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(e.name, p) for p in pats):
-                hits.append(e.path + "/")
+                hits.append(norm_rel(e.path) + "/")
                 if len(hits) >= cap:
                     return hits
             if depth + 1 < maxdepth:
@@ -297,7 +298,7 @@ def make_glob_tool(host) -> ToolEntry:
         rg = shutil.which("rg")
         files: list = []
         if rg:
-            cmd = [rg, "--files", "--sortr", "modified", "-g", pattern, target]
+            cmd = [rg] + (["--path-separator", "/"] if IS_WINDOWS else []) + ["--files", "--sortr", "modified", "-g", pattern, target]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, cwd=host.root(), timeout=30)
                 if proc.returncode in (0, 1):          # 0 = files, 1 = none (not an error)

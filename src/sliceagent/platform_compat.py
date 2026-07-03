@@ -16,9 +16,12 @@ import subprocess
 import sys
 
 IS_WINDOWS = sys.platform == "win32"
+_warned_no_bash = False
 
-# SIGKILL doesn't exist on Windows; POSIX value is unchanged.
-SIG_KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+# SIGKILL doesn't exist on Windows. POSIX keeps the real signal; win32 uses a SENTINEL that can
+# never equal SIGTERM — otherwise kill_tree's `sig == SIG_KILL` force-check would be True for the
+# GRACEFUL phase too and procman's TERM->wait->KILL ladder would collapse to an immediate /F kill.
+SIG_KILL = getattr(signal, "SIGKILL", None) or -9
 
 
 def norm_rel(path: str) -> str:
@@ -46,8 +49,8 @@ def find_bash() -> str | None:
     local = os.environ.get("LOCALAPPDATA", "")
     candidates = [
         os.path.join(local, "sliceagent", "git", "bin", "bash.exe") if local else "",
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
     ]
     for c in candidates:
         if c and os.path.isfile(c):
@@ -71,6 +74,12 @@ def sh(command: str) -> dict:
     bash = find_bash()
     if bash:
         return {"args": [bash, "-c", command], "shell": False}
+    global _warned_no_bash
+    if not _warned_no_bash:  # once per process: silent cmd.exe downgrade breaks bash-syntax commands confusingly
+        _warned_no_bash = True
+        import sys as _s
+        print("sliceagent: no Git Bash found — shell commands run under cmd.exe and bash syntax will fail. "
+              "Install Git for Windows or set SLICEAGENT_BASH.", file=_s.stderr)
     return {"args": command, "shell": True}
 
 

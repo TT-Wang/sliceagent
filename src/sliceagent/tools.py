@@ -18,7 +18,7 @@ import tempfile
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
-from .platform_compat import IS_WINDOWS, is_win_abs, msys_to_win, win_path_candidates
+from .platform_compat import IS_WINDOWS, is_win_abs, msys_to_win, norm_rel, win_path_candidates
 from .procman import ProcManager
 from .registry import ToolEntry, ToolRegistry, ToolText
 from .sandbox import LocalSandbox
@@ -798,7 +798,7 @@ class LocalToolHost:
             for f in sorted(filenames):
                 if _is_ignored(f):
                     continue
-                rels.append(f if rel == "." else os.path.join(rel, f))
+                rels.append(f if rel == "." else norm_rel(os.path.join(rel, f)))
                 if len(rels) >= _LIST_CAP:
                     capped = True
                     break

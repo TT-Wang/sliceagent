@@ -484,7 +484,7 @@ def repo_map(root: str, *, max_entries: int = 300, max_per_dir: int = 25, max_ch
                            if not _is_ignored(f) and not f.endswith(_MAP_SKIP_SUFFIX))
             if not files:
                 continue
-            rel = os.path.relpath(dirpath, root)
+            rel = norm_rel(os.path.relpath(dirpath, root))
             code_count = sum(1 for f in files if f.endswith(_CODE_SUFFIX))
             rows.append((rel, files, len(files), code_count))
     except OSError:
