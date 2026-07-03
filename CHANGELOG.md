@@ -5,6 +5,33 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-07-03
+
+**Native Windows support — one command, no WSL:**
+`irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex`
+(installs pinned uv + sliceagent with its own Python 3.12, and SHA256-verified Git Bash + ripgrep when missing; user-scoped, no admin).
+
+### Added
+- `platform_compat` seam: shell commands run under **Git Bash** on Windows (the model's bash-syntax
+  tool calls work unchanged), win32 process groups + `taskkill` tree-kill, drive-letter/MSYS path
+  extraction for shell-path grants.
+- Forward-slash path contract in all model-facing output on Windows (`rg --path-separator /`,
+  normalized rel paths in the code index / repo map / listings / `@file` completion) and a
+  win32-only system-prompt note about Git Bash path quoting.
+- CI `windows-latest` cell (full suite green on Windows) + a Windows-footgun lint
+  (`scripts/check_windows_footguns.py`) that keeps the Unix-ism bug class out permanently.
+
+### Changed
+- memem floor → **2.9.7** (Windows-importable memory backend; also carries 2.9.6's
+  legacy-frontmatter auto-repair).
+
+### Known Windows limitations
+- Interactive PTY sessions (`terminal_open`) are not yet available natively (clean refusal; use
+  `run_command` / `proc_start`). Planned: pywinpty bridge.
+
+**Linux/macOS: zero behavior change.** Every Windows branch is platform-gated; POSIX call paths are
+byte-identical, pinned by identity tests, and verified by an adversarial POSIX-regression review.
+
 ## [0.1.11] — 2026-07-03
 
 OSS-polish pass (triaged from two external reviews; the confirmed quick wins).

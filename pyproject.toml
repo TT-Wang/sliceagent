@@ -24,7 +24,7 @@ dependencies = [
     # numpy is required because memem.retrieve imports it but doesn't pin it in its base deps.
     # (No torch: we use memem's BM25/FTS path, not the heavy `embedding` extra.)
     "numpy>=1.24",
-    "memem>=2.9.5",
+    "memem>=2.9.7",  # 2.9.6 = legacy-frontmatter repair; 2.9.7 = Windows-importable (fcntl shim)
     "mcp>=1.0",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
 ]
 
