@@ -26,7 +26,6 @@ dependencies = [
     "numpy>=1.24",
     "memem>=2.9.5",
     "mcp>=1.0",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
-    "tomli>=1.2; python_version<'3.11'",  # tomllib backport for plugin manifests on Python 3.10
 ]
 
 [project.optional-dependencies]

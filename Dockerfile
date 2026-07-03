@@ -4,7 +4,7 @@
 # The agent edits files in the mounted workspace (/work); pass your key via -e (never bake it in).
 FROM python:3.12-slim
 
-# git: memem is a git dependency · ripgrep: powers the code-index / search tier
+# git: used to read workspace git state · ripgrep: powers the code-index / search tier
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
     && rm -rf /var/lib/apt/lists/*

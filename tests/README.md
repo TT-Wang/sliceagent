@@ -21,5 +21,6 @@ PYTHONPATH=src .venv/bin/python tests/test_reliability.py
 - **Deterministic.** No `Date.now`-style nondeterminism; no network; no real clock dependence beyond short sleeps in the scheduler-timeout test.
 - A behavior change ships a test here in the same change.
 
-Live, key-requiring checks (h2h, routing accuracy, review quality) live in `evals/` and are run manually —
-they are not part of the offline suite.
+Live, key-requiring checks (h2h, routing accuracy, review quality) live in `evals/` — a local dev tree,
+gitignored and not present in a public clone (the reproducible benchmark harness is under `benchmarks/`) —
+and are run manually; they are not part of the offline suite.

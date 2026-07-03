@@ -12,4 +12,4 @@ labels: enhancement
 
 **Moat note (if relevant)**
 <!-- sliceagent's moat is the bounded, reconstructed per-turn slice (no transcript accumulation). If your
-     idea touches context/memory, note how it stays moat-safe — see CONTRIBUTING.md / ARCHITECTURE.md. -->
+     idea touches context/memory, note how it stays moat-safe — see CONTRIBUTING.md. -->
