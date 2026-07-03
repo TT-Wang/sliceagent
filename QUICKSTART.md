@@ -10,6 +10,12 @@ One command — Linux, macOS, WSL2 (installs `uv`, its own Python, ripgrep, and 
 curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
+On **Windows**, run it inside WSL2 — or let PowerShell route it there for you:
+
+```powershell
+irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex
+```
+
 Or install from PyPI yourself (you manage the Python — needs ≥ 3.11):
 
 ```bash
