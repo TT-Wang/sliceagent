@@ -18,7 +18,9 @@ for t in tests/test_*.py; do
   else
     fail=$((fail + 1)); failed="$failed ${t##*/}"
     echo "── FAIL: $t ─────────────────────────────"
-    tail -25 "$log"
+    # the FAIL/Traceback lines first (a chatty file scrolls them out of a blind tail), then the tail
+    grep -E "^FAIL |Traceback|^[A-Za-z]*Error" "$log" | head -15
+    tail -12 "$log"
   fi
 done
 rm -f "$log"
