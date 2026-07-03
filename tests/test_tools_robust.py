@@ -24,7 +24,7 @@ def _host():
 def _write(root, rel, content, *, mode="w"):
     p = os.path.join(root, rel)
     os.makedirs(os.path.dirname(p) or root, exist_ok=True)
-    with open(p, mode, encoding="utf-8") as f:
+    with open(p, mode, encoding="utf-8", newline="") as f:  # no \n->\r\n translation on Windows: tests assert byte-exact round-trips
         f.write(content)
     return p
 

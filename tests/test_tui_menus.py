@@ -4,6 +4,11 @@ with test_tui_widgets (the arrow permission-confirm) this covers every keyboard-
 
 No model, no pty. Run: PYTHONPATH=src python tests/test_tui_menus.py
 """
+import sys as _sys
+if _sys.platform == "win32":
+    print("SKIP: prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none "
+          "(NoConsoleScreenBufferError) — works in a real terminal")
+    _sys.exit(0)
 import os
 import sys
 

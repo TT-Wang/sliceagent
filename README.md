@@ -174,13 +174,13 @@ One command — Linux, macOS, WSL2:
 curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
-**Windows** — sliceagent needs a Unix environment (PTY), so it runs inside **WSL2**. In PowerShell:
+**Windows** — one command in PowerShell, fully native (no WSL, no admin):
 
 ```powershell
 irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex
 ```
 
-(That script installs sliceagent inside your default WSL distro — and if you don't have WSL yet, it prints the one command to set it up.)
+(Installs `uv` + sliceagent, and Git Bash + ripgrep if you don't have them — the agent's shell commands run under Git Bash, same as other coding agents. Interactive PTY sessions (`terminal_open`) aren't available natively yet; everything else works. Prefer WSL2? The Linux one-liner above works there as-is.)
 
 **The installer handles everything**: `uv`, its own Python 3.12, ripgrep, and sliceagent — in an isolated tool env, no sudo, no prerequisites, no conflict with any Python you already have (conda base at 3.10? Rosetta-Intel conda on an M-series Mac? Doesn't matter). Then just:
 

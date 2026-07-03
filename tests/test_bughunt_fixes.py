@@ -767,6 +767,8 @@ def saved_dollars_accrue_and_reprice():
 # ── FEATURE: typing "/" pops a command menu — completer yields commands AND the composer has a menu float ─
 @check
 def slash_command_menu_renders():
+    if __import__("sys").platform == "win32":
+        return  # prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none
     import sliceagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
@@ -787,6 +789,8 @@ def slash_command_menu_renders():
 # ── FEATURE: two-tier selector menus (model→reasoning, mode) ───────────────────────────────────────────
 @check
 def selector_menu_navigates_and_returns():
+    if __import__("sys").platform == "win32":
+        return  # prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none
     import sliceagent.tui as t
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -1154,7 +1158,8 @@ def floor_catches_etc_cred_globs():
 @check
 def oracle_timeout_with_output_no_crash():
     from sliceagent.oracle import CommandOracle
-    cmd = "python3 -u -c \"import sys,time; print('partial'); sys.stdout.flush(); time.sleep(5)\""
+    py = "python" if sys.platform == "win32" else "python3"   # windows-latest Git Bash has python.exe but no python3 shim
+    cmd = f"{py} -u -c \"import sys,time; print('partial'); sys.stdout.flush(); time.sleep(5)\""
     ok, out = CommandOracle(cmd, timeout=0.5).verify()
     assert ok is False and "timed out" in out   # must RETURN a failure, never raise
 

@@ -237,3 +237,15 @@ DELEGATION_BLOCK = (
     "out work you must keep consistent yourself.\n"
     "</delegation>"
 )
+
+# win32 ONLY: the shell is Git Bash and the model must not paste raw backslash paths into commands
+# (bash eats unquoted backslashes). Appended conditionally so the POSIX prompt stays byte-identical
+# (prompt-cache stability + the zero-POSIX-delta contract).
+from .platform_compat import IS_WINDOWS as _IS_WIN  # noqa: E402
+
+if _IS_WIN:
+    SYSTEM_PROMPT += (
+        "\n<windows>Shell commands run under Git Bash (bash syntax works). Always write paths with "
+        "FORWARD slashes (C:/Users/x) or quote them — bash eats unquoted backslashes. Tool output "
+        "already uses forward slashes; use paths exactly as shown.</windows>"
+    )

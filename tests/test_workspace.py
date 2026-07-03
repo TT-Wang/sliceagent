@@ -69,7 +69,10 @@ def empty_cwd_in_non_repo_returns_blank():
     try:
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
-            assert build_workspace_snapshot("") == ""
+            try:
+                assert build_workspace_snapshot("") == ""
+            finally:
+                os.chdir(prev)   # step OUT before TemporaryDirectory cleanup — Windows can't delete the process CWD
     finally:
         os.chdir(prev)
 

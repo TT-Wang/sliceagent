@@ -184,7 +184,8 @@ def _atomic_write(path: str, body: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".sliceagent-cfg-", suffix=".tmp")
     ok = False
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):   # not on Windows — NTFS perms aren't octal; user-profile dir is private
+            os.fchmod(fd, 0o600)
         os.write(fd, body.encode("utf-8"))
         os.fsync(fd)
         os.close(fd)
