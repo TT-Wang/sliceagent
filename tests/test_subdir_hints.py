@@ -36,7 +36,7 @@ def surfaces_on_new_subtree():
     h = SubdirHints(root)
     out = h.hints_for(["backend/src/main.py"])
     assert "FastAPI" in out                       # ancestor backend/AGENTS.md surfaced
-    assert os.path.join("backend", "AGENTS.md") in out   # labelled with the relative path (native sep)
+    assert "backend/AGENTS.md" in out             # labelled with the relative path (forward-slash contract on all platforms)
 
 
 @check

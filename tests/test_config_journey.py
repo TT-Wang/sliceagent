@@ -93,6 +93,8 @@ def switch_rebinds_endpoint_and_key():
 
 @check
 def selector_returns_the_provider_triple():
+    if __import__("sys").platform == "win32":
+        return  # prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
     with create_pipe_input() as pinp:

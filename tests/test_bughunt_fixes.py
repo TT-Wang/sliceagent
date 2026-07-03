@@ -767,6 +767,8 @@ def saved_dollars_accrue_and_reprice():
 # ── FEATURE: typing "/" pops a command menu — completer yields commands AND the composer has a menu float ─
 @check
 def slash_command_menu_renders():
+    if __import__("sys").platform == "win32":
+        return  # prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none
     import sliceagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
@@ -787,6 +789,8 @@ def slash_command_menu_renders():
 # ── FEATURE: two-tier selector menus (model→reasoning, mode) ───────────────────────────────────────────
 @check
 def selector_menu_navigates_and_returns():
+    if __import__("sys").platform == "win32":
+        return  # prompt_toolkit needs a real Windows console; CI's Git-Bash runner has none
     import sliceagent.tui as t
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
