@@ -45,7 +45,24 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 # ── 2. sliceagent ────────────────────────────────────────────────────────────
 Step "Installing sliceagent (isolated env, its own Python 3.12)..."
 uv tool install --force --python 3.12 "sliceagent[tui]"
-if ($LASTEXITCODE -ne 0) { Write-Host "uv tool install failed (see above)."; exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    # Most common Windows failure: antivirus (Defender / 360 / 电脑管家) blocks uv's freshly
+    # written .exe script shims — 'Failed to update Windows PE resources ... Access denied /
+    # 拒绝访问'. Usually a transient scan race: clear the cache and retry once.
+    Step "Install failed — clearing uv cache and retrying once (antivirus often blocks the first attempt)..."
+    try { uv cache clean | Out-Null } catch { }
+    Start-Sleep -Seconds 3
+    uv tool install --force --python 3.12 "sliceagent[tui]"
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "uv tool install failed twice. If the error above mentions 'Windows PE resources' /"
+    Write-Host "'Access denied' / '拒绝访问', your antivirus is blocking uv's script shims. Fix:"
+    Write-Host "  1. Temporarily pause the antivirus real-time protection (Defender / 360 / 电脑管家),"
+    Write-Host "     or add exclusions for:  %LOCALAPPDATA%\uv  and  %USERPROFILE%\.local"
+    Write-Host "  2. Re-run this installer. (Re-enable the antivirus afterwards.)"
+    exit 1
+}
 try { uv tool update-shell | Out-Null } catch { }   # best-effort PATH help; WinPS 5.1-safe (no 2>$null under EAP=Stop)
 
 # ── 3. Git Bash (runs the agent's shell commands — same strategy as Claude Code) ─

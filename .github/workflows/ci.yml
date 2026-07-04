@@ -50,3 +50,14 @@ jobs:
 
       - name: Tests
         run: bash scripts/run_tests.sh
+
+      # Users install via `uv tool install` (install.sh / install.ps1) — a DIFFERENT code path from
+      # the pip install above (uv writes .exe trampoline shims on Windows; antivirus/permission
+      # surface). Validate it from the built wheel on the Windows cell.
+      - name: Windows — validate the uv tool-install path
+        if: runner.os == 'Windows'
+        run: |
+          pip install uv build
+          python -m build --wheel
+          uv tool install --python 3.12 --from "$(ls dist/*.whl)" sliceagent
+          "$USERPROFILE/.local/bin/sliceagent.exe" version
