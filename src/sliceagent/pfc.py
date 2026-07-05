@@ -128,6 +128,14 @@ class Slice:
     # recall_history (the decompression path). `turns` counts user turns this topic (for the "+N older"
     # pointer). Bounded => growth stays decoupled from conversation length (the moat).
     conversation: list[dict] = field(default_factory=list)  # [{user, assistant}], last MAX_CONVERSATION
+    # AUTHORITATIVE INTENT (full-range): every user message this topic, VERBATIM + uncapped. Unlike the
+    # short-range `conversation` ring (bounded to MAX_CONVERSATION, per-message gisted), a user's stated
+    # instruction/constraint is IRREDUCIBLE ground truth — it cannot be re-derived from disk or from an
+    # archived turn's gist. So it is the ONE part of the conversation that is never compacted: kept in
+    # full, forever. (T1 buried-detail fix: a constraint stated once early must survive to a later turn.
+    # Verbatim = no lossy extraction step — the exact step that dropped `40000` and substituted `65536`.
+    # These bytes never change turn-to-turn, so as a STABLE region they EXTEND the cacheable prefix.)
+    user_log: list[dict] = field(default_factory=list)  # [{turn, text}] verbatim, uncapped
     turns: int = 0
     # GHOST INDEX: bounded recovery POINTERS (references, not content) to things recently paged OUT of
     # the slice — an evicted read, a dropped skill. Turns "omission is unrecoverable" into a one-call
@@ -186,6 +194,7 @@ class Slice:
         self.reviewed = []
         self.open_report = ""
         self.conversation = []
+        self.user_log = []
         self.turns = 0
         self.ghosts = []
         self.protected_deps = set()
@@ -258,6 +267,9 @@ def record_user(s: Slice, message: str) -> None:
     Bounded ring — older exchanges live in the durable cache, paged in on demand (not kept here)."""
     s.turns += 1
     s.turn_actions = 0   # new user turn → reset the per-turn exploration budget (drives the explore-nudge)
+    # VERBATIM, uncapped — the authoritative user-intent record (see user_log field note). Full message,
+    # NOT one_line'd: the whole point is that a precise constraint stated here is never truncated/dropped.
+    s.user_log.append({"turn": s.turns, "text": message})
     s.conversation.append({"user": one_line(message, CONVO_MSG_CHARS), "assistant": ""})
     s.conversation = s.conversation[-MAX_CONVERSATION:]
 

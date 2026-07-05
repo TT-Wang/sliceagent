@@ -131,6 +131,21 @@ def render_threads(refs) -> str:
     return "\n".join(lines)
 
 
+def render_user_log(s) -> str:
+    """USER INSTRUCTIONS tier: EVERY user message this topic, verbatim, in order — the authoritative
+    record of what was asked. The user's stated intent/constraints are IRREDUCIBLE ground truth (they
+    cannot be re-derived from disk or from an archived turn's gist), so unlike the RECENT CONVERSATION
+    ring this is uncapped and never truncated. Excludes the in-progress turn (it renders separately as
+    CURRENT REQUEST at the salient tail). Empty until there is at least one PRIOR user message."""
+    log = getattr(s, "user_log", None)
+    if not log:
+        return ""
+    prior = log[:-1]   # the last entry is the current turn's message == the CURRENT REQUEST
+    if not prior:
+        return ""
+    return "\n".join(f"- [turn {e['turn']}] {e['text']}" for e in prior)
+
+
 def render_conversation(s) -> str:
     """The RECENT CONVERSATION tier: the last few COMPLETED user<->assistant exchanges (the in-progress
     one is excluded — its user message is the current task). Ends with a pointer to recall the rest."""
@@ -620,6 +635,12 @@ REGION_ORDER = (
     # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
     ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
+    # USER INSTRUCTIONS — every prior user message this session, VERBATIM + uncapped. The user's stated
+    # intent/constraints are irreducible ground truth (unre-derivable from disk or an archived gist), so
+    # they are the one part of the conversation never compacted. STABLE/slot-0: these bytes never change
+    # turn-to-turn, so they EXTEND the cacheable prefix. (T1 buried-detail fix — a constraint stated once
+    # early survives to a much later turn; 'later supersedes earlier' handles corrections.)
+    ("user_log",       STABLE,   lambda c: (f"# USER INSTRUCTIONS (every request you've been given this session, verbatim — the authoritative record of what was asked; honor every still-applicable one, and a LATER statement supersedes an earlier one it contradicts)\n{render_user_log(c['s'])}\n\n" if render_user_log(c['s']) else ""), 0),
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this. Lines are numbered for citation/reference; the leading number is NOT part of the file — never include it in a str_replace old_string)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP moved to the BYTE-STABLE system prefix (make_build_slice) so it's a prompt-cache PREFIX
