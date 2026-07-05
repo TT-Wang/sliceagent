@@ -138,42 +138,6 @@ def repeat_redirected_but_distinct_search_allowed():
 
 
 @check
-def ratchet_folds_lookback_into_slice():
-    from sliceagent.events import ToolResult
-    from sliceagent.pfc import Slice, slice_sink
-    from sliceagent.regions import render_reviewed
-    s = Slice(); s.reset("task")
-    sink = slice_sink(s)
-    sink(ToolResult("recall_history", {}, "index", False))            # index lookback
-    sink(ToolResult("recall_history", {"turns": [3]}, "trace", False))  # a drill
-    assert "index" in s.reviewed and "turns=[3]" in s.reviewed         # advanced the slice state
-    sink(ToolResult("recall_history", {}, "index", False))            # repeat → deduped
-    assert s.reviewed.count("index") == 1
-    rev = render_reviewed(s)
-    # reframed (smell -> first-class): guards against re-fetching what's already paged in, while still
-    # inviting a DIFFERENT turn — non-suppressive, but the ratchet still renders the reviewed entries.
-    assert "HISTORY REVIEWED" in rev and "already paged in" in rev and "turns=[3]" in rev
-    s2 = Slice(); s2.reset("t")
-    slice_sink(s2)(ToolResult("recall_history", {}, "boom", True))    # failing lookback → not recorded
-    assert s2.reviewed == [] and render_reviewed(s2) == ""
-
-
-@check
-def reviewed_is_temporal_not_permanent():
-    # the ratchet must clear between directives/turns, or a past lookback contaminates future moves
-    from sliceagent.memory import NullMemory
-    from sliceagent.session import Session
-    from sliceagent.pfc import Slice
-    s = Slice(); s.reset("task A"); s.reviewed = ["index", "turns=[3]"]
-    s.reset("task B")
-    assert s.reviewed == []                              # new_topic / reset → clean slate
-    sess = Session(NullMemory(), "s")
-    sess.new_topic("do X"); sess.active().reviewed = ["index"]
-    sess.continue_topic("now do Y")
-    assert sess.active().reviewed == []                  # a new directive clears it
-
-
-@check
 def nullmemory_has_no_history():
     m = NullMemory()
     assert m.read_episodes("s1") == []

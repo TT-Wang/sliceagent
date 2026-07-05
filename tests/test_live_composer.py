@@ -150,7 +150,7 @@ def live_app_slash_is_handled_not_run_as_a_turn():
 @check
 def richsink_refactor_is_render_identical():
     # the shared _render_tool_result must produce the SAME output RichSink did before extraction:
-    # plan panel, mission line, gutter card with ✓/✗, and read-card header-only.
+    # plan panel, gutter card with ✓/✗, and read-card header-only.
     from sliceagent.tui import _render_tool_result
     from sliceagent.events import ToolResult
     from rich.console import Console
@@ -161,7 +161,6 @@ def richsink_refactor_is_render_identical():
         return c.file.getvalue()
 
     assert "plan ·" in render(ToolResult("update_plan", {"steps": [{"step": "a", "status": "done"}]}, "", False))
-    assert "mission" in render(ToolResult("set_mission", {"text": "ship it"}, "", False))
     run_ok = render(ToolResult("run_command", {"command": "pytest"}, "3 passed", False))
     assert "✓" in run_ok and "pytest" in run_ok and "3 passed" in run_ok, run_ok
     run_bad = render(ToolResult("run_command", {"command": "x"}, "boom", True))

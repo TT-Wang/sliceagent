@@ -1,4 +1,4 @@
-"""SwapManager — single owner of the working-set PAGE lifecycle (file/dep/skill/ghost/reviewed); every page enters/
+"""SwapManager — single owner of the working-set PAGE lifecycle (file/dep/skill/ghost); every page enters/
 leaves the slice THROUGH here. The memory plane of a DEMAND-PAGED SNAPSHOT MACHINE: the slice is a CACHE, not a log,
 so eviction is always safe (a re-fault re-reads from the durable store). DUCK-TYPED: imports nothing from pfc.py
 (reverse import circular — pfc.py imports the bounds below); only prefetch() reaches
@@ -29,14 +29,13 @@ MAX_GHOSTS = 6     # GHOST INDEX ring — pointers to recently paged-out files/s
 MAX_ACTIVE_SKILLS = 2    # keep only the most-recently-loaded skills active
 MAX_SKILL_CHARS = 12000  # a loaded skill body before it enters the slice; bounded by COUNT (MAX_ACTIVE_SKILLS=2),
 # so this is generous — a half-read skill (helpers/examples/patterns in the tail lost) misleads more than it costs
-MAX_REVIEWED = 8         # bounded ring of history lookbacks done (the recall_history ratchet)
 HOT_TTL = 3              # steps a REFAULT-promoted file stays kernel-protected (self-tuning; not the model)
 HOT_CEILING = 4  # bound the kernel-granted soft-pin set — never an accumulating tier (decoupled from
                  # DEP_CEILING so raising the dep ceiling doesn't widen the refault soft-pin set)
 
 
 class SwapManager:
-    """Owns the working set: file load/evict, dep prefetch, skill load/evict, reviewed ratchet, ghosts."""
+    """Owns the working set: file load/evict, dep prefetch, skill load/evict, ghosts."""
     def __init__(self, retriever=None):
         self.retriever = retriever
 
@@ -134,11 +133,6 @@ class SwapManager:
         for sk in s.active_skills[:-MAX_ACTIVE_SKILLS]:
             self._ghost_add(s, "skill", sk["name"])   # evicted skill → recovery pointer
         s.active_skills = s.active_skills[-MAX_ACTIVE_SKILLS:]
-
-    def note_review(self, s, mark: str) -> None:  # RATCHET: record a history lookback (bounded) so it isn't re-done
-        if mark and mark not in s.reviewed:
-            s.reviewed.append(mark)
-            del s.reviewed[:-MAX_REVIEWED]
 
     def _is_ghost(self, s, kind: str, ref: str) -> bool:  # is this ref currently in the (recency-bounded) ghost ring?
         return any(g["kind"] == kind and g["ref"] == ref for g in s.ghosts)

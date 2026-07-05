@@ -24,7 +24,7 @@ BRAIN-ANALOGY LEGEND (used in this file's section comments — a naming aid, not
   HIPPOCAMPUS     — episode-*: the lossless per-turn log, reached only by an explicit, cue-dependent
                     recall (recall_history) — like real hippocampal recall, prone to confabulation if
                     the cue is weak, which the visible-manifest/recall-marker work exists to prevent.
-The Slice's own carried state (findings, conversation ring, plan, mission — see pfc.py) is the
+The Slice's own carried state (findings, conversation ring, plan — see pfc.py) is the
 fourth piece: PREFRONTAL CORTEX / working memory — bounded, actively maintained, free (no lookup()
 call at all), and lost when the task resets. Only 4 of PageTable's 6 kinds fire per turn inside
 build(); the other 2 (episode-xsession, episode-search-thissession) are reached only via the

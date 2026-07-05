@@ -15,7 +15,6 @@ import os
 import re
 
 from .safety import wrap_untrusted
-from .swap import MAX_REVIEWED
 from .text_utils import normalize_ws, one_line
 
 MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
@@ -28,7 +27,6 @@ MAX_REQ_CHARS = 300      # each requirement is ONE compact line (contracts — a
 MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
 MAX_PLAN_CHARS = 300     # each plan step is ONE compact line (multi-file scope must survive)
 _PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
-MAX_MISSION_CHARS = 500  # the MISSION (session north-star) is ONE compact objective line (don't clip scope)
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -56,18 +54,6 @@ _NO_CAP = 1_000_000
 
 # `one_line` is re-exported from text_utils (single definition — pfc.py/seed.py/neocortex.py import the
 # real definition directly). Kept importable from regions too for the existing call sites here.
-
-
-def render_reviewed(s) -> str:
-    """The recall_history RATCHET tier — lookbacks already done this task, so the model sees the
-    lookback advanced the state (and doesn't re-fetch the SAME turn). Only rendered when something's
-    been reviewed. Non-suppressive wording: it guards against re-fetching what's already paged in, but
-    still invites fetching a DIFFERENT turn (recall is a normal read, not a smell)."""
-    if not s.reviewed:
-        return ""
-    return ("# HISTORY REVIEWED (already paged in this task — their content is in YOUR NOTES / RECENT "
-            "above; fetch a DIFFERENT turn from PAGED-OUT HISTORY if you need more)\n"
-            f"{', '.join(s.reviewed[-MAX_REVIEWED:])}\n\n")
 
 
 def render_cache_manifest(refs) -> str:
@@ -625,15 +611,12 @@ def render_now(hints: str = "") -> str:
 # # YOUR NOTES / the # OPEN USER REPORT blocker / the # REPEATED-FAILING header all live in the
 # literals below — relocated verbatim from render_slice, not duplicated.)
 REGION_ORDER = (
+    # ──────────── TIER 1 · INTENT — what the user wants (the contract). STABLE, slot-0: leads the cache prefix. ────────────
     # STANDING REQUIREMENTS — the live contract that must hold when the task is DONE: a model-curated set
     # of constraints (exact signature, output format, stated rule, an added requirement), maintained in-band
     # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
     # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
     # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
-    # MISSION — the session-spanning NORTH STAR (goal mode): the overarching objective that persists
-    # ACROSS topic switches, above any single topic's goal. Self-suppresses when unset → zero bytes by
-    # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
-    ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
     # USER INSTRUCTIONS — every prior user message this session, VERBATIM + uncapped. The user's stated
     # intent/constraints are irreducible ground truth (unre-derivable from disk or an archived gist), so
@@ -641,23 +624,26 @@ REGION_ORDER = (
     # turn-to-turn, so they EXTEND the cacheable prefix. (T1 buried-detail fix — a constraint stated once
     # early survives to a much later turn; 'later supersedes earlier' handles corrections.)
     ("user_log",       STABLE,   lambda c: (f"# USER INSTRUCTIONS (every request you've been given this session, verbatim — the authoritative record of what was asked; honor every still-applicable one, and a LATER statement supersedes an earlier one it contradicts)\n{render_user_log(c['s'])}\n\n" if render_user_log(c['s']) else ""), 0),
+    # ──────────── TIER 2 · GROUND TRUTH — the world, re-derived from durable stores each turn. ────────────
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this. Lines are numbered for citation/reference; the leading number is NOT part of the file — never include it in a str_replace old_string)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP moved to the BYTE-STABLE system prefix (make_build_slice) so it's a prompt-cache PREFIX
     # shared across every turn + subagent, instead of full-price in the volatile user slice. (Region removed.)
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
+    # ──────────── TIER 3 · MY STATE — what the agent has established / is doing. ────────────
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (established facts to REUSE — don't re-derive these; OPEN FILES stays the ground truth for current file contents. Per-note tags mark trust: no tag = observed, '(your note)' = your summary, '(UNVERIFIED claim)' = not yet confirmed)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
     ("plan",           VOLATILE, lambda c: (f"# PLAN (your ordered steps & live progress — keep exactly ONE step in_progress; '[~]'=in progress, '[x]'=done, '[ ]'=pending; update with update_plan)\n{render_plan(c['s'].plan)}\n\n" if getattr(c['s'], 'plan', None) else ""), 3),
     ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
-    ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
+    # ──────────── TIER 4 · RECALL — paged out of the slice; fetched on demand. ────────────
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
     # PAGED-OUT HISTORY — the cache MANIFEST: earlier turns of THIS session that are NOT in the slice,
     # each with the exact recall_history call to page it back. Sits beside GHOST INDEX (same "it's paged
     # out, here's the one call to get it" idiom — files there, turns here) so the model has a SEEN target
     # to call; an unseen cache is the dead channel. Locators only (moat); suppresses itself when empty.
     ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; page any back with the call shown)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    # ──────────── TIER 5 · STEERING & LIVE STATE — what's wrong / where things stand (VOLATILE, high-authority tail). ────────────
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part

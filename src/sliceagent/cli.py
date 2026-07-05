@@ -534,9 +534,6 @@ def main() -> None:
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
-            mission = getattr(s, "mission", "") if s else ""
-            if mission:
-                _console.print(f"  🎯 mission: {mission}", markup=False)
             if not plan:
                 _console.print("  (no active plan — the agent sets one with update_plan on multi-step tasks)")
             else:

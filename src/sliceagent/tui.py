@@ -168,14 +168,11 @@ def _response_panel(content: str, console: Console) -> Panel:
 
 def _render_tool_result(e):
     """The renderable for a ToolResult — SHARED by RichSink (REPL) and LiveSink (live box) so they can't
-    drift. The model-curated tiers render as first-class UI (a live PLAN checklist, the MISSION line);
+    drift. The model-curated tiers render as first-class UI (a live PLAN checklist);
     everything else is a dim '┊'-gutter card: mark · header · optional inline diff · bounded output (shown
     only for action tools / failures — read/list say it all in the header)."""
     if e.name == "update_plan" and not e.failing:
         return _render_plan(e.args.get("steps") or [])
-    if e.name == "set_mission" and not e.failing:
-        return Text.assemble(Text("  🎯 mission: ", style=TH["accent"]),
-                             Text(_shorten(str(e.args.get("text", "")), 80), style="bold"))
     mark = Text("✓", style=TH["ok"]) if not e.failing else Text("✗", style=TH["fail"])
     head = Text.assemble(Text("┊ ", style=TH["dim"]), mark, " ",
                          Text(_tool_header(e.name, e.args), style=TH["tool"]))
@@ -913,7 +910,7 @@ _SLASH = {
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
     "/cwd":     "switch workspace root (/cwd <path>) — re-roots repo map, file tools & commands",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
-    "/plan":    "show the agent's current PLAN + mission",
+    "/plan":    "show the agent's current PLAN",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",
     "/threads": "list open/parked topics",
     "/plugins": "list loaded plugins + their tools",

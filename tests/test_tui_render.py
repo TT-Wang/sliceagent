@@ -42,14 +42,6 @@ def plan_renders_as_a_checklist():
 
 
 @check
-def mission_renders_as_a_line():
-    sink, buf = _sink_capture()
-    sink(ToolResult("set_mission", {"text": "ship the v2 release"}, "MISSION set", failing=False))
-    out = buf.getvalue()
-    assert "mission" in out and "ship the v2 release" in out, out
-
-
-@check
 def fresh_tokens_tracked_for_toolbar():
     sink, _ = _sink_capture()
     sink(StepEnd(1, {"prompt_tokens": 1000, "completion_tokens": 20, "input_other": 200}, "tool_use"))

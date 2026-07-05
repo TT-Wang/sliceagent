@@ -54,7 +54,6 @@ def task_state_markdown_roundtrips_new_tiers():  # #3
         task_id="t1", session_id="s1", goal="do the thing",
         requirements=[{"text": "public API must stay stable", "done": False}],
         plan=[{"step": "write code", "status": "done"}, {"step": "test", "status": "in_progress"}],
-        mission="ship the v2 release",
         world={"port": "8137", "map": "room A -> room B"},
     )
     md = _render_task_md(ts, created="2026-06-23", updated="2026-06-23")
@@ -65,7 +64,6 @@ def task_state_markdown_roundtrips_new_tiers():  # #3
     assert back.requirements == [{"text": "public API must stay stable", "done": False}], back.requirements
     assert [x["step"] for x in back.plan] == ["write code", "test"], back.plan
     assert back.plan[1]["status"] == "in_progress"
-    assert back.mission == "ship the v2 release", back.mission
     assert back.world == {"port": "8137", "map": "room A -> room B"}, back.world
 
 

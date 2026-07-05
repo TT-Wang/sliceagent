@@ -69,7 +69,6 @@ class TaskState:
     finding_source: dict[str, str] = field(default_factory=dict)  # finding -> provenance tier (carried; else resume upgrades 'claim'→'tool-note')
     requirements: list[dict] = field(default_factory=list)  # STANDING REQUIREMENTS contract (carried)
     plan: list[dict] = field(default_factory=list)          # PLAN / TodoWrite steps + status (carried)
-    mission: str = ""                                       # MISSION north-star objective (carried)
     open_report: str = ""                                   # OPEN USER REPORT blocker (carried; the "it's broken" push-back must survive resume)
     world: dict = field(default_factory=dict)               # agent WORLD MODEL (carried; was dropped on resume)
     active_files: list[str] = field(default_factory=list)

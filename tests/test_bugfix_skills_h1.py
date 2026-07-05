@@ -57,7 +57,6 @@ def taskstate_survives_disk_roundtrip():  # H1 — the real checkpoint→file→
         task_id="t-h1", session_id="s1", title="add json export", goal="add a --json flag",
         requirements=[{"text": "keep the public API stable", "done": False}],
         plan=[{"step": "write the flag", "status": "done"}, {"step": "test", "status": "in_progress"}],
-        mission="ship the v2 exporter",
         world={"port": "8137", "entry": "export.py:main"},
         findings=["the flag is parsed in export.py"],
     )
@@ -69,7 +68,6 @@ def taskstate_survives_disk_roundtrip():  # H1 — the real checkpoint→file→
     assert back.requirements == [{"text": "keep the public API stable", "done": False}], back.requirements
     assert [p["step"] for p in back.plan] == ["write the flag", "test"], back.plan
     assert back.plan[1]["status"] == "in_progress"
-    assert back.mission == "ship the v2 exporter", back.mission
     assert back.world == {"port": "8137", "entry": "export.py:main"}, back.world
     assert back.findings == ["the flag is parsed in export.py"], back.findings
 
