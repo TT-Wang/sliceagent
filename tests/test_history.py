@@ -66,6 +66,31 @@ def tool_no_args_returns_index():
 
 
 @check
+def full_recall_is_superset_of_compact():
+    """full=True must NOT be lossier than the default recall. render_full alone returns only the
+    end-state SLICE snapshot, which omits transient tool observations — so a model reaching for `full`
+    to get MORE got LESS (measured in evals/tr_incidental: a full-recall lost a buried instance id the
+    compact recall preserved). The fix unions the trajectory into full mode. Regression guard."""
+    try:
+        m = _memem()
+    except Exception:
+        print("  (skip)"); return
+    rec = {"title": "run provision", "note": "pass",
+           "markdown": "# run provision\n## what happened\n- [run_command] ./provision.sh -> ok\n"
+                       "    provisioned id: needle-pv-42\n",
+           "steps": [{"slice": "# CURRENT REQUEST\nrun ./provision.sh (no value in the end-state slice)\n",
+                      "action": [{"name": "run_command", "args": {"command": "./provision.sh"}, "failing": False}],
+                      "observation": ["provisioned id: needle-pv-42"]}],
+           "meta": {"failing": False, "stop_reason": "end_turn", "files": []}}
+    m.append_episode("s1", "t1", 1, rec)
+    compact = make_history_tool(m, "s1").handler({"turns": [1]})               # fresh guard per call (no rein)
+    full = make_history_tool(m, "s1").handler({"turns": [1], "full": True})
+    assert "needle-pv-42" in compact, "compact recall should carry the tool observation"
+    assert "needle-pv-42" in full, "full recall must be a SUPERSET — it dropped the tool observation"
+    assert "exact end-state slice" in full and "CURRENT REQUEST" in full, "full must still include the slice"
+
+
+@check
 def tool_fetch_trace_and_specific_turn():
     try:
         m = _memem()

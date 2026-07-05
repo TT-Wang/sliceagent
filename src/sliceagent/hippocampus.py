@@ -555,7 +555,16 @@ def make_history_tool(memory, session_id: str):
             return "No matching turns. Call recall_history() with no args for the index."
         guard["served"].add(sig)
         guard["distinct"] += 1
-        return (render_full(sel) if full else render_trace(sel)) + CAPTURE_BACK
+        if full:
+            # `full` ⊇ compact: the "what happened" trajectory (raw tool observations) FIRST, then the
+            # exact end-state slice. render_full alone returns ONLY the reconstructed slice snapshot, which
+            # OMITS transient tool outputs (e.g. a run_command's stdout), so a model reaching for `full` to
+            # get MORE than the default recall got LESS (measured, evals/tr_incidental: a full-recall lost a
+            # buried instance id that the compact recall preserved). Union them so `full` is never lossier.
+            body = render_trace(sel) + "\n\n══ exact end-state slice(s) ══\n" + render_full(sel)
+        else:
+            body = render_trace(sel)
+        return body + CAPTURE_BACK
 
     schema = {"type": "function", "function": {
         "name": "recall_history",
