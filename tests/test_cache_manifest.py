@@ -73,12 +73,13 @@ def manifest_renders_with_fetch_calls():
 # ── bounded to MANIFEST_TURNS (the moat: constant size regardless of session length) ──
 @check
 def manifest_bounded_with_older_tail():
-    lines = [_line(i, f"turn {i} work", note=f"did thing {i}") for i in range(1, 13)]  # 12 turns
+    N = MANIFEST_TURNS + 4                                          # a session LONGER than the window
+    lines = [_line(i, f"turn {i} work", note=f"did thing {i}") for i in range(1, N + 1)]
     user = _build_user(_DurableMem(lines))
-    shown = [n for n in range(1, 13) if f"recall_history(turns=[{n}])" in user]
+    shown = [n for n in range(1, N + 1) if f"recall_history(turns=[{n}])" in user]
     assert len(shown) == MANIFEST_TURNS, f"expected {MANIFEST_TURNS} locators, got {len(shown)}: {shown}"
-    assert shown == list(range(13 - MANIFEST_TURNS, 13)), f"must show the LAST {MANIFEST_TURNS}: {shown}"
-    older = 12 - MANIFEST_TURNS
+    assert shown == list(range(N + 1 - MANIFEST_TURNS, N + 1)), f"must show the LAST {MANIFEST_TURNS}: {shown}"
+    older = N - MANIFEST_TURNS
     assert f"{older} earlier turn(s)" in user, "the '+N earlier' tail is missing"
     assert "recall_history() for the full index" in user, "older tail should point at the bare index"
 
@@ -128,7 +129,8 @@ def empty_session_renders_no_manifest():
 # ── PageTable is the single read seam; it returns locator-only PageRefs ───────────────
 @check
 def pagetable_thissession_returns_locator_refs():
-    lines = [_line(i, f"t{i}", note=f"n{i}") for i in range(1, 12)]  # 11 turns
+    N = MANIFEST_TURNS + 4                                          # more turns than the window → older sentinel
+    lines = [_line(i, f"t{i}", note=f"n{i}") for i in range(1, N + 1)]
     refs = PageTable(memory=_DurableMem(lines)).lookup("s1", kind="episode-thissession", k=MANIFEST_TURNS)
     assert len(refs) == MANIFEST_TURNS + 1, f"expected {MANIFEST_TURNS} + older sentinel, got {len(refs)}"
     assert refs[-1].handle == "…older", "last ref must be the older-tail sentinel"

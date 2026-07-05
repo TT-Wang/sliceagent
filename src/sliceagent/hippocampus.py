@@ -360,7 +360,10 @@ class HippocampusMixin:
             return [], 0
 
 
-INDEX_LIMIT = 40       # breadcrumbs shown by the bare index (a LOCATOR bound — titles/notes, not content)
+INDEX_LIMIT = 200      # breadcrumbs shown by the bare on-demand index (a LOCATOR bound — titles/notes, not
+# content). MUST be >= MANIFEST_TURNS (the auto-shown window): the explicit "recall_history() for the full
+# index" fallback must never show FEWER turns than the manifest already shows. OPT-IN (one call, not per-turn)
+# so a generous cap is cheap and makes the '+N older' tail's promise ("the full index") actually full.
 OBS_TAIL = 300         # legacy-record fallback ONLY: per-observation tail when there is no stored markdown
 DISTINCT_PER_TURN = 8  # backstop on DISTINCT turn-fetches per turn; repeats are redirected for free
 # NO read-side CONTENT cap: a fetched turn is returned IN FULL. The bound is the SEAL, not a second cut at
