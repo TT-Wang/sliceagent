@@ -5,6 +5,109 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-07-03
+
+**Native Windows support — one command, no WSL:**
+`irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex`
+(installs pinned uv + sliceagent with its own Python 3.12, and SHA256-verified Git Bash + ripgrep when missing; user-scoped, no admin).
+
+### Added
+- `platform_compat` seam: shell commands run under **Git Bash** on Windows (the model's bash-syntax
+  tool calls work unchanged), win32 process groups + `taskkill` tree-kill, drive-letter/MSYS path
+  extraction for shell-path grants.
+- Forward-slash path contract in all model-facing output on Windows (`rg --path-separator /`,
+  normalized rel paths in the code index / repo map / listings / `@file` completion) and a
+  win32-only system-prompt note about Git Bash path quoting.
+- CI `windows-latest` cell (full suite green on Windows) + a Windows-footgun lint
+  (`scripts/check_windows_footguns.py`) that keeps the Unix-ism bug class out permanently.
+
+### Changed
+- memem floor → **2.9.7** (Windows-importable memory backend; also carries 2.9.6's
+  legacy-frontmatter auto-repair).
+
+### Known Windows limitations
+- Interactive PTY sessions (`terminal_open`) are not yet available natively (clean refusal; use
+  `run_command` / `proc_start`). Planned: pywinpty bridge.
+
+**Linux/macOS: zero behavior change.** Every Windows branch is platform-gated; POSIX call paths are
+byte-identical, pinned by identity tests, and verified by an adversarial POSIX-regression review.
+
+## [0.1.11] — 2026-07-03
+
+OSS-polish pass (triaged from two external reviews; the confirmed quick wins).
+
+### Fixed
+- `_as_text` (tool-result coercion): a tool returning `None` now becomes `""` (not the literal string
+  `"None"`) and `bytes` are decoded (not rendered as a `b'…'` repr) before entering the slice.
+- Rebrand leftovers: `sliceagent.toml.example`, the example plugin, and `.gitignore` still referenced
+  the old `memagent` / `.memagent/` name and paths — updated to `sliceagent` / `.sliceagent/`.
+- `.gitignore` now ignores `.sliceagent/` (a session writes paged-output blobs into a project-local
+  `.sliceagent/blobs/`, which was showing up as untracked repo cruft); `.dockerignore` excludes it too.
+- The generated config reference (`docs/CONFIGURATION.md`, an internal/untracked doc) is regenerated
+  from `envspec` so `AGENT_MODEL` shows no default (it is required); a drift-guard test keeps it honest
+  and skips cleanly where the untracked doc is absent (CI / installed package).
+- `install.sh`: removed a dead `REPO` (git-URL) variable — the installer tracks the PyPI release, one
+  canonical path; `ROADMAP.md` updated to match (it still described the old `git+…` install).
+
+### Docs
+- README: the benchmark section now notes the model is swappable via `AGENT_MODEL` and points at the
+  reproducible `evals/` harnesses; added a **pre-1.0 stability** statement (SemVer, 0.x may change,
+  breaking changes in the changelog, numbers are directional).
+
+## [0.1.10] — 2026-07-03
+
+### Fixed
+- Startup banner: the block wordmark clipped its right edge — the final "t" of "sliceagent" — on
+  terminals narrower than ~91 columns, because the frame's indent + padding + border overhead pushed
+  the 79-column art past the window. The layout now sheds that chrome as the window narrows, so the
+  full name renders from ~85 columns up (wide windows keep the roomy framing).
+
+## [0.1.9] — 2026-07-03
+
+Bug-hunt round 2 (deep-core lenses, full 3-vote adversarial verify). Five confirmed fixes.
+
+### Security
+- The durable debug log's `_scrub_args` now redacts secrets in NESTED dict/list tool arguments
+  (e.g. an MCP call's `{config:{api_key:…}}` or `{headers:{Authorization:…}}`) — top-level-only
+  redaction leaked them to `~/.sliceagent/logs/**/durable-log.jsonl` in plaintext.
+- `AGENT_PROXY=none` (documented "force a DIRECT connection") now truly forces direct: the httpx
+  client is built with `trust_env=False`, so an ambient `HTTPS_PROXY` can no longer silently route
+  your API traffic through a proxy you told sliceagent to bypass (both first build and `/model` hops).
+
+### Fixed
+- `str_replace`/`edit_file` no longer flip a whole file to CRLF when it's mostly-LF but contains a
+  single embedded `\r\n` (a byte literal, an HTTP fixture, a merge artifact). CRLF is now detected by
+  DOMINANCE, not mere presence — uniformly-CRLF Windows files are still preserved.
+- Session-end consolidation no longer crashes (and silently discards ALL of a session's promoted
+  lessons/skills) when the episodic log contains one malformed record.
+- `/undo` and `/cwd` (and `/plugins`) no longer corrupt output or crash Rich with a MarkupError when a
+  path contains brackets — e.g. a Next.js `app/[id]/page.tsx` route or `~/proj/[slug]`.
+
+## [0.1.8] — 2026-07-02
+
+Launch-day bug-hunt round: a security fix plus config-robustness and /model correctness.
+
+### Security
+- `run_command` in the default *teenager* mode no longer auto-runs exec/write commands disguised as
+  "read-only": `env <program>`, `sort -o FILE`, `date -s`, `tree -o FILE`, `uniq IN OUT`, and
+  `git grep --open-files-in-pager` now take the confirm path (arbitrary code-exec / file-overwrite
+  confirm-bypass). Read-only siblings like `du -s` / `grep -o` still auto-run.
+
+### Fixed
+- Boot no longer cross-wires a prefs-pinned provider's key with the DEFAULT provider's endpoint (an
+  env `gpt-5.5` @ OpenAI pin on a DeepSeek-default config used to 401 every call on relaunch).
+- A prefs `provider`/model pin whose `[providers.<id>]` table was removed from config.toml is now
+  dropped at boot instead of forcing a model onto the wrong endpoint.
+- The wizard no longer silently ERASES other providers' API keys when config.toml is unparseable —
+  the old file is moved to a non-clobbering `.bak` first (keys recoverable).
+- `sliceagent config` / `config --use` / the init wizard no longer crash on a non-UTF-8 config.toml
+  or a scalar value under `[providers]` (they degrade).
+- `llm.switch()` (a `/model` provider hop) closes the replaced HTTP client — no more fd leak per hop.
+- The `/model` reasoning menu offers `high` (not a misleading `max`) for OpenRouter models, and offers
+  the levels the *target* provider supports when the pick rebinds the endpoint.
+- The wizard's typed provider fallback rejects an unknown choice instead of silently configuring
+  OpenRouter.
+
 ## [0.1.7] — 2026-07-02
 
 ### Fixed

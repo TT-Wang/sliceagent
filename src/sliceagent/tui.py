@@ -69,7 +69,7 @@ _TOOL = {
     "grep":           ("🔍", "grep",   "pattern"),
     "glob":           ("🔍", "glob",   "pattern"),
     "skill":          ("📚", "skill",  "name"),
-    "recall_history": ("🕮 ", "recall", "index"),
+    "search_history": ("🕮 ", "search", "query"),
     "new_topic":      ("🟢", "topic",  "goal"),
     "switch_topic":   ("🔀", "switch", "task_id"),
     "spawn_subagent": ("🤖", "agent",  "task"),
@@ -78,8 +78,9 @@ _TOOL = {
 
 
 # read-only / navigation tools — a long run of these (a review reads + greps a dozen files) is just
-# noise as one card each, so the sink COALESCES a consecutive run into ONE compact line. recall_history
-# is deliberately NOT here: it's the memory channel and stays its own visible card.
+# noise as one card each, so the sink COALESCES a consecutive run into ONE compact line. search_history
+# is deliberately NOT here: it's the cross-session memory channel and stays its own visible card. (A
+# read_file/grep under history/ coalesces like any other read — it IS an ordinary file read now.)
 _COALESCE = {"read_file", "list_files", "grep", "glob"}
 _READ_VERB = {"read_file": "read", "list_files": "list", "grep": "grep", "glob": "glob"}
 
@@ -168,14 +169,11 @@ def _response_panel(content: str, console: Console) -> Panel:
 
 def _render_tool_result(e):
     """The renderable for a ToolResult — SHARED by RichSink (REPL) and LiveSink (live box) so they can't
-    drift. The model-curated tiers render as first-class UI (a live PLAN checklist, the MISSION line);
+    drift. The model-curated tiers render as first-class UI (a live PLAN checklist);
     everything else is a dim '┊'-gutter card: mark · header · optional inline diff · bounded output (shown
     only for action tools / failures — read/list say it all in the header)."""
     if e.name == "update_plan" and not e.failing:
         return _render_plan(e.args.get("steps") or [])
-    if e.name == "set_mission" and not e.failing:
-        return Text.assemble(Text("  🎯 mission: ", style=TH["accent"]),
-                             Text(_shorten(str(e.args.get("text", "")), 80), style="bold"))
     mark = Text("✓", style=TH["ok"]) if not e.failing else Text("✗", style=TH["fail"])
     head = Text.assemble(Text("┊ ", style=TH["dim"]), mark, " ",
                          Text(_tool_header(e.name, e.args), style=TH["tool"]))
@@ -864,12 +862,16 @@ def _model_candidates(llm, cfg):
 
 def _reasoning_levels(model, base_url):
     """Reasoning levels valid for a model, derived from its capability (provider-aware). Effort-capable
-    models (gpt-5/o-series) expose all four; others only fast/full (high/max would degrade to default)."""
+    models (gpt-5/o-series) expose all four; OpenRouter exposes fast/full/high (its unified reasoning
+    object maps max→high, so offering max would be a lie); others only fast/full (high/max would
+    degrade to default)."""
     from .model_catalog import capability
     full4 = [("fast", "minimal reasoning — fastest, cheapest"),
              ("full", "provider default reasoning"),
              ("high", "deeper reasoning (effort=high, /v1/responses)"),
              ("max", "deepest reasoning (effort=xhigh)")]
+    if "openrouter" in (base_url or "").lower():   # unified reasoning object honors effort WITH tools
+        return full4[:2] + [("high", "deeper reasoning (unified reasoning, effort=high)")]
     if capability(model, base_url).supports_reasoning_effort:
         return full4
     return full4[:2]   # fast | full only — the model has no effort knob
@@ -888,7 +890,10 @@ def select_model_reasoning(llm, cfg, *, pt_input=None, pt_output=None):
     if pick is None:
         return None
     model, _grp, pid = cands[pick]
-    base = getattr(llm, "_base_url", "") if model == llm.model else ""
+    if pid:   # the pick will REBIND to this provider — offer the levels ITS endpoint supports
+        base = ((cfg.providers() or {}).get(pid) or {}).get("base_url") or ""
+    else:
+        base = getattr(llm, "_base_url", "") if model == llm.model else ""
     levels = _reasoning_levels(model, base)
     lvl_rows = [(name, desc) for name, desc in levels]
     lvl_cur = next((i for i, (n, _) in enumerate(levels) if n == llm.reasoning), -1)
@@ -906,7 +911,7 @@ _SLASH = {
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
     "/cwd":     "switch workspace root (/cwd <path>) — re-roots repo map, file tools & commands",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
-    "/plan":    "show the agent's current PLAN + mission",
+    "/plan":    "show the agent's current PLAN",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",
     "/threads": "list open/parked topics",
     "/plugins": "list loaded plugins + their tools",
@@ -1457,10 +1462,17 @@ def banner_panel(console: Console, info: str) -> Panel:
     fallback). Each art row is no-wrap + crop, so a terminal narrower than the art (~86 cols) clips it
     cleanly on the right instead of wrapping into a staircase; a normal-width window shows it in full.
     `console` is kept in the signature for the callers, though the layout is now width-independent."""
+    # The wordmark itself is 79 cols. Full chrome (2-space row indent + 2-col panel padding + border) needs
+    # ~91 cols, so a ~86-col window CROPPED the right edge — the final "t". Shed the indent + horizontal
+    # padding as the window narrows so the WHOLE name shows down to ~85 cols (below that it still crops
+    # cleanly — no wrap; the emblem stays on every art row). Wide windows keep the roomy framing.
+    width = getattr(console, "width", 80) or 80
+    indent = "  " if width >= 91 else ""
+    hpad = 2 if width >= 91 else 0
     rows = []
     for i, word in enumerate(_WORDMARK):
         blk, col = _EMBLEM[i]
-        t = Text.assemble(("  ", ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}"))
+        t = Text.assemble((indent, ""), (blk, f"bold {col}"), ("  ", ""), (word, f"bold {col}"))
         t.no_wrap = True
         t.overflow = "crop"          # narrow terminal → clip the art, never wrap it into a staircase
         rows.append(t)
@@ -1470,7 +1482,7 @@ def banner_panel(console: Console, info: str) -> Panel:
         rows.append(Text("  " + info, style=TH["dim"]))
     return Panel(Group(*rows), border_style=TH["accent"], box=_box.ROUNDED,
                  title=f"[bold {TH['accent']}]sliceagent[/]", title_align="left",
-                 subtitle="[grey50]/help · ctrl-d to quit[/]", subtitle_align="right", padding=(1, 2))
+                 subtitle="[grey50]/help · ctrl-d to quit[/]", subtitle_align="right", padding=(1, hpad))
 
 
 def banner(console: Console, info: str) -> None:

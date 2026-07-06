@@ -1,0 +1,21 @@
+[
+  "Now that the graph can be built, add topo_order(): return a list of ALL registered tasks ordered so that every dependency comes before each task that depends on it. Make it deterministic: whenever several tasks are simultaneously free to run (all of their dependencies have already been placed), emit them in alphabetical order. This is Kahn's algorithm with an alphabetically-sorted frontier. Keep the adjacency design described in the module docstring (name -> set of direct dependency names). The seed tests in tests/test_seed.py must stay green.",
+
+  "Add cycle safety. A self-dependency add_dependency(x, x) must raise ValueError, and any add_dependency call that would introduce a cycle (i.e. depends_on already reaches task through existing edges) must also raise ValueError and leave the graph unchanged. Also add has_cycle() -> bool that reports whether the current graph contains any cycle, and make topo_order() raise ValueError if a cycle is somehow present.",
+
+  "Add ready(done): given an iterable of already-completed task names, return the sorted list of tasks that are NOT in done and whose every direct dependency IS in done. These are the tasks that can start next.",
+
+  "Add waves(): return a list of levels, where each level is a sorted list of task names. Level 0 is exactly the tasks that have no dependencies; level k is the tasks all of whose direct dependencies appear in earlier levels (< k). Every task must appear in exactly one wave.",
+
+  "Add remove_task(name): remove the task from the graph together with every edge that references it -- both its own dependency entries and every OTHER task's dependency on it. If name is not a registered task, raise KeyError.",
+
+  "Add run(runner): execute the tasks in topo_order(), calling runner(name) once for each task in that order, and return a status dict mapping each task name to the string 'ok'. Don't worry about failures yet -- assume every runner call succeeds.",
+
+  "Bug report to fix: after remove_task, topo_order() and waves() sometimes blow up with a KeyError, or the removed task still shows up, because a task that depended on the removed one is still holding a dependency edge pointing at the deleted node. Make remove_task fully purge the task from every other task's dependency set, so that afterwards topo_order(), waves() and ready() never see a dangling reference to a task that no longer exists.",
+
+  "Extend run(runner) to handle failures. If runner(name) raises any exception, that task's status is 'failed' (its runner's return value is discarded), and every task that depends on it -- directly OR transitively -- gets status 'skipped' with runner NOT called for it. Tasks that don't depend on the failed one still run normally and are 'ok'. Keep executing in topo order and return the full name -> status map.",
+
+  "Bug report to fix: the failure handling from the last change isn't propagating far enough. When A fails, its direct dependent B is correctly marked 'skipped', but C -- which depends on B (not directly on A) -- still gets run instead of skipped. Fix run() so the skip propagates transitively: any task that has a failed-or-skipped ancestor anywhere in its dependency chain must itself be 'skipped' and its runner must not be called.",
+
+  "Add serialization. to_dict() returns {'tasks': <sorted list of all task names>, 'deps': {name: <sorted list of that task's direct dependencies>}} for every registered task. Add a classmethod from_dict(d) that rebuilds an equivalent Scheduler from such a dict. Round-tripping must preserve the graph: from_dict(to_dict(s)) must produce a scheduler whose to_dict() equals s.to_dict()."
+]

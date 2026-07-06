@@ -147,7 +147,7 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
 
 _BODY_HDR_ESC = "⁣"  # invisible separator: prefix a VERBATIM line that begins with '## ' so
                           # _read_sections doesn't mistake it for a section header (model-written markdown
-                          # in goal/mission/last_error/resolution otherwise truncates/misroutes on resume).
+                          # in goal/last_error/resolution otherwise truncates/misroutes on resume).
 
 
 def _esc_body(t: str) -> str:
@@ -217,11 +217,10 @@ def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
         "## Finding sources", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}"
                                         for k, v in task.finding_source.items()),
         # carried slice tiers — JSON-per-bullet so dict items round-trip EXACTLY (no markdown-escape
-        # hazard). Without these, resuming a task silently dropped the standing contract / todo / north-
-        # star / world model (data loss). Mission is a single verbatim line like Status.
+        # hazard). Without these, resuming a task silently dropped the standing contract / todo /
+        # world model (data loss).
         "## Requirements", "\n".join(f"- {json.dumps(r, ensure_ascii=False)}" for r in task.requirements),
         "## Plan", "\n".join(f"- {json.dumps(p, ensure_ascii=False)}" for p in task.plan),
-        "## Mission", _esc_body(task.mission),
         "## Open report", _esc_body(getattr(task, "open_report", "")),
         "## World", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}" for k, v in task.world.items()),
         "## Working set", "\n".join(f"- {p}" for p in task.active_files),
@@ -268,7 +267,6 @@ def _parse_task_md(path: str) -> TaskState | None:
                         if isinstance(kv, list) and len(kv) == 2 and isinstance(kv[0], str)},
         requirements=[r for r in _json_bullets("requirements") if isinstance(r, dict)],
         plan=[p for p in _json_bullets("plan") if isinstance(p, dict)],
-        mission=_unesc_body(sec.get("mission", "")),
         open_report=_unesc_body(sec.get("open report", "")),
         world=world,
         active_files=_bullets(sec.get("working set", "")),
@@ -390,7 +388,7 @@ class MememMemory(HippocampusMixin, NeocortexMixin):
                 created = fm.get("created") or created
             updated = _now_iso()
             # redact the WHOLE rendered task state before it lands on disk — title/goal/findings/last_error/
-            # resolution/mission/world are all model/tool-derived and may carry secrets (mirrors the episodic
+            # resolution/world are all model/tool-derived and may carry secrets (mirrors the episodic
             # cache redaction). Redact-the-output is future-proof: new fields are covered automatically.
             _write_atomic(path, redact_text(_render_task_md(task, created=created, updated=updated)))
             _upsert_session_index(self._vault, task, updated)

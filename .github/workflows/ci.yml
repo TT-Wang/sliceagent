@@ -14,8 +14,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12"]
+        include:
+          - os: windows-latest   # native Windows (Hermes pattern): imports, lint, and suite must hold
+            python: "3.12"
+    defaults:
+      run:
+        shell: bash              # Git Bash on the Windows runner — same shell the agent itself uses
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -25,6 +31,8 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update && sudo apt-get install -y ripgrep
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            choco install ripgrep -y
           else
             brew install ripgrep
           fi
@@ -42,3 +50,14 @@ jobs:
 
       - name: Tests
         run: bash scripts/run_tests.sh
+
+      # Users install via `uv tool install` (install.sh / install.ps1) — a DIFFERENT code path from
+      # the pip install above (uv writes .exe trampoline shims on Windows; antivirus/permission
+      # surface). Validate it from the built wheel on the Windows cell.
+      - name: Windows — validate the uv tool-install path
+        if: runner.os == 'Windows'
+        run: |
+          pip install uv build
+          python -m build --wheel
+          uv tool install --python 3.12 --from "$(ls dist/*.whl)" sliceagent
+          "$USERPROFILE/.local/bin/sliceagent.exe" version

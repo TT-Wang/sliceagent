@@ -50,7 +50,15 @@ def log_sink(root: str = ".", path: str | None = None):
     path = path or os.path.join(state_dir("logs", root_key(root)), "durable-log.jsonl")
 
     def _scrub_args(args: dict) -> dict:          # redact string values (edit_file content, inline tokens)
-        return {k: (redact_text(v) if isinstance(v, str) else v) for k, v in (args or {}).items()}
+        def _rec(v):                              # RECURSE — a secret nested in a dict/list arg (e.g. an
+            if isinstance(v, str):                # MCP tool's {config:{api_key:…}} / {headers:{Authorization:…}})
+                return redact_text(v)             # must not reach the on-disk log in plaintext (top-level-only
+            if isinstance(v, dict):               # redaction leaked it; sibling hippocampus._clamp already recurses)
+                return {k: _rec(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_rec(x) for x in v]
+            return v
+        return _rec(args or {})
 
     def sink(e: Event) -> None:
         rec = None
@@ -151,6 +159,21 @@ def _ws_name(path: str) -> str:
     return "~" if p == os.path.realpath(os.path.expanduser("~")) else (os.path.basename(p) or p)
 
 
+def _env_from_config(c, pid: str | None = None) -> None:
+    """Populate LLM_API_KEY/LLM_BASE_URL from config (ENV still wins). A prefs-pinned provider `pid`
+    binds AS A UNIT: its key with ITS OWN endpoint — an absent base_url means the SDK default (OpenAI),
+    NOT the default provider's base_url (that fallback cross-wired an openai key onto the deepseek
+    endpoint after `/model`-hop + restart when default_provider pointed elsewhere)."""
+    tbl = (c.providers() or {}).get(pid) if pid else None
+    if isinstance(tbl, dict) and tbl.get("api_key"):
+        key, base = tbl["api_key"], tbl.get("base_url") or ""
+    else:                                    # no/unusable pin → the default provider's own pairing
+        key, base = c.api_key, c.base_url
+    for _env, _val in (("LLM_API_KEY", key), ("LLM_BASE_URL", base)):
+        if not os.environ.get(_env) and _val:
+            os.environ[_env] = _val
+
+
 def main() -> None:
     # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `sliceagent init` runs on a
     # machine with nothing configured yet. A bare `sliceagent` (or one with non-subcommand args) falls through.
@@ -164,14 +187,6 @@ def main() -> None:
     # configured user never has to export anything; ENV still wins for one-off overrides.
     from .config import load_config, load_prefs
     _boot_prefs = load_prefs()   # the last /model choice may pin a PROVIDER (endpoint+key), not just a model
-
-    def _env_from_config(c, pid: str | None = None) -> None:
-        tbl = (c.providers() or {}).get(pid) if pid else None
-        key = (tbl or {}).get("api_key") or c.api_key
-        base = ((tbl or {}).get("base_url") if tbl and tbl.get("api_key") else None) or c.base_url
-        for _env, _val in (("LLM_API_KEY", key), ("LLM_BASE_URL", base)):
-            if not os.environ.get(_env) and _val:
-                os.environ[_env] = _val
 
     def _key_present() -> bool:
         return bool(os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -189,6 +204,14 @@ def main() -> None:
         return run_init() == 0
 
     cfg = load_config()
+    # A prefs `provider` pin whose [providers.<id>] table was since removed from config.toml is STALE:
+    # its key/endpoint already fall back to the default provider (see _env_from_config), but its pinned
+    # MODEL would still win at the resolution below and get sent to the wrong endpoint (model_not_found
+    # every turn). Drop the whole stale pin so model/endpoint resolve together from the live config.
+    if _boot_prefs.get("provider") and _boot_prefs["provider"] not in (cfg.providers() or {}):
+        from .config import save_prefs as _sp
+        _sp({"provider": None, "model": None})       # None DELETES (see save_prefs)
+        _boot_prefs.pop("provider", None); _boot_prefs.pop("model", None)
     _env_from_config(cfg, _boot_prefs.get("provider"))
     if not _key_present() and _first_run_setup("Welcome! No API key configured yet"):
         cfg = load_config()          # the wizard just wrote ~/.sliceagent/config.toml — pick it up
@@ -346,10 +369,14 @@ def main() -> None:
     llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
-    # recall_history: the model's bounded valve into the cold cache (paged-out turns of this session).
+    # history/: this session's paged-out turns exposed as read-only virtual files (read_file/list_files/grep)
+    # — the model reaches for files (a pretraining reflex) far more readily than a bespoke recall tool
+    # (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is written to disk. search_history adds the
+    # one thing files can't: FTS5 over PAST sessions (their turns aren't mounted here).
     if getattr(memory, "is_durable", False):
-        from .hippocampus import make_history_tool
-        base_tools.registry.register(make_history_tool(memory, session.session_id))
+        from .hippocampus import HistoryFS, make_search_history_tool
+        base_tools._history = HistoryFS(memory, session.session_id)
+        base_tools.registry.register(make_search_history_tool(memory, session.session_id))
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
     # memory.consolidate (reads the episodic cache, never the slice). `mine_mode` (off|deterministic|llm)
@@ -468,6 +495,18 @@ def main() -> None:
         ans = input(f"  ⚠ allow {name} {str(detail)[:60]!r}? ({reason}) [y]es/[n]o/[a]lways: ").strip().lower()
         return {"y": "yes", "yes": "yes", "a": "always", "always": "always"}.get(ans, "no")
 
+    def _live_pid():
+        """The configured provider the LIVE llm is actually bound to (endpoint+key match), or None.
+        Prefs must pin what's IN EFFECT, not the last menu pick — a typed `/model <name>` keeps the
+        endpoint, so blindly re-saving the old pin resurrected a dead endpoint+model pairing at boot."""
+        lbase = getattr(llm, "_base_url", "") or ""
+        lkey = getattr(llm.client, "api_key", None)
+        for p, t in (cfg.providers() or {}).items():
+            if isinstance(t, dict) and t.get("api_key") and t["api_key"] == lkey \
+                    and (t.get("base_url") or "") == lbase:
+                return p
+        return None
+
     def _handle_slash(line):  # TUI navigation palette — wired to existing session ops
         nonlocal cfg          # /config hot-reloads the config after the in-session wizard
         parts = line.split(maxsplit=1)
@@ -499,9 +538,6 @@ def main() -> None:
         elif cmd == "/plan":
             s = session.active() if session.active_id else None
             plan = getattr(s, "plan", None) if s else None
-            mission = getattr(s, "mission", "") if s else ""
-            if mission:
-                _console.print(f"  🎯 mission: {mission}", markup=False)
             if not plan:
                 _console.print("  (no active plan — the agent sets one with update_plan on multi-step tasks)")
             else:
@@ -539,12 +575,15 @@ def main() -> None:
                 except Exception:
                     _console.print(f"  no such topic: {arg}", markup=False)
         elif cmd == "/undo":
-            _console.print("  " + base_tools.undo_last())   # revert the last file edit
+            # markup=False: undo_last() embeds the edited file PATH; a Next.js-style '[id]'/'[...slug]'
+            # segment is parsed as a Rich tag → corrupted output or a MarkupError crash.
+            _console.print("  " + base_tools.undo_last(), markup=False)   # revert the last file edit
         elif cmd == "/plugins":
             tools = sorted(e.name for e in base_tools.registry._tools.values()
                            if getattr(e, "source", "") == "plugin")
-            _console.print(f"  plugin dirs: {', '.join(cfg.plugin_dirs) or '(none configured)'}")
-            _console.print(f"  plugin tools ({len(tools)}): {', '.join(tools) or '(none loaded)'}")
+            # markup=False: plugin dirs are filesystem PATHS that may contain '[...]' (same Rich-tag hazard)
+            _console.print(f"  plugin dirs: {', '.join(cfg.plugin_dirs) or '(none configured)'}", markup=False)
+            _console.print(f"  plugin tools ({len(tools)}): {', '.join(tools) or '(none loaded)'}", markup=False)
         elif cmd == "/mcp":
             configured = list(cfg.mcp_servers.keys())
             mtools = sorted(e.name for e in base_tools.registry._tools.values()
@@ -595,8 +634,9 @@ def main() -> None:
                             _kw = {"base_url": _tbl.get("base_url") or "", "api_key": _tbl["api_key"]}
                     llm.switch(model=_model, reasoning=_reasoning, **_kw)
                     _stats["model"] = llm.model
+                    # pin the provider ACTUALLY in effect (None DELETES a stale pin — see save_prefs)
                     save_prefs({"model": llm.model, "reasoning": llm.reasoning,
-                                **({"provider": _pid} if _pid else {})})
+                                "provider": _pid or _live_pid()})
                     note = _reasoning_note(llm)
                     _console.print(f"  ✓ model → [bold]{llm.model}[/]"
                                    + (f" @ [bold]{_pid}[/]" if _pid else "")
@@ -619,7 +659,9 @@ def main() -> None:
                     _console.print("  effort must be one of: fast | full | high | max"); return True
                 llm.switch(model=name, reasoning=eff)
                 _stats["model"] = llm.model
-                save_prefs({"model": llm.model, "reasoning": llm.reasoning})
+                # typed /model keeps the endpoint — re-resolve the pin against the LIVE binding so a
+                # stale provider pin can't resurrect the old endpoint under this model at next boot
+                save_prefs({"model": llm.model, "reasoning": llm.reasoning, "provider": _live_pid()})
                 note = _reasoning_note(llm)
                 _console.print(f"  ✓ model → [bold]{llm.model}[/]"
                                + (f" · reasoning [bold]{llm.reasoning}[/]" if eff else "")
@@ -640,7 +682,7 @@ def main() -> None:
             if not arg:
                 _console.print(f"  workspace: {base_tools.root()}", markup=False)
             else:
-                _console.print("  ✓ " + _reroot(arg))
+                _console.print("  ✓ " + _reroot(arg), markup=False)   # path may contain '[...]' → Rich markup
         else:
             _console.print(f"  unknown command {cmd} (/help)", markup=False)
         return True

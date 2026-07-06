@@ -1,13 +1,25 @@
-# memagent.toml — persistent settings (copy to ./memagent.toml or ~/.memagent/config.toml).
-# Precedence: ENV var > project memagent.toml > user ~/.memagent/config.toml > default.
+# sliceagent.toml — persistent settings (copy to ./sliceagent.toml or ~/.sliceagent/config.toml).
+# Precedence: ENV var > project ./sliceagent.toml > user ~/.sliceagent/config.toml > default.
 # So an env var (e.g. AGENT_POLICY=allow) still overrides this file for one-off runs.
+#
+# Easiest path: run `sliceagent init` (or `/config` in-session) — it writes the [providers.<id>]
+# table + key for you (chmod 0600). Hand-editing this file is fully supported too.
+
+# --- providers: one [providers.<id>] table per LLM you've configured; `default_provider` picks one ---
+# (This is what `sliceagent init` writes. api_key is plaintext here, so keep the file 0600.)
+# [providers.deepseek]
+#   api_key = "sk-..."
+#   base_url = "https://api.deepseek.com/v1"
+#   model = "deepseek-chat"
 
 [agent]
-model = "gpt-5.5"            # AGENT_MODEL
-policy = "teenager"          # AGENT_POLICY: teenager (auto edits, ask on cmds) | baby-sitter (ask on all) | let-it-go (auto) — all block catastrophic
-mine = "deterministic"      # AGENT_MINE: deterministic | llm | off  (memem write loop)
-subagent_depth = 1          # AGENT_SUBAGENT_DEPTH: 0 disables spawn_subagent
-show_slice = false          # SHOW_SLICE: print the reconstructed slice each turn
+# default_provider = "deepseek"   # AGENT_PROVIDER: which [providers.<id>] table drives runs
+model = "deepseek-chat"           # AGENT_MODEL: the model id. NO built-in default — set it here, via a
+                                  # provider table, or AGENT_MODEL (else `sliceagent init` picks one).
+policy = "teenager"               # AGENT_POLICY: teenager (auto edits, ask on cmds) | baby-sitter (ask on all) | let-it-go (auto) — all block catastrophic
+mine = "deterministic"            # AGENT_MINE: deterministic | llm | off  (memem write loop)
+subagent_depth = 1                # AGENT_SUBAGENT_DEPTH: 0 disables spawn_subagent
+show_slice = false                # SHOW_SLICE: print the reconstructed slice each turn
 
 [sandbox]
 backend = "local"           # AGENT_SANDBOX: local (subprocess) | docker (container)
@@ -21,7 +33,7 @@ backend = "local"           # AGENT_SANDBOX: local (subprocess) | docker (contai
 # max_tokens = 200000         # AGENT_MAX_TOKENS: stop the turn past this ceiling
 
 [skills]
-# dirs = ["~/.memagent/skills", "./.memagent/skills"]   # SKILL.md packs (omit → built-in defaults)
+# dirs = ["~/.sliceagent/skills", "./.sliceagent/skills"]   # SKILL.md packs (omit → built-in defaults)
 
 # --- extension surfaces (consumed as those sub-phases land) ---
 # [mcp_servers.github]                 # ③.3: external MCP servers, surfaced as mcp__github__* tools
@@ -32,4 +44,4 @@ backend = "local"           # AGENT_SANDBOX: local (subprocess) | docker (contai
 #   url = "https://mcp.example.com"    # http/sse transport
 
 # [plugins]                            # ③.4: extra plugin directories
-#   dirs = ["./.memagent/plugins"]
+#   dirs = ["./.sliceagent/plugins"]

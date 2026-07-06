@@ -27,8 +27,9 @@ scratch/
 evals/prompt_ab/variants/
 evals/prompt_ab/runs/
 
-# local memagent state / monitor runtime (personal; not part of the repo)
-.memagent/
+# local sliceagent state / monitor runtime (personal; not part of the repo)
+.sliceagent/
+.memagent/          # legacy pre-rename state dir (ignore so an upgraded checkout stays clean)
 monitor/
 brain/
 .mindmux/
@@ -56,3 +57,6 @@ ROADMAP.md
 
 # all of docs/ is internal (architecture/spec/brand assets) — not published; untracked 2026-07-02
 docs/
+
+# ColBench raw HF dataset (huge; selected tasks are committed under evals/colbench/tasks/)
+evals/colbench/data/

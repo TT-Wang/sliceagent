@@ -7,7 +7,7 @@ HOW IT CAME OUT, replacing the raw head+tail tail-snippet.
 
 Adapted to sliceagent's tool names (file_operations / tools.py: read_file, write_file,
 edit_file/str_replace, append_to_file, run_command, list_files, execute_code, plus the
-sliceagent built-ins skill/new_topic/switch_topic/recall_history). Pure + deterministic →
+sliceagent built-ins skill/new_topic/switch_topic/search_history). Pure + deterministic →
 testable offline, no LLM.
 
 NO-TRANSCRIPT INVARIANT: this only formats already-stored episodic records for read-back; it
@@ -81,8 +81,8 @@ def summarize_tool_result(name: str, args: dict, output: str, *, failing: bool =
         tgt = args.get("goal") or args.get("task_id") or ""
         return f"[{name}] {_clip(tgt)}{fail}"
 
-    if name == "recall_history":
-        return f"[recall_history] -> {n} lines{fail}"
+    if name == "search_history":
+        return f"[search_history] -> {n} lines{fail}"
 
     # generic fallback: first one or two args + size
     hint = ""

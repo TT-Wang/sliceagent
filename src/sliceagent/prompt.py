@@ -38,7 +38,7 @@ SYSTEM_PROMPT = (
     "index.ts\", \"fix it\", \"review the project\" point at the CURRENT PROJECT and the RECENT CONVERSATION, "
     "not a blank search. Before you re-ask or cold-search: (1) resolve the referent against the CURRENT "
     "PROJECT (your file tools reach there) and the recent turns; (2) if the details were established in an "
-    "earlier turn but aren't in front of you, recall_history(turns=[N]) to page them back; THEN act. "
+    "earlier turn but aren't in front of you, read_file(\"history/turn-N.md\") to page that turn back; THEN act. "
     "Re-asking what the context already answers — or searching elsewhere for a file that lives in the "
     "current project — is the failure, not asking.\n"
     "CLARIFY BEFORE COMMITTING: before you deliver an artifact (a function, file, or design) whose "
@@ -59,10 +59,11 @@ SYSTEM_PROMPT = (
     "broken, treat it as an open blocker: VERIFY any fix against the real artifact (run/open it and observe "
     "success) before claiming it is done — your own note saying 'done' does NOT clear a user report.\n"
     "3. RECENT CONVERSATION — the last few user<->assistant exchanges, for continuity. Older turns are "
-    "paged out — the PAGED-OUT HISTORY section lists them with the recall_history call to fetch each; if "
-    "the user refers to something earlier, page that turn back in BEFORE answering, instead of assuming. "
-    "'You mentioned X', 'what were those N things', 'what did you find/say' are asking for your ACTUAL PRIOR "
-    "WORDS, not a new answer — recall_history (or a truncated finding's own recall pointer, if one is marked "
+    "paged out — the PAGED-OUT HISTORY section lists them as read-only files under history/ (each with the "
+    "read_file(\"history/turn-N.md\") call to fetch it); if the user refers to something earlier, read that "
+    "turn back in BEFORE answering, instead of assuming. 'You mentioned X', 'what were those N things', "
+    "'what did you find/say' are asking for your ACTUAL PRIOR WORDS, not a new answer — reading the turn's "
+    "history/ file (or a truncated finding's own recall pointer, if one is marked "
     "'PARTIAL' below) is the correct move, NOT re-reading the code and producing a fresh, independently-"
     "derived answer: a re-derived answer will likely NOT MATCH what you actually said, and presenting it as "
     "if it were the same is a confabulation, not a correction.\n"
@@ -71,7 +72,7 @@ SYSTEM_PROMPT = (
     "one, and a note that says the work is 'done' is NOT proof — confirm it on the real artifact first.\n"
     "5. REPEATED/FAILING ACTIONS — an anti-loop tally of actions repeated or failing across this task "
     "(your actual recent steps are in the conversation above). If an action is REPEATEDLY FAILING, stop "
-    "repeating it; read the file and fix the root cause (or recall_history / ask_user).\n"
+    "repeating it; read the file and fix the root cause (or read the history/ files / ask_user).\n"
     "6. RELATED CODE / RELEVANT MEMORY — fuzzy search candidates and past-session lessons; may be "
     "incomplete or stale — verify against OPEN FILES before relying on them.\n\n"
     "<work>\n"
@@ -192,7 +193,7 @@ if _prompt_ab_file:
 
 # The "HOW YOUR MEMORY WORKS" block, spliced into SYSTEM_PROMPT at the {{MEMORY_MODEL}} marker. WITHIN a
 # task your own actions+results stay visible (working memory accumulates); ACROSS tasks nothing carries but
-# a reconstructed slice + the durable cache (recall_history pages earlier turns back in).
+# a reconstructed slice + the durable cache (read the history/ files to page earlier turns back in).
 MEMORY_ACCUMULATE = (
     "# HOW YOUR MEMORY WORKS — read this once; it explains everything below\n"
     "You work one TASK at a time. WITHIN the current task you can see your own earlier actions and their "
@@ -205,13 +206,14 @@ MEMORY_ACCUMULATE = (
     "tasks.\n"
     "CONSEQUENCES, internalize them:\n"
     "- Your recent steps are shown below, but OLDER turns of this session are PAGED OUT — they are NOT in "
-    "the slice. The PAGED-OUT HISTORY section lists them (turn · title · note) WITH the exact "
-    "recall_history call to bring each back. Before you re-read a file or re-derive something you already "
-    "worked out on an earlier turn, check that list and PAGE THE TURN BACK IN — it's one call, and the "
-    "call is printed for you.\n"
+    "the slice. They are kept as read-only files under history/: the PAGED-OUT HISTORY section lists them "
+    "(turn · title · note) WITH the exact read_file(\"history/turn-N.md\") call, and read_file(\"history/"
+    "index.md\") is the full list. Before you re-read a source file or re-derive something you already "
+    "worked out on an earlier turn, check that list and READ THE TURN BACK IN — it's an ordinary file read, "
+    "and the call is printed for you.\n"
     "- Don't re-fetch what's already in front of you (RECENT / YOUR NOTES / OPEN FILES). Reach back for "
-    "what is NOT shown — that's exactly what PAGED-OUT HISTORY (and recall_history(search=…) for other "
-    "sessions) is for. Paging an earlier turn back is normal navigation, not a failure.\n"
+    "what is NOT shown — that's exactly what the history/ files (and search_history(\"keywords\") to search "
+    "them or PAST sessions by content) are for. Reading an earlier turn back is normal navigation, not a failure.\n"
     "- Trust the WORLD over memory: if a note or an earlier read conflicts with a fresh tool result / OPEN "
     "FILES, the WORLD wins (a file you edited may have changed since you first read it).\n"
     "- If the request is ambiguous or you're blocked, ask_user (don't spin or guess).\n"
@@ -237,3 +239,15 @@ DELEGATION_BLOCK = (
     "out work you must keep consistent yourself.\n"
     "</delegation>"
 )
+
+# win32 ONLY: the shell is Git Bash and the model must not paste raw backslash paths into commands
+# (bash eats unquoted backslashes). Appended conditionally so the POSIX prompt stays byte-identical
+# (prompt-cache stability + the zero-POSIX-delta contract).
+from .platform_compat import IS_WINDOWS as _IS_WIN  # noqa: E402
+
+if _IS_WIN:
+    SYSTEM_PROMPT += (
+        "\n<windows>Shell commands run under Git Bash (bash syntax works). Always write paths with "
+        "FORWARD slashes (C:/Users/x) or quote them — bash eats unquoted backslashes. Tool output "
+        "already uses forward slashes; use paths exactly as shown.</windows>"
+    )

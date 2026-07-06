@@ -1,0 +1,9 @@
+{
+  "name": "s3_intervalset_algebra",
+  "stressor": "long-horizon incremental algebra (each turn builds on the merged canonical form)",
+  "turns": 10,
+  "max_steps_per_turn": 14,
+  "use_code_index": false,
+  "source_note": "Hand-built stateful project: intervalset, an algebra over half-open integer intervals [start,end). Seed ships a NAIVE unmerged store (add() just appends raw pairs). Ten dependent turns replace it with a canonical sorted/merged form, then layer on length/overlaps/remove/shift, an adjacency-coalescing regression, union/intersection/difference, a split-on-remove regression, and gaps(). No third-party deps; stdlib only.",
+  "discriminator": "Turn 6 (adjacency) and turn 9 (interior-split remove) are regressions that only make sense if the agent still holds the exact canonical-merge invariant and the half-open [start,end) convention it wrote in turns 1 and 4 -- and turn 9 additionally demands that difference() from turn 8 stay consistent with the fixed remove(). A bounded-slice agent re-reads iset.py and the concrete contract each turn; a growing-transcript agent must keep all ten turns' decisions live and is likelier to leave merge coalescing strict-overlap-only or drop the right remainder on an interior remove."
+}

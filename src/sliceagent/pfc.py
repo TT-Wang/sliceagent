@@ -10,7 +10,7 @@ the moat (a cache keeps no history), task-agnosticism (a cache doesn't know what
 LLM-agnosticism (the cache contract sits below the model).
 
 IN BRAIN TERMS (a naming aid — see pagetable.py for the fuller legend): the Slice's own carried
-state (findings, conversation ring, plan, mission — see seal() below) is PREFRONTAL CORTEX /
+state (findings, conversation ring, plan — see seal() below) is PREFRONTAL CORTEX /
 working memory: bounded, actively maintained, free, lost on reset. This module owns exactly
 that region: the `Slice` dataclass, its lifecycle (reset/seal), and the functions that MUTATE
 it in place (touch_file, add_skill, record_user, consolidate_checkpoint, slice_sink). The
@@ -36,7 +36,6 @@ from .regions import (
     CONVO_MSG_CHARS,
     MAX_CONVERSATION,
     MAX_FINDINGS,
-    MAX_MISSION_CHARS,
     MAX_PLAN_CHARS,
     MAX_PLAN_ITEMS,
     MAX_REQUIREMENTS,
@@ -86,11 +85,6 @@ class Slice:
     # (acceptance criteria): this is the step sequence + progress. Replace-all via the update_plan tool
     # (folded by slice_sink). Carried by seal() (continuity), wiped by reset(). Bounded (MAX_PLAN_ITEMS).
     plan: list[dict] = field(default_factory=list)  # [{"step": str, "status": pending|in_progress|done}]
-    # MISSION — the NORTH-STAR objective / "why" framing the agent sets to stay oriented
-    # over a long multi-step task, ABOVE the literal `goal`. ONE string (inherently bounded); set via
-    # set_mission, cleared via mission_done. Self-suppresses when empty (no bloat). Carried by seal()
-    # across the task's turns; wiped by reset() (a brand-new task) — same lifecycle as requirements/plan.
-    mission: str = ""
     action_log: dict[str, dict] = field(default_factory=dict)
     active_files: list[str] = field(default_factory=list)
     last_error: str = ""
@@ -114,7 +108,6 @@ class Slice:
     since_edit: int = 0  # tool calls since the last successful edit — drives the EDIT convergence check
     turn_actions: int = 0  # tool calls THIS user turn — finding-INDEPENDENT (unlike since_edit, which resets
     # on every new finding); drives the explore-nudge so a read-heavy Q&A that records notes still converges
-    reviewed: list[str] = field(default_factory=list)  # history lookbacks done — the recall_history ratchet
     # I3 — OPEN USER REPORT. The user's most-recent FAILURE REPORT ("it can't play", "cd: no such
     # file"), captured verbatim as a BLOCKER the model must verify against the real artifact before
     # claiming done. A snapshot agent loses the dialectic — the user pushing back on a "done" claim —
@@ -124,10 +117,18 @@ class Slice:
     open_report: str = ""
     # CONTINUITY (short-range): a bounded ring of the last few user<->assistant exchanges so the slice
     # carries the immediate conversational thread (a snapshot agent otherwise loses "what we just said").
-    # Older turns are NOT here — they live in the durable episodic cache, paged in ON DEMAND via
-    # recall_history (the decompression path). `turns` counts user turns this topic (for the "+N older"
+    # Older turns are NOT here — they live in the durable episodic cache, paged in ON DEMAND by reading
+    # the history/ turn files (the decompression path). `turns` counts user turns this topic (for the "+N older"
     # pointer). Bounded => growth stays decoupled from conversation length (the moat).
     conversation: list[dict] = field(default_factory=list)  # [{user, assistant}], last MAX_CONVERSATION
+    # AUTHORITATIVE INTENT (full-range): every user message this topic, VERBATIM + uncapped. Unlike the
+    # short-range `conversation` ring (bounded to MAX_CONVERSATION, per-message gisted), a user's stated
+    # instruction/constraint is IRREDUCIBLE ground truth — it cannot be re-derived from disk or from an
+    # archived turn's gist. So it is the ONE part of the conversation that is never compacted: kept in
+    # full, forever. (T1 buried-detail fix: a constraint stated once early must survive to a later turn.
+    # Verbatim = no lossy extraction step — the exact step that dropped `40000` and substituted `65536`.
+    # These bytes never change turn-to-turn, so as a STABLE region they EXTEND the cacheable prefix.)
+    user_log: list[dict] = field(default_factory=list)  # [{turn, text}] verbatim, uncapped
     turns: int = 0
     # GHOST INDEX: bounded recovery POINTERS (references, not content) to things recently paged OUT of
     # the slice — an evicted read, a dropped skill. Turns "omission is unrecoverable" into a one-call
@@ -171,7 +172,6 @@ class Slice:
         self.goal = goal
         self.requirements = []   # a brand-new task starts with an EMPTY contract (model curates it in-band)
         self.plan = []           # a brand-new task starts with an empty plan (kept by seal() within a task)
-        self.mission = ""        # north-star objective — wiped on a brand-new task (kept by seal())
         self.action_log = {}
         self.active_files = []
         self.last_error = ""
@@ -183,9 +183,9 @@ class Slice:
         self.edited_files = set()
         self.since_edit = 0
         self.turn_actions = 0
-        self.reviewed = []
         self.open_report = ""
         self.conversation = []
+        self.user_log = []
         self.turns = 0
         self.ghosts = []
         self.protected_deps = set()
@@ -258,6 +258,9 @@ def record_user(s: Slice, message: str) -> None:
     Bounded ring — older exchanges live in the durable cache, paged in on demand (not kept here)."""
     s.turns += 1
     s.turn_actions = 0   # new user turn → reset the per-turn exploration budget (drives the explore-nudge)
+    # VERBATIM, uncapped — the authoritative user-intent record (see user_log field note). Full message,
+    # NOT one_line'd: the whole point is that a precise constraint stated here is never truncated/dropped.
+    s.user_log.append({"turn": s.turns, "text": message})
     s.conversation.append({"user": one_line(message, CONVO_MSG_CHARS), "assistant": ""})
     s.conversation = s.conversation[-MAX_CONVERSATION:]
 
@@ -295,27 +298,6 @@ def consolidate_checkpoint(s: "Slice", *, compact: bool = True) -> str:
     return "\n".join(lines)
 
 
-def _history_mark(args: dict) -> str:
-    """A short label for a recall_history lookback, so the slice records WHAT was already reviewed."""
-    if not isinstance(args, dict):
-        return ""
-    full = "·full" if args.get("full") else ""
-    if args.get("turns"):
-        nums = []
-        for t in (args["turns"] if isinstance(args["turns"], (list, tuple)) else []):
-            try:
-                nums.append(int(t))
-            except (TypeError, ValueError):
-                pass   # a malformed turn id is just a bad display label — never abort the slice fold
-        return f"turns={sorted(nums)}" + full
-    if args.get("last"):
-        try:
-            return f"last={int(args['last'])}" + full
-        except (TypeError, ValueError):
-            return "index"
-    return "index"
-
-
 def slice_sink(state):
     """Event sink that folds tool results back into the tiers (keeps the loop decoupled). `state`
     is a Slice or a Session — events fold into the CURRENT active slice (so a topic switch redirects
@@ -337,7 +319,7 @@ def slice_sink(state):
                 full = event.content
                 s.conversation[-1]["assistant"] = one_line(full, CONVO_MSG_CHARS)
                 # RECALL BRIDGE (core cross-turn continuity): flag when the reply was CUT to the gist, so
-                # the NEXT turn's RECENT CONVERSATION advertises the recall_history call to page the FULL
+                # the NEXT turn's RECENT CONVERSATION points at the turn's history/ file to read the FULL
                 # reply back. Without this the model reads an 800-char gist as the complete reply and
                 # confabulates anything past it ("explain item 2" of a long report it can no longer see)
                 # instead of recalling — the failure the whole cache-not-log design exists to prevent.
@@ -396,11 +378,6 @@ def slice_sink(state):
                     if _step:
                         _new.append({"step": _step, "status": _st})
                 s.plan = _new
-            # MISSION (north star) — fold set_mission/mission_done (the handler only confirms; STATE here).
-            elif event.name == "set_mission" and not event.failing:
-                s.mission = " ".join(str(event.args.get("text", "")).split())[:MAX_MISSION_CHARS]
-            elif event.name == "mission_done" and not event.failing:
-                s.mission = ""
             # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
             # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
             # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
@@ -411,9 +388,6 @@ def slice_sink(state):
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
                 # next turn (no transcript). The skill tool returns the body as its output.
                 add_skill(s, event.args.get("name", ""), event.output)
-            if event.name == "recall_history" and not event.failing:
-                # RATCHET (via SwapManager): record the lookback so render_reviewed shows it next rebuild.
-                _DEFAULT_SWAP.note_review(s, _history_mark(event.args))
             # list_files/grep/glob "path" is a DIRECTORY scope, not a working-set FILE — don't pin it (else
             # build_artifacts read_text(dir) → IsADirectoryError → a bogus OPEN FILES entry every turn).
             if event.args.get("path") and event.name not in ("list_files", "grep", "glob"):

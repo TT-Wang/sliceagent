@@ -15,10 +15,9 @@ import os
 import re
 
 from .safety import wrap_untrusted
-from .swap import MAX_REVIEWED
 from .text_utils import normalize_ws, one_line
 
-MANIFEST_TURNS = 8       # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
+MANIFEST_TURNS = 50      # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
 MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of parked topics
 MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
@@ -28,7 +27,6 @@ MAX_REQ_CHARS = 300      # each requirement is ONE compact line (contracts — a
 MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
 MAX_PLAN_CHARS = 300     # each plan step is ONE compact line (multi-file scope must survive)
 _PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
-MAX_MISSION_CHARS = 500  # the MISSION (session north-star) is ONE compact objective line (don't clip scope)
 
 MAX_REPORT_CHARS = 280   # OPEN USER REPORT — one compact verbatim line (bounded; never a transcript)
 MAX_ACTION_LOG = 24      # bounded anti-loop tally (no-transcript: the action_log can't grow per-topic forever)
@@ -58,26 +56,15 @@ _NO_CAP = 1_000_000
 # real definition directly). Kept importable from regions too for the existing call sites here.
 
 
-def render_reviewed(s) -> str:
-    """The recall_history RATCHET tier — lookbacks already done this task, so the model sees the
-    lookback advanced the state (and doesn't re-fetch the SAME turn). Only rendered when something's
-    been reviewed. Non-suppressive wording: it guards against re-fetching what's already paged in, but
-    still invites fetching a DIFFERENT turn (recall is a normal read, not a smell)."""
-    if not s.reviewed:
-        return ""
-    return ("# HISTORY REVIEWED (already paged in this task — their content is in YOUR NOTES / RECENT "
-            "above; fetch a DIFFERENT turn from PAGED-OUT HISTORY if you need more)\n"
-            f"{', '.join(s.reviewed[-MAX_REVIEWED:])}\n\n")
-
-
 def render_cache_manifest(refs) -> str:
     """PAGED-OUT HISTORY body: one locator line per earlier turn of THIS session (NOT in the slice),
-    each ending with the EXACT call to page it back — so reaching back is copy-paste, not a blind
-    guess. This is the TRIGGER the dead recall channel was missing: a cache the model can't see is a
-    cache it never calls (the read-side analogue of REPO MAP advertising file paths). ``refs`` are
-    locator-only PageRefs from PageTable._episodes_thissession (ONE read seam); this is pure
-    formatting. MOAT: locators only — turn/title/breadcrumb, never content; the turn's body pages in
-    on demand and is bounded by recall_history's own caps."""
+    each ending with the EXACT read_file call to page it back — so reaching back is copy-paste, not a
+    blind guess. This is the TRIGGER the dead recall channel was missing: a cache the model can't see is
+    a cache it never calls (the read-side analogue of REPO MAP advertising file paths). The turns are
+    read-only VIRTUAL files under history/ — the model reaches for read_file far more readily than a
+    bespoke recall tool (measured 2026-07-06). ``refs`` are locator-only PageRefs from
+    PageTable._episodes_thissession (ONE read seam); this is pure formatting. MOAT: locators only —
+    turn/title/breadcrumb, never content; the turn's body is served on demand from the bounded seal."""
     if not refs:
         return ""
     lines = []
@@ -85,7 +72,7 @@ def render_cache_manifest(refs) -> str:
         if r.handle == "…older":
             lines.append(f"- {r.preview}")          # the "+N earlier" tail (no single-turn call)
         else:
-            lines.append(f"- {r.preview}  → recall_history(turns=[{r.handle}])")
+            lines.append(f'- {r.preview}  → read_file("history/turn-{r.handle}.md")')
     return "\n".join(lines)
 
 
@@ -131,6 +118,21 @@ def render_threads(refs) -> str:
     return "\n".join(lines)
 
 
+def render_user_log(s) -> str:
+    """USER INSTRUCTIONS tier: EVERY user message this topic, verbatim, in order — the authoritative
+    record of what was asked. The user's stated intent/constraints are IRREDUCIBLE ground truth (they
+    cannot be re-derived from disk or from an archived turn's gist), so unlike the RECENT CONVERSATION
+    ring this is uncapped and never truncated. Excludes the in-progress turn (it renders separately as
+    CURRENT REQUEST at the salient tail). Empty until there is at least one PRIOR user message."""
+    log = getattr(s, "user_log", None)
+    if not log:
+        return ""
+    prior = log[:-1]   # the last entry is the current turn's message == the CURRENT REQUEST
+    if not prior:
+        return ""
+    return "\n".join(f"- [turn {e['turn']}] {e['text']}" for e in prior)
+
+
 def render_conversation(s) -> str:
     """The RECENT CONVERSATION tier: the last few COMPLETED user<->assistant exchanges (the in-progress
     one is excluded — its user message is the current task). Ends with a pointer to recall the rest."""
@@ -138,19 +140,20 @@ def render_conversation(s) -> str:
     if not prior:
         return ""
     lines = []
-    n = len(prior)
-    for idx, e in enumerate(prior):
+    for e in prior:
         lines.append(f"- user: {e['user']}")
         if e.get("assistant"):
             lines.append(f"  you:  {e['assistant']}")
             if e.get("truncated"):
-                # the gist above is a CUT of a longer reply — advertise the exact recall so the model pages
-                # the FULL text back instead of confabulating detail past the cut (last=1 == this reply).
-                lines.append(f"        ⋯ (shortened to a gist — recall_history(last={n - idx}) for the FULL "
-                             f"reply before answering about its specifics; do NOT guess past the cut)")
+                # the gist above is a CUT of a longer reply — point at the history/ files so the model pages
+                # the FULL text back instead of confabulating detail past the cut. This reply is one of the
+                # turns listed in PAGED-OUT HISTORY below (each with its read_file("history/turn-N.md") call).
+                lines.append("        ⋯ (shortened to a gist — read the FULL reply from its turn file in "
+                             "PAGED-OUT HISTORY below, read_file(\"history/index.md\") to find it, before "
+                             "answering about its specifics; do NOT guess past the cut)")
     older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
     tail = (f"\n(+{older} earlier turn(s) this session not shown — they're listed in PAGED-OUT HISTORY "
-            "below; recall_history(turns=[N]) to view any)") if older > 0 else ""
+            "below; read_file(\"history/turn-N.md\") to view any)") if older > 0 else ""
     return "\n".join(lines) + tail
 
 
@@ -190,14 +193,13 @@ def is_done_claim(text: str) -> bool:
 # Found live TWICE via two independent cut sites (a bug-hunt reply cut in the RECENT CONVERSATION ring, then
 # again cut here in FINDINGS/OPEN USER REPORT) — any NEW site that bounds model- or user-authored text with
 # one_line() should go through this helper rather than a bare one_line() call.
-_RECALL_ON_CUT_MARK = " [cut — PARTIAL; see PAGED-OUT HISTORY or recall_history(search=...) for the rest, don't guess]"
+_RECALL_ON_CUT_MARK = ' [cut — PARTIAL; see PAGED-OUT HISTORY (history/ files) or search_history("...") for the rest, don\'t guess]'
 
 
 def _cut_with_recall_marker(text: str, cap: int) -> str:
     """one_line(text, cap), but if the cut actually removed content, replace the tail with a marker
-    naming the cut + the two general recall paths (no turn number is available at these call sites,
-    unlike the RECENT CONVERSATION ring which knows an exact recall_history(last=K)) + an explicit
-    don't-guess instruction."""
+    naming the cut + the two general recall paths (the history/ files listed in PAGED-OUT HISTORY, and
+    search_history for content across sessions) + an explicit don't-guess instruction."""
     was_cut = len(one_line(text, cap + 1)) > cap
     if not was_cut:
         return one_line(text, cap)
@@ -610,33 +612,39 @@ def render_now(hints: str = "") -> str:
 # # YOUR NOTES / the # OPEN USER REPORT blocker / the # REPEATED-FAILING header all live in the
 # literals below — relocated verbatim from render_slice, not duplicated.)
 REGION_ORDER = (
+    # ──────────── TIER 1 · INTENT — what the user wants (the contract). STABLE, slot-0: leads the cache prefix. ────────────
     # STANDING REQUIREMENTS — the live contract that must hold when the task is DONE: a model-curated set
     # of constraints (exact signature, output format, stated rule, an added requirement), maintained in-band
     # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
     # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
     # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
-    # MISSION — the session-spanning NORTH STAR (goal mode): the overarching objective that persists
-    # ACROSS topic switches, above any single topic's goal. Self-suppresses when unset → zero bytes by
-    # default (no bloat), real opt-in-by-use feature. STABLE/slot-0, changes rarely → prefix stays cache-warm.
-    ("mission",        STABLE,   lambda c: (f"# MISSION (your overarching objective for this whole session — keep steering toward it across tasks until you call mission_done)\n{c['s'].mission}\n\n" if getattr(c['s'], 'mission', '') else ""), 0),
     ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
+    # USER INSTRUCTIONS — every prior user message this session, VERBATIM + uncapped. The user's stated
+    # intent/constraints are irreducible ground truth (unre-derivable from disk or an archived gist), so
+    # they are the one part of the conversation never compacted. STABLE/slot-0: these bytes never change
+    # turn-to-turn, so they EXTEND the cacheable prefix. (T1 buried-detail fix — a constraint stated once
+    # early survives to a much later turn; 'later supersedes earlier' handles corrections.)
+    ("user_log",       STABLE,   lambda c: (f"# USER INSTRUCTIONS (every request you've been given this session, verbatim — the authoritative record of what was asked; honor every still-applicable one, and a LATER statement supersedes an earlier one it contradicts)\n{render_user_log(c['s'])}\n\n" if render_user_log(c['s']) else ""), 0),
+    # ──────────── TIER 2 · GROUND TRUTH — the world, re-derived from durable stores each turn. ────────────
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this. Lines are numbered for citation/reference; the leading number is NOT part of the file — never include it in a str_replace old_string)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
     # REPO MAP moved to the BYTE-STABLE system prefix (make_build_slice) so it's a prompt-cache PREFIX
     # shared across every turn + subagent, instead of full-price in the volatile user slice. (Region removed.)
     ("skills",         STABLE,   lambda c: (f"# ACTIVE SKILL(S) (loaded instructions — FOLLOW these for the task)\n{render_skills(c['s'].active_skills)}\n\n" if render_skills(c["s"].active_skills) else ""), 2),
     ("memory",         STABLE,   lambda c: (f"# RELEVANT MEMORY (lessons from past sessions — apply if useful)\n{c['memory']}\n\n" if c["memory"] else ""), 2),
-    ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the recall_history call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
+    # ──────────── TIER 3 · MY STATE — what the agent has established / is doing. ────────────
+    ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the read_file(\"history/turn-N.md\") call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (established facts to REUSE — don't re-derive these; OPEN FILES stays the ground truth for current file contents. Per-note tags mark trust: no tag = observed, '(your note)' = your summary, '(UNVERIFIED claim)' = not yet confirmed)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
     ("plan",           VOLATILE, lambda c: (f"# PLAN (your ordered steps & live progress — keep exactly ONE step in_progress; '[~]'=in progress, '[x]'=done, '[ ]'=pending; update with update_plan)\n{render_plan(c['s'].plan)}\n\n" if getattr(c['s'], 'plan', None) else ""), 3),
     ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
-    ("reviewed",       VOLATILE, lambda c: render_reviewed(c["s"]), 3),
+    # ──────────── TIER 4 · RECALL — paged out of the slice; fetched on demand. ────────────
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
     # PAGED-OUT HISTORY — the cache MANIFEST: earlier turns of THIS session that are NOT in the slice,
-    # each with the exact recall_history call to page it back. Sits beside GHOST INDEX (same "it's paged
-    # out, here's the one call to get it" idiom — files there, turns here) so the model has a SEEN target
-    # to call; an unseen cache is the dead channel. Locators only (moat); suppresses itself when empty.
-    ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; page any back with the call shown)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    # each with the exact read_file("history/turn-N.md") call to page it back (they're read-only virtual
+    # files under history/). Sits beside GHOST INDEX (same "it's paged out, here's the one call to get it"
+    # idiom) so the model has a SEEN target to read; an unseen cache is the dead channel. Locators only.
+    ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; they are read-only files under history/ — read any back with the call shown, read_file(\"history/index.md\") for the full list, or search_history(\"keywords\") across sessions)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    # ──────────── TIER 5 · STEERING & LIVE STATE — what's wrong / where things stand (VOLATILE, high-authority tail). ────────────
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part

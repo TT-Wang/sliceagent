@@ -1,5 +1,5 @@
 """NEOCORTEX — the long-term / semantic memory: distilled lessons, auto-surfaced every turn with no
-tool call (unlike HIPPOCAMPUS's explicit, cue-dependent recall_history). Two sides live in this one
+tool call (unlike HIPPOCAMPUS's explicit reads of the history/ files). Two sides live in this one
 module: `NeocortexMixin` (recall/remember/mark_used, the memem-backed cross-session lesson store
 mixed into MememMemory in memory.py) and the CONSOLIDATION pipeline (the cache→long-term step that
 distills the episodic cache into those lessons, plus reusable skills).
@@ -87,6 +87,8 @@ def _is_secret(text: str) -> bool:
 def _by_task(records: list[dict]) -> list[list[dict]]:
     groups: dict[str, list[dict]] = {}
     for r in records:
+        if not isinstance(r, dict):      # a malformed episodic line (null/list/partial write, old schema)
+            continue                     # must not crash consolidation → silently DISCARD ALL lessons this session
         groups.setdefault(r.get("task_id", ""), []).append(r)
     return [sorted(g, key=lambda r: r.get("turn", 0)) for g in groups.values()]
 
@@ -98,7 +100,7 @@ def promote_episodes(records: list[dict]) -> list[dict]:
     # pass 1: collect the corrective pitfall of each task + count signatures (frequency, #4)
     cand = []
     for recs in _by_task(records):
-        rmeta = [r.get("record", {}) for r in recs]
+        rmeta = [(r.get("record") if isinstance(r.get("record"), dict) else {}) for r in recs]  # {"record": null} → {} (not None)
         had_fail = any(m.get("meta", {}).get("failing") for m in rmeta)
         last = rmeta[-1].get("meta", {})
         if not (had_fail and last.get("stop_reason") == "end_turn" and not last.get("failing")):
@@ -167,17 +169,18 @@ Author the skill to this standard:
 def build_learn_prompt(user_request: str = "") -> str:
     """B2 (/learn): build ONE prompt that has the LIVE agent distill a reusable skill from
     the source the user named and save it via the `write_skill` tool. No separate distill engine + no new
-    LLM seam (llm-agnostic, works on any backend); the agent reads THIS session from the CACHE via
-    recall_history (never the slice), honoring the cache-only-distill invariant."""
+    LLM seam (llm-agnostic, works on any backend); the agent reads THIS session from the CACHE via the
+    history/ files (never the slice), honoring the cache-only-distill invariant."""
     req = (user_request or "").strip() or ("the workflow we just went through in this session - review the "
                                             "steps taken and distill them into a reusable skill")
     return (
         "[/learn] Distill a REUSABLE SKILL from the source below and save it with the write_skill tool.\n\n"
         f"WHAT TO LEARN FROM:\n{req}\n\n"
         "Do this:\n"
-        "1. Gather the material with the tools you already have: recall_history (review THIS session's "
-        "earlier turns - the lossless cache), read_file / grep for files, the recent conversation for "
-        "'what we just did'. If the scope is ambiguous, make a reasonable choice and note it; do not stall.\n"
+        "1. Gather the material with the tools you already have: read_file(\"history/index.md\") then the "
+        "turn files (review THIS session's earlier turns - the lossless cache), read_file / grep for files, "
+        "the recent conversation for 'what we just did'. If the scope is ambiguous, make a reasonable choice "
+        "and note it; do not stall.\n"
         "2. Call write_skill ONCE with a name, a <=60-char description, and the body. After it succeeds, "
         "tell the user the skill name and a one-line summary of what it captured.\n\n"
         f"{_LEARN_STANDARDS}"
@@ -222,7 +225,7 @@ def promote_procedures(records: list[dict], *, min_actions: int = PROC_MIN_ACTIO
     EverOS rule), capped. Pure. Returns {kind, name, description, steps, files, freq, tags}."""
     cand = []
     for recs in _by_task(records):
-        rmeta = [r.get("record", {}) for r in recs]
+        rmeta = [(r.get("record") if isinstance(r.get("record"), dict) else {}) for r in recs]  # {"record": null} → {} (not None)
         if any(m.get("meta", {}).get("failing") for m in rmeta):
             continue                                   # corrective → a fact, not a procedure
         last = rmeta[-1].get("meta", {})

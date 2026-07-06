@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 # An EXPLORER's read-only surface — the single source of truth (subagent.py imports this).
 # `grep` (find by CONTENT) + `glob` (find by NAME) are the two discovery tools; both read-only.
-READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "recall_history", "code_review")
+READ_ONLY_TOOLS = ("read_file", "list_files", "grep", "glob", "skill", "search_history", "code_review")
 _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against this KNOWN-safe set (pessimistic)
 
 # Tools NO subagent may use, regardless of its allowlist. A
@@ -29,7 +29,6 @@ SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user"})
 WRITE_TOOLS = frozenset({
     "edit_file", "append_to_file", "str_replace", "run_command", "execute_code",
     "world_set", "world_clear", "require", "drop_requirement", "requirement_done", "update_plan",
-    "set_mission", "mission_done",
     "terminal_open", "terminal_send", "terminal_read", "terminal_wait", "terminal_close",
     "proc_start", "proc_poll", "proc_tail", "proc_wait", "proc_kill",
     "spawn_subagent", "spawn_explore", "spawn_agent",

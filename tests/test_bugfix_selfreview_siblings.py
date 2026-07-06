@@ -40,7 +40,7 @@ def readonly_and_ask_are_deny_by_default():  # Class 3 / policy
 
 @check
 def guardrail_treats_unknown_and_nonfile_builtins_as_mutators():  # Class 3 / guardrails
-    for reader in ("read_file", "list_files", "recall_history", "grep", "glob", "ask_user"):
+    for reader in ("read_file", "list_files", "search_history", "grep", "glob", "ask_user"):
         assert reader in _NON_MUTATORS, f"{reader} should be a known non-mutator"
     for mut in ("edit_file", "world_set", "terminal_open", "proc_start", "update_plan",
                 "some_unknown_mcp_tool"):

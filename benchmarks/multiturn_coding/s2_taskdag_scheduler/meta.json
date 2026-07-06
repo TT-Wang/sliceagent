@@ -1,0 +1,9 @@
+{
+  "name": "s2_taskdag_scheduler",
+  "stressor": "long-horizon dependent feature build (history matters)",
+  "turns": 10,
+  "max_steps_per_turn": 14,
+  "use_code_index": false,
+  "source_note": "Hand-built stateful project: taskdag, a deterministic task scheduler over a dependency graph. Seed ships only graph construction (add_task/add_dependency/tasks/dependencies). Ten dependent turns add Kahn topo_order, cycle safety, ready(done), waves(), remove_task, a plain run(), a remove_task dangling-edge regression fix, failure-aware run(), a transitive-skip regression fix, and to_dict/from_dict serialization. No third-party deps; stdlib only; deterministic (alphabetical tie-breaks, no time/randomness).",
+  "discriminator": "Turns 7 and 9 are regressions that only make sense if the agent still recalls the exact adjacency representation (name -> set of direct deps), the alphabetical Kahn tie-break from turn 1, the wave levelling from turn 4, and the failure/skip status contract from turn 8 it wrote earlier. A naive remove_task that only drops the task's own entry (leaving dependents pointing at a deleted node) or a naive failure-run that only skips DIRECT dependents both pass their own turn superficially but are caught by the cumulative probe; a bounded-slice agent re-reads scheduler.py and the concrete contract each turn, while a growing-transcript agent must keep all ten turns' decisions live and is likelier to reintroduce the dangling edge or the shallow-skip bug."
+}

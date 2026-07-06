@@ -1,0 +1,9 @@
+{
+  "name": "s1_longhorizon_debug",
+  "stressor": "long-horizon iterative debugging (history matters)",
+  "turns": 6,
+  "max_steps_per_turn": 12,
+  "use_code_index": false,
+  "source_note": "Hand-built stateful project: tinykv, an in-memory KV store with a layer-stack transaction design. Seed ships single-level transactions; six dependent turns add nesting, nesting-aware tombstones, keys/items views, an atomic numincr, a regression fix for nested-abort corruption, and a committed-only snapshot(). No third-party deps; stdlib only.",
+  "discriminator": "Turn 5 is a regression that only makes sense if the agent still recalls the _TOMBSTONE sentinel, the _layers stack, and the exact commit/rollback fold semantics it wrote in turns 1-2 and the numincr from turn 4; a bounded-slice agent re-reads store.py and the concrete contract each turn, while a growing-transcript agent must keep all six turns' decisions live and is likelier to reintroduce the parent-layer tombstone leak."
+}

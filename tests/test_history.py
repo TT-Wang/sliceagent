@@ -1,4 +1,4 @@
-"""recall_history tool + read_episodes tests. No model, no pytest.
+"""history/ virtual files (HistoryFS) + search_history + read_episodes tests. No model, no pytest.
 Run: python tests/test_history.py
 """
 import os
@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.hippocampus import make_history_tool, render_full, render_index, render_trace  # noqa: E402
+from sliceagent.hippocampus import render_search, render_trace  # noqa: E402
 from sliceagent.memory import NullMemory  # noqa: E402
 
 CHECKS = []
@@ -46,42 +46,20 @@ def append_and_read_roundtrip_with_ts_topic_title():
 
 
 @check
-def index_shows_breadcrumbs():
-    lines = [{"task_id": "t-aaa", "turn": 1, "ts": "2026-06-16T12:30:00",
-              "record": _rec("fix the parser", "off-by-one in tokenizer", [{"slice": "", "action": [], "observation": []}])}]
-    idx = render_index(lines)
-    assert "turn 1" in idx and "fix the parser" in idx and "off-by-one" in idx and "t-aaa" in idx and "12:30" in idx
-
-
-@check
-def tool_no_args_returns_index():
+def historyfs_over_durable_memem_roundtrip():
+    """HistoryFS reads the SAME durable episodic cache the write side flushes — index + turn file."""
     try:
         m = _memem()
     except Exception:
-        print("  (skip)"); return
-    m.append_episode("s1", "t1", 1, _rec("task one", "did a thing", [{"slice": "", "action": [], "observation": []}]))
-    tool = make_history_tool(m, "s1")
-    out = tool.handler({})
-    assert "CACHED HISTORY" in out and "task one" in out
-
-
-@check
-def tool_fetch_trace_and_specific_turn():
-    try:
-        m = _memem()
-    except Exception:
-        print("  (skip)"); return
-    m.append_episode("s1", "t1", 1, _rec("t-one", "n1",
-                     [{"slice": "SL1", "action": [{"name": "run_command", "args": {"command": "pytest"}, "failing": True}],
-                       "observation": ["FAILED 3 tests"]}]))
-    m.append_episode("s1", "t1", 2, _rec("t-two", "n2", [{"slice": "SL2", "action": [], "observation": []}]))
-    tool = make_history_tool(m, "s1")
-    last = tool.handler({"last": 1})
-    assert "turn 2" in last and "turn 1" not in last              # only the most recent
-    one = tool.handler({"turns": [1]})
-    assert "run_command" in one and "FAILED 3 tests" in one and "n1" in one   # action+obs+note
-    full = tool.handler({"turns": [1], "full": True})
-    assert "SL1" in full                                          # full mode returns the stored slice
+        print("  (skip: memem not importable)"); return
+    from sliceagent.hippocampus import HistoryFS
+    m.append_episode("s1", "t1", 1, _rec("task one", "did a thing",
+                     [{"slice": "", "action": [{"name": "run_command", "args": {"command": "pytest"},
+                                                "failing": True}], "observation": ["FAILED 3 tests"]}]))
+    fs = HistoryFS(m, "s1")
+    assert "turn-1.md" in fs.read_file("history/index.md") and "task one" in fs.read_file("history/index.md")
+    t1 = fs.read_file("history/turn-1.md")
+    assert "run_command" in t1 and "FAILED 3 tests" in t1 and "did a thing" in t1   # action+obs+note
 
 
 @check
@@ -97,87 +75,172 @@ def trace_has_no_read_cap_but_bounds_per_obs_at_the_seal():
 
 
 @check
-def trace_and_full_return_the_full_conclusion_for_a_large_turn():
-    # the 'can't locate my second finding' read-side bug: a big turn's conclusion (markdown tail) must survive,
-    # and `full` must surface the note (the agent's reply lives there, NOT in the seed slice).
+def trace_returns_the_full_conclusion_for_a_large_turn():
+    # the 'can't locate my second finding' read-side bug: a big turn's conclusion (markdown tail) must
+    # survive with no read cap — render_trace backs each history/turn-N.md file.
     concl = "Finding 6: tab links drop string[] params."
     big_md = "## seed\n" + ("filler " * 5000) + f"\n\n## conclusion\n{concl}"
     line = {"task_id": "t", "turn": 7, "ts": "2026-06-16T12:00:00",
             "record": {"title": "review page.tsx", "note": concl, "markdown": big_md,
                        "steps": [{"slice": "seed-slice-body"}], "meta": {}}}
     assert concl in render_trace([line]), "the conclusion at the markdown tail must survive (no read cap)"
-    assert concl in render_full([line]), "full mode must surface the note/conclusion, not just the seed slice"
 
 
 class _FakeMem:
-    def __init__(self, lines):
+    def __init__(self, lines, hits=None):
         self._lines = lines
+        self._hits = hits or []          # search_episodes results (for search_history tests)
     def read_episodes(self, session_id, *, limit=None):
         return self._lines
-
-
-@check
-def repeat_redirected_but_distinct_search_allowed():
-    lines = [{"task_id": "t", "turn": i, "ts": "2026-06-16T12:00:00",
-              "record": _rec(f"turn{i}", "note", [{"slice": f"S{i}", "action": [], "observation": []}])}
-             for i in range(1, 15)]
-    fake = _FakeMem(lines)
-    tool = make_history_tool(fake, "s")
-    a = tool.handler({"turns": [1]})
-    assert "turn 1" in a and "Record what you need" in a            # served + capture-back
-    b = tool.handler({"turns": [1]})                                # EXACT repeat → redirect, no re-dump
-    assert "already pulled" in b and "S1" not in b
-    for i in range(2, 9):                                           # 7 more DISTINCT drills (never blocked)
-        assert f"turn {i}" in tool.handler({"turns": [i]}), f"distinct fetch {i} must be served"
-    over = tool.handler({"turns": [9]})                            # past the generous backstop → to index
-    assert "index" in over.lower() and "turn 9" not in over
-    assert "CACHED HISTORY" in tool.handler({})                    # index is free (not counted as a drill)
-    assert "already pulled" in tool.handler({})                    # repeat index → redirect
-    fake._lines = lines + [dict(lines[0], turn=99)]               # cache grew → new turn → rein resets
-    assert "turn 1" in tool.handler({"turns": [1]})               # can drill again
-
-
-@check
-def ratchet_folds_lookback_into_slice():
-    from sliceagent.events import ToolResult
-    from sliceagent.pfc import Slice, slice_sink
-    from sliceagent.regions import render_reviewed
-    s = Slice(); s.reset("task")
-    sink = slice_sink(s)
-    sink(ToolResult("recall_history", {}, "index", False))            # index lookback
-    sink(ToolResult("recall_history", {"turns": [3]}, "trace", False))  # a drill
-    assert "index" in s.reviewed and "turns=[3]" in s.reviewed         # advanced the slice state
-    sink(ToolResult("recall_history", {}, "index", False))            # repeat → deduped
-    assert s.reviewed.count("index") == 1
-    rev = render_reviewed(s)
-    # reframed (smell -> first-class): guards against re-fetching what's already paged in, while still
-    # inviting a DIFFERENT turn — non-suppressive, but the ratchet still renders the reviewed entries.
-    assert "HISTORY REVIEWED" in rev and "already paged in" in rev and "turns=[3]" in rev
-    s2 = Slice(); s2.reset("t")
-    slice_sink(s2)(ToolResult("recall_history", {}, "boom", True))    # failing lookback → not recorded
-    assert s2.reviewed == [] and render_reviewed(s2) == ""
-
-
-@check
-def reviewed_is_temporal_not_permanent():
-    # the ratchet must clear between directives/turns, or a past lookback contaminates future moves
-    from sliceagent.memory import NullMemory
-    from sliceagent.session import Session
-    from sliceagent.pfc import Slice
-    s = Slice(); s.reset("task A"); s.reviewed = ["index", "turns=[3]"]
-    s.reset("task B")
-    assert s.reviewed == []                              # new_topic / reset → clean slate
-    sess = Session(NullMemory(), "s")
-    sess.new_topic("do X"); sess.active().reviewed = ["index"]
-    sess.continue_topic("now do Y")
-    assert sess.active().reviewed == []                  # a new directive clears it
+    def search_episodes(self, query, *, limit=8, exclude_session=None, only_session=None):
+        return list(self._hits)          # ignores query — the test controls the hits directly
 
 
 @check
 def nullmemory_has_no_history():
+    from sliceagent.hippocampus import HistoryFS
     m = NullMemory()
     assert m.read_episodes("s1") == []
-    assert "No cached history" in make_history_tool(m, "s1").handler({})
+    assert "no earlier turns yet" in HistoryFS(m, "s1").read_file("history/index.md")
+
+
+# ── history/ virtual read-only namespace (HistoryFS + LocalToolHost routing) ──────────────────────────
+def _hist_lines():
+    return [
+        {"task_id": "t1", "turn": 1, "ts": "2026-07-06T12:30:00",
+         "record": _rec("fix the parser", "off-by-one in tokenizer",
+                        [{"slice": "SL1", "action": [{"name": "read_file", "args": {"path": "p.py"}, "failing": False}],
+                          "observation": ["contents"]}])},
+        {"task_id": "t1", "turn": 2, "ts": "2026-07-06T12:40:00",
+         "record": {"title": "provision box", "note": "pass",
+                    "markdown": "# provision box\n## what happened\n- [run_command] ./provision.sh -> ok\n"
+                                "    provisioned id: needle-pv-42\n",
+                    "steps": [{"slice": "S2", "action": [], "observation": []}],
+                    "meta": {"failing": False, "stop_reason": "end_turn", "files": []}}},
+    ]
+
+
+@check
+def historyfs_index_lists_turns_as_files():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    idx = fs.read_file("history/index.md")
+    assert "turn-1.md" in idx and "turn-2.md" in idx           # each turn is a file
+    assert "fix the parser" in idx and "provision box" in idx  # titles
+    assert 'read_file("history/turn-<N>.md")' in idx           # tells the model how to read one
+    assert fs.read_file("history") == idx and fs.read_file("history/") == idx   # dir/root ⇒ index
+
+
+@check
+def historyfs_turn_read_returns_the_seal_markdown():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    t2 = fs.read_file("history/turn-2.md")
+    assert "needle-pv-42" in t2 and "provision box" in t2      # the sealed turn's markdown, in full
+    assert "no such turn" in fs.read_file("history/turn-99.md")
+    assert "not a history file" in fs.read_file("history/notes.txt")
+
+
+@check
+def historyfs_listing_and_grep():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    ls = fs.listing("history")
+    assert "index.md" in ls and "turn-1.md" in ls and "turn-2.md" in ls
+    g = fs.grep("needle-pv-\\d+")
+    assert "history/turn-2.md:" in g and "needle-pv-42" in g   # ripgrep-shaped file:line:text
+    assert "history/turn-2.md" in fs.grep("needle", output_mode="files_with_matches")
+    assert "no matches" in fs.grep("zzz-not-present")
+    assert "invalid regex" in fs.grep("(unclosed")
+
+
+@check
+def historyfs_grep_scopes_to_the_requested_path():
+    # ripgrep semantics: grep of a specific turn file searches ONLY that file, not the whole namespace.
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "needle-pv-42" in fs.grep("needle", path="history")                 # dir → all turns
+    assert "needle-pv-42" in fs.grep("needle", path="history/turn-2.md")       # the turn that has it
+    assert "no matches" in fs.grep("needle", path="history/turn-1.md")         # a turn that does NOT
+    assert "no matches" in fs.grep("needle", path="history/turn-99.md")        # a non-existent turn
+
+
+@check
+def historyfs_normalizes_messy_paths():
+    # _history_leaf must collapse stray '//' and './' so a slightly-malformed path still resolves the turn.
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    for p in ("history//turn-2.md", "history/./turn-2.md", "./history/turn-2.md", "history/turn-2.md/"):
+        assert "needle-pv-42" in fs.read_file(p), p
+    # a '..'-escape normalizes to a non-history file → safely misses (no traversal)
+    assert "not a history file" in fs.read_file("history/../secret.md")
+
+
+@check
+def host_routes_read_list_grep_to_history():
+    from sliceagent.tools import LocalToolHost
+    from sliceagent.code_grep import make_grep_tool
+    host = LocalToolHost(root=tempfile.mkdtemp())
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "turn-2.md" in host._t_read_file({"path": "history/index.md"})
+    assert "needle-pv-42" in host._t_read_file({"path": "history/turn-2.md"})
+    assert "turn-1.md" in host._t_list_files({"path": "history"})
+    grep = make_grep_tool(host)
+    assert "needle-pv-42" in grep.handler({"pattern": "needle-pv-\\d+", "path": "history"})
+    # a normal path is NOT routed to history — listing "." serves the real (empty) workspace, not the index
+    assert host._t_list_files({"path": "."}) == "(empty)"
+
+
+@check
+def host_rejects_writes_to_history():
+    from sliceagent.tools import LocalToolHost
+    host = LocalToolHost(root=tempfile.mkdtemp())
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    for res in (host._t_edit_file({"path": "history/turn-1.md", "content": "x"}),
+                host._t_append({"path": "history/new.md", "content": "x"}),
+                host._t_str_replace({"path": "history/turn-1.md", "old_str": "a", "new_str": "b"})):
+        assert getattr(res, "ok", True) is False and "read-only" in res, res
+
+
+@check
+def host_real_file_wins_over_virtual_history():
+    # I2: a REAL on-disk file under history/ must never be shadowed by the virtual view (no lying about disk).
+    from sliceagent.tools import LocalToolHost
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "history"), exist_ok=True)
+    with open(os.path.join(d, "history", "real.md"), "w") as f:
+        f.write("REAL ON DISK CONTENT")
+    host = LocalToolHost(root=d)
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "REAL ON DISK CONTENT" in host._t_read_file({"path": "history/real.md"})   # real wins
+    # a real history/ DIR exists → list_files shows the real dir (real wins), not the virtual listing
+    assert "real.md" in host._t_list_files({"path": "history"})
+    # a real file also can be WRITTEN (guard only rejects the virtual case)
+    assert getattr(host._t_append({"path": "history/real.md", "content": "!"}), "ok", True) is not False
+
+
+@check
+def render_search_points_at_history_files():
+    # this-session content hits come WITH the read_file("history/turn-N.md") call (not the deleted recall tool)
+    from types import SimpleNamespace as NS
+    mine = [NS(handle=3, preview="fixed the tokenizer off-by-one")]
+    cross = [NS(handle="sess-9", preview="how retries were tuned last week")]
+    out = render_search(mine, cross)
+    assert 'read_file("history/turn-3.md")' in out and "recall_history" not in out
+    assert "CROSS-SESSION" in out and "sess-9" in out
+
+
+@check
+def search_history_tool_empty_query_and_no_matches():
+    from sliceagent.hippocampus import make_search_history_tool
+    tool = make_search_history_tool(_FakeMem([]), "s")
+    assert tool.schema["function"]["name"] == "search_history"
+    assert "pass a 'query'" in tool.handler({})                       # empty query → usage
+    out = tool.handler({"query": "nonexistent-token-xyz"})            # FakeMem returns no hits
+    assert "No content matches" in out and 'history/index.md' in out  # points back at the file namespace
 
 
 def main():

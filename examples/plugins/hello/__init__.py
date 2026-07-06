@@ -1,4 +1,4 @@
-"""Reference memagent plugin. `register(ctx)` is the single entry point; through `ctx` a
+"""Reference sliceagent plugin. `register(ctx)` is the single entry point; through `ctx` a
 plugin feeds the EXISTING seams — the tool registry, skill manager, MCP servers, and hooks.
 A plugin gets no privileged surface: its tools run through the same sandbox + permission
 policy + scheduler as built-in tools."""

@@ -4,13 +4,33 @@ Get from zero to your first completed task in ~5 minutes.
 
 ## 1. Install
 
+One command — Linux, macOS, WSL2 (installs `uv`, its own Python, ripgrep, and sliceagent in an isolated tool env):
+
 ```bash
-git clone https://github.com/TT-Wang/sliceagent && cd sliceagent
-uv sync                      # or: pip install -e .
+curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh | sh
 ```
 
-sliceagent needs Python ≥ 3.11. The interactive UI (rich + prompt_toolkit) ships in the `tui` extra and is
-installed by default; everything still works without it (plain stdout).
+On **Windows** (native, no WSL needed):
+
+```powershell
+irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex
+```
+
+Or install from PyPI yourself (you manage the Python — needs ≥ 3.11):
+
+```bash
+uv tool install --python 3.12 "sliceagent[tui]"   # or: pipx install "sliceagent[tui]" / pip install "sliceagent[tui]"
+```
+
+From source (development):
+
+```bash
+git clone https://github.com/TT-Wang/sliceagent && cd sliceagent
+uv sync --all-extras         # or: pip install -e ".[tui]"
+```
+
+The interactive UI (rich + prompt_toolkit) ships in the `tui` extra — the curl installer and the PyPI
+commands above include it; everything still works without it (plain stdout).
 
 ## 2. Set up your provider
 
