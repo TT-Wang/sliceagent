@@ -786,7 +786,7 @@ def main() -> None:
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
         record_user(session.active(), text)
         _expand_mentions(text)            # @path → pin the file into OPEN FILES
-        build = make_build_slice(session, tools, retriever, memory, text, session.session_id)
+        build = make_build_slice(session, tools, retriever, memory, text, session.session_id, model_id=llm.model)
         # live mode must wire the SAME host sinks as the REPL path (episodic cache, durable log, metrics) —
         # not just slice+renderer — else the cache→memory loop and /cost produce NOTHING in live mode.
         _live_sinks = [slice_sink(session)]
@@ -910,7 +910,7 @@ def main() -> None:
             try:
                 # slice-build phase happens BEFORE run_turn's own KeyboardInterrupt handling — a ctrl-c
                 # here (e.g. during the one-time repo-map build) must cancel the turn, not crash the REPL.
-                build = make_build_slice(session, tools, retriever, memory, line, session.session_id)
+                build = make_build_slice(session, tools, retriever, memory, line, session.session_id, model_id=llm.model)
             except KeyboardInterrupt:
                 print("\n  · cancelled")
                 continue

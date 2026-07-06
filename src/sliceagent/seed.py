@@ -252,7 +252,8 @@ def _attach_images(user_text: str, host):
     return parts
 
 
-def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = "", system_extra: str = ""):
+def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = "", system_extra: str = "",
+                     model_id: str = ""):
     """The reconstruction seam the loop calls ONCE per turn to build the SEED. Returns [system, user]
     messages; within the turn the loop accumulates native messages (no per-step rebuild).
 
@@ -309,7 +310,15 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # deterministic ground-truth facts (platform, real HOME, cwd, git branch/status) computed ONCE per
     # session — so the system tier stays byte-stable (prompt-cache warm), never re-probed per turn.
     # Reuses sensory_cortex.git_branch_status (the same git probe as the snapshot, collapsed to one line).
-    env_facts = [f"- Platform: {sys.platform}", f"- HOME: {os.path.expanduser('~')}"]
+    # MODEL IDENTITY — the harness KNOWS which model drives this agent (the LLM client's model id); surface
+    # it as OBSERVED ground truth so the agent answers "which model are you?" truthfully instead of guessing.
+    # Without it the agent has no anchor and confabulates a self-identity (e.g. DeepSeek models, trained on
+    # Claude/GPT output, claim to BE Claude) — the same "harness has the fact but doesn't show it" failure.
+    env_facts = []
+    if model_id:
+        env_facts.append(f"- You are running on the '{model_id}' model. This is your ACTUAL model; if asked "
+                         "which model / LLM you are, state THIS — do not guess or name a different one.")
+    env_facts += [f"- Platform: {sys.platform}", f"- HOME: {os.path.expanduser('~')}"]
     if cwd:
         env_facts.append(f"- Working directory (cwd): {cwd}")
     gbs = git_branch_status(cwd) if cwd else ""
