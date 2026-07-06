@@ -1,8 +1,8 @@
-"""Within-session content recall: recall_history(search="…") must find an OLD turn of THIS session
-by what it was ABOUT — closing the long-tail gap where a turn past the manifest/index window was
-reachable only by a turn number nobody knew. Two layers:
+"""Within-session content recall: search_history("…") must find an OLD turn of THIS session by what it
+was ABOUT — closing the long-tail gap where a turn past the manifest/index window was reachable only by
+a turn number nobody knew. Two layers:
   1. WIRING (no FTS5 dep): the PageTable backend + render_search produce turn-numbered hits that come
-     WITH the exact recall_history(turns=[N]) call, and only_session/exclude_session scope correctly.
+     WITH the exact read_file("history/turn-N.md") call, and only_session/exclude_session scope correctly.
   2. FTS5 (guarded): the real EpisodeIndex.only_session filter restricts to one session; exclude drops it.
 No model, no pytest. Run: PYTHONPATH=src python tests/test_recall_search.py
 """
@@ -74,8 +74,8 @@ def render_search_emits_the_exact_fetch_call_for_this_session_hits():
     mine = pt.lookup("database", kind="episode-search-thissession", k=6)
     cross = pt.lookup("database", kind="episode-xsession", k=6)
     out = render_search(mine, cross)
-    # the model searched by CONTENT and gets back the COPY-PASTE call — no turn number to guess.
-    assert "recall_history(turns=[7])" in out, out
+    # the model searched by CONTENT and gets back the COPY-PASTE read_file call — no turn number to guess.
+    assert 'read_file("history/turn-7.md")' in out, out
     assert "THIS SESSION" in out and "CROSS-SESSION" in out, out
 
 

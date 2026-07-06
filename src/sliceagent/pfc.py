@@ -117,8 +117,8 @@ class Slice:
     open_report: str = ""
     # CONTINUITY (short-range): a bounded ring of the last few user<->assistant exchanges so the slice
     # carries the immediate conversational thread (a snapshot agent otherwise loses "what we just said").
-    # Older turns are NOT here — they live in the durable episodic cache, paged in ON DEMAND via
-    # recall_history (the decompression path). `turns` counts user turns this topic (for the "+N older"
+    # Older turns are NOT here — they live in the durable episodic cache, paged in ON DEMAND by reading
+    # the history/ turn files (the decompression path). `turns` counts user turns this topic (for the "+N older"
     # pointer). Bounded => growth stays decoupled from conversation length (the moat).
     conversation: list[dict] = field(default_factory=list)  # [{user, assistant}], last MAX_CONVERSATION
     # AUTHORITATIVE INTENT (full-range): every user message this topic, VERBATIM + uncapped. Unlike the
@@ -319,7 +319,7 @@ def slice_sink(state):
                 full = event.content
                 s.conversation[-1]["assistant"] = one_line(full, CONVO_MSG_CHARS)
                 # RECALL BRIDGE (core cross-turn continuity): flag when the reply was CUT to the gist, so
-                # the NEXT turn's RECENT CONVERSATION advertises the recall_history call to page the FULL
+                # the NEXT turn's RECENT CONVERSATION points at the turn's history/ file to read the FULL
                 # reply back. Without this the model reads an 800-char gist as the complete reply and
                 # confabulates anything past it ("explain item 2" of a long report it can no longer see)
                 # instead of recalling — the failure the whole cache-not-log design exists to prevent.

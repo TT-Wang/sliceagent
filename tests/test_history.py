@@ -1,4 +1,4 @@
-"""recall_history tool + read_episodes tests. No model, no pytest.
+"""history/ virtual files (HistoryFS) + search_history + read_episodes tests. No model, no pytest.
 Run: python tests/test_history.py
 """
 import os
@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.hippocampus import make_history_tool, render_full, render_index, render_trace  # noqa: E402
+from sliceagent.hippocampus import render_search, render_trace  # noqa: E402
 from sliceagent.memory import NullMemory  # noqa: E402
 
 CHECKS = []
@@ -46,67 +46,20 @@ def append_and_read_roundtrip_with_ts_topic_title():
 
 
 @check
-def index_shows_breadcrumbs():
-    lines = [{"task_id": "t-aaa", "turn": 1, "ts": "2026-06-16T12:30:00",
-              "record": _rec("fix the parser", "off-by-one in tokenizer", [{"slice": "", "action": [], "observation": []}])}]
-    idx = render_index(lines)
-    assert "turn 1" in idx and "fix the parser" in idx and "off-by-one" in idx and "t-aaa" in idx and "12:30" in idx
-
-
-@check
-def tool_no_args_returns_index():
+def historyfs_over_durable_memem_roundtrip():
+    """HistoryFS reads the SAME durable episodic cache the write side flushes — index + turn file."""
     try:
         m = _memem()
     except Exception:
-        print("  (skip)"); return
-    m.append_episode("s1", "t1", 1, _rec("task one", "did a thing", [{"slice": "", "action": [], "observation": []}]))
-    tool = make_history_tool(m, "s1")
-    out = tool.handler({})
-    assert "CACHED HISTORY" in out and "task one" in out
-
-
-@check
-def full_recall_is_superset_of_compact():
-    """full=True must NOT be lossier than the default recall. render_full alone returns only the
-    end-state SLICE snapshot, which omits transient tool observations — so a model reaching for `full`
-    to get MORE got LESS (measured in evals/tr_incidental: a full-recall lost a buried instance id the
-    compact recall preserved). The fix unions the trajectory into full mode. Regression guard."""
-    try:
-        m = _memem()
-    except Exception:
-        print("  (skip)"); return
-    rec = {"title": "run provision", "note": "pass",
-           "markdown": "# run provision\n## what happened\n- [run_command] ./provision.sh -> ok\n"
-                       "    provisioned id: needle-pv-42\n",
-           "steps": [{"slice": "# CURRENT REQUEST\nrun ./provision.sh (no value in the end-state slice)\n",
-                      "action": [{"name": "run_command", "args": {"command": "./provision.sh"}, "failing": False}],
-                      "observation": ["provisioned id: needle-pv-42"]}],
-           "meta": {"failing": False, "stop_reason": "end_turn", "files": []}}
-    m.append_episode("s1", "t1", 1, rec)
-    compact = make_history_tool(m, "s1").handler({"turns": [1]})               # fresh guard per call (no rein)
-    full = make_history_tool(m, "s1").handler({"turns": [1], "full": True})
-    assert "needle-pv-42" in compact, "compact recall should carry the tool observation"
-    assert "needle-pv-42" in full, "full recall must be a SUPERSET — it dropped the tool observation"
-    assert "exact end-state slice" in full and "CURRENT REQUEST" in full, "full must still include the slice"
-
-
-@check
-def tool_fetch_trace_and_specific_turn():
-    try:
-        m = _memem()
-    except Exception:
-        print("  (skip)"); return
-    m.append_episode("s1", "t1", 1, _rec("t-one", "n1",
-                     [{"slice": "SL1", "action": [{"name": "run_command", "args": {"command": "pytest"}, "failing": True}],
-                       "observation": ["FAILED 3 tests"]}]))
-    m.append_episode("s1", "t1", 2, _rec("t-two", "n2", [{"slice": "SL2", "action": [], "observation": []}]))
-    tool = make_history_tool(m, "s1")
-    last = tool.handler({"last": 1})
-    assert "turn 2" in last and "turn 1" not in last              # only the most recent
-    one = tool.handler({"turns": [1]})
-    assert "run_command" in one and "FAILED 3 tests" in one and "n1" in one   # action+obs+note
-    full = tool.handler({"turns": [1], "full": True})
-    assert "SL1" in full                                          # full mode returns the stored slice
+        print("  (skip: memem not importable)"); return
+    from sliceagent.hippocampus import HistoryFS
+    m.append_episode("s1", "t1", 1, _rec("task one", "did a thing",
+                     [{"slice": "", "action": [{"name": "run_command", "args": {"command": "pytest"},
+                                                "failing": True}], "observation": ["FAILED 3 tests"]}]))
+    fs = HistoryFS(m, "s1")
+    assert "turn-1.md" in fs.read_file("history/index.md") and "task one" in fs.read_file("history/index.md")
+    t1 = fs.read_file("history/turn-1.md")
+    assert "run_command" in t1 and "FAILED 3 tests" in t1 and "did a thing" in t1   # action+obs+note
 
 
 @check
@@ -122,51 +75,33 @@ def trace_has_no_read_cap_but_bounds_per_obs_at_the_seal():
 
 
 @check
-def trace_and_full_return_the_full_conclusion_for_a_large_turn():
-    # the 'can't locate my second finding' read-side bug: a big turn's conclusion (markdown tail) must survive,
-    # and `full` must surface the note (the agent's reply lives there, NOT in the seed slice).
+def trace_returns_the_full_conclusion_for_a_large_turn():
+    # the 'can't locate my second finding' read-side bug: a big turn's conclusion (markdown tail) must
+    # survive with no read cap — render_trace backs each history/turn-N.md file.
     concl = "Finding 6: tab links drop string[] params."
     big_md = "## seed\n" + ("filler " * 5000) + f"\n\n## conclusion\n{concl}"
     line = {"task_id": "t", "turn": 7, "ts": "2026-06-16T12:00:00",
             "record": {"title": "review page.tsx", "note": concl, "markdown": big_md,
                        "steps": [{"slice": "seed-slice-body"}], "meta": {}}}
     assert concl in render_trace([line]), "the conclusion at the markdown tail must survive (no read cap)"
-    assert concl in render_full([line]), "full mode must surface the note/conclusion, not just the seed slice"
 
 
 class _FakeMem:
-    def __init__(self, lines):
+    def __init__(self, lines, hits=None):
         self._lines = lines
+        self._hits = hits or []          # search_episodes results (for search_history tests)
     def read_episodes(self, session_id, *, limit=None):
         return self._lines
-
-
-@check
-def repeat_redirected_but_distinct_search_allowed():
-    lines = [{"task_id": "t", "turn": i, "ts": "2026-06-16T12:00:00",
-              "record": _rec(f"turn{i}", "note", [{"slice": f"S{i}", "action": [], "observation": []}])}
-             for i in range(1, 15)]
-    fake = _FakeMem(lines)
-    tool = make_history_tool(fake, "s")
-    a = tool.handler({"turns": [1]})
-    assert "turn 1" in a and "Record what you need" in a            # served + capture-back
-    b = tool.handler({"turns": [1]})                                # EXACT repeat → redirect, no re-dump
-    assert "already pulled" in b and "S1" not in b
-    for i in range(2, 9):                                           # 7 more DISTINCT drills (never blocked)
-        assert f"turn {i}" in tool.handler({"turns": [i]}), f"distinct fetch {i} must be served"
-    over = tool.handler({"turns": [9]})                            # past the generous backstop → to index
-    assert "index" in over.lower() and "turn 9" not in over
-    assert "CACHED HISTORY" in tool.handler({})                    # index is free (not counted as a drill)
-    assert "already pulled" in tool.handler({})                    # repeat index → redirect
-    fake._lines = lines + [dict(lines[0], turn=99)]               # cache grew → new turn → rein resets
-    assert "turn 1" in tool.handler({"turns": [1]})               # can drill again
+    def search_episodes(self, query, *, limit=8, exclude_session=None, only_session=None):
+        return list(self._hits)          # ignores query — the test controls the hits directly
 
 
 @check
 def nullmemory_has_no_history():
+    from sliceagent.hippocampus import HistoryFS
     m = NullMemory()
     assert m.read_episodes("s1") == []
-    assert "No cached history" in make_history_tool(m, "s1").handler({})
+    assert "no earlier turns yet" in HistoryFS(m, "s1").read_file("history/index.md")
 
 
 # ── history/ virtual read-only namespace (HistoryFS + LocalToolHost routing) ──────────────────────────
@@ -263,6 +198,27 @@ def host_real_file_wins_over_virtual_history():
     assert "real.md" in host._t_list_files({"path": "history"})
     # a real file also can be WRITTEN (guard only rejects the virtual case)
     assert getattr(host._t_append({"path": "history/real.md", "content": "!"}), "ok", True) is not False
+
+
+@check
+def render_search_points_at_history_files():
+    # this-session content hits come WITH the read_file("history/turn-N.md") call (not the deleted recall tool)
+    from types import SimpleNamespace as NS
+    mine = [NS(handle=3, preview="fixed the tokenizer off-by-one")]
+    cross = [NS(handle="sess-9", preview="how retries were tuned last week")]
+    out = render_search(mine, cross)
+    assert 'read_file("history/turn-3.md")' in out and "recall_history" not in out
+    assert "CROSS-SESSION" in out and "sess-9" in out
+
+
+@check
+def search_history_tool_empty_query_and_no_matches():
+    from sliceagent.hippocampus import make_search_history_tool
+    tool = make_search_history_tool(_FakeMem([]), "s")
+    assert tool.schema["function"]["name"] == "search_history"
+    assert "pass a 'query'" in tool.handler({})                       # empty query → usage
+    out = tool.handler({"query": "nonexistent-token-xyz"})            # FakeMem returns no hits
+    assert "No content matches" in out and 'history/index.md' in out  # points back at the file namespace
 
 
 def main():

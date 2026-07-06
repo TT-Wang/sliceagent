@@ -158,7 +158,7 @@ def idempotent_is_known_set():
     # the membership the guardrail relies on
     assert "read_file" in IDEMPOTENT_TOOL_NAMES
     assert "list_files" in IDEMPOTENT_TOOL_NAMES
-    assert "recall_history" in IDEMPOTENT_TOOL_NAMES
+    assert "search_history" in IDEMPOTENT_TOOL_NAMES
 
 
 # --- mutating tools never trip the no-progress path ----------------------------

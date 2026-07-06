@@ -434,8 +434,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # SENSORY CORTEX — LIVE world-state: re-probe git each build (current branch + changed files), so
         # the slice always carries the up-to-date working-tree state instead of a stale snapshot.
         worktree = git_worktree_state(cwd) if cwd else ""
-        # PAGED-OUT HISTORY manifest — the HIPPOCAMPUS made VISIBLE so the model CALLS recall_history (the
-        # dead active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession;
+        # PAGED-OUT HISTORY manifest — the HIPPOCAMPUS made VISIBLE so the model READS the history/ turn
+        # files (the dead active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession;
         # bounded to MANIFEST_TURNS locators (moat), self-suppresses with no durable log (NullMemory => []).
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)  # HIPPOCAMPUS
         cache_manifest = render_cache_manifest(manifest_refs)

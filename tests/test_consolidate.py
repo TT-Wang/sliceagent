@@ -281,7 +281,7 @@ def render_skill_llm_generalizes_falls_back_and_scans_first():
 @check
 def learn_prompt_drives_write_skill_from_the_cache():
     p = build_learn_prompt("")
-    assert "write_skill" in p and "recall_history" in p and "## Process" in p
+    assert "write_skill" in p and "history/index.md" in p and "## Process" in p
     assert "workflow we just went through" in p                                  # default source
     assert "deploy.md" in build_learn_prompt("the deploy steps in deploy.md")    # honors the user's source
 

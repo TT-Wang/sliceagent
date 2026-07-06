@@ -69,7 +69,7 @@ _TOOL = {
     "grep":           ("🔍", "grep",   "pattern"),
     "glob":           ("🔍", "glob",   "pattern"),
     "skill":          ("📚", "skill",  "name"),
-    "recall_history": ("🕮 ", "recall", "index"),
+    "search_history": ("🕮 ", "search", "query"),
     "new_topic":      ("🟢", "topic",  "goal"),
     "switch_topic":   ("🔀", "switch", "task_id"),
     "spawn_subagent": ("🤖", "agent",  "task"),
@@ -78,8 +78,9 @@ _TOOL = {
 
 
 # read-only / navigation tools — a long run of these (a review reads + greps a dozen files) is just
-# noise as one card each, so the sink COALESCES a consecutive run into ONE compact line. recall_history
-# is deliberately NOT here: it's the memory channel and stays its own visible card.
+# noise as one card each, so the sink COALESCES a consecutive run into ONE compact line. search_history
+# is deliberately NOT here: it's the cross-session memory channel and stays its own visible card. (A
+# read_file/grep under history/ coalesces like any other read — it IS an ordinary file read now.)
 _COALESCE = {"read_file", "list_files", "grep", "glob"}
 _READ_VERB = {"read_file": "read", "list_files": "list", "grep": "grep", "glob": "glob"}
 

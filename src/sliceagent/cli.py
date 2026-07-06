@@ -369,14 +369,14 @@ def main() -> None:
     llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
-    # recall_history: the model's bounded valve into the cold cache (paged-out turns of this session).
-    # history/: the SAME cache exposed as read-only virtual files (read_file/list_files/grep) — the model
-    # reaches for files (a pretraining reflex) far more readily than the bespoke recall tool (measured
-    # 2026-07-06: evicted-fact confab 47%→0%). Both read one archive; nothing is written to disk.
+    # history/: this session's paged-out turns exposed as read-only virtual files (read_file/list_files/grep)
+    # — the model reaches for files (a pretraining reflex) far more readily than a bespoke recall tool
+    # (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is written to disk. search_history adds the
+    # one thing files can't: FTS5 over PAST sessions (their turns aren't mounted here).
     if getattr(memory, "is_durable", False):
-        from .hippocampus import HistoryFS, make_history_tool
-        base_tools.registry.register(make_history_tool(memory, session.session_id))
+        from .hippocampus import HistoryFS, make_search_history_tool
         base_tools._history = HistoryFS(memory, session.session_id)
+        base_tools.registry.register(make_search_history_tool(memory, session.session_id))
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
     # memory.consolidate (reads the episodic cache, never the slice). `mine_mode` (off|deterministic|llm)

@@ -1,9 +1,9 @@
-"""PAGED-OUT HISTORY manifest — the cache made VISIBLE so the model CALLS recall_history.
+"""PAGED-OUT HISTORY manifest — the cache made VISIBLE so the model READS the history/ turn files.
 
 The active-ask channel was dead because the episodic cache had no manifest in the slice: the model
-calls read_file because REPO MAP advertises paths, but never called recall_history because nothing
-advertised the cache. These checks prove the manifest now renders as a typed region (locators +
-copy-pasteable fetch call), is BOUNDED (moat), carries a payoff breadcrumb for every turn (the
+calls read_file because REPO MAP advertises paths, so we advertise the paged-out turns the SAME way —
+as read_file("history/turn-N.md") locators. These checks prove the manifest now renders as a typed
+region (locators + copy-pasteable read call), is BOUNDED (moat), carries a payoff breadcrumb for every turn (the
 pin/view-killer was invisible payoff), leaks NO content bodies, and self-suppresses with no durable
 cache. Deterministic — no model, no disk, no memem (a tiny durable-memory stub).
 Run: PYTHONPATH=src python tests/test_cache_manifest.py
@@ -63,9 +63,9 @@ def manifest_renders_with_fetch_calls():
     ])
     user = _build_user(mem)
     assert "# PAGED-OUT HISTORY" in user, "manifest region missing from slice"
-    # each turn is a locator line ENDING in its own fetch call (the copy-paste win)
+    # each turn is a locator line ENDING in its own read_file call (the copy-paste win)
     for n in (1, 2, 3):
-        assert f"recall_history(turns=[{n}])" in user, f"turn {n} fetch call missing"
+        assert f'read_file("history/turn-{n}.md")' in user, f"turn {n} read call missing"
     assert "3 callers: api.py:40" in user, "the payoff breadcrumb (note) is missing"
     assert "· FAIL" in user, "failing turn not flagged"
 
@@ -76,12 +76,12 @@ def manifest_bounded_with_older_tail():
     N = MANIFEST_TURNS + 4                                          # a session LONGER than the window
     lines = [_line(i, f"turn {i} work", note=f"did thing {i}") for i in range(1, N + 1)]
     user = _build_user(_DurableMem(lines))
-    shown = [n for n in range(1, N + 1) if f"recall_history(turns=[{n}])" in user]
+    shown = [n for n in range(1, N + 1) if f'read_file("history/turn-{n}.md")' in user]
     assert len(shown) == MANIFEST_TURNS, f"expected {MANIFEST_TURNS} locators, got {len(shown)}: {shown}"
     assert shown == list(range(N + 1 - MANIFEST_TURNS, N + 1)), f"must show the LAST {MANIFEST_TURNS}: {shown}"
     older = N - MANIFEST_TURNS
     assert f"{older} earlier turn(s)" in user, "the '+N earlier' tail is missing"
-    assert "recall_history() for the full index" in user, "older tail should point at the bare index"
+    assert 'read_file("history/index.md") for the full index' in user, "older tail should point at the index file"
 
 
 # ── every line carries a payoff breadcrumb, even with no note (adoption requirement) ──
@@ -176,10 +176,10 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
     """The 'explain item 2' bug: a long prior reply is stored in the RECENT CONVERSATION ring as an
     800-char gist. If the ring doesn't SIGNAL the cut + how to page the rest, the model reads the gist as
     the whole reply and confabulates the part it can't see (a cross-turn-continuity failure = the moat).
-    Fix: a truncated ring reply carries a recall_history(last=K) marker, and that call returns the full text."""
+    Fix: a truncated ring reply points at the turn's history/ file, and reading it returns the full text."""
     from sliceagent.hippocampus import turn_markdown
     from sliceagent.events import AssistantText
-    from sliceagent.hippocampus import make_history_tool
+    from sliceagent.hippocampus import HistoryFS
     from sliceagent.pfc import record_user, slice_sink
 
     item2 = "2. lib/pipeline.ts:131,142 — jobs_scored column used for the jobs_updated value."
@@ -214,11 +214,12 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
 
     # item 2 is NOT in the static slice (it was cut from the gist) — recall is REQUIRED to answer
     assert "jobs_scored" not in user, "test premise broken: item 2 should be past the gist cap"
-    # ...but the ring advertises the exact recall call, so the model pages it back instead of guessing
-    assert "recall_history(last=1)" in user, "truncated ring reply must advertise recall_history(last=1)"
-    # and following that call returns the full reply, item 2 included
-    out = make_history_tool(mem, sid).handler({"last": 1})
-    assert "jobs_scored" in out and "131,142" in out, "recall_history(last=1) must return item 2's full text"
+    # ...but the slice points at the turn's history/ file (ring marker + PAGED-OUT HISTORY manifest), so the
+    # model reads it back instead of guessing
+    assert 'read_file("history/' in user, "a truncated ring reply must point at the turn's history/ file"
+    # and reading turn 1's history file returns the full reply, item 2 included
+    out = HistoryFS(mem, sid).read_file("history/turn-1.md")
+    assert "jobs_scored" in out and "131,142" in out, 'history/turn-1.md must return item 2\'s full text'
 
 
 @check
@@ -228,8 +229,8 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
     # MAX_FINDING_CHARS=300 with NO signal. TT hit this for real: 3 filler turns pushed the bug-hunt reply
     # out of the RECENT CONVERSATION ring entirely, leaving ONLY this findings fragment — with no marker,
     # the model saw a snippet of bug #1 and FABRICATED 3 replacement bugs instead of recalling the rest.
-    # Findings carry no turn number, so the fix points at the two GENERAL recall paths (the manifest, or
-    # recall_history(search=...)) rather than a specific turns=[N] call.
+    # Findings carry no turn number, so the fix points at the two GENERAL recall paths (the history/ files
+    # in the manifest, or search_history("...")) rather than a specific turn file.
     from sliceagent.pfc import Slice
     from sliceagent.regions import record_note
 
@@ -248,7 +249,7 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
     assert "archetypeCounts" not in stored, "test premise broken: bug #2 should be past the cut"
     # the stored finding must clearly mark itself as partial and point at BOTH real recall paths
     assert "PARTIAL" in stored, "a truncated finding must say it is partial, not silently drop the rest"
-    assert "PAGED-OUT HISTORY" in stored and "recall_history(search=" in stored, stored
+    assert "PAGED-OUT HISTORY" in stored and "search_history(" in stored, stored
     assert "don't guess" in stored, "must explicitly warn against re-deriving instead of recalling"
     # a SHORT note that fits within the cap must be stored VERBATIM, with no marker (no false positives)
     s2 = Slice(); record_note(s2, "a short claim under the cap", source="claim")
@@ -272,7 +273,7 @@ def truncated_user_report_also_advertises_recall():
     s = Slice(); s.reset("x")
     assert capture_user_report(s, long_report) is True, "a failure-report message must be captured"
     assert "PARTIAL" in s.open_report and "don't guess" in s.open_report, s.open_report
-    assert "recall_history(search=" in s.open_report, s.open_report
+    assert "search_history(" in s.open_report, s.open_report
 
     # a short report fits verbatim, no marker
     s2 = Slice(); s2.reset("y")

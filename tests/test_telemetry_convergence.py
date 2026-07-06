@@ -25,7 +25,7 @@ def telemetry_counts_rereads_recalls_and_reads():
     t(StepEnd(0, {}, "x"))
     t(ToolResult("read_file", {"path": "a.py"}, "data", False))   # re-read within window
     t(ToolResult("read_file", {"path": "b.py"}, "data", False))   # read of b
-    t(ToolResult("recall_history", {"last": 3}, "...", False))    # a recall
+    t(ToolResult("search_history", {"query": "x"}, "...", False))  # a recall (cross-session content search)
     t(ToolResult("read_file", {"path": "c.py"}, "Error", True))   # FAILED read — not counted
     s = t.summary()
     assert s["reads"] == 3 and s["re_reads"] == 1 and s["recalls"] == 1, s
