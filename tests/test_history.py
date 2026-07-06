@@ -155,6 +155,28 @@ def historyfs_listing_and_grep():
 
 
 @check
+def historyfs_grep_scopes_to_the_requested_path():
+    # ripgrep semantics: grep of a specific turn file searches ONLY that file, not the whole namespace.
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "needle-pv-42" in fs.grep("needle", path="history")                 # dir → all turns
+    assert "needle-pv-42" in fs.grep("needle", path="history/turn-2.md")       # the turn that has it
+    assert "no matches" in fs.grep("needle", path="history/turn-1.md")         # a turn that does NOT
+    assert "no matches" in fs.grep("needle", path="history/turn-99.md")        # a non-existent turn
+
+
+@check
+def historyfs_normalizes_messy_paths():
+    # _history_leaf must collapse stray '//' and './' so a slightly-malformed path still resolves the turn.
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    for p in ("history//turn-2.md", "history/./turn-2.md", "./history/turn-2.md", "history/turn-2.md/"):
+        assert "needle-pv-42" in fs.read_file(p), p
+    # a '..'-escape normalizes to a non-history file → safely misses (no traversal)
+    assert "not a history file" in fs.read_file("history/../secret.md")
+
+
+@check
 def host_routes_read_list_grep_to_history():
     from sliceagent.tools import LocalToolHost
     from sliceagent.code_grep import make_grep_tool

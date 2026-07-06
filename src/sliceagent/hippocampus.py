@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 from collections import deque
 
@@ -430,11 +431,15 @@ _TURN_FILE = re.compile(r"^turn-(\d+)\.md$")
 
 
 def _history_leaf(path: str) -> str:
-    """The path tail under the history mount: 'history/turn-2.md' -> 'turn-2.md', 'history' or 'history/' -> ''."""
+    """The NORMALIZED path tail under the history mount: 'history/turn-2.md' -> 'turn-2.md';
+    'history' / 'history/' / 'history//' / 'history/./' -> ''. posixpath.normpath collapses stray '//',
+    './' and a leading './' (so read_file("history//turn-1.md") still resolves) — while a nested or
+    '..'-escaping path normalizes to something that is NOT a bare index.md/turn-N.md, so it safely misses
+    (no traversal; HistoryFS only ever serves exact index.md / turn-N.md names)."""
     p = (path or "").strip().replace("\\", "/")
-    while p.startswith("./"):
-        p = p[2:]
-    p = p.rstrip("/")
+    if not p:
+        return ""
+    p = posixpath.normpath(p)          # collapse //, ./, resolve .. — pure string op, no filesystem
     if p == HISTORY_MOUNT:
         return ""
     return p[len(HISTORY_MOUNT) + 1:] if p.startswith(HISTORY_MOUNT + "/") else p
@@ -494,18 +499,31 @@ class HistoryFS:
         return ("\n".join(names)
                 + '\n(read index.md for turn titles, or search_history("keywords") to find a turn by content)')
 
-    def grep(self, pattern: str, *, output_mode: str = "content", context: int = 0,
-             offset: int = 0, limit: int = 50) -> str:
+    def _docs_for(self, path, lines) -> list:
+        """The (name, text) docs a grep over `path` should scan — SCOPED like ripgrep: the whole namespace
+        for the history/ dir, or a single file when `path` targets index.md / a specific turn-N.md."""
+        leaf = _history_leaf(path)
+        if leaf == "":                     # the history/ dir → the whole namespace
+            return [("index.md", self.index(lines))] + [
+                (f"turn-{ln.get('turn')}.md", render_trace([ln])) for ln in lines if ln.get("turn") is not None]
+        if leaf == "index.md":
+            return [("index.md", self.index(lines))]
+        m = _TURN_FILE.match(leaf)
+        if not m:
+            return []                      # a specific non-existent history file → nothing to search
+        n = int(m.group(1))
+        sel = [ln for ln in lines if ln.get("turn") == n]
+        return [(leaf, render_trace(sel))] if sel else []
+
+    def grep(self, pattern: str, *, path: str = HISTORY_MOUNT, output_mode: str = "content",
+             context: int = 0, offset: int = 0, limit: int = 50) -> str:
         # ponytail: regex over the rendered turn docs (Python re, not ripgrep — these are virtual). `context`
         # is accepted for arg-parity with the real grep but not implemented (turn docs are seal-bounded).
         try:
             rx = re.compile(pattern)
         except re.error as e:
             return f"grep: invalid regex ({e})."
-        lines = self._lines()
-        docs = [("index.md", self.index(lines))]
-        docs += [(f"turn-{ln.get('turn')}.md", render_trace([ln]))
-                 for ln in lines if ln.get("turn") is not None]
+        docs = self._docs_for(path, self._lines())   # SCOPE to the requested file, not the whole namespace
         hits, counts = [], {}
         for name, text in docs:
             for i, line in enumerate(text.splitlines(), 1):
