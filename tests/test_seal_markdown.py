@@ -1,5 +1,5 @@
-"""The seal saves each turn's slice into the cache as a clean MARKDOWN snapshot, and recall_history
-returns it smoothly (read a past turn like opening a doc). No model. Run:
+"""The seal saves each turn's slice into the cache as a clean MARKDOWN snapshot, and the history/ files
+return it smoothly (read a past turn like opening a doc). No model. Run:
   PYTHONPATH=src python tests/test_seal_markdown.py
 """
 import os
@@ -7,8 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.hippocampus import make_episode_sink, turn_markdown  # noqa: E402
-from sliceagent.hippocampus import make_history_tool  # noqa: E402
+from sliceagent.hippocampus import HistoryFS, make_episode_sink, turn_markdown  # noqa: E402
 from sliceagent.events import SliceBuilt, ToolResult, TurnEnd  # noqa: E402
 
 CHECKS = []
@@ -59,16 +58,15 @@ def recall_returns_the_markdown_smoothly():
     mem = _Cache()
     sink = make_episode_sink(mem, session_id="s", task_id_fn=lambda: "t", title_fn=lambda: "Turn one")
     _run_a_turn(sink)
-    tool = make_history_tool(mem, "s")
-    out = tool.handler({"turns": [1]})
+    out = HistoryFS(mem, "s").read_file("history/turn-1.md")
     assert "## what happened" in out and "## conclusion" in out, \
-        "recall_history returns the clean markdown snapshot (smooth read), not a raw dump"
+        "history/turn-1.md returns the clean markdown snapshot (smooth read), not a raw dump"
 
 
 @check
 def recall_returns_the_observed_value_end_to_end():
     # THE channel, model-free: a value OBSERVED in a turn (not reported, not noted) must come BACK through
-    # recall_history. Proves precision is a property of the cache+recall path itself — any live flakiness
+    # the history/ files. Proves precision is a property of the cache+read path itself — any live flakiness
     # on top is the model's recall reliability, not the channel losing data.
     mem = _Cache()
     sink = make_episode_sink(mem, session_id="s", task_id_fn=lambda: "t", title_fn=lambda: "Read config")
@@ -76,8 +74,8 @@ def recall_returns_the_observed_value_end_to_end():
     sink(ToolResult(name="read_file", args={"path": "config.env"},
                     output="HOST=localhost\nSECRET=VAL_XYZ_42\nPORT=80\nDEBUG=false", failing=False))
     sink(TurnEnd("end_turn", 1, {"prompt_tokens": 10, "completion_tokens": 2}))
-    out = make_history_tool(mem, "s").handler({"turns": [1]})
-    assert "VAL_XYZ_42" in out, "recall_history must return the OBSERVED value (the cross-slice channel)"
+    out = HistoryFS(mem, "s").read_file("history/turn-1.md")
+    assert "VAL_XYZ_42" in out, "history/turn-1.md must return the OBSERVED value (the cross-slice channel)"
 
 
 @check

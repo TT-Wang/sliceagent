@@ -2,7 +2,7 @@
 tool dispatch → slice_sink fold → NEXT-turn render). Proves the wiring works end-to-end, not just per-unit.
 Deterministic, no network, no model. Run: PYTHONPATH=src python tests/test_breadth_e2e.py
 
-Capabilities covered here: plan, mission, world model, standing requirements, skills (load + $ARGUMENTS),
+Capabilities covered here: plan, world model, standing requirements, skills (load + $ARGUMENTS),
 plugins (a 3rd-party-registered tool runs through the loop). Subagents/swarm, MCP, and recall are covered
 end-to-end by test_readonly_subagent / test_mcp_output_cap / test_recall_search + test_history.
 """
@@ -71,13 +71,6 @@ def plan_flows_end_to_end():
         {"step": "write the code", "status": "in_progress"},
         {"step": "add tests", "status": "pending"}]})]))
     assert "# PLAN" in user and "write the code" in user and "[~]" in user, user[:300]
-
-
-@check
-def mission_flows_end_to_end():
-    s = Slice(); s.reset("a big objective")
-    user, _ = _run(s, _host(), _resp(calls=[_TC("set_mission", {"text": "ship the v2 release"})]))
-    assert "# MISSION" in user and "ship the v2 release" in user, user[:300]
 
 
 @check

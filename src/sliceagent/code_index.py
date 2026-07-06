@@ -21,6 +21,7 @@ import subprocess
 import threading
 
 from .interfaces import Snippet
+from .platform_compat import norm_rel
 
 # tokens too common to discriminate on (task prose is full of them)
 _STOP = frozenset((
@@ -226,7 +227,7 @@ class RipgrepCodeIndex:
         matched: dict[str, set] = {}
         if terms:
             for path, info in self._search(terms).items():
-                matched[os.path.relpath(path, self.root)] = info["terms"]
+                matched[norm_rel(os.path.relpath(path, self.root))] = info["terms"]
         seeds = {rel: float(len(t)) for rel, t in matched.items() if rel in g["fileset"]}
         n_seeds = len(seeds)                 # real seed signal returned to retrieve()'s gate (no shared read-back race)
         pr = self._pagerank(files, g["edges"], seeds)
@@ -403,7 +404,7 @@ class RipgrepCodeIndex:
         rels: list[str] = []
         for p in proc.stdout.splitlines():
             if os.path.splitext(p)[1] in _CODE_EXT:
-                rels.append(os.path.relpath(p, self.root))
+                rels.append(norm_rel(os.path.relpath(p, self.root)))
         rels.sort()
         return rels[:max_files]
 

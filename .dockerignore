@@ -5,6 +5,8 @@
 *.pyc
 *.whl
 brain/
+.sliceagent/
+.memagent/
 .mindmux/
 scratch/
 runs/

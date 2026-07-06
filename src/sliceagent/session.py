@@ -108,7 +108,6 @@ class Session:
         for sig, a in s.action_log.items():
             a["failing"] = False
         s.since_edit = 0
-        s.reviewed = []          # new directive → the history ratchet resets (re-allow fresh lookbacks)
         capture_user_report(s, message)   # a failure report rides forward as an OPEN USER REPORT blocker
         return s
 

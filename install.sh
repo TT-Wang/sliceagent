@@ -10,8 +10,8 @@
 # As with any `curl … | sh`, you are welcome to read this script first — it does exactly the above.
 set -eu
 
-REPO="git+https://github.com/TT-Wang/sliceagent"
-PKG="sliceagent[tui]"          # from PyPI; [tui] = rich terminal UI
+PKG="sliceagent[tui]"          # the PUBLISHED PyPI release; [tui] = rich terminal UI. This installer
+                               # tracks PyPI stable (not git main) — one canonical, reproducible path.
 
 info() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
 warn() { printf '\033[33m! %s\033[0m\n' "$1" >&2; }

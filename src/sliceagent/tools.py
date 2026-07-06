@@ -18,6 +18,7 @@ import tempfile
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
+from .platform_compat import IS_WINDOWS, is_win_abs, msys_to_win, norm_rel, win_path_candidates
 from .procman import ProcManager
 from .registry import ToolEntry, ToolRegistry, ToolText
 from .sandbox import LocalSandbox
@@ -336,14 +337,6 @@ TOOL_SCHEMAS = [
                        "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
                        "required": ["step", "status"]}}},
         ["steps"]),
-    _fn("set_mission",
-        "Set your MISSION — the overarching NORTH-STAR objective for a long multi-step task (the 'why'), "
-        "shown at the top of your context every turn so you stay oriented across many steps. Set it once at "
-        "the start of a substantial task; it is ABOVE the literal task and your step plan. Re-setting "
-        "replaces it. Skip it for quick one-off requests.",
-        {"text": {"type": "string"}}, ["text"]),
-    _fn("mission_done", "Clear your MISSION once the overarching objective is achieved (it stops showing).",
-        {}, []),
 ]
 
 
@@ -409,6 +402,9 @@ class LocalToolHost:
         # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
         self._extra_roots: list[str] = []
         self._focus: str | None = None   # most-recently-worked EXTERNAL dir → the active focus (slice-surfaced)
+        # The read-only VIRTUAL `history/` namespace (this session's sealed turns as files). Injected by the
+        # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
+        self._history = None
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
@@ -447,7 +443,6 @@ class LocalToolHost:
             "world_set": self._t_world_set, "world_clear": self._t_world_clear,
             "require": self._t_require, "requirement_done": self._t_requirement_done,
             "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
-            "set_mission": self._t_set_mission, "mission_done": self._t_mission_done,
             "code_review": self._t_code_review,
         }
         for schema in TOOL_SCHEMAS:
@@ -475,6 +470,10 @@ class LocalToolHost:
         full = os.path.realpath(os.path.expanduser(path))
         # never widen reach to the whole filesystem or the bare home dir
         if full == os.sep or full == os.path.realpath(os.path.expanduser("~")):
+            return None
+        # win32: '/' realpaths to the CURRENT DRIVE's root ('C:\'), which the os.sep check
+        # above can't see — refuse any drive root / UNC share root too (splitdrive tail).
+        if IS_WINDOWS and os.path.splitdrive(full)[1] in ("", os.sep, "/"):
             return None
         if full == self.root() or full in self._extra_roots:
             return full
@@ -540,10 +539,15 @@ class LocalToolHost:
         home = os.path.realpath(os.path.expanduser("~"))
         root = self.root()
         # quoted paths (may contain spaces) OR bare ~/-rooted tokens up to a shell metachar/space
-        for q, uq in re.findall(
-                r"""['"]([^'"]*/[^'"]*)['"]|(?<![\w'"])((?:~|/)[^\s'"|&;<>()]+)""", text):
-            cand = (q or uq).strip()
-            if not (cand.startswith("/") or cand.startswith("~")):
+        cands = [(q or uq).strip() for q, uq in re.findall(
+                r"""['"]([^'"]*/[^'"]*)['"]|(?<![\w'"])((?:~|/)[^\s'"|&;<>()]+)""", text)]
+        if IS_WINDOWS:
+            # win32 (Git Bash): commands carry 'C:\x' / "C:/x" / bare C:\x tokens the POSIX
+            # extractor can't see, plus MSYS '/c/x' mounts. Seam logic in platform_compat.
+            cands = [msys_to_win(c) for c in cands] + win_path_candidates(text)
+        for cand in cands:
+            if not (cand.startswith("/") or cand.startswith("~")
+                    or (IS_WINDOWS and is_win_abs(cand))):
                 continue
             full = os.path.realpath(os.path.expanduser(cand))
             d = full if os.path.isdir(full) else os.path.dirname(full)
@@ -574,6 +578,36 @@ class LocalToolHost:
             return full
         alt = self.locate(path)
         return alt if os.path.exists(alt) else full
+
+    def _history_route(self, path):
+        """Return the HistoryFS iff `path` targets the virtual `history/` namespace AND no real on-disk file
+        shadows it — a real file/dir ALWAYS wins the name (I2: the virtual view never lies about disk). Else
+        None. ponytail: `history/` is a reserved virtual namespace; a project with a real top-level history/
+        dir keeps its files (real wins) and only forfeits the virtual listing under that exact name. Used by
+        read_file/list_files/grep to route reads, and by the write tools to reject (a virtual route ⇒ read-only)."""
+        h = self._history
+        if h is None:
+            return None
+        p = (path or "").strip().replace("\\", "/")
+        while p.startswith("./"):
+            p = p[2:]
+        p = p.rstrip("/")
+        if not (p == "history" or p.startswith("history/")):
+            return None
+        try:
+            real = self.resolve_read(path)
+        except (ValueError, PermissionError):
+            real = None
+        return None if (real and os.path.exists(real)) else h
+
+    def _history_readonly_guard(self, path):
+        """ToolText rejecting a WRITE to the virtual history/ namespace (it's a read-only view of the sealed
+        archive); None when the path isn't virtual history (real files/dirs write normally)."""
+        if self._history_route(path) is None:
+            return None
+        return ToolText("history/ is a read-only view of this session's past turns (the episodic archive) — "
+                        "you can read_file/list_files/grep it, but it can't be written. Save work elsewhere.",
+                        ok=False)
 
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
@@ -682,7 +716,7 @@ class LocalToolHost:
         try:
             import hashlib
             digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-            rel = os.path.join(".sliceagent", "blobs", f"{label.replace(' ', '-')}-{digest}.txt")
+            rel = f".sliceagent/blobs/{label.replace(' ', '-')}-{digest}.txt"   # forward slashes on BOTH platforms: the model-visible ref must match the bash-flavored tool contract (and Windows file APIs accept '/')
             full = self._resolve(rel)
             self._mkparent(full)
             if not os.path.exists(full):
@@ -702,6 +736,9 @@ class LocalToolHost:
         # inspect structure and pick the right CLI. str_replace still uses read_text() (which
         # raises on binary) — you can't text-edit a binary, so that path stays a hard error.
         path = args["path"]
+        hf = self._history_route(path)
+        if hf is not None:               # read-only VIRTUAL history/ (this session's sealed turns as files)
+            return hf.read_file(path)
         full = self.resolve_read(path)   # focus copy if present, else search all roots (paged-out blob recall)
         with open(full, "rb") as f:
             raw = f.read()
@@ -747,14 +784,20 @@ class LocalToolHost:
 
     @staticmethod
     def _detect_crlf(full: str) -> bool:
-        """True if the existing file uses Windows CRLF line endings (sample the head). Used to PRESERVE
+        """True if the existing file is DOMINANTLY Windows CRLF (sample the head). Used to PRESERVE
         line endings on edit: the model emits '\\n', and writing that to a CRLF file rewrites every line
-        ending — a huge spurious diff / corruption on Windows-authored repos."""
+        ending — a huge spurious diff / corruption on Windows-authored repos. DOMINANCE (not mere
+        presence): a mostly-LF file with one embedded '\\r\\n' (a byte literal, an HTTP fixture, a merge
+        artifact) must NOT be flipped whole-file to CRLF — while a uniformly-CRLF file with one stray LF
+        still counts as CRLF. crlf ≥ (bare-LF) covers both, and keeps the pinned uniform cases."""
         try:
             with open(full, "rb") as f:
-                return b"\r\n" in f.read(65536)
+                head = f.read(65536)
         except OSError:
             return False
+        crlf = head.count(b"\r\n")
+        lf_only = head.count(b"\n") - crlf          # LFs that are NOT part of a CRLF
+        return crlf > 0 and crlf >= lf_only
 
     @staticmethod
     def _preserve_eol(text: str, crlf: bool) -> str:
@@ -763,6 +806,9 @@ class LocalToolHost:
         return text.replace("\r\n", "\n").replace("\n", "\r\n") if crlf else text
 
     def _t_list_files(self, args: dict) -> str:
+        hf = self._history_route(args.get("path") or ".")
+        if hf is not None:               # list the virtual history/ namespace (index.md + turn-N.md)
+            return hf.listing(args.get("path") or "history")
         base = self._resolve(args.get("path") or ".")
         if not args.get("recursive"):
             entries = sorted(os.listdir(base))
@@ -782,7 +828,7 @@ class LocalToolHost:
             for f in sorted(filenames):
                 if _is_ignored(f):
                     continue
-                rels.append(f if rel == "." else os.path.join(rel, f))
+                rels.append(f if rel == "." else norm_rel(os.path.join(rel, f)))
                 if len(rels) >= _LIST_CAP:
                     capped = True
                     break
@@ -794,6 +840,9 @@ class LocalToolHost:
         return body
 
     def _t_edit_file(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: target the SAME file read_file shows (existing match across roots); new files still land at the focus base
         self._mkparent(full)
         content = args["content"]
@@ -820,6 +869,9 @@ class LocalToolHost:
             pass
 
     def _t_append(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: append to the SAME file read_file shows; new files still land at the focus base
         self._mkparent(full)
         self._journal(args["path"], full)
@@ -849,6 +901,9 @@ class LocalToolHost:
             return msg
 
     def _t_str_replace(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: edit the SAME file read_file shows (search all roots), not a focus-relative phantom
         try:
             cur = self.read_text(full, lossy=False)  # read the resolved target; strict: abort on invalid UTF-8, never write back a mangled file
@@ -1116,15 +1171,6 @@ class LocalToolHost:
         done = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "done")
         doing = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "in_progress")
         return f"PLAN updated: {n} steps ({done} done, {doing} in progress) — shown in your PLAN section."
-
-    def _t_set_mission(self, args: dict) -> str:
-        t = " ".join((args.get("text") or "").split())
-        if not t:
-            return ToolText("Error: set_mission needs a non-empty 'text'.", ok=False)
-        return f"MISSION set: {t} (shown at the top of your context until you call mission_done)."
-
-    def _t_mission_done(self, args: dict) -> str:
-        return "MISSION cleared (achieved — no longer shown)."
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])

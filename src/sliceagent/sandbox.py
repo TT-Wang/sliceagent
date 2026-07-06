@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+
+from .platform_compat import sh as _sh
 import sys
 import uuid
 from typing import Protocol, runtime_checkable
@@ -76,7 +78,7 @@ class LocalSandbox(BaseSandbox):
     def _exec(self, command: str, *, cwd: str, timeout: float) -> tuple[int, str]:
         env = _scrub_env() if self.scrub_secrets else None
         try:
-            r = subprocess.run(command, shell=True, cwd=cwd, env=env,
+            r = subprocess.run(**_sh(command), cwd=cwd, env=env,
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return 124, f"Command timed out after {timeout:g}s"

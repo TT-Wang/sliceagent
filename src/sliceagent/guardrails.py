@@ -39,7 +39,7 @@ from typing import Any, Mapping
 
 # sliceagent's read-only (idempotent) builtins. Repeating one of these with the SAME args
 # and getting the SAME result is "no progress" — a soft loop the slice can't see through.
-IDEMPOTENT_TOOL_NAMES = frozenset({"read_file", "list_files", "recall_history"})
+IDEMPOTENT_TOOL_NAMES = frozenset({"read_file", "list_files", "search_history"})
 
 # sliceagent's mutating builtins (+ topic/skill routing). A mutating tool is never treated
 # as idempotent (its repeated identical RESULT is not a no-progress signal — only its
@@ -155,7 +155,7 @@ def op_kind(tool_name: str) -> str:
         return "list"
     if tool_name in ("run_command", "execute_code"):
         return "exec"
-    if tool_name in ("new_topic", "switch_topic", "skill", "recall_history"):
+    if tool_name in ("new_topic", "switch_topic", "skill", "search_history"):
         return "meta"
     return "other"
 

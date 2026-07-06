@@ -1,0 +1,21 @@
+[
+  "The current IntervalSet is naive -- add() just appends the raw (start,end) pairs and never merges them, which is getting unwieldy. Please change it to maintain its internal state as a canonical form: a SORTED list of non-overlapping intervals. add(s, e) should insert the new interval and merge it into that canonical form; an empty interval (s >= e) is ignored. Add an intervals() method that returns the sorted merged list of (s, e) tuples. contains(x) must still work against the merged form (half-open, so start <= x < end). For this change, 'merge' only needs to coalesce intervals that strictly OVERLAP -- worry about merely-touching ones later. Keep the seed tests in tests/test_seed.py green.",
+
+  "Add a length() method that returns the total covered length: the sum of (e - s) over the merged intervals.",
+
+  "Add overlaps(s, e): return True iff the query interval [s, e) intersects any covered region of the set. An empty query (s >= e) returns False.",
+
+  "Add remove(s, e): subtract the region [s, e) from the set. Depending on where it lands this may trim one end of an interval, delete intervals entirely, or cut a hole in the middle of an interval (splitting it into two). Keep the canonical sorted, non-overlapping merged form after the removal. An empty removal (s >= e) changes nothing.",
+
+  "Add shift(delta): return a NEW IntervalSet with every interval translated by +delta (so [s, e) becomes [s+delta, e+delta)). This must be pure -- the original set is left unchanged.",
+
+  "Bug report on merge: add(1, 3) then add(3, 5) currently leaves two separate intervals [1,3) and [3,5), but since these are half-open they actually touch (the end of one equals the start of the next), so they should coalesce into a single [1, 5). Same for adding across a zero-width gap. Fix the merge logic so that ADJACENT (touching, where one's end equals the next's start) intervals coalesce, not just strictly-overlapping ones. This must apply to add() from now on.",
+
+  "Add union(other) and intersection(other), where other is another IntervalSet. Each returns a NEW IntervalSet: union covers everything covered by either set, intersection covers only what BOTH cover. Both results must be in the canonical merged form (adjacency-coalesced, like add now does).",
+
+  "Add difference(other), where other is another IntervalSet. It returns a NEW IntervalSet covering exactly the regions that are in self but NOT covered by other. Canonical merged form, and neither self nor other is modified.",
+
+  "Regression on remove: removing a middle chunk is broken. For a set covering [0, 10), calling remove(4, 6) should leave [0, 4) plus [6, 10), but right now the right-hand piece is getting dropped (or its bounds are off). Fix remove() so that removing an interior chunk correctly splits the interval into the left remainder and the right remainder. Make sure difference() stays consistent with the fixed remove().",
+
+  "Add gaps(lo, hi): return the sorted list of uncovered sub-intervals that fall within the window [lo, hi) -- i.e. the complement of the set, clipped to [lo, hi). If the window is empty (lo >= hi) or fully covered, return an empty list."
+]

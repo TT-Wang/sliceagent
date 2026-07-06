@@ -55,7 +55,7 @@ def older_turns_get_a_recall_pointer():
         record_user(s, f"req {i}")
         slice_sink(s)(AssistantText(f"reply {i}"))
     out = render_conversation(s)
-    assert "earlier turn(s)" in out and "recall_history" in out, out
+    assert "earlier turn(s)" in out and "history/" in out, out
 
 
 @check

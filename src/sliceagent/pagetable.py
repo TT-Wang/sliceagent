@@ -24,7 +24,7 @@ BRAIN-ANALOGY LEGEND (used in this file's section comments — a naming aid, not
   HIPPOCAMPUS     — episode-*: the lossless per-turn log, reached only by an explicit, cue-dependent
                     recall (recall_history) — like real hippocampal recall, prone to confabulation if
                     the cue is weak, which the visible-manifest/recall-marker work exists to prevent.
-The Slice's own carried state (findings, conversation ring, plan, mission — see pfc.py) is the
+The Slice's own carried state (findings, conversation ring, plan — see pfc.py) is the
 fourth piece: PREFRONTAL CORTEX / working memory — bounded, actively maintained, free (no lookup()
 call at all), and lost when the task resets. Only 4 of PageTable's 6 kinds fire per turn inside
 build(); the other 2 (episode-xsession, episode-search-thissession) are reached only via the
@@ -143,7 +143,7 @@ class PageTable:
         """WITHIN-SESSION content recall: FTS5 over the CURRENT session's episodes (the long-tail past
         the manifest/index window). Closes the gap where an old turn was reachable only by a turn number
         nobody knew. Each hit -> a PageRef whose handle is the TURN NUMBER, so the model pages the full
-        turn with recall_history(turns=[N]) — search by content, fetch by the number it just learned."""
+        turn with read_file("history/turn-N.md") — search by content, read by the number it just learned."""
         if self.memory is None or not isinstance(query, str) or not query.strip() or not self.session_id:
             return []                              # FAIL CLOSED: no current session → no within-session search
         hits = self.memory.search_episodes(query.strip(), limit=k, only_session=self.session_id)
@@ -153,11 +153,11 @@ class PageTable:
 
     def _episodes_thissession(self, session_id: str, k: int) -> list[PageRef]:
         """PAGED-OUT HISTORY manifest: locator-only PageRefs for the last ``k`` turns of THIS session —
-        the TRIGGER that makes recall_history get called (the model cannot reach for a cache it cannot
-        see; pin/view died because their payoff was invisible). The single this-session episodic READ
-        entry (mirrors ``_episodes`` for cross-session) so the slice has ONE retrieval seam. Locators
+        the TRIGGER that makes the model READ the history/ turn files (it cannot reach for a cache it
+        cannot see; pin/view died because their payoff was invisible). The single this-session episodic
+        READ entry (mirrors ``_episodes`` for cross-session) so the slice has ONE retrieval seam. Locators
         only — turn/title/breadcrumb, NEVER step bodies; content pages in solely when the model calls
-        recall_history(turns=[N]). Bounded to ``k``; a trailing '…older' ref flags that more exist."""
+        read_file("history/turn-N.md"). Bounded to ``k``; a trailing '…older' ref flags that more exist."""
         if not session_id:
             return []
         # Use the TAIL-only manifest read (O(k)/turn) when available, so a long session doesn't re-parse the
@@ -180,8 +180,8 @@ class PageTable:
                         score=float(ln.get("turn") or 0), untrusted=False) for ln in shown]
         if older:
             refs.append(PageRef(handle="…older", kind="episode-thissession",
-                                preview=(f"{older} earlier turn(s) not shown — recall_history() for the full "
-                                         f"index, or recall_history(search=\"keywords\") to find an older turn "
+                                preview=(f'{older} earlier turn(s) not shown — read_file("history/index.md") for '
+                                         f'the full index, or search_history("keywords") to find an older turn '
                                          f"of THIS session by content (also matches past sessions)"),
                                 score=0.0, untrusted=False))
         return refs

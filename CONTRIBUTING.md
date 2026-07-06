@@ -16,7 +16,7 @@ script with a tiny `@check` harness that exits non-zero on failure. Run the whol
 
 ```bash
 bash scripts/run_tests.sh             # runs every tests/test_*.py, tallies, exits non-zero on any failure
-ruff check src/sliceagent tests evals   # lint (real-bug rules; house style configured in pyproject)
+ruff check src/sliceagent tests         # lint (real-bug rules; house style configured in pyproject)
 ```
 
 or a single file:

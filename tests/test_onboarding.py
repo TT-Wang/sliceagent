@@ -147,8 +147,9 @@ def init_writes_a_valid_config_on_success():
     assert data["providers"]["moonshot"]["model"] == "kimi-k2.7-code"
     assert data["agent"]["default_provider"] == "moonshot"
     assert data["agent"]["model"] == "kimi-k2.7-code"
-    # 0600 perms (holds a key)
-    assert (os.stat(path).st_mode & 0o077) == 0, "config with a key must be 0600"
+    # 0600 perms (holds a key) — POSIX only: NTFS has no octal modes and the writer skips fchmod on win32
+    if sys.platform != "win32":
+        assert (os.stat(path).st_mode & 0o077) == 0, "config with a key must be 0600"
     # and Config resolves the key/model from the default provider
     c = Config(data)
     saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "AGENT_MODEL", "AGENT_PROVIDER")}

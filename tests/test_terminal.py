@@ -3,6 +3,10 @@ The other half of the live-process gap. Deterministic-ish (uses real PTYs + the 
 primitive with generous timeouts), no model, no pytest.
 Run: PYTHONPATH=src python tests/test_terminal.py
 """
+import sys as _sys
+if _sys.platform == "win32":
+    print("SKIP: PTY sessions are deliberately unavailable on Windows (Phase 2: pywinpty bridge)")
+    _sys.exit(0)
 import os
 import shlex
 import sys

@@ -9,8 +9,11 @@ Signals:
   - re_reads : a read_file on a path ALREADY read within the last `window` steps. Within a turn the prior
     read is still in the accumulated transcript, so a re-read signals the model isn't using its resident
     context; across turns it's the reconstruction-MISS signal (the seed/seal didn't carry what it needed).
-  - recalls  : recall_history calls — recovery from the cold cache (the model knew it forgot).
-  - reads    : total successful read_file calls (the denominator for a re-read RATE).
+  - recalls  : accesses to the paged-out episodic cache — a read_file/list_files/grep under history/, or a
+    search_history call. Recovery from the cold cache (the model knew it forgot). (Was recall_history, now
+    deleted: the same recovery happens through the history/ virtual files.)
+  - reads    : total successful read_file calls on REAL files (the denominator for a re-read RATE; a
+    history/ read is a recall, counted above, not a source re-read).
 """
 from __future__ import annotations
 
@@ -18,6 +21,17 @@ from .events import Event, StepEnd, ToolResult
 
 RE_READ_WINDOW = 6          # a path re-read within this many steps counts as a likely reconstruction miss
 _MAX_TRACKED = 256          # bound the per-path last-seen map (never a transcript)
+
+
+def _is_history_path(path) -> bool:
+    """True if a tool path targets the virtual history/ namespace (recovery from the paged-out cache)."""
+    if not isinstance(path, str):
+        return False
+    p = path.strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.rstrip("/")
+    return p == "history" or p.startswith("history/")
 
 
 class Telemetry:
@@ -35,9 +49,14 @@ class Telemetry:
         if isinstance(e, StepEnd):
             self.step += 1
         elif isinstance(e, ToolResult) and not e.failing:
-            if e.name == "read_file":
+            path = (e.args or {}).get("path")
+            hist = _is_history_path(path)
+            if e.name in ("read_file", "list_files", "grep") and hist:
+                self.recalls += 1               # recovery from the paged-out cache via the history/ files
+            elif e.name == "search_history":
+                self.recalls += 1               # cross-session content recall (FTS5)
+            elif e.name == "read_file":         # a REAL source read (history reads counted above, not here)
                 self.reads += 1
-                path = (e.args or {}).get("path")
                 if path:
                     last = self._last_read.get(path)
                     if last is not None and (self.step - last) <= self.window:
@@ -45,8 +64,6 @@ class Telemetry:
                     self._last_read[path] = self.step
                     if len(self._last_read) > _MAX_TRACKED:   # bound: drop the oldest entry
                         del self._last_read[min(self._last_read, key=self._last_read.get)]
-            elif e.name == "recall_history":
-                self.recalls += 1
 
     def summary(self) -> dict:
         rate = round(self.re_reads / self.reads, 3) if self.reads else 0.0

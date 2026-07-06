@@ -140,8 +140,40 @@ def _read_config(path: str) -> dict:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
+        # sibling parity with config.py:_read_toml — a non-UTF-8 or malformed config must DEGRADE, not
+        # crash `sliceagent config` / `config --use` / the init wizard with a traceback.
         return {}
+
+
+def _backup_if_corrupt(path: str) -> "str | None":
+    """A rewrite reads the existing config to MERGE into; but _read_config returns {} for BOTH 'missing'
+    and 'unparseable', so a rewrite over a corrupt file would silently ERASE every provider key + section
+    it couldn't parse. Guard the writers: if `path` exists and is non-empty but does NOT parse, move it
+    aside to a non-clobbering .bak first (the keys survive, recoverable) and return the backup path; else
+    None (absent / empty / valid — nothing to protect)."""
+    import tomllib
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        tomllib.loads(raw.decode("utf-8"))
+        return None                                  # parses fine → a normal merge is safe
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
+        pass
+    bak, n = path + ".bak", 0
+    while os.path.exists(bak):                        # never clobber an earlier backup
+        n += 1
+        bak = f"{path}.bak.{n}"
+    try:
+        os.replace(path, bak)
+        return bak
+    except OSError:
+        return None
 
 
 def _atomic_write(path: str, body: str) -> None:
@@ -152,7 +184,8 @@ def _atomic_write(path: str, body: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".sliceagent-cfg-", suffix=".tmp")
     ok = False
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):   # not on Windows — NTFS perms aren't octal; user-profile dir is private
+            os.fchmod(fd, 0o600)
         os.write(fd, body.encode("utf-8"))
         os.fsync(fd)
         os.close(fd)
@@ -170,8 +203,10 @@ def _atomic_write(path: str, body: str) -> None:
                 pass
 
 
-def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: str) -> None:
-    """Merge a provider into the config: add/update [providers.<pid>], set it as the default, keep the rest."""
+def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: str) -> "str | None":
+    """Merge a provider into the config: add/update [providers.<pid>], set it as the default, keep the rest.
+    Returns the path of a backup taken when the existing config was unparseable (else None)."""
+    bak = _backup_if_corrupt(path)                   # never silently erase keys in a corrupt config
     data = _read_config(path)
     provs = data.setdefault("providers", {})
     if not isinstance(provs, dict):              # a corrupt non-dict providers must not crash on provs[pid]=
@@ -186,6 +221,7 @@ def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: s
     agent["default_provider"] = pid
     agent["model"] = model                                     # keep top-level model in sync (back-compat)
     _atomic_write(path, _emit_toml(data))
+    return bak
 
 
 def _test_key(model: str, api_key: str, base_url: str, llm_factory) -> tuple[bool, str]:
@@ -250,8 +286,20 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
             for k in keys:
                 _id, label, _base, model0 = PROVIDERS[k]
                 out(f"    {k}. {label}" + (f"  ({model0})" if model0 else ""))
-            choice = inp("  > ").strip() or "1"
-        pid, label, base_url, model = PROVIDERS.get(choice, PROVIDERS["1"])
+            # an unrecognized answer must NOT silently become provider 1 (a typed "openai" used to
+            # configure OpenRouter without a word) — accept a number OR a provider id, else re-ask.
+            choice = None
+            for _attempt in range(3):
+                raw = inp("  > ").strip() or "1"
+                if raw in PROVIDERS:
+                    choice = raw; break
+                byname = next((k for k in keys if PROVIDERS[k][0] == raw.lower()), None)
+                if byname:
+                    choice = byname; break
+                out(f"  not a valid choice: {raw!r} — enter 1-{len(PROVIDERS)} or a provider name")
+            if choice is None:
+                out("  no valid choice — aborting."); return 1
+        pid, label, base_url, model = PROVIDERS[choice]
         if pid == "custom":
             base_url = inp("  Base URL (OpenAI-compatible, e.g. https://host/v1): ").strip()
         # RE-CONFIGURING an ALREADY-SAVED provider (re-running `sliceagent init` to update the model,
@@ -303,7 +351,9 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         if cont not in ("y", "yes"):
             out("  Not saved. Re-run `sliceagent init` to try again."); return 1
 
-    _save_provider(path, pid=pid, model=model, api_key=key, base_url=base_url)
+    bak = _save_provider(path, pid=pid, model=model, api_key=key, base_url=base_url)
+    if bak:
+        out(f"  ⚠ the existing config didn't parse — moved it to {bak} (its keys are recoverable there).")
     out(f"\n  Saved provider '{pid}' (model {model}) → {path} (0600)")
     out("  Ready. Run:  sliceagent\n")
     return 0
@@ -356,7 +406,8 @@ def run_config(argv=None, *, home=None, env=None) -> int:
         out("  providers (* = default · `config --use <id>` to switch):")
         for pid, p in provs.items():
             mark = "*" if pid == default else " "
-            out(f"    {mark} {pid}  ({(p or {}).get('model', '?')})")
+            model = p.get("model", "?") if isinstance(p, dict) else "?"   # a scalar under [providers] must not crash
+            out(f"    {mark} {pid}  ({model})")
     out("  set values:")
     any_set = False
     for e in REGISTRY:

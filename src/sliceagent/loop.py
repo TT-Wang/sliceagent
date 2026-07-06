@@ -38,8 +38,16 @@ from .scheduler import run_scheduled
 
 def _as_text(out):
     """Preserve a ToolText (str subclass carrying .ok); coerce anything non-str defensively. Used so the
-    scheduler step does not strip the registry's structured success flag back to a plain string."""
-    return out if isinstance(out, str) else str(out)
+    scheduler step does not strip the registry's structured success flag back to a plain string.
+    None → "" (not the literal "None") and bytes → decoded text (not the b'…' repr) — a tool that returns
+    those must not poison the slice with a Python-object spelling."""
+    if isinstance(out, str):                 # includes ToolText (str subclass carrying .ok)
+        return out
+    if out is None:
+        return ""
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out).decode("utf-8", "replace")
+    return str(out)
 
 
 # Path-targeted file mutators — a read of a path written by one of these IN THE SAME BATCH must not be
@@ -90,8 +98,8 @@ FILTERED_MSG = "The response was stopped by the provider's content filter; the t
 # Breadcrumb inserted ONCE when overflow compaction drops the oldest exchange, so the loss is never
 # silent: the model is told it happened and how to recover (the episode sink archived it losslessly).
 OVERFLOW_COMPACTED = ("[context note: the oldest step(s) of this turn were compacted out to fit the window. "
-                      "If you need details from an early step, re-derive them or call recall_history if it is "
-                      "available — do not assume that work is undone.]")
+                      "If you need details from an early step, re-derive them or read this session's history/ "
+                      "files if available — do not assume that work is undone.]")
 _CRUMB_PREFIX = "[context note: the oldest"   # stable prefix to detect the breadcrumb (with or without the checkpoint)
 
 
@@ -107,16 +115,16 @@ def _overflow_breadcrumb(consolidate) -> dict:
         except Exception:  # noqa: BLE001 — a checkpoint hiccup must never break overflow handling
             snap = ""
     content = (OVERFLOW_COMPACTED + "\n\n# CHECKPOINT — state of play (the distilled state of the compacted "
-               "steps; recall_history for raw detail):\n" + snap) if snap else OVERFLOW_COMPACTED
+               "steps; read the history/ files for raw detail):\n" + snap) if snap else OVERFLOW_COMPACTED
     return {"role": "user", "content": content}
 
 # Micro-compaction: on overflow, the FIRST move is to clear the BODIES of
 # OLD tool-result messages — the bulky, stale part — while keeping the assistant reasoning skeleton and the
 # recent window. Strictly better than dropping whole exchanges (which loses the reasoning too), and it keeps
 # every tool_call↔reply pairing intact so the message sequence stays valid. The full output is archived in
-# the episode cache, so this is lossless-by-default (recall_history pages it back).
+# the episode cache, so this is lossless-by-default (once the turn seals, it's in this session's history/ files).
 MICRO_KEEP_RECENT = 10
-MICRO_MARKER = "[old tool result cleared to fit the window — recall_history can page it back]"
+MICRO_MARKER = "[old tool result cleared to fit the window — it's archived losslessly; re-derive it or read the history/ files]"
 
 
 def _micro_compact(messages: list, *, floor: int, keep_recent: int = MICRO_KEEP_RECENT) -> bool:

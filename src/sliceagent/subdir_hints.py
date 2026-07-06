@@ -37,6 +37,8 @@ import os
 import re
 from pathlib import Path
 
+from .platform_compat import norm_rel
+
 
 class SubdirHints:
     """Track visited subtrees and surface each one's convention files ONCE per task.
@@ -188,9 +190,9 @@ class SubdirHints:
 
     def _display_path(self, hint_path: Path) -> str:
         try:
-            return str(hint_path.relative_to(self._root))
+            return norm_rel(str(hint_path.relative_to(self._root)))
         except ValueError:
-            return str(hint_path)
+            return norm_rel(str(hint_path))
 
 
 # ----------------------------------------------------------------------------

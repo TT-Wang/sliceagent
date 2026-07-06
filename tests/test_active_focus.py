@@ -98,7 +98,7 @@ def system_prompt_resolves_referents_before_asking():
     low = SYSTEM_PROMPT.lower()
     assert "current project" in low, "prompt must reference the CURRENT PROJECT tier"
     assert "resolve before asking" in low, "prompt must teach resolve-before-asking"
-    assert "recall_history" in low, "prompt must point to recall before re-asking"
+    assert "history/" in low, "prompt must point to the history/ files before re-asking"
 
 
 # ---- bounded-C: the current project (relative base) follows focus; the boundary floor never moves -----
