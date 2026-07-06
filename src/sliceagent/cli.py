@@ -968,28 +968,34 @@ def main() -> None:
         if t.is_alive():
             print(f"  · warning: {label} timed out after {secs:.0f}s — exiting anyway")
 
-    _safe("tool cleanup", base_tools.cleanup)
-    if reviewer is not None:           # let an in-flight background review finish (bounded) before consolidating
-        _safe("bg-review join", lambda: reviewer.join(timeout=10))
-    if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
-        _bounded("MCP shutdown", mcp_runtime.shutdown)
-    # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:
-    # off → skip; deterministic → recorded skills; llm → render_skill_llm generalizes (scan-first).
-    if getattr(memory, "is_durable", False) and mine_mode not in ("0", "off", "none"):
-        st = _safe("memory consolidation",
-                   lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode)) or {}
-        if st.get("lessons") or st.get("skills"):        # report the TRUTH, not a blind 'success'
-            print(f"  · consolidated: {st.get('lessons', 0)} lesson(s), {st.get('skills', 0)} skill(s)"
-                  + (f", {st['skills_rejected']} rejected" if st.get("skills_rejected") else "")
-                  + (f", {st['errors']} error(s)" if st.get("errors") else ""))
-        elif st.get("skills_rejected") or st.get("errors"):
-            print(f"  · consolidation: {st.get('skills_rejected', 0)} rejected, {st.get('errors', 0)} error(s)")
-    _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
-    if metrics is not None:                                 # the moat number: per-turn fresh-input curve
-        s = metrics.summary()
-        print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
-              f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']}({s['tool_failures']} fail) "
-              f"retries={s['retries']} overflows={s['overflows']} errors={s['errors']}")
+    # A ctrl-c during this shutdown sequence means "just quit" — _safe only catches Exception, but ctrl-c
+    # raises KeyboardInterrupt (a BaseException), so without this outer guard a ctrl-c landing mid-step (esp.
+    # the slow consolidation LLM call) would escape every _safe and dump a raw traceback. Catch it once here.
+    try:
+        _safe("tool cleanup", base_tools.cleanup)
+        if reviewer is not None:           # let an in-flight background review finish (bounded) before consolidating
+            _safe("bg-review join", lambda: reviewer.join(timeout=10))
+        if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
+            _bounded("MCP shutdown", mcp_runtime.shutdown)
+        # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:
+        # off → skip; deterministic → recorded skills; llm → render_skill_llm generalizes (scan-first).
+        if getattr(memory, "is_durable", False) and mine_mode not in ("0", "off", "none"):
+            st = _safe("memory consolidation",
+                       lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode)) or {}
+            if st.get("lessons") or st.get("skills"):        # report the TRUTH, not a blind 'success'
+                print(f"  · consolidated: {st.get('lessons', 0)} lesson(s), {st.get('skills', 0)} skill(s)"
+                      + (f", {st['skills_rejected']} rejected" if st.get("skills_rejected") else "")
+                      + (f", {st['errors']} error(s)" if st.get("errors") else ""))
+            elif st.get("skills_rejected") or st.get("errors"):
+                print(f"  · consolidation: {st.get('skills_rejected', 0)} rejected, {st.get('errors', 0)} error(s)")
+        _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
+        if metrics is not None:                                 # the moat number: per-turn fresh-input curve
+            s = metrics.summary()
+            print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
+                  f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']}({s['tool_failures']} fail) "
+                  f"retries={s['retries']} overflows={s['overflows']} errors={s['errors']}")
+    except KeyboardInterrupt:
+        print("\n  · exiting (skipped remaining cleanup)")
 
 
 if __name__ == "__main__":
