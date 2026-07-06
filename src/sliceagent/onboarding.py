@@ -46,6 +46,20 @@ def _tty() -> bool:
         return False
 
 
+def _arrow_ok() -> bool:
+    """True ONLY where the vertical arrow-key menu (_menu_select) can actually run — a POSIX tty with
+    termios. On Windows termios is absent, so the raw-mode arrow reader is inert; return False so the
+    wizard uses the typed NUMBERED menu and never prints a '↑/↓ + Enter' hint it can't honor (a Windows
+    user was told to use arrows, they did nothing, Enter then defaulted to provider 1). Separate from the
+    masked key-entry gate, which is prompt_toolkit-based and DOES work on Windows."""
+    try:
+        import termios  # noqa: F401
+        import tty       # noqa: F401
+    except Exception:  # noqa: BLE001 — non-POSIX (Windows) → no raw-mode arrow keys
+        return False
+    return _tty()
+
+
 def _masked_input(prompt_text: str, fallback):
     """API-key entry with VISIBLE feedback — asterisks per keystroke (prompt_toolkit is_password)
     instead of getpass's fully-invisible field, which first-run users read as 'nothing is happening'.
@@ -271,12 +285,13 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
 
     # arrow-key niceties only on a REAL interactive run with the default input hooks — injected
     # inp/getpw (tests, scripted runs) keep the typed flow byte-for-byte.
-    fancy = inp is input and getpw is __import__("getpass").getpass and _tty()
+    fancy = inp is input and getpw is __import__("getpass").getpass and _tty()   # masked key entry (prompt_toolkit; cross-platform incl. Windows)
+    arrows = fancy and _arrow_ok()                                               # vertical arrow menu (POSIX termios only; typed fallback on Windows)
     keys = sorted(PROVIDERS)
     try:
-        out("\n  Choose a provider (↑/↓ + Enter):" if fancy else "\n  Choose a provider:")
+        out("\n  Choose a provider (↑/↓ + Enter):" if arrows else "\n  Choose a provider (type the number):")
         idx = None
-        if fancy:
+        if arrows:
             labels = [f"{PROVIDERS[k][1]}" + (f"  — {PROVIDERS[k][3]}" if PROVIDERS[k][3] else "")
                       for k in keys]
             idx = _pick(labels)                       # Esc → KeyboardInterrupt → 'cancelled' below
@@ -290,7 +305,7 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
             # configure OpenRouter without a word) — accept a number OR a provider id, else re-ask.
             choice = None
             for _attempt in range(3):
-                raw = inp("  > ").strip() or "1"
+                raw = inp(f"  Enter a number (1-{len(keys)}) or provider name [1]: ").strip() or "1"
                 if raw in PROVIDERS:
                     choice = raw; break
                 byname = next((k for k in keys if PROVIDERS[k][0] == raw.lower()), None)
@@ -312,7 +327,7 @@ def run_init(*, inp=input, getpw=None, llm_factory=None, home=None) -> int:
         # ORDER (user-decided): provider → MODEL → key. "Choose what you want, then prove you can" —
         # the key is the last thing typed, so the live test follows it immediately.
         picked_model = None
-        if fancy:
+        if arrows:
             cur = existing.get("model") or model
             opts = [m for m in ([cur] if cur else []) + MODEL_SUGGESTIONS.get(pid, []) if m]
             opts = list(dict.fromkeys(opts)) + ["type another model id…"]

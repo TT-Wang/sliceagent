@@ -270,6 +270,45 @@ def dispatch_routes_known_subcommands():
     assert onboarding.dispatch(["bogus"]) == 1   # unknown → usage + non-zero exit (shell-correct)
 
 
+@check
+def arrow_ok_off_without_termios():
+    # Windows: termios is absent → the raw-mode arrow menu can't run → _arrow_ok() must be False EVEN on a
+    # real tty, so the wizard uses the typed numbered menu and never prints a '↑/↓' hint it can't honor.
+    saved_tty, saved_mod = onboarding._tty, sys.modules.get("termios", "MISS")
+    onboarding._tty = lambda: True                       # pretend a real tty (like Windows PowerShell)
+    sys.modules["termios"] = None                        # `import termios` now raises → simulate Windows
+    try:
+        assert onboarding._arrow_ok() is False, "no termios → arrows OFF even on a tty"
+    finally:
+        onboarding._tty = saved_tty
+        if saved_mod == "MISS":
+            sys.modules.pop("termios", None)
+        else:
+            sys.modules["termios"] = saved_mod
+
+
+@check
+def typed_menu_picks_by_number_without_advertising_arrows():
+    # the Windows repro: a non-arrow run must (a) NOT print '↑/↓', and (b) let a typed number pick the
+    # provider she wanted (DeepSeek = 4), instead of Enter silently defaulting to provider 1.
+    import io
+    home = tempfile.mkdtemp(prefix="init-typed-")
+    buf, old = io.StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        rc = onboarding.run_init(inp=_seq("4", ""), getpw=_seq("k"),      # 4 = DeepSeek in the menu order
+                                 llm_factory=lambda m: _OkLLM(), home=home)
+    finally:
+        sys.stdout = old
+    assert rc == 0
+    out = buf.getvalue()
+    assert "↑/↓" not in out, "a run without a working arrow menu must not advertise arrow keys"
+    assert "type the number" in out, "it must tell the user to type the number"
+    data = tomllib.load(open(os.path.join(home, ".sliceagent", "config.toml"), "rb"))
+    assert "deepseek" in data["providers"], f"typing '4' must select DeepSeek, got {list(data['providers'])}"
+    assert data["agent"]["default_provider"] == "deepseek"
+
+
 def main():
     failed = 0
     for fn in CHECKS:
