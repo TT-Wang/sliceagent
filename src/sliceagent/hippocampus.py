@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import deque
 
@@ -486,6 +487,118 @@ def render_search(mine, cross) -> str:
         for r in cross:
             out.append(f"- [{r.handle}] {r.preview}")
     return "\n".join(out) if out else "No content matches found."
+
+
+# ── history/ — the episodic archive as a read-only VIRTUAL file namespace ─────────────────────────────
+# Measured 2026-07-06 (A/B on the gap-detection matrix): the model reaches for read_file/grep — a deeply
+# grooved pretraining reflex — but RESISTS the bespoke recall tool, wrongly treating the in-context convo as
+# complete. Exposing sealed turns AS files it can read/list/grep converts evicted-fact confabulation 47%→0%
+# (recovery 13%→100%). No files hit disk: HistoryFS serves the SAME episodic cache read_episodes reads,
+# routed by LocalToolHost whenever a tool path targets `history/`. Read-only (writes rejected upstream); a
+# real on-disk file always wins the name (host._history_route), so the virtual view never lies about disk.
+HISTORY_MOUNT = "history"
+_TURN_FILE = re.compile(r"^turn-(\d+)\.md$")
+
+
+def _history_leaf(path: str) -> str:
+    """The path tail under the history mount: 'history/turn-2.md' -> 'turn-2.md', 'history' or 'history/' -> ''."""
+    p = (path or "").strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.rstrip("/")
+    if p == HISTORY_MOUNT:
+        return ""
+    return p[len(HISTORY_MOUNT) + 1:] if p.startswith(HISTORY_MOUNT + "/") else p
+
+
+class HistoryFS:
+    """Read-only virtual filesystem over THIS session's sealed turns. `index.md` lists every turn (the
+    manifest-as-file); each `turn-<N>.md` is that turn's markdown snapshot (the seal artifact, in full).
+    Content is served live from the episodic cache (read_episodes) — nothing is written to disk. Duck-typed:
+    the LocalToolHost holds one as `_history` and routes read_file/list_files/grep under `history/` here."""
+
+    def __init__(self, memory, session_id: str):
+        self._memory = memory
+        self._session_id = session_id
+
+    def _lines(self) -> list:
+        return self._memory.read_episodes(self._session_id)
+
+    @staticmethod
+    def _turn_names(lines) -> list:
+        return [f"turn-{ln.get('turn')}.md" for ln in lines if ln.get("turn") is not None]
+
+    def index(self, lines=None) -> str:
+        if lines is None:
+            lines = self._lines()
+        if not lines:
+            return "# HISTORY (this session)\n(no earlier turns yet — this is an early turn.)"
+        out = ["# HISTORY — this session's earlier turns "
+               "(read one: read_file(\"history/turn-<N>.md\"); find by content: search_history(\"keywords\"))"]
+        for ln in lines:
+            rec = ln.get("record", {})
+            title = (rec.get("title") or "(no title)")[:70]
+            note = rec.get("note") or ""
+            fail = " FAIL" if (rec.get("meta") or {}).get("failing") else ""
+            out.append(f"- turn-{ln.get('turn')}.md · {_short_ts(ln.get('ts', ''))} · {title}{fail}"
+                       + (f" — {note[:90]}" if note else ""))
+        return "\n".join(out)
+
+    def read_file(self, path: str) -> str:
+        lines = self._lines()
+        leaf = _history_leaf(path)
+        if leaf in ("", "index.md"):
+            return self.index(lines)
+        m = _TURN_FILE.match(leaf)
+        if m:
+            n = int(m.group(1))
+            sel = [ln for ln in lines if ln.get("turn") == n]
+            if sel:
+                return render_trace(sel)   # the seal snapshot for that turn, in full (same as recall's compact)
+            return (f'history/{leaf}: no such turn this session. '
+                    f'read_file("history/index.md") for the list of turns.')
+        return (f'history/{leaf}: not a history file. Available: index.md, '
+                f'{", ".join(self._turn_names(lines)) or "(no turns yet)"}.')
+
+    def listing(self, path: str = HISTORY_MOUNT) -> str:
+        names = ["index.md"] + self._turn_names(self._lines())
+        return ("\n".join(names)
+                + '\n(read index.md for turn titles, or search_history("keywords") to find a turn by content)')
+
+    def grep(self, pattern: str, *, output_mode: str = "content", context: int = 0,
+             offset: int = 0, limit: int = 50) -> str:
+        # ponytail: regex over the rendered turn docs (Python re, not ripgrep — these are virtual). `context`
+        # is accepted for arg-parity with the real grep but not implemented (turn docs are seal-bounded).
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            return f"grep: invalid regex ({e})."
+        lines = self._lines()
+        docs = [("index.md", self.index(lines))]
+        docs += [(f"turn-{ln.get('turn')}.md", render_trace([ln]))
+                 for ln in lines if ln.get("turn") is not None]
+        hits, counts = [], {}
+        for name, text in docs:
+            for i, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"history/{name}:{i}:{line}")
+                    counts[name] = counts.get(name, 0) + 1
+        if not hits:
+            return "grep: no matches found."
+        if output_mode == "files_with_matches":
+            body_lines = [f"history/{n}" for n in counts]
+        elif output_mode == "count":
+            body_lines = [f"history/{n}:{c}" for n, c in counts.items()]
+        else:
+            body_lines = hits
+        total = len(body_lines)
+        window = body_lines[offset:offset + limit]
+        if not window:
+            return f"grep: no results at offset={offset} ({total} total matches)."
+        body = "\n".join(window)
+        if offset + limit < total:
+            body += f"\n\n[truncated; use offset={offset + limit} to see more]"
+        return body
 
 
 def make_history_tool(memory, session_id: str):

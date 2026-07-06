@@ -370,9 +370,13 @@ def main() -> None:
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
     # recall_history: the model's bounded valve into the cold cache (paged-out turns of this session).
+    # history/: the SAME cache exposed as read-only virtual files (read_file/list_files/grep) — the model
+    # reaches for files (a pretraining reflex) far more readily than the bespoke recall tool (measured
+    # 2026-07-06: evicted-fact confab 47%→0%). Both read one archive; nothing is written to disk.
     if getattr(memory, "is_durable", False):
-        from .hippocampus import make_history_tool
+        from .hippocampus import HistoryFS, make_history_tool
         base_tools.registry.register(make_history_tool(memory, session.session_id))
+        base_tools._history = HistoryFS(memory, session.session_id)
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
     # memory.consolidate (reads the episodic cache, never the slice). `mine_mode` (off|deterministic|llm)

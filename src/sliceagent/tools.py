@@ -402,6 +402,9 @@ class LocalToolHost:
         # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
         self._extra_roots: list[str] = []
         self._focus: str | None = None   # most-recently-worked EXTERNAL dir → the active focus (slice-surfaced)
+        # The read-only VIRTUAL `history/` namespace (this session's sealed turns as files). Injected by the
+        # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
+        self._history = None
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
@@ -576,6 +579,36 @@ class LocalToolHost:
         alt = self.locate(path)
         return alt if os.path.exists(alt) else full
 
+    def _history_route(self, path):
+        """Return the HistoryFS iff `path` targets the virtual `history/` namespace AND no real on-disk file
+        shadows it — a real file/dir ALWAYS wins the name (I2: the virtual view never lies about disk). Else
+        None. ponytail: `history/` is a reserved virtual namespace; a project with a real top-level history/
+        dir keeps its files (real wins) and only forfeits the virtual listing under that exact name. Used by
+        read_file/list_files/grep to route reads, and by the write tools to reject (a virtual route ⇒ read-only)."""
+        h = self._history
+        if h is None:
+            return None
+        p = (path or "").strip().replace("\\", "/")
+        while p.startswith("./"):
+            p = p[2:]
+        p = p.rstrip("/")
+        if not (p == "history" or p.startswith("history/")):
+            return None
+        try:
+            real = self.resolve_read(path)
+        except (ValueError, PermissionError):
+            real = None
+        return None if (real and os.path.exists(real)) else h
+
+    def _history_readonly_guard(self, path):
+        """ToolText rejecting a WRITE to the virtual history/ namespace (it's a read-only view of the sealed
+        archive); None when the path isn't virtual history (real files/dirs write normally)."""
+        if self._history_route(path) is None:
+            return None
+        return ToolText("history/ is a read-only view of this session's past turns (the episodic archive) — "
+                        "you can read_file/list_files/grep it, but it can't be written. Save work elsewhere.",
+                        ok=False)
+
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
         reject escapes. expanduser FIRST so '~' behaves like the shell (P2) instead of
@@ -703,6 +736,9 @@ class LocalToolHost:
         # inspect structure and pick the right CLI. str_replace still uses read_text() (which
         # raises on binary) — you can't text-edit a binary, so that path stays a hard error.
         path = args["path"]
+        hf = self._history_route(path)
+        if hf is not None:               # read-only VIRTUAL history/ (this session's sealed turns as files)
+            return hf.read_file(path)
         full = self.resolve_read(path)   # focus copy if present, else search all roots (paged-out blob recall)
         with open(full, "rb") as f:
             raw = f.read()
@@ -770,6 +806,9 @@ class LocalToolHost:
         return text.replace("\r\n", "\n").replace("\n", "\r\n") if crlf else text
 
     def _t_list_files(self, args: dict) -> str:
+        hf = self._history_route(args.get("path") or ".")
+        if hf is not None:               # list the virtual history/ namespace (index.md + turn-N.md)
+            return hf.listing(args.get("path") or "history")
         base = self._resolve(args.get("path") or ".")
         if not args.get("recursive"):
             entries = sorted(os.listdir(base))
@@ -801,6 +840,9 @@ class LocalToolHost:
         return body
 
     def _t_edit_file(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: target the SAME file read_file shows (existing match across roots); new files still land at the focus base
         self._mkparent(full)
         content = args["content"]
@@ -827,6 +869,9 @@ class LocalToolHost:
             pass
 
     def _t_append(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: append to the SAME file read_file shows; new files still land at the focus base
         self._mkparent(full)
         self._journal(args["path"], full)
@@ -856,6 +901,9 @@ class LocalToolHost:
             return msg
 
     def _t_str_replace(self, args: dict) -> str:
+        rej = self._history_readonly_guard(args.get("path", ""))
+        if rej is not None:
+            return rej
         full = self.resolve_read(args["path"])   # I2: edit the SAME file read_file shows (search all roots), not a focus-relative phantom
         try:
             cur = self.read_text(full, lossy=False)  # read the resolved target; strict: abort on invalid UTF-8, never write back a mangled file

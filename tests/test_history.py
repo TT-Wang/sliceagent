@@ -169,6 +169,102 @@ def nullmemory_has_no_history():
     assert "No cached history" in make_history_tool(m, "s1").handler({})
 
 
+# ── history/ virtual read-only namespace (HistoryFS + LocalToolHost routing) ──────────────────────────
+def _hist_lines():
+    return [
+        {"task_id": "t1", "turn": 1, "ts": "2026-07-06T12:30:00",
+         "record": _rec("fix the parser", "off-by-one in tokenizer",
+                        [{"slice": "SL1", "action": [{"name": "read_file", "args": {"path": "p.py"}, "failing": False}],
+                          "observation": ["contents"]}])},
+        {"task_id": "t1", "turn": 2, "ts": "2026-07-06T12:40:00",
+         "record": {"title": "provision box", "note": "pass",
+                    "markdown": "# provision box\n## what happened\n- [run_command] ./provision.sh -> ok\n"
+                                "    provisioned id: needle-pv-42\n",
+                    "steps": [{"slice": "S2", "action": [], "observation": []}],
+                    "meta": {"failing": False, "stop_reason": "end_turn", "files": []}}},
+    ]
+
+
+@check
+def historyfs_index_lists_turns_as_files():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    idx = fs.read_file("history/index.md")
+    assert "turn-1.md" in idx and "turn-2.md" in idx           # each turn is a file
+    assert "fix the parser" in idx and "provision box" in idx  # titles
+    assert 'read_file("history/turn-<N>.md")' in idx           # tells the model how to read one
+    assert fs.read_file("history") == idx and fs.read_file("history/") == idx   # dir/root ⇒ index
+
+
+@check
+def historyfs_turn_read_returns_the_seal_markdown():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    t2 = fs.read_file("history/turn-2.md")
+    assert "needle-pv-42" in t2 and "provision box" in t2      # the sealed turn's markdown, in full
+    assert "no such turn" in fs.read_file("history/turn-99.md")
+    assert "not a history file" in fs.read_file("history/notes.txt")
+
+
+@check
+def historyfs_listing_and_grep():
+    from sliceagent.hippocampus import HistoryFS
+    fs = HistoryFS(_FakeMem(_hist_lines()), "s")
+    ls = fs.listing("history")
+    assert "index.md" in ls and "turn-1.md" in ls and "turn-2.md" in ls
+    g = fs.grep("needle-pv-\\d+")
+    assert "history/turn-2.md:" in g and "needle-pv-42" in g   # ripgrep-shaped file:line:text
+    assert "history/turn-2.md" in fs.grep("needle", output_mode="files_with_matches")
+    assert "no matches" in fs.grep("zzz-not-present")
+    assert "invalid regex" in fs.grep("(unclosed")
+
+
+@check
+def host_routes_read_list_grep_to_history():
+    from sliceagent.tools import LocalToolHost
+    from sliceagent.code_grep import make_grep_tool
+    host = LocalToolHost(root=tempfile.mkdtemp())
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "turn-2.md" in host._t_read_file({"path": "history/index.md"})
+    assert "needle-pv-42" in host._t_read_file({"path": "history/turn-2.md"})
+    assert "turn-1.md" in host._t_list_files({"path": "history"})
+    grep = make_grep_tool(host)
+    assert "needle-pv-42" in grep.handler({"pattern": "needle-pv-\\d+", "path": "history"})
+    # a normal path is NOT routed to history — listing "." serves the real (empty) workspace, not the index
+    assert host._t_list_files({"path": "."}) == "(empty)"
+
+
+@check
+def host_rejects_writes_to_history():
+    from sliceagent.tools import LocalToolHost
+    host = LocalToolHost(root=tempfile.mkdtemp())
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    for res in (host._t_edit_file({"path": "history/turn-1.md", "content": "x"}),
+                host._t_append({"path": "history/new.md", "content": "x"}),
+                host._t_str_replace({"path": "history/turn-1.md", "old_str": "a", "new_str": "b"})):
+        assert getattr(res, "ok", True) is False and "read-only" in res, res
+
+
+@check
+def host_real_file_wins_over_virtual_history():
+    # I2: a REAL on-disk file under history/ must never be shadowed by the virtual view (no lying about disk).
+    from sliceagent.tools import LocalToolHost
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "history"), exist_ok=True)
+    with open(os.path.join(d, "history", "real.md"), "w") as f:
+        f.write("REAL ON DISK CONTENT")
+    host = LocalToolHost(root=d)
+    from sliceagent.hippocampus import HistoryFS
+    host._history = HistoryFS(_FakeMem(_hist_lines()), "s")
+    assert "REAL ON DISK CONTENT" in host._t_read_file({"path": "history/real.md"})   # real wins
+    # a real history/ DIR exists → list_files shows the real dir (real wins), not the virtual listing
+    assert "real.md" in host._t_list_files({"path": "history"})
+    # a real file also can be WRITTEN (guard only rejects the virtual case)
+    assert getattr(host._t_append({"path": "history/real.md", "content": "!"}), "ok", True) is not False
+
+
 def main():
     failed = 0
     for fn in CHECKS:
