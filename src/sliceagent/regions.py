@@ -643,7 +643,7 @@ REGION_ORDER = (
     # each with the exact read_file("history/turn-N.md") call to page it back (they're read-only virtual
     # files under history/). Sits beside GHOST INDEX (same "it's paged out, here's the one call to get it"
     # idiom) so the model has a SEEN target to read; an unseen cache is the dead channel. Locators only.
-    ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (earlier turns of THIS session — NOT in the slice; they are read-only files under history/ — read any back with the call shown, read_file(\"history/index.md\") for the full list, or search_history(\"keywords\") across sessions)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (your OWN earlier turns this session — your memory of what you did, kept as read-only files under history/ and NOT in the slice; read any back with the call shown, read_file(\"history/index.md\") for the full list, or search_history(\"keywords\") across sessions)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
     # ──────────── TIER 5 · STEERING & LIVE STATE — what's wrong / where things stand (VOLATILE, high-authority tail). ────────────
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),

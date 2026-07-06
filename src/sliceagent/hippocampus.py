@@ -467,8 +467,8 @@ class HistoryFS:
             lines = self._lines()
         if not lines:
             return "# HISTORY (this session)\n(no earlier turns yet — this is an early turn.)"
-        out = ["# HISTORY — this session's earlier turns "
-               "(read one: read_file(\"history/turn-<N>.md\"); find by content: search_history(\"keywords\"))"]
+        out = ["# HISTORY — your own record of what you did this session "
+               "(read a turn: read_file(\"history/turn-<N>.md\"); find by content: search_history(\"keywords\"))"]
         for ln in lines:
             rec = ln.get("record", {})
             title = (rec.get("title") or "(no title)")[:70]
