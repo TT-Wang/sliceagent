@@ -5,6 +5,28 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-07-08
+
+### Changed
+- **RECENT CONVERSATION tier now keeps the last few completed turns verbatim** (was an
+  800-char head-cut applied every turn). Fixes cross-turn reference resolution: a
+  recommendation or conclusion stated at a reply's *tail* now survives, so a follow-up like
+  "go with your recommendation" resolves against it instead of falling to recall and grabbing
+  an older, keyword-matching turn. The bound is the turn *count*, not a byte cap — per-turn
+  peak stays flat across session length (older turns still page out to `history/`).
+
+### Added
+- **Value-provenance clarify cue:** the agent treats a concrete value it did not observe
+  (a number / id / port / path) as an unstated requirement — it asks or leaves an obvious
+  placeholder instead of inventing a plausible default. Scoped to *unsourced* values, so it
+  never second-guesses a value it legitimately has. (Measured: absent-value confabulation
+  0.83 → 0.25, with no over-abstention on values the agent does have.)
+
+### Fixed
+- **Clean exit on Ctrl-C during shutdown:** a Ctrl-C that lands in the session-end memory
+  consolidation (a slow subprocess LLM call) no longer dumps a traceback — the whole
+  shutdown sequence is guarded so an interrupt just quits.
+
 ## [0.1.12] — 2026-07-03
 
 **Native Windows support — one command, no WSL:**
