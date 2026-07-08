@@ -520,21 +520,38 @@ class OpenAILLM:
         """Map prompt-caching intent to the ACTIVE provider's knob; no-op for providers without
         one. Modeled on `_reasoning_kwargs` — the quirk stays isolated to this adapter.
 
-        Only Claude/Anthropic-compatible endpoints support an explicit prompt-cache breakpoint;
-        every other provider (the default gpt-5.5 / OpenAI-compatible path) returns {} so the
-        request is byte-stable and untouched. For an Anthropic-compatible endpoint we return a
-        TODO-stubbed {} for now: the exact `extra_body` cache_control shape is DEFERRED until a
-        real Anthropic base_url is wired (the safe half — a byte-stable prefix + cached_tokens
-        read-back — is already in place and provider-agnostic).
-        """
+        OpenAI-compatible providers (the default gpt-5.5 / Moonshot / DeepSeek path) cache automatically
+        or via `prompt_cache_key` (see `_cache_routing_kwargs`), so this returns {} and leaves the request
+        byte-stable. Claude/Anthropic-compatible endpoints instead cache via an explicit `cache_control`
+        breakpoint on a message content BLOCK — not a top-level kwarg — so for those we mark the SYSTEM
+        message (sliceagent's large byte-stable prefix) IN PLACE and return {}. Anthropic then reads the
+        whole prefix from cache on every later same-prefix turn — the exact win the bounded slice sets up.
+        (Shape per Anthropic's documented content-block cache_control spec; fires ONLY on a Claude endpoint,
+        so the default DeepSeek/OpenAI path is byte-for-byte unchanged. Not yet run against a live Anthropic
+        endpoint here — unit-tested for shape + gating.)"""
         model, base = self.model.lower(), self._base_url.lower()
         if "claude" not in model and "anthropic" not in base:
-            return {}  # non-Claude provider → no explicit cache breakpoint
-        # Anthropic-compatible endpoint: DEFER the real cache_control extra_body shape (see
-        # adopt_plan.md sec 6 defer). Stubbed {} keeps the request byte-stable until wired.
-        # TODO(anthropic): set extra_body cache_control on the system/stable prefix against a
-        #   live Anthropic base_url; MERGE with _reasoning_kwargs' extra_body, do not overwrite.
+            return {}                                        # OpenAI-compatible → automatic / prompt_cache_key
+        self._mark_cache_breakpoint(messages)                # Anthropic → content-block breakpoint (mutates in place)
         return {}
+
+    @staticmethod
+    def _mark_cache_breakpoint(messages: list[dict]) -> None:
+        """Place ONE Anthropic ephemeral `cache_control` breakpoint at the end of the LAST system message
+        (sliceagent's largest byte-stable span), converting its string content to a single text content
+        block that carries the breakpoint. Anthropic caches everything up to and including the marked block,
+        so the whole stable prefix is served from cache on later same-prefix turns. Idempotent (never
+        double-marks); a no-op when there is no system message. Anthropic allows up to 4 breakpoints — one
+        on the system prefix captures the bulk of the cacheable tokens; tools/older turns can add more later."""
+        for m in reversed(messages):
+            if m.get("role") != "system":
+                continue
+            c = m.get("content")
+            if isinstance(c, str) and c:
+                m["content"] = [{"type": "text", "text": c, "cache_control": {"type": "ephemeral"}}]
+            elif isinstance(c, list) and c and isinstance(c[-1], dict) and "cache_control" not in c[-1]:
+                c[-1] = {**c[-1], "cache_control": {"type": "ephemeral"}}
+            return
 
     def _cache_routing_kwargs(self) -> dict:
         """Map the session cache-routing hint to the ACTIVE provider; gated like the sibling
