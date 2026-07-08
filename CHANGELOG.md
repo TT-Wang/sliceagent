@@ -5,6 +5,21 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-07-08
+
+### Added
+- **Subagent structured artifacts.** A delegated child now seals a typed report into a `subagents/`
+  archive and hands the parent a bounded digest plus a `read_file("subagents/sub-N.md")` recall handle —
+  the cache-not-log moat applied to delegation. The parent absorbs O(1)-sized digests while the child's
+  full detail stays paged out on disk yet fully recallable (manifest at `subagents/index.md`, per-child
+  reports, grep). Ids are assigned race-safely under concurrent fan-out, secrets are redacted on persist,
+  and a child is isolated from the parent's `history/`, siblings' `subagents/`, and `search_history`.
+
+### Fixed
+- **FileLock flush-before-release.** The advisory lock now flushes buffered writes before releasing the
+  lock, so a concurrent appender counting lines can't race a half-written file (surfaced by parallel
+  subagent fan-out).
+
 ## [0.1.15] — 2026-07-08
 
 ### Added
