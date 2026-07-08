@@ -5,6 +5,24 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-07-08
+
+### Added
+- **Anthropic prompt-cache breakpoint.** On a Claude/Anthropic endpoint the stable system prefix is now
+  marked with a `cache_control` breakpoint, so Anthropic serves the whole prefix from cache on later
+  same-prefix turns (it was previously a no-op stub). Gated to Claude endpoints — the default DeepSeek /
+  OpenAI path is byte-for-byte unchanged.
+
+### Changed
+- **Slice field lifecycle is now explicit and enforced.** Every `Slice` field is classified in one table
+  (carry / reset / custom at the turn boundary), and the suite fails if a field is added without a
+  lifecycle decision — or if `seal()`/`reset()` mishandle it. Closes a class of silent bugs where state
+  could leak across tasks or accumulate across turns.
+
+### Fixed
+- **Episode-writer concurrency.** An advisory file lock (real on POSIX, graceful no-op elsewhere) now
+  serializes concurrent appenders to the same session log so records can't interleave into a torn line.
+
 ## [0.1.14] — 2026-07-08
 
 ### Changed
