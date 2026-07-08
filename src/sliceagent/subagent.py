@@ -122,6 +122,17 @@ def _primary_arg(args) -> str:
     return ""
 
 
+def _targets_reserved_ns(args) -> bool:
+    """True if a read tool's path targets the PARENT-only virtual namespaces (subagents/ or history/) — a
+    child shares the base host, so without this it could page the parent's trajectory or a sibling's sealed
+    artifact (a third channel the design forbids: children couple ONLY through the two seals)."""
+    p = (args.get("path") or "").strip().replace("\\", "/") if isinstance(args, dict) else ""
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.rstrip("/")
+    return p in ("subagents", "history") or p.startswith("subagents/") or p.startswith("history/")
+
+
 def _nested_sink(notify, depth: int):
     """Surface a child agent's progress as ONE DYNAMIC line: each tool call updates a single
     status line with the current action + a running count, instead of printing a line per call. The renderer
@@ -138,7 +149,7 @@ def _nested_sink(notify, depth: int):
 
 def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  max_steps: int = 20, depth: int = 1, notify=None,
-                 read_only: bool = False, spec: AgentSpec | None = None) -> str:
+                 read_only: bool = False, spec: AgentSpec | None = None, session_id: str = "") -> str:
     """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
     The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
     context guarantee); only the summary crosses back.
@@ -189,7 +200,8 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     result = run_turn(build_slice=build, llm=child_llm, tools=tools, dispatch=child_dispatch,
                       hooks=hooks, max_steps=max_steps)
 
-    files = ", ".join(child_state.active_files) or "(none)"
+    _af = list(child_state.active_files)   # BOUND the resident head: a child that read 100 files must not
+    files = (", ".join(_af[:20]) + (f" +{len(_af) - 20} more" if len(_af) > 20 else "")) or "(none)"
     # A READ-ONLY explorer's deliverable is its summary; so is a verifier's verdict (summary_is_deliverable),
     # whose LAST check is often a deliberate failing repro. A lingering last_error must NOT flag those as "did
     # not finish cleanly". Only a genuinely WRITABLE worker's last_error matters (it may have left the task
@@ -198,9 +210,25 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     success = result.stop_reason == "end_turn" and (summary_is_deliverable or not child_state.last_error)
     status = "ok" if success else result.stop_reason
     label = {"explorer": "explore", "general": "subagent"}.get(spec.name, spec.name)  # named-kind label
-    summary = f"[{label} {status} · {result.steps} steps · files: {files}]"
-    if cap.text:
-        summary += " " + one_line(cap.text, 400)
+
+    # SEAL the child's work as a structured artifact and ARCHIVE it. The parent gets a bounded digest + a
+    # recall handle; the FULL report lives at subagents/<id>.md — paged in on demand, out again next seal — so
+    # the parent's context stays flat no matter how much the child did (the moat, one level up). No detail is
+    # lost: the digest is a coarse-graining, the handle is its refinement map.
+    artifact = {
+        "kind": spec.name, "task": task, "status": status, "steps": result.steps,
+        "report": cap.text or "", "findings": list(child_state.findings),
+        "change_set": sorted(child_state.edited_files), "files": list(child_state.active_files),
+        "coverage": f"{len(child_state.active_files)} file(s) touched; stop={result.stop_reason}", "refs": [],
+    }
+    handle = memory.append_subagent_artifact(session_id, artifact) if session_id else ""
+
+    head = f"[{label} {status} · {result.steps} steps · files: {files}]"
+    if handle:   # archived → bounded digest + recall handle (the refinable seal)
+        body = one_line(cap.text, 300) if cap.text else "(no summary produced)"
+        summary = f'{head} {body} → full report: read_file("subagents/{handle}.md")'
+    else:        # no durable archive (eval/headless) → inline, back-compat with the pre-artifact behavior
+        summary = head + (" " + one_line(cap.text, 400) if cap.text else "")
     if not success:
         if child_state.last_error:
             summary += " | unresolved: " + one_line(child_state.last_error, 160)
@@ -214,7 +242,7 @@ class SubagentHost:
 
     def __init__(self, inner, *, llm, retriever, memory, policy,
                  max_depth: int = 1, max_steps: int = 20, depth: int = 0, notify=None,
-                 read_only: bool = False, spec: AgentSpec | None = None, agents=None):
+                 read_only: bool = False, spec: AgentSpec | None = None, agents=None, session_id: str = ""):
         self.inner = inner
         self.llm = llm
         self.retriever = retriever
@@ -229,6 +257,7 @@ class SubagentHost:
         self.spec = spec or (BUILTIN_AGENTS["explorer"] if read_only else None)
         self.read_only = self.spec.read_only if self.spec is not None else False
         self.agents = agents or BUILTIN_AGENTS
+        self.session_id = session_id   # the PARENT session — children archive artifacts under it (recall handle)
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -248,7 +277,7 @@ class SubagentHost:
             # parent's job; it returns a summary instead). Then restrict to the kind's allowlist if it has one.
             s = [x for x in s if x.get("function", {}).get("name") not in SUBAGENT_EXCLUDED_TOOLS]
             if self.spec.tools is not None:
-                allow = set(self.spec.tools)
+                allow = set(self.spec.tools) - {"search_history"}   # child: search_history leaks the parent session
                 s = [x for x in s if x.get("function", {}).get("name") in allow]
                 # spawn_* tools are appended below for the unrestricted path — but an allowlist that NAMES a
                 # spawn tool would otherwise have it filtered out here. Offer the allowed ones (depth-gated).
@@ -303,6 +332,18 @@ class SubagentHost:
         # the read-only allowlist, so this also blocks that escalation. (A general child has tools=None → skip.)
         if self.spec is not None and self.spec.tools is not None and name not in self.spec.tools:
             return f"Error: tool {name!r} is not available to the {getattr(self.spec, 'name', 'sub')!r} agent"
+        # ISOLATION: a CHILD must not read the PARENT's trajectory (history/) or its siblings' sealed artifacts
+        # (subagents/) — reserved virtual namespaces on the SHARED base host. Blocking keeps the ONLY
+        # child↔parent coupling the two seals (brief down, artifact up); a child needing more context says so
+        # in its report rather than paging the parent's.
+        # search_history is bound to the PARENT session (its FTS5 this-session mode returns previews of the
+        # parent's own turns) → same trajectory leak as reading history/. A child works from its brief, not the
+        # parent's memory, so block it too (and it's dropped from the child's schemas below).
+        if self.spec is not None and (name == "search_history"
+                                      or (name in ("read_file", "list_files", "grep") and _targets_reserved_ns(args))):
+            return ("Error: history/ and subagents/ (and search_history over them) are the parent's private "
+                    "namespaces — a subagent works only from its own task/brief. If you lack context, say so "
+                    "in your report.")
         if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
             return self.inner.run(name, args)
         if self.depth >= self.max_depth:
@@ -321,12 +362,13 @@ class SubagentHost:
             self.inner, llm=self.llm, retriever=self.retriever, memory=self.memory,
             policy=self.policy, max_depth=self.max_depth, max_steps=self.max_steps,
             depth=self.depth + 1, notify=self.notify, spec=spec, agents=self.agents,
+            session_id=self.session_id,   # nested children archive under the SAME parent session
         )
         try:
             return run_subagent(
                 task, tools=child_tools, llm=self.llm, retriever=self.retriever,
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
-                depth=self.depth + 1, notify=self.notify, spec=spec,
+                depth=self.depth + 1, notify=self.notify, spec=spec, session_id=self.session_id,
             )
         except Exception as e:  # a child failure must not crash the parent
             return f"Error: subagent crashed: {e}"

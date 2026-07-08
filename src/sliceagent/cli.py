@@ -357,25 +357,26 @@ def main() -> None:
         fn = _sub_render["fn"]
         if fn is not None:
             fn(text)
+    session = Session(memory)        # host-side topic manager (one bounded Slice per topic) — created FIRST so
+    llm.set_cache_key(session.session_id)   # its id can thread into the subagent host (children archive under it)
     tools = base_tools
-    if sub_depth > 0:  # wrap so the model can delegate sub-tasks (summary-only return)
+    if sub_depth > 0:  # wrap so the model can delegate sub-tasks (bounded artifact + recall handle)
         from .agents import load_agents
         # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md
         agent_roots = list(cfg.skills_roots or []) + [root, os.path.join(root, ".sliceagent")]
         tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
                              policy=policy, max_depth=sub_depth, notify=_notify_subagent,
-                             agents=load_agents(agent_roots))
-    session = Session(memory)        # host-side topic manager (one bounded Slice per topic)
-    llm.set_cache_key(session.session_id)   # session-stable prompt-cache routing (cheapest cache lever)
+                             agents=load_agents(agent_roots), session_id=session.session_id)
     for t in make_topic_tools(session):   # model can route topics via new_topic / switch_topic
         base_tools.registry.register(t)
-    # history/: this session's paged-out turns exposed as read-only virtual files (read_file/list_files/grep)
-    # — the model reaches for files (a pretraining reflex) far more readily than a bespoke recall tool
-    # (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is written to disk. search_history adds the
-    # one thing files can't: FTS5 over PAST sessions (their turns aren't mounted here).
+    # history/ + subagents/: this session's paged-out turns AND its children's sealed reports, exposed as
+    # read-only virtual files (read_file/list_files/grep) — the model reaches for files (a pretraining reflex)
+    # far more readily than a bespoke recall tool (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is
+    # written to disk here. search_history adds the one thing files can't: FTS5 over PAST sessions.
     if getattr(memory, "is_durable", False):
-        from .hippocampus import HistoryFS, make_search_history_tool
+        from .hippocampus import HistoryFS, SubagentFS, make_search_history_tool
         base_tools._history = HistoryFS(memory, session.session_id)
+        base_tools._subagents = SubagentFS(memory, session.session_id)
         base_tools.registry.register(make_search_history_tool(memory, session.session_id))
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in

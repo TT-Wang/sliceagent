@@ -338,6 +338,12 @@ class NullMemory:
     def episode_manifest(self, session_id: str, k: int) -> tuple[list[dict], int]:
         return [], 0
 
+    def append_subagent_artifact(self, session_id: str, artifact: dict) -> str:
+        return ""   # no vault → not archived; run_subagent falls back to the inline digest
+
+    def read_subagent_artifacts(self, session_id: str) -> list[dict]:
+        return []
+
     def search_episodes(self, query: str, *, limit: int = 5,
                         exclude_session: str | None = None,
                         only_session: str | None = None) -> list[dict]:

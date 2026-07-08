@@ -175,6 +175,10 @@ class FileLock:
         return self
 
     def __exit__(self, *exc):
+        try:
+            self._f.flush()   # flush BEFORE releasing so the NEXT locker sees a complete file — otherwise a
+        except Exception:     # count-then-append (read the file under the lock, then write) races the buffer.
+            pass
         if self._locked:
             try:
                 import fcntl

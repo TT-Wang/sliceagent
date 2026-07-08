@@ -98,7 +98,10 @@ def host_read_only_has_no_spawn_or_edit_even_with_depth_left():
     assert "spawn_explore" not in names, names
     assert "edit_file" not in names and "str_replace" not in names, names
     assert "run_command" not in names and "execute_code" not in names, names
-    assert set(names) == set(_KEEP), names                 # only the read-only allowlist survives
+    # a CHILD must not get search_history — it is bound to the PARENT session and previews the parent's turns
+    # (isolation: children couple only through the two seals). So the child allowlist is _KEEP MINUS search_history.
+    assert "search_history" not in names, names
+    assert set(names) == set(_KEEP) - {"search_history"}, names
 
 
 @check

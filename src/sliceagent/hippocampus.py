@@ -35,12 +35,19 @@ import json
 import os
 import posixpath
 import re
+import threading
 from collections import deque
 
 from .events import AssistantText, Event, SliceBuilt, ToolResult, TurnEnd, TurnInterrupted
 from .pfc import edited_paths_in_code, paths_in_code  # noqa: F401  (paths_in_code kept for back-compat callers)
 from .safety import redact_text
-from .text_utils import format_ts, now_iso
+from .text_utils import format_ts, now_iso, one_line
+
+# Serializes the count-then-append id assignment in append_subagent_artifact ACROSS THREADS — parallel
+# explorers run as threads in ONE process (the scheduler's ThreadPoolExecutor), which is where the id race
+# actually happens. FileLock adds cross-PROCESS safety on POSIX, but flock is a no-op on Windows; this
+# in-process lock makes the sequential ids collision-proof regardless of flock availability.
+_SUBAGENT_APPEND_LOCK = threading.Lock()
 
 _EDIT_TOOL_NAMES = ("edit_file", "append_to_file", "str_replace", "write_file")
 
@@ -364,6 +371,52 @@ class HippocampusMixin:
         except Exception:
             return [], 0
 
+    def append_subagent_artifact(self, session_id: str, artifact: dict) -> str:
+        """Archive a subagent's sealed ARTIFACT under the parent SESSION; return its stable handle ('sub-<n>')
+        so the parent can recall it via read_file("subagents/<handle>.md"). Mirrors append_episode: append-only
+        JSONL at <vault>/subagents/<session>.jsonl, FileLocked so parallel explorers get RACE-SAFE sequential
+        ids. Never raises — an archive failure returns '' and the caller falls back to the inline digest."""
+        if not session_id:
+            return ""
+        try:
+            d = os.path.join(self._vault, "subagents")
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, f"{session_id}.jsonl")
+            from .platform_compat import FileLock
+            with _SUBAGENT_APPEND_LOCK:                                   # serialize same-process explorer threads
+                with open(path, "a+", encoding="utf-8") as f, FileLock(f):   # + cross-process on POSIX
+                    f.seek(0)
+                    n = sum(1 for ln in f if ln.strip()) + 1             # count-then-append atomic under both locks
+                    sid = f"sub-{n}"
+                    # _clamp redacts secrets + byte-bounds every string leaf, like append_episode — a child
+                    # that quoted a key/token into its report must NOT persist it verbatim on disk.
+                    f.write(json.dumps({"v": 1, "id": sid, "ts": now_iso(), "artifact": self._clamp(artifact)},
+                                       ensure_ascii=False, default=str) + "\n")   # O_APPEND → writes at EOF
+            return sid
+        except Exception:
+            return ""
+
+    def read_subagent_artifacts(self, session_id: str) -> list[dict]:
+        """The parent session's archived subagent artifacts, in spawn order. Torn-line tolerant. Never raises."""
+        try:
+            path = os.path.join(self._vault, "subagents", f"{session_id}.jsonl")
+            if not os.path.exists(path):
+                return []
+            out = []
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln:
+                        try:
+                            v = json.loads(ln)
+                        except ValueError:
+                            continue
+                        if isinstance(v, dict):   # a scalar/list line must not reach SubagentFS's .get() → AttributeError
+                            out.append(v)
+            return out
+        except Exception:
+            return []
+
 
 OBS_TAIL = 300         # legacy-record fallback ONLY: per-observation tail when a turn has no stored markdown.
 # render_trace returns a fetched turn IN FULL (no read-side content cap) — the bound is the SEAL: the archive
@@ -588,3 +641,134 @@ def make_search_history_tool(memory, session_id: str):
             "query": {"type": "string", "description": "FTS5 keywords to search episode content for."},
         }, "required": ["query"]}}}
     return ToolEntry(name="search_history", schema=schema, handler=_handler, source="builtin")
+
+
+# ── SUBAGENTS/ virtual namespace — the parent's read-only view of its children's sealed artifacts ──────
+# Mirrors HistoryFS (history/), but over read_subagent_artifacts instead of turns. `index.md` is the
+# DELEGATED WORK manifest; each `sub-<n>.md` is a child's FULL sealed report — the refinement handle behind
+# the bounded digest the spawn tool returned. Served live from the archive; nothing new is written here.
+SUBAGENT_MOUNT = "subagents"
+_SUB_FILE = re.compile(r"^(sub-\d+)\.md$")
+
+
+def _subagent_leaf(path: str) -> str:
+    """Normalized tail under the subagents mount ('subagents/sub-2.md' -> 'sub-2.md'; the bare dir -> '')."""
+    p = (path or "").strip().replace("\\", "/")
+    if not p:
+        return ""
+    p = posixpath.normpath(p)
+    if p == SUBAGENT_MOUNT:
+        return ""
+    return p[len(SUBAGENT_MOUNT) + 1:] if p.startswith(SUBAGENT_MOUNT + "/") else p
+
+
+def render_artifact(rec: dict) -> str:
+    """A subagent artifact rendered as its full markdown report (what read_file('subagents/sub-N.md') returns)."""
+    a = rec.get("artifact") or {}
+    out = [f"# {rec.get('id', 'sub-?')} — {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
+           f"{a.get('steps', '?')} steps", f"task: {a.get('task', '')}"]
+    if a.get("coverage"):
+        out.append(f"coverage: {a['coverage']}")
+    if a.get("change_set"):
+        out.append("change-set: " + ", ".join(a["change_set"]))
+    if a.get("files"):
+        out.append("read: " + ", ".join(a["files"][:20]))
+    findings = a.get("findings") or []
+    if findings:
+        out += ["", "## findings"] + [f"- {f}" for f in findings]
+    if a.get("report"):
+        out += ["", "## report", a["report"]]
+    return "\n".join(out)
+
+
+def _artifact_excerpt(rec: dict, n: int = 90) -> str:
+    a = rec.get("artifact") or {}
+    return one_line(a.get("report") or (a.get("findings") or [""])[0] or a.get("task", ""), n)
+
+
+class SubagentFS:
+    """Read-only virtual FS over THIS session's sealed subagent artifacts (the child→parent seals). Duck-typed
+    like HistoryFS: the host holds one and routes read_file/list_files/grep under `subagents/` here."""
+
+    def __init__(self, memory, session_id: str):
+        self._memory = memory
+        self._session_id = session_id
+
+    def _arts(self) -> list:
+        return self._memory.read_subagent_artifacts(self._session_id)
+
+    @staticmethod
+    def _names(arts) -> list:
+        return [f"{r.get('id')}.md" for r in arts if r.get("id")]
+
+    def index(self, arts=None) -> str:
+        if arts is None:
+            arts = self._arts()
+        if not arts:
+            return "# DELEGATED WORK (this session)\n(no subagent reports yet.)"
+        out = ["# DELEGATED WORK — your subagents' sealed reports this session "
+               "(read one IN FULL: read_file(\"subagents/sub-<N>.md\"))"]
+        for r in arts:
+            a = r.get("artifact") or {}
+            out.append(f"- {r.get('id')}.md · {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
+                       f"{a.get('steps', '?')} steps — {_artifact_excerpt(r)}")
+        return "\n".join(out)
+
+    def read_file(self, path: str) -> str:
+        arts = self._arts()
+        leaf = _subagent_leaf(path)
+        if leaf in ("", "index.md"):
+            return self.index(arts)
+        m = _SUB_FILE.match(leaf)
+        if m:
+            sel = [r for r in arts if r.get("id") == m.group(1)]
+            if sel:
+                return render_artifact(sel[-1])
+            return (f'subagents/{leaf}: no such subagent report this session. '
+                    f'read_file("subagents/index.md") for the list.')
+        return (f'subagents/{leaf}: not a subagent report. Available: index.md, '
+                f'{", ".join(self._names(arts)) or "(none yet)"}.')
+
+    def listing(self, path: str = SUBAGENT_MOUNT) -> str:
+        return "\n".join(["index.md"] + self._names(self._arts())) + \
+            '\n(read index.md for the delegated-work manifest)'
+
+    def _docs_for(self, path, arts) -> list:
+        leaf = _subagent_leaf(path)
+        if leaf == "":
+            return [("index.md", self.index(arts))] + [(f"{r.get('id')}.md", render_artifact(r)) for r in arts]
+        if leaf == "index.md":
+            return [("index.md", self.index(arts))]
+        m = _SUB_FILE.match(leaf)
+        if not m:
+            return []
+        sel = [r for r in arts if r.get("id") == m.group(1)]
+        return [(leaf, render_artifact(sel[-1]))] if sel else []
+
+    def grep(self, pattern: str, *, path: str = SUBAGENT_MOUNT, output_mode: str = "content",
+             context: int = 0, offset: int = 0, limit: int = 50) -> str:
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            return f"grep: invalid regex ({e})."
+        hits, counts = [], {}
+        for name, text in self._docs_for(path, self._arts()):
+            for i, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"subagents/{name}:{i}:{line}")
+                    counts[name] = counts.get(name, 0) + 1
+        if not hits:
+            return "grep: no matches found."
+        if output_mode == "files_with_matches":
+            body_lines = [f"subagents/{n}" for n in counts]
+        elif output_mode == "count":
+            body_lines = [f"subagents/{n}:{c}" for n, c in counts.items()]
+        else:
+            body_lines = hits
+        window = body_lines[offset:offset + limit]
+        if not window:
+            return f"grep: no results at offset={offset} ({len(body_lines)} total)."
+        body = "\n".join(window)
+        if offset + limit < len(body_lines):
+            body += f"\n\n[truncated; use offset={offset + limit} to see more]"
+        return body

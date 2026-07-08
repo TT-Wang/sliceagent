@@ -405,6 +405,7 @@ class LocalToolHost:
         # The read-only VIRTUAL `history/` namespace (this session's sealed turns as files). Injected by the
         # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
         self._history = None
+        self._subagents = None   # a SubagentFS (subagents/ virtual namespace) — the parent's view of child seals
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
@@ -580,34 +581,36 @@ class LocalToolHost:
         return alt if os.path.exists(alt) else full
 
     def _history_route(self, path):
-        """Return the HistoryFS iff `path` targets the virtual `history/` namespace AND no real on-disk file
-        shadows it — a real file/dir ALWAYS wins the name (I2: the virtual view never lies about disk). Else
-        None. ponytail: `history/` is a reserved virtual namespace; a project with a real top-level history/
-        dir keeps its files (real wins) and only forfeits the virtual listing under that exact name. Used by
+        """Return the virtual FS (HistoryFS for `history/`, SubagentFS for `subagents/`) iff `path` targets that
+        reserved namespace AND no real on-disk file shadows it — a real file/dir ALWAYS wins the name (I2: the
+        virtual view never lies about disk). Else None. ponytail: these are reserved virtual namespaces; a
+        project with a real top-level history/ or subagents/ dir keeps its files (real wins). Used by
         read_file/list_files/grep to route reads, and by the write tools to reject (a virtual route ⇒ read-only)."""
-        h = self._history
-        if h is None:
-            return None
         p = (path or "").strip().replace("\\", "/")
         while p.startswith("./"):
             p = p[2:]
         p = p.rstrip("/")
-        if not (p == "history" or p.startswith("history/")):
-            return None
-        try:
-            real = self.resolve_read(path)
-        except (ValueError, PermissionError):
-            real = None
-        return None if (real and os.path.exists(real)) else h
+        for mount, fs in (("history", self._history), ("subagents", self._subagents)):
+            if fs is None or not (p == mount or p.startswith(mount + "/")):
+                continue
+            try:
+                real = self.resolve_read(path)
+            except (ValueError, PermissionError):
+                real = None
+            return None if (real and os.path.exists(real)) else fs
+        return None
 
     def _history_readonly_guard(self, path):
-        """ToolText rejecting a WRITE to the virtual history/ namespace (it's a read-only view of the sealed
-        archive); None when the path isn't virtual history (real files/dirs write normally)."""
-        if self._history_route(path) is None:
+        """ToolText rejecting a WRITE to a virtual namespace (history/ or subagents/ — read-only views of the
+        sealed archive); None when the path isn't virtual (real files/dirs write normally)."""
+        fs = self._history_route(path)
+        if fs is None:
             return None
-        return ToolText("history/ is a read-only view of this session's past turns (the episodic archive) — "
-                        "you can read_file/list_files/grep it, but it can't be written. Save work elsewhere.",
-                        ok=False)
+        what = ("subagents/ is a read-only view of your subagents' sealed reports"
+                if fs is self._subagents else
+                "history/ is a read-only view of this session's past turns (the episodic archive)")
+        return ToolText(f"{what} — you can read_file/list_files/grep it, but it can't be written. "
+                        "Save work elsewhere.", ok=False)
 
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
