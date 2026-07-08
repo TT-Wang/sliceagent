@@ -151,3 +151,34 @@ def msys_to_win(path: str) -> str:
 def is_win_abs(path: str) -> bool:
     """True iff *path* is an absolute drive-letter path (C:\\... or C:/...)."""
     return bool(_WIN_ABS_RE.match(path))
+
+
+class FileLock:
+    """Best-effort EXCLUSIVE advisory lock on an already-open file, held for a `with` block. Real on POSIX
+    (`fcntl.flock`); a graceful no-op where flock is unavailable (Windows / odd filesystem) — cache reads
+    already tolerate a torn line, so the no-lock case degrades to today's behavior, never worse. Serializes
+    concurrent APPENDERS to the SAME file (e.g. a resumed session that reuses its session_id, or a future
+    off-thread writer) so their lines can't interleave into a corrupt record. Advisory: every writer of the
+    file must go through here to get the guarantee. Never raises — a locking failure downgrades to unlocked."""
+
+    def __init__(self, fileobj):
+        self._f = fileobj
+        self._locked = False
+
+    def __enter__(self):
+        try:
+            import fcntl
+            fcntl.flock(self._f.fileno(), fcntl.LOCK_EX)   # blocks until acquired; auto-released on fd close / process death
+            self._locked = True
+        except Exception:
+            self._locked = False                           # no flock here → proceed unlocked (reads tolerate torn lines)
+        return self
+
+    def __exit__(self, *exc):
+        if self._locked:
+            try:
+                import fcntl
+                fcntl.flock(self._f.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        return False

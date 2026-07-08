@@ -238,7 +238,11 @@ class HippocampusMixin:
             clamped = self._clamp_record(record)
             line = {"v": 1, "session_id": session_id, "task_id": task_id, "turn": turn,
                     "ts": ts, "record": clamped}
-            with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f:
+            from .platform_compat import FileLock
+            # FileLock serializes concurrent appenders to this session file (a resumed session reusing its
+            # session_id, or a future off-thread writer) so their lines can't interleave into a torn record.
+            # Best-effort (real on POSIX, no-op elsewhere); reads already skip an unparsable line either way.
+            with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f, FileLock(f):
                 # #36: default=str — a non-serializable value in a tool output must STRINGIFY, never raise
                 # and silently drop the whole turn (the except below would eat it = lost episode + index).
                 f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
