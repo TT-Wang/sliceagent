@@ -59,6 +59,33 @@ def older_turns_get_a_recall_pointer():
 
 
 @check
+def ring_keeps_a_long_reply_verbatim_so_a_tail_recommendation_survives():
+    # #116: the OLD head-cut at 800 chars severed a recommendation stated at the reply TAIL, so a next-turn
+    # "go with your recommendation" mis-resolved to an older keyword-matching turn. Verbatim ring must keep the tail.
+    s = Slice(); s.reset("t")
+    record_user(s, "which file worth probe next")
+    long_reply = "Here is a long analysis. " + ("filler detail. " * 200) + "My recommendation: lib/outreach.ts."
+    assert len(long_reply) > 800, "reply must exceed the old gist cap to be a real regression test"
+    slice_sink(s)(AssistantText(long_reply))
+    record_user(s, "go with your recommendation")   # in-progress; the prior reply is the antecedent
+    out = render_conversation(s)
+    assert "My recommendation: lib/outreach.ts." in out, "the tail recommendation must survive verbatim"
+
+
+@check
+def ring_stays_count_bounded_regardless_of_reply_size():
+    # #116 moat guard: the bound is the turn COUNT (MAX_CONVERSATION), not bytes — resident ring entries stay
+    # flat as the session grows, no matter how large each reply is (peak flexes with reply size, not session length).
+    s = Slice(); s.reset("t")
+    big = "x" * 50_000
+    for i in range(40):
+        record_user(s, f"req {i} " + big)
+        slice_sink(s)(AssistantText(f"reply {i} " + big))
+    assert len(s.conversation) == MAX_CONVERSATION, len(s.conversation)   # 40 turns → still MAX_CONVERSATION entries
+    assert all("req" in e["user"] for e in s.conversation)
+
+
+@check
 def fresh_slice_renders_no_conversation_tier():
     s = Slice(); s.reset("t")
     assert render_conversation(s) == ""

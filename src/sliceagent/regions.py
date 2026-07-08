@@ -39,9 +39,12 @@ MAX_ACTION_SHOWN = 12    # cap on REPEATED/FAILING entries rendered (highest-sig
 FULL_FILE_LINES = 1200
 REGION_LINES = 400
 DISCOVERY_K = 6
-MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — last N user<->assistant exchanges (short-range continuity)
-CONVO_MSG_CHARS = 800    # per-message GIST cap in the conversation tier (count-bounded by MAX_CONVERSATION;
-# the cache holds the full text and recall pages it back, so this is a display-gist size, not the only copy)
+MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — the last N completed user<->assistant exchanges, kept
+# VERBATIM (no per-message truncation). The bound is this COUNT, not a byte cap: the last few turns are the active
+# loop's antecedents ("go with your recommendation" / "save this") and must survive intact so a deictic follow-up
+# resolves against them directly instead of falling to relevance-recall. Peak flexes with recent reply size but
+# stays flat across SESSION LENGTH (older turns + re-readable bulk still page out to history/; recall pages back).
+# (render_conversation drops the in-progress turn, so this surfaces the last MAX_CONVERSATION-1 completed turns.)
 
 
 # ── PER-REGION RENDER: UNCAPPED-BY-RELEVANCE ──────────────────────────────────
@@ -143,14 +146,7 @@ def render_conversation(s) -> str:
     for e in prior:
         lines.append(f"- user: {e['user']}")
         if e.get("assistant"):
-            lines.append(f"  you:  {e['assistant']}")
-            if e.get("truncated"):
-                # the gist above is a CUT of a longer reply — point at the history/ files so the model pages
-                # the FULL text back instead of confabulating detail past the cut. This reply is one of the
-                # turns listed in PAGED-OUT HISTORY below (each with its read_file("history/turn-N.md") call).
-                lines.append("        ⋯ (shortened to a gist — read the FULL reply from its turn file in "
-                             "PAGED-OUT HISTORY below, read_file(\"history/index.md\") to find it, before "
-                             "answering about its specifics; do NOT guess past the cut)")
+            lines.append(f"  you:  {e['assistant']}")   # VERBATIM — no per-message cut, so no recall pointer here
     older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
     tail = (f"\n(+{older} earlier turn(s) this session not shown — they're listed in PAGED-OUT HISTORY "
             "below; read_file(\"history/turn-N.md\") to view any)") if older > 0 else ""

@@ -33,7 +33,6 @@ from dataclasses import dataclass, field
 
 from .events import AssistantText, Event, ToolResult
 from .regions import (
-    CONVO_MSG_CHARS,
     MAX_CONVERSATION,
     MAX_FINDINGS,
     MAX_PLAN_CHARS,
@@ -44,7 +43,7 @@ from .regions import (
     record_note,
 )
 from .swap import READ_BUDGET, READ_BUDGET_MAX, _DEFAULT_SWAP
-from .text_utils import one_line
+from .text_utils import normalize_ws, one_line
 
 # literal paths the model touches via execute_code helpers — so code-as-action reads/edits
 # still populate the OPEN FILES working set (they run in the sandbox, bypassing the ToolHost)
@@ -261,7 +260,10 @@ def record_user(s: Slice, message: str) -> None:
     # VERBATIM, uncapped — the authoritative user-intent record (see user_log field note). Full message,
     # NOT one_line'd: the whole point is that a precise constraint stated here is never truncated/dropped.
     s.user_log.append({"turn": s.turns, "text": message})
-    s.conversation.append({"user": one_line(message, CONVO_MSG_CHARS), "assistant": ""})
+    # RECENT CONVERSATION ring — VERBATIM (whitespace-normalized, NOT truncated): the last few turns are the
+    # active loop's antecedents, so a deictic follow-up ("go with your recommendation", "save this") resolves
+    # against the real text, not a lossy gist. Count-bounded by MAX_CONVERSATION; older turns page out to history/.
+    s.conversation.append({"user": normalize_ws(message), "assistant": ""})
     s.conversation = s.conversation[-MAX_CONVERSATION:]
 
 
@@ -317,13 +319,11 @@ def slice_sink(state):
                 # fill the assistant side of the in-progress exchange — the LAST AssistantText of the
                 # turn wins, so this ends up holding the final reply shown to the user (continuity).
                 full = event.content
-                s.conversation[-1]["assistant"] = one_line(full, CONVO_MSG_CHARS)
-                # RECALL BRIDGE (core cross-turn continuity): flag when the reply was CUT to the gist, so
-                # the NEXT turn's RECENT CONVERSATION points at the turn's history/ file to read the FULL
-                # reply back. Without this the model reads an 800-char gist as the complete reply and
-                # confabulates anything past it ("explain item 2" of a long report it can no longer see)
-                # instead of recalling — the failure the whole cache-not-log design exists to prevent.
-                s.conversation[-1]["truncated"] = len(one_line(full, CONVO_MSG_CHARS + 1)) > CONVO_MSG_CHARS
+                # VERBATIM (whitespace-normalized, NOT truncated): the last MAX_CONVERSATION turns keep their
+                # FULL reply so a next-turn back-reference ("go with your recommendation") resolves against the
+                # real conclusion — which usually sits at the TAIL, exactly what a head-gist used to sever. The
+                # bound is the turn COUNT, not bytes; older turns page out to history/ (recall pages them back).
+                s.conversation[-1]["assistant"] = normalize_ws(full)
             return
         if isinstance(event, ToolResult):
             # the model's distilled conclusion rides on the tool call (the note arg) — fold it into

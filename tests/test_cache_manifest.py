@@ -172,11 +172,10 @@ def pagetable_memory_lessons_unifies_recall():
 
 
 @check
-def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
-    """The 'explain item 2' bug: a long prior reply is stored in the RECENT CONVERSATION ring as an
-    800-char gist. If the ring doesn't SIGNAL the cut + how to page the rest, the model reads the gist as
-    the whole reply and confabulates the part it can't see (a cross-turn-continuity failure = the moat).
-    Fix: a truncated ring reply points at the turn's history/ file, and reading it returns the full text."""
+def long_prior_reply_stays_verbatim_so_item_2_is_answerable_without_recall():
+    """The 'explain item 2' case, post-#116. A long prior reply used to be gisted to 800 chars — item 2 got
+    cut, forcing a recall (or a confabulation). Now the RECENT CONVERSATION ring keeps the last few replies
+    VERBATIM, so item 2 is RESIDENT in the slice and answerable directly. The on-disk archive stays lossless."""
     from sliceagent.hippocampus import turn_markdown
     from sliceagent.events import AssistantText
     from sliceagent.hippocampus import HistoryFS
@@ -184,7 +183,7 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
 
     item2 = "2. lib/pipeline.ts:131,142 — jobs_scored column used for the jobs_updated value."
     report = ("Bug Hunt Report\n\n1. queries.ts:233 build-blocker. "
-              + ("long item-1 detail that pushes item 2 well past the gist cap. " * 20)
+              + ("long item-1 detail that once pushed item 2 past the old gist cap. " * 20)
               + "\n\n" + item2 + "\n\n3. llm.ts:87 drops systemPrompt.\n")
 
     class Mem:
@@ -212,14 +211,12 @@ def truncated_prior_reply_advertises_recall_so_the_model_does_not_confabulate():
     tools = LocalToolHost(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     user = make_build_slice(st, tools, None, mem, "explain item 2", sid)()[1]["content"]
 
-    # item 2 is NOT in the static slice (it was cut from the gist) — recall is REQUIRED to answer
-    assert "jobs_scored" not in user, "test premise broken: item 2 should be past the gist cap"
-    # ...but the slice points at the turn's history/ file (ring marker + PAGED-OUT HISTORY manifest), so the
-    # model reads it back instead of guessing
-    assert 'read_file("history/' in user, "a truncated ring reply must point at the turn's history/ file"
-    # and reading turn 1's history file returns the full reply, item 2 included
+    # item 2 is now RESIDENT in the slice — the verbatim ring keeps the whole prior reply, so no cut, no recall
+    # needed, no confabulation. (This is the #116 flip: the antecedent stays in front of the model.)
+    assert "jobs_scored" in user and "131,142" in user, "the long prior reply must be kept verbatim in the slice"
+    # and the on-disk archive is still lossless — the fallback path once this turn eventually pages out
     out = HistoryFS(mem, sid).read_file("history/turn-1.md")
-    assert "jobs_scored" in out and "131,142" in out, 'history/turn-1.md must return item 2\'s full text'
+    assert "jobs_scored" in out and "131,142" in out, 'history/turn-1.md must still return item 2\'s full text'
 
 
 @check
