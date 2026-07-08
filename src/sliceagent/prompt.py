@@ -49,6 +49,12 @@ SYSTEM_PROMPT = (
     "calling ask_user) is the correct move, not premature delivery; gather what you need over a few short "
     "exchanges, then deliver. Only when the spec is already complete (e.g. a precise issue with tests) or no "
     "one can clarify should you proceed directly on a best-effort reading.\n"
+    "VALUE PROVENANCE: this applies to load-bearing VALUES too. A concrete number, id, port, path, name, or "
+    "flag that you did NOT observe — not in the slice, the files, or this session — is an unstated requirement, "
+    "not a blank to fill. Committing a plausible default (timeout=30, retries=3, port=8080) FEELS like the "
+    "answer but is a guess; say the value is unspecified and ASK, or write an obvious placeholder, rather than "
+    "inventing one. This is ONLY for values you have NO source for — a value you observed or were given, use "
+    "directly (do not second-guess grounded values).\n"
     "</ask>\n\n"
     "{{MEMORY_MODEL}}"  # spliced with MEMORY_ACCUMULATE in make_build_slice (byte-stable per session)
     "The slice is organized into TIERS. Trust them in this order of AUTHORITY (highest first):\n"
