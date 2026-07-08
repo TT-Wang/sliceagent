@@ -236,6 +236,30 @@ class Slice:
         self.stale_deps = set()
 
 
+# ── SLICE FIELD LIFECYCLE — single source of truth ──────────────────────────────────────────────────
+# reset() (the TASK boundary) uniformly wipes EVERY field to its default. seal() (the TURN boundary) does
+# NOT: it CARRIES the distilled durable state, RESETS transient per-loop kernel state, and applies CUSTOM
+# bounding (cap/filter) to a few. Historically each field's seal behavior was encoded by OMISSION (a field
+# survives iff seal() happens not to touch it) — so adding a transient field and forgetting to reset it here
+# silently CARRIED it, accumulating across turns and breaking the flat-peak moat; forgetting a field in
+# reset() leaked it across unrelated tasks. This table makes the choice EXPLICIT, and test_slice_lifecycle
+# enforces: (a) every Slice field is classified here, (b) reset() wipes all fields, (c) seal() resets every
+# 'reset' field and preserves every 'carry' field. Add a Slice field → classify it here or the suite fails.
+_SLICE_SEAL_POLICY: dict[str, str] = {
+    # CARRY — distilled/durable across a turn (kept by seal by NOT touching it)
+    "goal": "carry", "requirements": "carry", "plan": "carry", "action_log": "carry",
+    "last_error": "carry", "active_skills": "carry", "world": "carry", "since_edit": "carry",
+    "open_report": "carry", "conversation": "carry", "user_log": "carry", "turns": "carry",
+    "io": "carry", "read_ceiling": "carry", "explore_mode": "carry",
+    # RESET — transient per-loop kernel state → back to default at the seal
+    "turn_actions": "reset", "ghosts": "reset", "protected_deps": "reset", "stale_deps": "reset",
+    "hot": "reset", "read_budget": "reset",
+    # CUSTOM — bounded/filtered by seal (findings cap, change-set filter); behavior has its own tests
+    "findings": "custom", "finding_source": "custom", "active_files": "custom",
+    "edited_files": "custom", "edit_anchor": "custom", "pre_defs": "custom",
+}
+
+
 def touch_file(s: Slice, path: str, edited: bool = False) -> None:
     """Shim → SwapManager.load (swap.py owns the file load→evict→ghost lifecycle). Signature unchanged."""
     _DEFAULT_SWAP.load(s, path, edited=edited)
