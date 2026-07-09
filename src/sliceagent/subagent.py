@@ -103,13 +103,16 @@ EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lowe
 
 
 def _profile_llm(llm, reasoning):
-    """The llm VIEW for a child running at a given reasoning intent ("fast"/"full"): a SHALLOW COPY with
-    `reasoning` overridden (shares the thread-safe openai client + all config; never mutates the parent or
-    races a sibling). No-op — returns the parent llm — when `reasoning` is falsy (inherit) or already matches."""
-    if not reasoning or getattr(llm, "reasoning", None) == reasoning:
-        return llm
+    """The llm VIEW for a CHILD: ALWAYS a SHALLOW COPY (shares the thread-safe client + immutable config),
+    never the parent object. Two isolations the shared object lacked (external review S7): (1) a child's
+    model/_fellback mutation on context-overflow must not silently switch the PARENT's model — a copy makes
+    those attributes child-local; (2) the parent's streaming delta sink is DISCONNECTED so child deltas never
+    reach the parent UI (a child's deliverable is its sealed summary, not its token stream). Reasoning is
+    applied when given/differing. Copy is cheap; correctness beats the old no-op-when-matching shortcut."""
     view = copy.copy(llm)
-    view.reasoning = reasoning
+    if reasoning:
+        view.reasoning = reasoning
+    view._on_delta = None   # child streaming stays OFF the parent's UI sink (summary-only seal, isolated state)
     return view
 
 
@@ -174,8 +177,11 @@ def _targets_reserved_ns(args) -> bool:
     children couple ONLY through the two seals — or an EXPLICIT grant / their OWN roster files, both
     checked by the caller: a grant is a pointer to a seal and self-memory is not a channel)."""
     p = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
-    return (p in ("subagents", "history", "roster")
-            or p.startswith(("subagents/", "history/", "roster/")))
+    # `.sliceagent/` is the host's PRIVATE dir — paged-out blobs (.sliceagent/blobs/, the L1→L2 store for big
+    # tool results), config, agents. A child shares the base host, so without blocking it a child could
+    # read_file/list a parent-created blob = an undocumented parent→child output channel (external review S8).
+    return (p in ("subagents", "history", "roster", ".sliceagent")
+            or p.startswith(("subagents/", "history/", "roster/", ".sliceagent/")))
 
 
 # NO hire cap — a dormant specialist is just files on disk and a wake reads only its own files (flat in
@@ -232,7 +238,7 @@ def _nested_sink(notify, depth: int):
 def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  max_steps: int = 20, depth: int = 1, notify=None,
                  read_only: bool = False, spec: AgentSpec | None = None, session_id: str = "",
-                 name: str = "", grants: tuple = (), identity_block: str = "") -> str:
+                 name: str = "", grants: tuple = (), identity_block: str = "", budget_sink=None) -> str:
     """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
     The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
     context guarantee); only the summary crosses back.
@@ -299,6 +305,15 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     hooks = CompositeHooks(*_child_hooks)
     result = run_turn(build_slice=build, llm=child_llm, tools=tools, dispatch=child_dispatch,
                       hooks=hooks, max_steps=max_steps)
+    # S5: a child's tokens were invisible to the parent's budget — a fan-out of N children could blow the
+    # per-turn cap unseen. Charge the child's usage back to the parent budget so the parent turn stops once
+    # the TOTAL (parent + all children) crosses the ceiling. usage is also sealed into the artifact below.
+    _child_usage = dict(getattr(result, "usage", None) or {})
+    if budget_sink is not None:
+        try:
+            budget_sink(int(_child_usage.get("prompt_tokens", 0)) + int(_child_usage.get("completion_tokens", 0)))
+        except Exception:  # noqa: BLE001 — budget accounting must never crash a returned child result
+            pass
 
     _af = list(child_state.active_files)   # BOUND the resident head: a child that read 100 files must not
     files = (", ".join(_af[:20]) + (f" +{len(_af) - 20} more" if len(_af) > 20 else "")) or "(none)"
@@ -325,7 +340,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     artifact = {
         "kind": spec.name, "name": name, "task": task, "brief": {"task": task, "grants": sorted(grants)},
         "lesson": one_line(_lm[-1], 200) if _lm else "",
-        "status": status, "steps": result.steps,
+        "status": status, "steps": result.steps, "usage": _child_usage,   # S5: child cost, sealed + billed up
         "report": cap.text or "", "findings": list(child_state.findings),
         "change_set": sorted(child_state.edited_files), "files": list(child_state.active_files),
         "trace": trace.text(),   # W6': the action path, bounded — full-detail grounding for rehydration
@@ -344,8 +359,11 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     head = f"[{label} {status} · {result.steps} steps · files: {files}]"
     if handle:   # archived → bounded digest + recall handle (the refinable seal)
         body = one_line(cap.text, 300) if cap.text else "(no summary produced)"
-        ref = f"{name}.md" if name else f"{handle}.md"   # a named seal is addressable by WHO did it
-        summary = f'{head} {body} → full report: read_file("subagents/{ref}")'
+        # ALWAYS hand back the CANONICAL immutable id (sub-N.md), never the subagents/<name>.md alias: the
+        # alias retargets to the LATEST job for that name, so a later same-name job would silently make an
+        # earlier tool result / grant open a DIFFERENT report (external review S11). The <name>.md alias
+        # stays resolvable in SubagentFS as a convenience; the sealed handle the parent stores is immutable.
+        summary = f'{head} {body} → full report: read_file("subagents/{handle}.md")'
     else:        # no durable archive (eval/headless) → inline, back-compat with the pre-artifact behavior
         summary = head + (" " + one_line(cap.text, 400) if cap.text else "")
     if not success:
@@ -362,7 +380,7 @@ class SubagentHost:
     def __init__(self, inner, *, llm, retriever, memory, policy,
                  max_depth: int = 1, max_steps: int = 20, depth: int = 0, notify=None,
                  read_only: bool = False, spec: AgentSpec | None = None, agents=None, session_id: str = "",
-                 grants: frozenset = frozenset(), instance_name: str = ""):
+                 grants: frozenset = frozenset(), instance_name: str = "", budget_sink=None):
         self.inner = inner
         self.llm = llm
         self.retriever = retriever
@@ -384,6 +402,9 @@ class SubagentHost:
         # W4': THIS child's standing identity (empty for temps/parents) — unlocks reads of its OWN
         # roster/<name>/ files only (self-memory is not a third channel; siblings stay denied).
         self.instance_name = instance_name
+        # S5: a callable(int) that charges child tokens back to the parent's per-turn budget (set by the CLI
+        # after the budget hook exists). Propagated to nested children so ALL delegated cost bills upward.
+        self.budget_sink = budget_sink
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -581,6 +602,7 @@ class SubagentHost:
             session_id=self.session_id,   # nested children archive under the SAME parent session
             grants=child_grants,          # W2: one hop only — this child's grants never propagate further
             instance_name=child_name,     # W4': unlocks the child's OWN roster/<name>/ files (self-memory)
+            budget_sink=self.budget_sink, # S5: nested child cost bills up to the same per-turn budget
         )
         try:
             out = run_subagent(
@@ -588,6 +610,7 @@ class SubagentHost:
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
                 depth=self.depth + 1, notify=self.notify, spec=spec, session_id=self.session_id,
                 name=child_name, grants=tuple(child_grants), identity_block=identity_block,
+                budget_sink=self.budget_sink,
             )
             # announce the lifecycle event (visibility: an unadvertised wake channel stays dead) — but NOT
             # onto a failed child's "Error: ..." return, where it would garble the parent's error tier (the

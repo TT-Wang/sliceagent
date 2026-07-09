@@ -132,7 +132,10 @@ def host_rejects_invalid_names_and_threads_valid_ones():
     assert r.startswith("Error: invalid subagent name"), r
     out = host.run("spawn_explore", {"task": "investigate x", "name": "auth-explorer"})
     assert "[auth-explorer (explore) ok" in out, out                              # identity leads the digest
-    assert 'read_file("subagents/auth-explorer.md")' in out, out                  # recall by WHO
+    # S11: the returned handle is the CANONICAL immutable sub-N.md (not the subagents/<name>.md alias, which
+    # retargets to the latest same-name job). The "who" is still in the digest head; the alias still resolves
+    # via SubagentFS (tested above) — only the sealed handle the parent stores is now immutable.
+    assert 'read_file("subagents/sub-1.md")' in out, out
     art = mem.read_subagent_artifacts("s1")[-1]["artifact"]
     assert art["name"] == "auth-explorer" and art["brief"]["task"] == "investigate x"
 

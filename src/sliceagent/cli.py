@@ -743,7 +743,12 @@ def main() -> None:
         oracle = CommandOracle(cfg.verify_cmd)
         hook_list.append(OracleHook(oracle, lambda out: setattr(session.active(), "last_error", f"Verification failed:\n{out[:600]}")))
     if cfg.max_tokens:
-        hook_list.append(BudgetHook(cfg.max_tokens))
+        _budget = BudgetHook(cfg.max_tokens)
+        hook_list.append(_budget)
+        # S5: charge child-subagent tokens to the SAME per-turn budget so a fan-out can't blow the cap unseen
+        # (SubagentHost was built earlier, before the hooks existed — wire the sink now).
+        if isinstance(tools, SubagentHost):
+            tools.budget_sink = _budget.record_external
     hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
     hooks = CompositeHooks(*hook_list)
 

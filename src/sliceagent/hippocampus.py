@@ -49,6 +49,26 @@ from .text_utils import format_ts, now_iso, one_line
 # actually happens. FileLock adds cross-PROCESS safety on POSIX, but flock is a no-op on Windows; this
 # in-process lock makes the sequential ids collision-proof regardless of flock availability.
 _SUBAGENT_APPEND_LOCK = threading.Lock()
+
+
+def _priv_file(path: str) -> None:
+    """Force a durable private record to mode 0600 regardless of umask — episodic/subagent/roster files hold
+    tasks, reports, findings, traces, and standing lessons, none of it world-readable (external review
+    S12/H-10). Best-effort; no-op on Windows / failure."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _priv_dir(path: str) -> None:
+    """makedirs + force 0700 (private) regardless of umask, for the vault subdirs that hold the above."""
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
 # Standing-specialist identity slug (mirrors subagent._VALID_NAME) — storage-side defense in depth:
 # roster names become directory names, so anything else must never touch the filesystem.
 _ROSTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
@@ -247,7 +267,7 @@ class HippocampusMixin:
     def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
         try:
             d = os.path.join(self._vault, "episodic")
-            os.makedirs(d, exist_ok=True)
+            _priv_dir(d)
             ts = now_iso()
             clamped = self._clamp_record(record)
             line = {"v": 1, "session_id": session_id, "task_id": task_id, "turn": turn,
@@ -256,10 +276,12 @@ class HippocampusMixin:
             # FileLock serializes concurrent appenders to this session file (a resumed session reusing its
             # session_id, or a future off-thread writer) so their lines can't interleave into a torn record.
             # Best-effort (real on POSIX, no-op elsewhere); reads already skip an unparsable line either way.
-            with open(os.path.join(d, f"{session_id}.jsonl"), "a", encoding="utf-8") as f, FileLock(f):
+            _epath = os.path.join(d, f"{session_id}.jsonl")
+            with open(_epath, "a", encoding="utf-8") as f, FileLock(f):
                 # #36: default=str — a non-serializable value in a tool output must STRINGIFY, never raise
                 # and silently drop the whole turn (the except below would eat it = lost episode + index).
                 f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
+            _priv_file(_epath)
         except Exception:
             return  # a cache write must never break a session
         self._index_episode(session_id, task_id, turn, ts, clamped)  # additive FTS5 mirror (item 12)
@@ -387,7 +409,7 @@ class HippocampusMixin:
             return ""
         try:
             d = os.path.join(self._vault, "subagents")
-            os.makedirs(d, exist_ok=True)
+            _priv_dir(d)
             path = os.path.join(d, f"{session_id}.jsonl")
             from .platform_compat import FileLock
             with _SUBAGENT_APPEND_LOCK:                                   # serialize same-process explorer threads
@@ -399,6 +421,7 @@ class HippocampusMixin:
                     # that quoted a key/token into its report must NOT persist it verbatim on disk.
                     f.write(json.dumps({"v": 1, "id": sid, "ts": now_iso(), "artifact": self._clamp(artifact)},
                                        ensure_ascii=False, default=str) + "\n")   # O_APPEND → writes at EOF
+            _priv_file(path)                                             # 0600, not umask 0644 (S12)
             return sid
         except Exception:
             return ""
@@ -435,7 +458,8 @@ class HippocampusMixin:
         tmp = os.path.join(d, f"profile.json.{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(profile, f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(d, "profile.json"))
+        _priv_file(tmp)   # so the replaced profile.json inherits 0600, not umask 0644 (S12: the atomic
+        os.replace(tmp, os.path.join(d, "profile.json"))   # UPDATE was silently downgrading the 0600 create)
 
     def roster_hire(self, name: str, kind: str) -> dict:
         """ATOMIC get-or-create of a standing identity; returns the AUTHORITATIVE profile (the pre-existing
@@ -461,7 +485,7 @@ class HippocampusMixin:
                 return existing                                  # idempotent — first kind wins (no _created)
             try:
                 d = self._roster_dir(name)
-                os.makedirs(d, exist_ok=True)
+                _priv_dir(d)
                 profile = {"v": 1, "name": name, "kind": kind, "created": now_iso(),
                            "jobs": 0, "last_active": now_iso()}
                 ppath = os.path.join(d, "profile.json")
@@ -549,9 +573,11 @@ class HippocampusMixin:
         try:
             d = self._roster_dir(name)
             path = os.path.join(d, "episodes.jsonl")
+            _priv_dir(d)
             from .platform_compat import FileLock
             with _SUBAGENT_APPEND_LOCK:
                 with open(path, "a+", encoding="utf-8") as f, FileLock(f):
+                    _priv_file(path)   # 0600, not umask 0644 (S12)
                     f.seek(0)
                     # id = append-count (every non-empty line), the SAME convention as append_episode /
                     # append_subagent_artifact — monotonic + unique. ponytail: an externally-corrupted torn

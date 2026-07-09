@@ -261,10 +261,15 @@ def explorer_profile_runs_fast_reasoning_without_mutating_parent():
     assert view.reasoning == "fast", view.reasoning
     assert parent.reasoning == "full", "parent llm must NOT be mutated (per-child view only)"
     assert view is not parent, "a reasoning override must get its OWN llm view"
-    assert _profile_llm(parent, None) is parent, "no reasoning override → parent llm unchanged"
-    # already at target → no needless copy
-    fast = SimpleNamespace(reasoning="fast")
-    assert _profile_llm(fast, "fast") is fast
+    assert view._on_delta is None, "child view disconnects the parent's streaming delta sink (S7)"
+    # S7: a child ALWAYS gets its OWN copy — even when reasoning is inherited or already matches — so a child's
+    # model/_fellback mutation can't switch the PARENT and child streaming can't leak to the parent UI.
+    inherited = _profile_llm(parent, None)
+    assert inherited is not parent, "child gets its own view even with inherited reasoning (S7)"
+    assert inherited._on_delta is None
+    fast = SimpleNamespace(reasoning="fast", _on_delta=lambda *_: None)
+    fv = _profile_llm(fast, "fast")
+    assert fv is not fast and fv._on_delta is None, "always an isolated view with streaming off (S7)"
 
 
 def main():

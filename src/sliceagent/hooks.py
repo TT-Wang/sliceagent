@@ -306,6 +306,12 @@ class BudgetHook(Hooks):
         self.spent += int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
         return {"stop_turn": True} if self.spent >= self.max else None
 
+    def record_external(self, tokens: int) -> None:
+        """Charge tokens spent OUTSIDE the parent's own LLM calls — a child subagent's usage — to the SAME
+        per-turn budget, so a fan-out of children can't blow the cap invisibly (external review S5). The
+        parent turn stops at its next record_step_usage once spent (parent + children) crosses max."""
+        self.spent += int(tokens or 0)
+
 
 class GuardrailHook(Hooks):
     """Cross-step loop guard: block a tool call that repeats an identical failing call,
