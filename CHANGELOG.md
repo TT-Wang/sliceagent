@@ -5,6 +5,35 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-07-09
+
+### Added
+- **The standing roster is now visible** to the agent — a bounded STANDING SPECIALISTS manifest in the slice
+  advertises your named specialists (and the `read_file("roster/index.md")` / wake calls), so a fresh
+  session discovers them instead of never finding the feature. The roster read is bounded-work (rank by a
+  cheap stat, parse only the top-K), so it stays flat per turn as the roster grows.
+- **A calibrated `reviewer` agent kind** — a read-only, parallel reviewer whose prompt enforces a severity
+  rubric and four anti-cry-wolf disciplines (read the adjacent comment, trace tainted data to its real
+  consumer, single-user-local threat model, refute your own finding). `spawn_agent(agent="reviewer", …)`.
+
+### Changed
+- **One delegation tool.** `spawn_explore` / `spawn_subagent` are collapsed into `spawn_agent(agent=<kind>,
+  name?, grants?)` (measured parallel-fan-out parity). The delegation mental model is rewritten around two
+  orthogonal dials — the KIND (`agent=`) and the IDENTITY (`name=` → omit for a one-shot temp, pass to HIRE
+  a standing specialist you can WAKE later). Old tool names still work.
+- **No roster hire cap.** A dormant specialist is just files on disk; the bound is on the surfaced view, not
+  the stored count.
+
+### Fixed
+- **Streaming hard-deadline** is re-raised (not downgraded to a partial truncation) so a wall-clock stall is
+  actually retried.
+- **Auto-approve safety:** a broad `AGENT_AUTO_APPROVE` glob no longer silently approves `git push`, package
+  publishes, or `rmdir` — they fall through to a confirmation.
+- Delegation guidance is spliced into the system prompt again (its gate keyed on a removed tool); a path
+  auto-grant no longer trips on version-shaped tokens; ripgrep subprocesses decode as UTF-8; a topic-park
+  failure no longer masquerades as "no such topic"; an unknown scheduler access type serializes safely; the
+  virtual roster FS resolves `profile.json` as well as `profile.md`.
+
 ## [0.1.17] — 2026-07-09
 
 ### Added
