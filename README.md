@@ -14,12 +14,9 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
 
 *Pre-1.0: on `0.x`, CLI flags, config keys, and APIs may change between releases; breaking changes are noted in the [CHANGELOG](CHANGELOG.md).*
 
-**Contents:** [Core design](CORE-DESIGN.md) · [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
+**Contents:** [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
 
 ## How it works
-
-For the precise meaning of “bounded”—history-bounded, task-elastic, and recoverable by construction—see
-the canonical [SliceAgent Core Design](CORE-DESIGN.md).
 
 <p align="center">
   <img src="assets/sliceagent-core-loop.gif" width="840"
