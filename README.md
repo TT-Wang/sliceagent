@@ -64,7 +64,7 @@ Each turn faults in exactly what the turn references — the carried slice, live
 
 On public benchmarks, sliceagent matches Codex's solve rate while using 2.5× fewer tokens and 1.3× less cost on ColBench, and up to 149× smaller peak input on long sessions.
 
-Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All three benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`).
+Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All four benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) — the fourth adds a third question: what does it cost to *orchestrate a subagent fleet*.
 
 ### 1. In-turn capability — Terminal-Bench 2.0 (public)
 
@@ -126,6 +126,32 @@ Per task — note how the transcript agent's peak input scales with the session 
 
 Same capability — **109–149× smaller peak context, 11.7× fewer tokens, 7.3× cheaper, 1.6× faster.** On `s3`, Codex's transcript reached a **2.44M-token** single-request peak while sliceagent held **16k** — a 149× gap that **widens the longer the session runs.**
 
+### 4. Subagent fan-out — hosting a delegation fleet ([`benchmarks/subagent_fanout.py`](benchmarks/subagent_fanout.py))
+
+A ColBench-style human-sim (a staff engineer) **explicitly tells both agents to fan out** — one explorer subagent per module across a 6-module service — then asks four parent-only follow-ups: a 6-turn session, 2 fan-out turns + 4 follow-ups. Codex `exec` ships its **own** `spawn_agent` primitive, so **both agents genuinely delegate.** The question isn't who *can* delegate; it's what the **orchestrator** pays to run a fleet. Both `gpt-5.5` at `high`; each agent's own subagent tokens are counted — Codex's child threads recovered from its session rollouts — for a true total-vs-total. **N = 3 runs, mean [min–max]:**
+
+| metric | sliceagent | OpenAI Codex | % of Codex |
+|---|--:|--:|:--:|
+| subagent spawns | 14 | 11.7 | both fan out |
+| **orchestrator peak** (largest single request) | **17,362** [15.7k–20.3k] | 362,595 [332k–387k] | **4.8%** |
+| delegated · own children | 341,515 | 568,027 | 60% |
+| **true total** (orchestrator + children) | **610,612** [536k–656k] | 2,235,243 [2.11M–2.32M] | **27%** |
+
+Per turn (mean of 3 runs) — the orchestrator's context is what caps how large a fleet you can keep running:
+
+| turn | sliceagent orchestrator | OpenAI Codex orchestrator |
+|---|--:|--:|
+| 1 · fan-out | 37,191 | 119,397 |
+| 2 · fan-out | 36,817 | 258,580 |
+| 3 · follow-up | 39,447 | 282,281 |
+| 4 · follow-up | 82,232 | 305,855 |
+| 5 · follow-up | 41,447 | 338,507 |
+| 6 · follow-up | 31,963 | 362,595 |
+
+sliceagent **seals each turn into a bounded digest**, so its orchestrator's largest single request averaged **~17k** no matter how many workers it spawned or how long the session ran (the turn-4 bump is a re-read to verify a value — many *bounded* steps, not a bigger context). A transcript orchestrator **re-carries the whole session every turn**, so the same delegation-heavy session grows unbounded — **~21× larger orchestrator peak, and ~3.7× more total tokens** once both agents' children are counted. Delegation is table stakes; both agents have it. **What makes sliceagent a natural substrate for a subagent system is the seal:** a bounded orchestrator plus durable, re-readable sealed subagent artifacts, so a long fleet-driven session never blows up the parent's context.
+
+*N = 3 runs, single model, one opponent, needs the Codex CLI installed. A value-recall sub-check varied wildly run-to-run (sliceagent 1–3 / 3, Codex 0–2 / 3) — it turns on a behavioral re-read choice, so it is within noise and **not** part of the claim. The defensible result is the orchestrator-context and total-token gap, which is structural and held across all three runs (orchestrator 8.8–14.3×, total 3.2–4.3×).*
+
 <details>
 <summary><b>How the cost numbers are calculated</b> (exact token counts × published rates)</summary>
 
@@ -162,9 +188,9 @@ One honest wrinkle worth naming: Codex's append-only transcript actually earns a
 
 </details>
 
-> The pattern across all three: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
+> The pattern across all four: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis, and it extends to orchestrating a subagent fleet, where a bounded orchestrator is the whole game. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
 >
-> **These are early, small-scale results** — modest task counts (N = 32 / 20 / 3), single trial per task, one model, one opponent. Treat them as a directional signal, not a settled claim. We're actively expanding to larger and more varied test sets, more trials, and more baselines, and will update these numbers as that work lands.
+> **These are early, small-scale results** — modest task counts (N = 32 / 20 / 3 tasks; §4 is one task × 3 runs), single trial per task, one model, one opponent. Treat them as a directional signal, not a settled claim. We're actively expanding to larger and more varied test sets, more trials, and more baselines, and will update these numbers as that work lands.
 
 ## Install & quickstart
 

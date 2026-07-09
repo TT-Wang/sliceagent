@@ -38,3 +38,14 @@ It drives sliceagent over each scenario's turns, scores the final repo with `ver
 | wall (total) | **1,069s** | 1,761s | **61%** |
 
 On `s3` (10 turns), Codex's transcript reached a **2.44M-token** single-request peak while sliceagent held **16k** — a 149× gap that widens with session length. See [`README.md`](../README.md#benchmark) for the full picture including the public [ColBench](https://huggingface.co/datasets/facebook/collaborative_agent_bench) run.
+
+## Subagent fan-out (README §4) — `subagent_fanout.py`
+
+A separate head-to-head where a ColBench-style human-sim tells **both** agents to fan out (one explorer subagent per module) then asks parent-only follow-ups over a 6-turn session. Both agents delegate (Codex has its own `spawn_agent`); the question is what the **orchestrator** pays to run a fleet. Each agent's own subagent tokens are counted — Codex's child threads are recovered from its `~/.codex/sessions` rollout files — for a true total-vs-total. Needs the **Codex CLI installed + logged in** in addition to a configured LLM.
+
+```bash
+ARCH_MODE=humansim AGENT_REASONING=high CODEX_EFFORT=high \
+  ARCH_RUNS=3 python benchmarks/subagent_fanout.py   # 3 runs + aggregate
+```
+
+Result (N=3): sliceagent's **orchestrator peak stays ~17k while Codex's climbs to ~360k** (it re-carries the whole transcript each turn), for **~21× smaller orchestrator peak and ~3.7× lower true total** on a delegation-heavy session. See [`README.md` §4](../README.md#benchmark) for the table and caveats.
