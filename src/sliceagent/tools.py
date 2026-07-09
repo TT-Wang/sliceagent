@@ -1032,7 +1032,10 @@ class LocalToolHost:
         if ref.startswith("-"):
             return ToolText(f"Error: invalid ref {ref!r} (a ref must not start with '-').", ok=False)
         try:
-            p = subprocess.run(["git", "-C", self.root(), "diff", ref, "--"],
+            # --no-ext-diff / --no-textconv: a hostile repo's .gitattributes + .git/config can register a diff
+            # driver whose external/textconv command git would otherwise EXECUTE while rendering the diff
+            # (external review H-06). Disable both so reviewing a repo never runs repo-controlled helpers.
+            p = subprocess.run(["git", "-C", self.root(), "diff", "--no-ext-diff", "--no-textconv", ref, "--"],
                                capture_output=True, text=True, timeout=30)
         except FileNotFoundError:
             return ToolText("Error: git is not installed.", ok=False)

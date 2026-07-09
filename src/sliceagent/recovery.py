@@ -43,11 +43,28 @@ def _sanitize(messages: list) -> list:
     output to disk after a hard crash, so it must honor the same redact-on-persist boundary as the episodic
     cache / debug log (every other durable store redacts). Replace image_url parts with a placeholder."""
     from .safety import redact_text
+
+    def _redact_tool_calls(tcs):
+        # assistant.tool_calls[*].function.arguments is a JSON STRING carrying the same secrets as content
+        # (edit_file bodies, tokens/paths in run_command) — it was NOT redacted, so a hard-crash WAL persisted
+        # it in the clear (external review H-13). Redact it on the same persist boundary as content.
+        if not isinstance(tcs, list):
+            return tcs
+        red = []
+        for tc in tcs:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                red.append({**tc, "function": {**fn, "arguments": redact_text(fn["arguments"])}})
+            else:
+                red.append(tc)
+        return red
+
     out = []
     for m in messages or []:
         if not isinstance(m, dict):
             out.append(m)
             continue
+        new = dict(m)
         c = m.get("content")
         if isinstance(c, list):
             parts = []
@@ -58,11 +75,12 @@ def _sanitize(messages: list) -> list:
                     parts.append({**p, "text": redact_text(p["text"])})
                 else:
                     parts.append(p)
-            out.append({**m, "content": parts})
+            new["content"] = parts
         elif isinstance(c, str):
-            out.append({**m, "content": redact_text(c)})
-        else:
-            out.append(m)
+            new["content"] = redact_text(c)
+        if "tool_calls" in new:
+            new["tool_calls"] = _redact_tool_calls(new["tool_calls"])
+        out.append(new)
     return out
 
 

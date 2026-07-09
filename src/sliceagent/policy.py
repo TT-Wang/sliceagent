@@ -145,12 +145,22 @@ def _is_readonly_command(cmd: str) -> bool:
         return False
     verb = os.path.basename(toks[0])
     if verb == "git":
-        sub = next((t for t in toks[1:] if not t.startswith("-")), "")
+        # split MAIN options (before the subcommand) from SUBCOMMAND options (after it).
+        isub = next((i for i, t in enumerate(toks[1:], 1) if not t.startswith("-")), len(toks))
+        sub = toks[isub] if isub < len(toks) else ""
         if sub not in _RO_GIT_SUB:
             return False
-        # `git grep --open-files-in-pager[=<cmd>]` / `-O[<cmd>]` runs a PAGER program (arbitrary exec).
-        if sub == "grep" and any(t.startswith("--open-files-in-pager") or t.startswith("-O") for t in toks):
+        main_opts, sub_opts = toks[1:isub], toks[isub + 1:]
+        # MAIN -c/--config/--exec-path inject git config (diff.external, *.textconv, pager, alias, exec-path)
+        # that points at an ARBITRARY command → exec. Refuse auto-approval (external review H-06).
+        if any(t in ("-c", "--config", "--exec-path") or t.startswith(("--config=", "--exec-path=")) for t in main_opts):
             return False
+        # SUBCOMMAND options that WRITE a file (-o/--output) or RUN a configured helper (--ext-diff/--textconv,
+        # `grep --open-files-in-pager`/`-O<cmd>` runs a pager). Any of these makes the "read-only" verb unsafe.
+        for t in sub_opts:
+            if (t in ("-o", "--output", "--ext-diff", "--textconv")
+                    or t.startswith(("--output=", "-O", "--open-files-in-pager"))):
+                return False
         return True
     if verb == "find":
         return not any(t in _FIND_MUTATORS for t in toks)

@@ -117,6 +117,38 @@ def kill_tree(popen: subprocess.Popen, sig: int) -> None:
             pass
 
 
+def capture_pgid(popen: subprocess.Popen):
+    """POSIX: the process-group id of a just-spawned group leader (== its pid), captured while it is still
+    alive — os.getpgid raises once the leader exits and is reaped. Returns None on Windows / on failure."""
+    if IS_WINDOWS:
+        return None
+    try:
+        return os.getpgid(popen.pid)
+    except (AttributeError, OSError):
+        return None
+
+
+def signal_pgid(pgid, sig: int, popen: subprocess.Popen = None) -> None:
+    """POSIX: signal a whole process GROUP by its stored pgid, so a background child is still reached after
+    the leader was reaped (killpg on the pgid works while any member lives). Falls back to signalling the
+    leader directly. Windows: defer to kill_tree (taskkill /T). No-op if there's nothing to signal."""
+    if IS_WINDOWS:
+        if popen is not None:
+            kill_tree(popen, sig)
+        return
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass   # group already fully gone
+    if popen is not None:
+        try:
+            popen.send_signal(sig)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # win32 shell-path extraction (used by tools._grant_shell_paths, gated on IS_WINDOWS
 # at the call site — POSIX never calls these).

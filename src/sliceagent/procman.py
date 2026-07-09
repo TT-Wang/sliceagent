@@ -20,7 +20,7 @@ import os
 import signal
 import subprocess
 
-from .platform_compat import SIG_KILL, kill_tree, popen_group_kwargs, sh as _sh
+from .platform_compat import SIG_KILL, capture_pgid, popen_group_kwargs, signal_pgid, sh as _sh
 import tempfile
 
 from .sandbox import _scrub_env
@@ -29,14 +29,15 @@ _TAIL_CHARS = 4000  # cap a tail read so a chatty process can't flood the slice
 
 
 class _Proc:
-    __slots__ = ("handle", "cmd", "popen", "log_path", "log_fh")
+    __slots__ = ("handle", "cmd", "popen", "log_path", "log_fh", "pgid")
 
-    def __init__(self, handle: str, cmd: str, popen, log_path: str, log_fh):
+    def __init__(self, handle: str, cmd: str, popen, log_path: str, log_fh, pgid=None):
         self.handle = handle
         self.cmd = cmd
         self.popen = popen
         self.log_path = log_path
         self.log_fh = log_fh
+        self.pgid = pgid   # POSIX process-group id captured at spawn (== leader pid); None on Windows
 
 
 class ProcManager:
@@ -67,7 +68,10 @@ class ProcManager:
                 except OSError:
                     pass
             raise
-        self._procs[handle] = _Proc(handle, command, popen, log_path, log_fh)
+        # Capture the process-group id NOW, while the leader is alive: getpgid raises once the leader exits
+        # and is reaped, so a later kill could no longer find the group to reach an orphaned background child
+        # (external review H-14). Via the platform_compat seam (Windows-safe).
+        self._procs[handle] = _Proc(handle, command, popen, log_path, log_fh, capture_pgid(popen))
         return handle
 
     def _spawn_proc(self, command, cwd, env, log_fh):
@@ -107,16 +111,19 @@ class ProcManager:
 
     def kill(self, handle: str) -> str:
         p = self._get(handle)
-        if p.popen.poll() is None:
-            self._signal_group(p, signal.SIGTERM)
+        # Signal the whole GROUP unconditionally — NOT only when the leader is alive. A background child can
+        # outlive the shell leader (leader exited/reaped, so poll() != None) yet still be in the group; gating
+        # the signal on leader-alive orphaned it (external review H-14). SIGTERM reaches the group members;
+        # escalate to SIGKILL if the leader is still hanging on after the grace period.
+        self._signal_group(p, signal.SIGTERM)
+        try:
+            p.popen.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self._signal_group(p, SIG_KILL)
             try:
-                p.popen.wait(timeout=3)
+                p.popen.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self._signal_group(p, SIG_KILL)
-                try:
-                    p.popen.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
+                pass
         status = self.poll(handle)
         # Release the open FD now (the process is dead, so nothing more writes the log) — a long session that
         # starts/kills many procs would otherwise leak one fd per cycle, marching toward EMFILE. Keep the
@@ -180,6 +187,6 @@ class ProcManager:
 
     @staticmethod
     def _signal_group(p: _Proc, sig: int) -> None:
-        # POSIX: the same killpg→send_signal ladder as always (now living in platform_compat);
-        # win32: taskkill /T tree-kill.
-        kill_tree(p.popen, sig)
+        # Signal the whole group via the pgid captured at spawn (POSIX) so we still reach a background child
+        # after the shell leader was reaped; Windows falls back to taskkill /T. All through the seam.
+        signal_pgid(p.pgid, sig, p.popen)
