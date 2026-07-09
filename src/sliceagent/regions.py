@@ -79,6 +79,29 @@ def render_cache_manifest(refs) -> str:
     return "\n".join(lines)
 
 
+ROSTER_MANIFEST_K = 12   # bounded roster preview; the full list is one read_file("roster/index.md") away
+
+
+def render_roster(profiles, total: int | None = None) -> str:
+    """STANDING SPECIALISTS body: the durable, cross-session roster made VISIBLE so the model reaches for
+    read_file("roster/index.md") / spawn_agent(name=…) instead of spelunking the raw vault when asked about
+    its specialists (the unadvertised-channel dead-cache trap — the whole roster was invisible without this,
+    so a fresh session could only find it by browsing ~/.sliceagent, where the virtual index.md isn't a real
+    file). ``profiles`` is already the top-K by recency (roster_recent); ``total`` is the full roster size
+    (defaults to len(profiles)) so the '+N more' overflow is correct even though we only parsed K. Locators
+    only (name/kind/jobs) — the full profile + career page in on demand via the .md virtual paths.
+    Self-suppresses when the roster is empty. Bound is on the VIEW (K shown), not the STORE (unbounded)."""
+    if not profiles:
+        return ""
+    shown = list(profiles)[:ROSTER_MANIFEST_K]
+    n_total = len(profiles) if total is None else total
+    lines = [f"- {p.get('name')} · {p.get('kind', '?')} · {p.get('jobs', 0)} job(s) · "
+             f"last active {(p.get('last_active') or '?')[:10]}" for p in shown]
+    if n_total > len(shown):
+        lines.append(f'- (+{n_total - len(shown)} more — read_file("roster/index.md") for all)')
+    return "\n".join(lines)
+
+
 def render_focus(focus, extra_roots, *, home: str = "", workspace: str = "") -> str:
     """CURRENT PROJECT body: the dir the agent is actively working in, when it has moved beyond the boundary
     root. Surfaces the auto-granted file-tool reach + the moved relative-path base (otherwise INVISIBLE →
@@ -640,6 +663,11 @@ REGION_ORDER = (
     # files under history/). Sits beside GHOST INDEX (same "it's paged out, here's the one call to get it"
     # idiom) so the model has a SEEN target to read; an unseen cache is the dead channel. Locators only.
     ("cache_manifest", VOLATILE, lambda c: (f"\n# PAGED-OUT HISTORY (your OWN earlier turns this session — your memory of what you did, kept as read-only files under history/ and NOT in the slice; read any back with the call shown, read_file(\"history/index.md\") for the full list, or search_history(\"keywords\") across sessions)\n{c['cache_manifest']}\n" if c.get("cache_manifest") else ""), 3),
+    # STANDING SPECIALISTS — the durable, cross-session roster made VISIBLE (same "advertise the paged-out
+    # channel" idiom as PAGED-OUT HISTORY). Without this the roster is a DEAD channel: a fresh session can't
+    # discover it except by browsing the raw vault, where the virtual index.md isn't a real file. Locators
+    # only; the full profile/career pages in on demand via read_file("roster/<name>/profile.md").
+    ("roster",         VOLATILE, lambda c: (f"\n# STANDING SPECIALISTS (named subagents you've hired — in THIS or a PAST session — each a durable specialist with its own sealed career; WAKE one to reuse its memory with spawn_agent(agent=<kind>, name=<name>, task=…), browse one with read_file(\"roster/<name>/profile.md\"), or read_file(\"roster/index.md\") for the full roster)\n{c['roster']}\n" if c.get("roster") else ""), 3),
     # ──────────── TIER 5 · STEERING & LIVE STATE — what's wrong / where things stand (VOLATILE, high-authority tail). ────────────
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),

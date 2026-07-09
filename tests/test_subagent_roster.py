@@ -263,7 +263,6 @@ def synthesis_seal_ships_its_refinement_map():
 
 # ---- W4': durable roster — hire once, wake many ------------------------------------------------------
 
-import sliceagent.subagent as subagent_mod  # noqa: E402
 from sliceagent.hippocampus import RosterFS  # noqa: E402
 
 
@@ -318,22 +317,21 @@ def wake_seed_carries_identity_lessons_absent_and_abstention():
 
 
 @check
-def roster_cap_kernel_says_no():
+def roster_is_uncapped_a_dormant_specialist_costs_nothing():
+    # the roster has NO hire cap — a dormant specialist is just files on disk; hiring the Nth always
+    # succeeds. The bound is on the VIEW (roster_recent surfaces top-K), not the STORE.
     mem = _mem()
     host = _staff_host(mem)
-    old = subagent_mod.ROSTER_CAP
-    subagent_mod.ROSTER_CAP = 2
-    try:
-        host.run("spawn_explore", {"task": "t", "name": "one"})
-        host.run("spawn_explore", {"task": "t", "name": "two"})
-        r = host.run("spawn_explore", {"task": "t", "name": "three"})
-        assert r.startswith("Error: roster full"), r
-        assert mem.roster_get("three") is None
-        # temps and existing staff still fine at the cap
-        assert "[explore ok" in host.run("spawn_explore", {"task": "t"})
-        assert "[one (explore) ok" in host.run("spawn_explore", {"task": "t", "name": "one"})
-    finally:
-        subagent_mod.ROSTER_CAP = old
+    for i in range(40):                                              # comfortably past the old cap of 32
+        out = host.run("spawn_explore", {"task": "t", "name": f"spec-{i:02d}"})
+        assert "hired standing specialist" in out, out
+    assert len(mem.roster_list()) == 40                             # all 40 stand
+    # the per-turn manifest read is BOUNDED: roster_recent parses only the top-K, and reports the true total
+    from sliceagent.regions import ROSTER_MANIFEST_K
+    profs, total = mem.roster_recent(ROSTER_MANIFEST_K)
+    assert total == 40 and len(profs) == ROSTER_MANIFEST_K, (total, len(profs))
+    # most-recently-active first (spec-39 was hired last)
+    assert profs[0]["name"] == "spec-39", profs[0]["name"]
 
 
 @check
@@ -539,9 +537,8 @@ def concurrent_same_name_hire_is_race_safe():
     mem = _mem()
 
     def _hire(kind):
-        return mem.roster_hire("scout", kind, cap=_ROSTER_CAP_FOR_TEST)
+        return mem.roster_hire("scout", kind)
 
-    _ROSTER_CAP_FOR_TEST = 100
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
         kinds = ["explorer", "synthesiser", "general", "reviewer"] * 8
         profs = list(ex.map(_hire, kinds))
@@ -573,13 +570,24 @@ def concurrent_career_appends_keep_every_job():
 
 
 @check
-def cap_is_enforced_atomically_inside_hire():
+def roster_recent_bounds_the_manifest_work_not_the_store():
+    # roster_recent parses only the top-K (bounded per-turn work) while the store is unbounded; it reports
+    # the true total, and ranks most-recently-active first, tolerating a null-date record without crashing.
     mem = _mem()
-    assert mem.roster_hire("a", "explorer", cap=2)
-    assert mem.roster_hire("b", "explorer", cap=2)
-    assert mem.roster_hire("c", "explorer", cap=2) == {}          # full → {} (kernel says no)
-    assert mem.roster_hire("a", "explorer", cap=2)                # waking existing at cap is fine
-    assert mem.roster_get("c") is None
+    for i in range(20):
+        mem.roster_hire(f"w{i:02d}", "explorer")
+    # bump one older specialist so it becomes most-recent (a job seal rewrites its profile → dir mtime)
+    mem.roster_append_job("w05", _art("explorer", "fresh work"))
+    profs, total = mem.roster_recent(5)
+    assert total == 20 and len(profs) == 5, (total, len(profs))
+    assert profs[0]["name"] == "w05", profs[0]["name"]           # recently-active surfaces first
+    # a present-but-null last_active must not crash the recency parse
+    import json as _json
+    d = mem._roster_dir("nulldate"); os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "profile.json"), "w") as f:
+        _json.dump({"name": "nulldate", "kind": "explorer", "jobs": 0, "last_active": None}, f)
+    profs2, total2 = mem.roster_recent(25)
+    assert total2 == 21 and any(p["name"] == "nulldate" for p in profs2), total2
 
 
 @check
@@ -704,6 +712,72 @@ def hire_suffix_not_appended_to_a_failed_childs_error():
     out = host.run("spawn_agent", {"agent": "general", "task": "do x", "name": "flaky"})
     assert out.startswith("Error:") and "hired standing specialist" not in out, out
     assert mem.roster_get("flaky") is not None                      # the hire is real regardless of outcome
+
+
+# ---- roster VISIBILITY: the standing roster must be surfaced in the slice (the discovery bug) ---------
+
+from sliceagent.regions import render_roster, REGION_ORDER, ROSTER_MANIFEST_K  # noqa: E402
+
+
+@check
+def roster_is_surfaced_in_the_slice_manifest():
+    # The bug the user hit: the roster was MOUNTED for tool routing but never ADVERTISED in the slice, so a
+    # fresh session couldn't discover read_file("roster/index.md") and spelunked the raw vault instead. The
+    # STANDING SPECIALISTS region is the fix (the visible-cache-manifest lesson, applied to the roster).
+    assert render_roster([]) == ""                                          # empty → nothing
+    profs = [{"name": f"spec-{i}", "kind": "explorer", "jobs": i, "last_active": "2026-07-09T00:00:00Z"}
+             for i in range(ROSTER_MANIFEST_K + 5)]
+    profs.append({"name": "nulldate", "kind": "explorer", "jobs": 0, "last_active": None})  # r3 null-safety
+    man = render_roster(profs)
+    assert "spec-0 · explorer · 0 job(s)" in man                            # locators: name · kind · jobs
+    assert man.count("\n") == ROSTER_MANIFEST_K                             # K lines + one overflow line
+    assert "+6 more" in man and 'read_file("roster/index.md")' in man       # overflow → the full-list call
+    # the region is wired into REGION_ORDER, emits the discovery affordances, and self-suppresses when empty
+    lam = next(e for e in REGION_ORDER if e[0] == "roster")[2]
+    assert lam({"roster": ""}) == ""
+    blk = lam({"roster": man})
+    assert "# STANDING SPECIALISTS" in blk
+    assert "spawn_agent(agent=<kind>, name=<name>" in blk and 'read_file("roster/index.md")' in blk
+
+
+@check
+def real_profile_json_name_resolves_through_the_virtual_fs():
+    # papercut: the on-disk files are profile.json, but the virtual FS served only profile.md — a model that
+    # saw the real name got "not a roster file". Both names now resolve.
+    mem = _mem()
+    mem.roster_hire("worker", "explorer")
+    fs = RosterFS(mem)
+    assert fs.read_file("roster/worker/profile.json").startswith("# worker")
+    assert fs.read_file("roster/worker/profile.md").startswith("# worker")
+
+
+# ---- system-prompt wiring: the delegation mental model must actually reach the model -----------------
+
+@check
+def delegation_guidance_is_spliced_when_spawn_agent_is_offered():
+    # the gate that includes DELEGATION_BLOCK keyed on "spawn_explore" — which was removed — so the whole
+    # rewritten mental model silently vanished from the prompt. Pin it: block present iff spawn_agent offered.
+    from sliceagent.pfc import Slice
+    from sliceagent.seed import make_build_slice
+
+    def _sys(tools):
+        st = Slice(); st.reset("review the repo")
+        msgs = make_build_slice(st, tools, NullRetriever(), NullMemory(), "review the repo")()
+        return "\n".join(m.get("content", "") if isinstance(m.get("content"), str) else ""
+                         for m in msgs if m.get("role") == "system")
+
+    # a parent host offers spawn_agent → the delegation guidance (and the new mental model) is in the prompt
+    parent = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(), policy=None,
+                          max_depth=1, depth=0)
+    sysp = _sys(parent)
+    assert "<delegation>" in sysp, "delegation block missing from the system prompt"
+    assert "spawn_agent(agent=" in sysp and "HIRE a STANDING specialist" in sysp   # the kind×name model
+    assert "spawn_explore" not in sysp, "stale spawn_explore leaked into the guidance"
+
+    # a host at the depth floor offers NO spawn tool → no delegation block (don't advertise a tool it lacks)
+    floor = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(), policy=None,
+                         max_depth=1, depth=1)
+    assert "<delegation>" not in _sys(floor)
 
 
 def main():

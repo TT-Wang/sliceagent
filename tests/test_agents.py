@@ -34,7 +34,7 @@ def read_only_derivation():
 
 @check
 def load_agents_builtins_only_when_no_dirs():
-    assert set(load_agents([])) == {"explorer", "general", "verification", "synthesiser"}
+    assert set(load_agents([])) == {"explorer", "general", "verification", "synthesiser", "reviewer"}
 
 
 @check
@@ -68,9 +68,13 @@ class _Inner:
 def spawn_agent_schema_lists_the_roster():
     host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None, max_depth=1, depth=0)
     names = [s["function"]["name"] for s in host.schemas()]
-    assert "spawn_agent" in names and "spawn_explore" in names and "spawn_subagent" in names
+    # ONE delegation tool now — spawn_agent subsumes the old spawn_explore/spawn_subagent (measured parity)
+    assert "spawn_agent" in names
+    assert "spawn_explore" not in names and "spawn_subagent" not in names, names
     sa = next(s for s in host.schemas() if s["function"]["name"] == "spawn_agent")
-    assert "explorer" in sa["function"]["description"] and "general" in sa["function"]["description"]
+    d = sa["function"]["description"]
+    assert "explorer" in d and "general" in d            # kinds still enumerated
+    assert "name" in d and "HIRE" in d                   # the identity/hire dial is taught in-schema
 
 
 @check

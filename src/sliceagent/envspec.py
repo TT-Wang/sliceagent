@@ -43,7 +43,7 @@ REGISTRY: list[EnvVar] = [
            "full", choices=("full", "fast", "high", "max"), validate=True),
     EnvVar("AGENT_THINKING", "agent", "Set to 'off' to disable reasoning (alias for AGENT_REASONING=fast).", ""),
     EnvVar("AGENT_MINE", "agent", "Lesson-mining mode for end-of-session consolidation.", "deterministic"),
-    EnvVar("AGENT_SUBAGENT_DEPTH", "agent", "Max delegation depth for spawn_subagent/spawn_explore (0=off).", "1"),
+    EnvVar("AGENT_SUBAGENT_DEPTH", "agent", "Max delegation depth for spawn_agent (0=off).", "1"),
     EnvVar("AGENT_EXPLORER_REASONING", "agent", "Reasoning effort for read-only explorer children.", "fast"),
     EnvVar("AGENT_AUTO_APPROVE", "agent", "Comma-separated globs of pre-approved safe commands (skip prompt).", ""),
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),

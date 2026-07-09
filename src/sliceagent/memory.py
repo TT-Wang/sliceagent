@@ -351,11 +351,14 @@ class NullMemory:
     def roster_get(self, name: str):
         return None
 
-    def roster_hire(self, name: str, kind: str, *, cap: int | None = None) -> dict:
+    def roster_hire(self, name: str, kind: str) -> dict:
         return {}
 
     def roster_list(self) -> list[dict]:
         return []
+
+    def roster_recent(self, k: int) -> tuple[list[dict], int]:
+        return [], 0
 
     def roster_append_job(self, name: str, artifact: dict) -> str:
         return ""

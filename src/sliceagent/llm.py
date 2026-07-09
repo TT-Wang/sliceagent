@@ -478,10 +478,17 @@ class OpenAILLM:
                                 if getattr(fn, "arguments", None):
                                     slot["args"].append(fn.arguments)
                 except _timeout_err:
-                    raise   # SIGALRM hard-deadline fired mid-chunk → propagate (one-shot alarm won't re-arm); the outer handler salvages the partial
+                    raise   # SIGALRM hard-deadline fired mid-chunk → propagate (one-shot alarm won't re-arm)
                 except Exception:  # noqa: BLE001 — one bad chunk must not kill the stream
                     continue
-        except Exception:  # noqa: BLE001 — stream broke mid-flight
+        except Exception as e:  # noqa: BLE001 — stream broke mid-flight
+            # H2: a SIGALRM hard-deadline is FATAL — it must NOT be salvaged as a partial "length" stop
+            # (that downgrades a wall-clock stall into a normal truncation, defeating the deadline). The
+            # inner handler re-raises it, but it was being re-caught HERE and downgraded whenever parts≠[].
+            # Re-raise so with_retry re-rolls — matching _responses_stream + the _emit "must not be
+            # swallowed" contract.
+            if isinstance(e, _timeout_err):
+                raise
             if not parts and not calls:
                 raise                          # nothing salvageable → let with_retry re-roll
             finish = finish or "length"        # partial assembly → treat as a truncated (incomplete) stop

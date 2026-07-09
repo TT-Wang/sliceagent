@@ -72,7 +72,8 @@ _TOOL = {
     "search_history": ("🕮 ", "search", "query"),
     "new_topic":      ("🟢", "topic",  "goal"),
     "switch_topic":   ("🔀", "switch", "task_id"),
-    "spawn_subagent": ("🤖", "agent",  "task"),
+    "spawn_agent":    ("🤖", "agent",  "task"),   # the ONE delegation tool
+    "spawn_subagent": ("🤖", "agent",  "task"),   # back-compat display for the old names
     "spawn_explore":  ("🔭", "explore", "task"),
 }
 

@@ -229,8 +229,13 @@ TOOL_SCHEMAS = [
     _fn("code_review",
         "Review code changes: returns the `git diff` for the workspace (default vs HEAD; pass `ref` for a "
         "branch / commit / range like 'main', 'HEAD~3', or 'main...HEAD') so you can audit the changes for "
-        "correctness, security, and edge cases — cite file:line for each issue you find. Read-only; needs a "
-        "git repo. Prefer this over piecing a review together from many read_file calls.",
+        "correctness, security, and edge cases — cite file:line for each issue. Read-only; needs a git repo. "
+        "Prefer this over piecing a review together from many read_file calls. CALIBRATE severity: reserve "
+        "critical/high for a real bug that fires in normal use or is exploitable by UNTRUSTED input — read the "
+        "adjacent comment (a documented tradeoff is not a bug), trace tainted data to its real consumer before "
+        "claiming a leak, remember this is a single-user LOCAL tool (self-edited config / same-user files are "
+        "trusted), and report each finding only with a concrete inputs→wrong-outcome you actually traced. For "
+        "a big or multi-area review, spawn_agent(agent=\"reviewer\", …) — one per area — instead.",
         {"ref": {"type": "string"}}, []),
     _fn("str_replace",
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
@@ -550,6 +555,12 @@ class LocalToolHost:
         for cand in cands:
             if not (cand.startswith("/") or cand.startswith("~")
                     or (IS_WINDOWS and is_win_abs(cand))):
+                continue
+            # H4: drop version-shaped tokens ('/v1.2.3', '/1.0') — a coincidental '/'-run from a version
+            # string, not a path the command operates on. (The must-be-an-existing-dir-UNDER-HOME guards
+            # below already exclude nearly all false positives; this kills the named residual class before
+            # even touching the filesystem.)
+            if re.fullmatch(r"[/~]v?\d[\d.]*", cand):
                 continue
             full = os.path.realpath(os.path.expanduser(cand))
             d = full if os.path.isdir(full) else os.path.dirname(full)

@@ -106,7 +106,8 @@ def host_read_only_has_no_spawn_or_edit_even_with_depth_left():
 
 @check
 def host_writable_schemas_unchanged_regression():
-    # read_only=False (default) must still surface the inner tools verbatim PLUS the two spawn tools.
+    # read_only=False (default) must still surface the inner tools verbatim PLUS the ONE delegation tool.
+    # (spawn_explore/spawn_subagent were collapsed into spawn_agent — measured fan-out parity.)
     inner = _InnerHost()
     host = SubagentHost(inner, llm=None, retriever=None, memory=None, policy=None,
                         max_depth=1, depth=0, read_only=False)
@@ -115,8 +116,9 @@ def host_writable_schemas_unchanged_regression():
     # every inner tool preserved, nothing dropped
     for n in inner_names:
         assert n in names, n
-    # delegation tools appended (depth<max_depth): the two built-ins + the generic registry tool
-    assert names == inner_names + ["spawn_subagent", "spawn_explore", "spawn_agent"], names
+    # exactly ONE delegation tool appended (depth<max_depth): spawn_agent subsumes the old aliases
+    assert names == inner_names + ["spawn_agent"], names
+    assert "spawn_explore" not in names and "spawn_subagent" not in names, names
 
 
 @check
@@ -125,7 +127,7 @@ def host_writable_no_spawn_at_depth_floor():
     host = SubagentHost(_InnerHost(), llm=None, retriever=None, memory=None, policy=None,
                         max_depth=1, depth=1, read_only=False)
     names = _names(host.schemas())
-    assert "spawn_subagent" not in names and "spawn_explore" not in names, names
+    assert "spawn_agent" not in names, names
 
 
 # ---- run_subagent(read_only=True) returns a bounded summary -----------------

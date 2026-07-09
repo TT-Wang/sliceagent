@@ -437,25 +437,28 @@ class HippocampusMixin:
             json.dump(profile, f, ensure_ascii=False)
         os.replace(tmp, os.path.join(d, "profile.json"))
 
-    def roster_hire(self, name: str, kind: str, *, cap: int | None = None) -> dict:
+    def roster_hire(self, name: str, kind: str) -> dict:
         """ATOMIC get-or-create of a standing identity; returns the AUTHORITATIVE profile (the pre-existing
-        one unchanged, or the just-created one) or {} on cap-full/failure. Never raises. The returned dict
-        of the caller that PERFORMED the create carries an EPHEMERAL '_created': True marker (never persisted)
+        one unchanged, or the just-created one) or {} on write failure. Never raises. The returned dict of
+        the caller that PERFORMED the create carries an EPHEMERAL '_created': True marker (never persisted)
         — so exactly ONE caller under a same-name race owns the 'hired' lifecycle announcement (deriving it
         from jobs==0 double-fires, since the race loser also sees jobs==0).
 
-        Race-safety (bug-hunt HIGH): the whole get→cap→create is under _SUBAGENT_APPEND_LOCK so parallel
-        spawn threads of the SAME name (the scheduler runs read-only children concurrently) can't both take
-        the create path — the loser gets the winner's profile back, so kind-stability is decided once. The
-        create uses O_CREAT|O_EXCL (atomic even ACROSS processes); cap is enforced HERE inside the lock."""
+        NO CAP: a dormant specialist is just files on disk (identity = archive key, not a runtime entity),
+        and a wake reads only THAT specialist's files — flat regardless of roster size. The roster isn't a
+        scarce resource, so the kernel doesn't ration it; the per-turn manifest cost is bounded instead
+        (roster_recent parses only the top-K), not the number of specialists.
+
+        Race-safety (bug-hunt HIGH): the whole get→create is under _SUBAGENT_APPEND_LOCK so parallel spawn
+        threads of the SAME name (the scheduler runs read-only children concurrently) can't both take the
+        create path — the loser gets the winner's profile back, so kind-stability is decided once. The
+        create uses O_CREAT|O_EXCL (atomic even ACROSS processes)."""
         if not self._roster_name_ok(name):
             return {}
         with _SUBAGENT_APPEND_LOCK:
             existing = self.roster_get(name)
             if existing:
                 return existing                                  # idempotent — first kind wins (no _created)
-            if cap is not None and len(self.roster_list()) >= cap:
-                return {}                                        # kernel says no, atomically
             try:
                 d = self._roster_dir(name)
                 os.makedirs(d, exist_ok=True)
@@ -486,7 +489,9 @@ class HippocampusMixin:
                 return {}
 
     def roster_list(self) -> list[dict]:
-        """All standing specialists' profiles, most recently active first. Never raises."""
+        """ALL standing specialists' profiles, most recently active first — O(N) parses. Never raises. Used
+        by the on-demand roster/index.md ('read the full roster') where paying O(N) once is fine (like
+        history/index.md); the PER-TURN slice manifest uses roster_recent (bounded work) instead."""
         try:
             base = os.path.join(self._vault, "roster")
             if not os.path.isdir(base):
@@ -502,6 +507,38 @@ class HippocampusMixin:
             return sorted(out, key=lambda p: p.get("last_active") or "", reverse=True)
         except Exception:
             return []
+
+    def roster_recent(self, k: int) -> tuple[list[dict], int]:
+        """(the k most-recently-active profiles, total roster size) for the per-turn slice manifest.
+        BOUNDED WORK — the whole reason the roster needs no cap: rank every specialist by a cheap dir stat
+        (no file open/parse), then PARSE ONLY the top k. So per-turn cost is O(N cheap stats + k parses),
+        never O(N parses) — a dormant specialist adds a stat, not a read (it 'costs zero sitting there').
+        Dir mtime tracks last_active: hire (O_EXCL create) and every job seal (profile rewrite via
+        os.replace) both touch the dir. Never raises."""
+        try:
+            base = os.path.join(self._vault, "roster")
+            if not os.path.isdir(base):
+                return [], 0
+            ranked = []
+            with os.scandir(base) as it:
+                for e in it:
+                    if not self._roster_name_ok(e.name):
+                        continue
+                    try:
+                        if e.is_dir():
+                            ranked.append((e.stat().st_mtime, e.name))
+                    except OSError:
+                        continue
+            ranked.sort(reverse=True)                       # newest dir-activity first
+            out = []
+            for _mt, name in ranked[:max(0, k)]:
+                p = self.roster_get(name)                   # parse ONLY the top-k
+                if p:
+                    out.append(p)
+            out.sort(key=lambda p: p.get("last_active") or "", reverse=True)   # display by last_active
+            return out, len(ranked)
+        except Exception:
+            return [], 0
 
     def roster_append_job(self, name: str, artifact: dict) -> str:
         """Append one sealed job to a specialist's CAREER; return its handle ('job-<n>') or ''. NO-OP for
@@ -1054,8 +1091,8 @@ class RosterFS:
         profiles = self._memory.roster_list()
         if not profiles:
             return ("# ROSTER (standing specialists)\n(none hired yet. Naming a delegation hires one: "
-                    "spawn_agent/spawn_explore with name=\"...\" — re-using the name later WAKES the same "
-                    "specialist with its career and lessons.)")
+                    "spawn_agent(agent=<kind>, name=\"...\", task=...) — re-using the name later WAKES the "
+                    "same specialist with its career and lessons.)")
         out = ["# ROSTER — your standing specialists (wake one: spawn_agent(agent=<kind>, name=<name>, "
                "task=...); browse one: read_file(\"roster/<name>/profile.md\"))"]
         for p in profiles:
@@ -1072,8 +1109,8 @@ class RosterFS:
         if profile is None:
             return (f'roster/{leaf}: no standing specialist named {name!r}. '
                     f'read_file("roster/index.md") for the roster.')
-        if rest in ("", "profile.md"):
-            return render_profile(profile, self._memory.roster_read_jobs(name))
+        if rest in ("", "profile.md", "profile.json"):   # accept the REAL on-disk name too (papercut: a model
+            return render_profile(profile, self._memory.roster_read_jobs(name))   # that saw profile.json reads it
         if rest == "lessons.md":
             lessons = profile.get("lessons") or []
             if not lessons:

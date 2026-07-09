@@ -154,7 +154,8 @@ def make_grep_tool(host) -> ToolEntry:
 
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=host.root(), timeout=30
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",  # H10: UTF-8, not locale
+                cwd=host.root(), timeout=30
             )
         except (OSError, subprocess.SubprocessError) as e:
             return f"grep: search failed ({e}); no results."
@@ -305,7 +306,8 @@ def make_glob_tool(host) -> ToolEntry:
         if rg:
             cmd = [rg] + (["--path-separator", "/"] if IS_WINDOWS else []) + ["--files", "--sortr", "modified", "-g", pattern, target]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, cwd=host.root(), timeout=30)
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",   # H10: UTF-8, not locale
+                                       errors="replace", cwd=host.root(), timeout=30)
                 if proc.returncode in (0, 1):          # 0 = files, 1 = none (not an error)
                     files = [ln for ln in proc.stdout.splitlines() if ln]
             except (OSError, subprocess.SubprocessError):

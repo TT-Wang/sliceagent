@@ -26,7 +26,9 @@ from .regions import (
     MANIFEST_TURNS,
     MAX_FINDINGS,
     REGION_LINES,
+    ROSTER_MANIFEST_K,
     render_cache_manifest,
+    render_roster,
     render_current_request,
     render_focus,
     render_now,
@@ -211,7 +213,7 @@ def render_subdir_hints(text: str) -> str:
 
 def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                  worktree: str = "", repo_map: str = "", cache_manifest: str = "",
-                 focus: str = "", *, max_findings: int = MAX_FINDINGS) -> str:
+                 focus: str = "", roster: str = "", *, max_findings: int = MAX_FINDINGS) -> str:
     """Assemble the ONE user string (the moat) by iterating REGION_ORDER — the typed-region layout
     in regions.py. Each region renders its own framed fragment and SUPPRESSES itself when empty;
     render_regions joins them (stable bulk leads for prompt-cache locality, volatile recency-salient
@@ -228,6 +230,7 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "repo_map": repo_map,
         "cache_manifest": cache_manifest,
         "focus": focus,
+        "roster": roster,
         "max_findings": max_findings,
     }
     return render_regions(ctx)
@@ -379,7 +382,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         _names = {sc.get("function", {}).get("name") for sc in tools.schemas()} if hasattr(tools, "schemas") else set()
     except Exception:
         _names = set()
-    delegation_block = DELEGATION_BLOCK if "spawn_explore" in _names else ""
+    delegation_block = DELEGATION_BLOCK if "spawn_agent" in _names else ""   # the ONE delegation tool now
     # Splice the memory-model explanation into the system prompt (computed once → byte-stable per session).
     mem_block = MEMORY_ACCUMULATE
 
@@ -448,6 +451,17 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # bounded to MANIFEST_TURNS locators (moat), self-suppresses with no durable log (NullMemory => []).
         manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)  # HIPPOCAMPUS
         cache_manifest = render_cache_manifest(manifest_refs)
+        # STANDING SPECIALISTS manifest — advertise the durable, cross-session roster so the model uses
+        # read_file("roster/index.md") / spawn_agent(name=…) instead of spelunking the raw vault (an
+        # unadvertised channel is a dead one). roster_recent does BOUNDED WORK (rank by cheap stat, parse
+        # only the top-K) so the roster can be UNCAPPED without denting the flat-per-turn moat — a dormant
+        # specialist costs a stat, not a read. getattr-guarded like episode_manifest — a minimal memory
+        # without a roster just yields "". Cross-session by design: NOT gated on is_session.
+        roster_manifest = ""
+        _roster_recent = getattr(memory, "roster_recent", None)
+        if callable(_roster_recent):
+            _profs, _total = _roster_recent(ROSTER_MANIFEST_K)
+            roster_manifest = render_roster(_profs, _total)
         # ACTIVE FOCUS — surface the file-tool reach beyond the workspace (auto-granted when the shell
         # works on an external dir, but otherwise INVISIBLE → the model defaulted to the workspace frame
         # and lost the thread across turns). Carries naturally: the host's extra roots persist per session.
@@ -457,7 +471,8 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
             focus_text = render_focus(_focus_path, _extra_roots, home=os.path.expanduser("~"), workspace=tools.root())
         body = render_slice(s, artifacts, discovery, lessons_memo[goal], threads,
                             worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix;
-                            max_findings=_NO_CAP)                       # subdir hints ride the NOW footer (nowblock) below
+                            roster=roster_manifest,                     # subdir hints ride the NOW footer (nowblock) below
+                            max_findings=_NO_CAP)
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
         # the two copies never diverge — and the intent-aware NOW footer is the OUTERMOST tail, so the final

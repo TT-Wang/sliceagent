@@ -42,7 +42,10 @@ class Session:
     def _park(self, status: str = "parked") -> None:
         """Durably checkpoint the active topic (for cross-session resume); a no-op under NullMemory.
         The live Slice stays in self.tasks regardless, so within-session switching is lossless."""
-        if self.active_id is None:
+        # M6: guard the dict access — if active_id is set but its Slice isn't in self.tasks (shouldn't
+        # happen), do NOT raise KeyError here: switch_topic's caller `_switch` has `except KeyError` and would
+        # mislabel a park failure as "no such topic" for the DIFFERENT topic being switched to. Nothing to save.
+        if self.active_id is None or self.active_id not in self.tasks:
             return
         if getattr(self.memory, "is_durable", False):
             self.memory.checkpoint_task(slice_to_task_state(

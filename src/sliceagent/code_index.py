@@ -369,7 +369,8 @@ class RipgrepCodeIndex:
         cmd.append(self.root)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=self.timeout)
+                                  encoding="utf-8", errors="replace",   # H10: don't decode ripgrep output with
+                                  timeout=self.timeout)                  # the locale codec (ASCII on C/POSIX → corrupt)
         except (OSError, subprocess.SubprocessError):
             return {}
         files: dict[str, dict] = {}
@@ -398,7 +399,8 @@ class RipgrepCodeIndex:
     def _code_files(self, max_files: int) -> list[str]:
         try:
             proc = subprocess.run([self.rg, "--files", self.root],
-                                  capture_output=True, text=True, timeout=self.timeout)
+                                  capture_output=True, text=True, encoding="utf-8",   # H10: UTF-8, not locale
+                                  errors="replace", timeout=self.timeout)
         except (OSError, subprocess.SubprocessError):
             return []
         rels: list[str] = []

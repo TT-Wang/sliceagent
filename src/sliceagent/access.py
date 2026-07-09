@@ -82,8 +82,14 @@ def _pair_conflict(left: Access, right: Access) -> bool:
     if ra_left or ra_right:
         if ra_left and ra_right:
             return False                                   # two workspace-wide reads never conflict
-        other = right if ra_left else left                 # the other side is a FileAccess (AllAccess handled above)
-        return _writes(other.operation)                    # read-all conflicts ONLY with a write, never with a read
+        other = right if ra_left else left                 # the other side should be a FileAccess
+        if not isinstance(other, FileAccess):
+            return True                                    # M29: unknown Access type → serialize (safe default),
+        return _writes(other.operation)                    # never AttributeError on a missing .operation
+    # M29: below reads .operation on BOTH sides — a future Access subclass that isn't FileAccess must
+    # conflict conservatively rather than crash the scheduler with an AttributeError.
+    if not (isinstance(left, FileAccess) and isinstance(right, FileAccess)):
+        return True
     if not (_writes(left.operation) or _writes(right.operation)):
         return False  # read/read, read/search never conflict
     return _overlap(left, right)

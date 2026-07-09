@@ -23,10 +23,14 @@ from .guidance import DENIAL_NO_PROMPT, DENIAL_USER
 # fall through to a confirmation even when a glob matches. The catastrophic floor is screened too (below).
 _DESTRUCTIVE_AUTO = [
     re.compile(r"\bgit\b[^\n]*\b(reset|clean|checkout|restore|rebase|filter-branch)\b", re.I),
-    re.compile(r"\bgit\b[^\n]*\bbranch\b[^\n]*\s-D\b", re.I),
+    re.compile(r"\bgit\b[^\n]*\bbranch\b[^\n]*\s-D\b", re.I),         # re.I → also catches -d (deletes a branch ref)
     re.compile(r"\bgit\b[^\n]*\bstash\b[^\n]*\b(drop|clear)\b", re.I),
-    re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(--force|--force-with-lease|\s-f\b)", re.I),
-    re.compile(r"\brm\b(?=[^|;&\n]*\s-[a-z]*r)", re.I),     # any recursive rm
+    re.compile(r"\bgit\b[^\n]*\bpush\b", re.I),                      # H8: ANY push, not just --force — OUTWARD and
+    #                                                                 publishes history (a plain push is hard to undo too)
+    re.compile(r"\b(npm|yarn|pnpm)\b[^\n]*\bpublish\b|\btwine\b[^\n]*\bupload\b"
+               r"|\b(cargo|poetry)\b[^\n]*\bpublish\b|\bgem\b[^\n]*\bpush\b", re.I),  # publish a package — outward, irreversible
+    re.compile(r"\brm\b(?=[^|;&\n]*\s-[a-z]*r)", re.I),              # any recursive rm
+    re.compile(r"\brmdir\b", re.I),                                 # removes a directory
     re.compile(r"\b(shred|mkfs|wipefs)\b", re.I),
 ]
 

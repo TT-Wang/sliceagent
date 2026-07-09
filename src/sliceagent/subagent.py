@@ -6,11 +6,14 @@ workspace, and returns ONLY a compact summary. The parent's slice never sees the
 child's transcript — just the summary — so parent context stays bounded no matter how
 much work the child did. That's the slice thesis applied recursively.
 
-Exposed as a tool (`spawn_subagent`) via a ToolHost wrapper, so the loop is unchanged:
-from the parent loop's view it's one tool call that returns a summary string. The child
-is depth-capped (a child can't spawn grandchildren by default) and runs under the same
-permission policy. Tool execution and reads delegate to the wrapped (real) ToolHost,
-so parent and child share one workspace and one sandbox.
+Exposed as ONE tool (`spawn_agent`, agent=<kind>) via a ToolHost wrapper, so the loop is
+unchanged: from the parent loop's view it's one tool call that returns a summary string.
+(The former `spawn_explore` / `spawn_subagent` were just agent="explorer" / "general";
+collapsed after measuring parallel-fan-out parity — run() still recognises the old names.)
+A named spawn HIRES a standing specialist; an unnamed one is a one-shot temp. The child is
+depth-capped (a child can't spawn grandchildren by default) and runs under the same
+permission policy. Tool execution and reads delegate to the wrapped (real) ToolHost, so
+parent and child share one workspace and one sandbox.
 """
 from __future__ import annotations
 
@@ -73,46 +76,10 @@ def _norm_vpath(path) -> str:
     return "" if p == "." else p.rstrip("/")
 
 
-_SUBAGENT_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "spawn_subagent",
-        "description": (
-            "Delegate a self-contained WRITABLE sub-task to a child agent (full tools). It works in "
-            "the SAME workspace and returns only a SHORT summary (not its full transcript), so your own "
-            "context stays small. Use for a large, decomposable piece of work you want carried out "
-            "end-to-end; give a complete, standalone description (the child sees none of your context). "
-            "For pure investigation prefer spawn_explore; for one tightly-coupled change you are "
-            "actively editing yourself, stay single-agent."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"task": {"type": "string"}, "name": _NAME_PARAM, "grants": _GRANTS_PARAM},
-            "required": ["task"],
-        },
-    },
-}
-
-_EXPLORE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "spawn_explore",
-        "description": (
-            "Delegate a READ-ONLY investigation to a child agent that reads/lists/searches (grep/glob)/"
-            "recalls in the SAME workspace and returns only a SHORT summary — its file reads never enter "
-            "your context. USE PROACTIVELY FOR BREADTH: whenever answering would require reading more "
-            "than a couple of files, or the task spans several areas (e.g. 'review the repo', 'where/how "
-            "is X handled', 'find the bug'), emit SEVERAL spawn_explore calls in ONE response (one per "
-            "area or question) — they run in PARALLEL — instead of reading everything yourself, then "
-            "synthesize their summaries. The child cannot edit, run commands, or spawn its own children."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"task": {"type": "string"}, "name": _NAME_PARAM, "grants": _GRANTS_PARAM},
-            "required": ["task"],
-        },
-    },
-}
+# NOTE: the former spawn_explore / spawn_subagent tool schemas are GONE — spawn_agent (built per-host in
+# SubagentHost._agent_schema) subsumes both (they were just agent="explorer" / agent="general"); measured
+# parity on parallel fan-out (evals/eval_spawn_breadth_ab.py). run() still RECOGNISES those two names for
+# back-compat (an old cached prompt or a stale caller), routing them to the explorer / general kinds.
 
 # Tools a READ-ONLY child may see. NO run_command/execute_code: the policy layer can't
 # guarantee a side-effect-free shell, so they are deferred (plan sec 6 defer). spawn_subagent
@@ -211,9 +178,9 @@ def _targets_reserved_ns(args) -> bool:
             or p.startswith(("subagents/", "history/", "roster/")))
 
 
-# HIRE cap — the kernel can say no: a roster past this size is sprawl, not a team. Temps are unlimited
-# (they don't enter the roster); hiring past the cap errors with the retire hint.
-ROSTER_CAP = 32
+# NO hire cap — a dormant specialist is just files on disk and a wake reads only its own files (flat in
+# roster size), so the roster isn't a scarce resource to ration. The per-turn cost is bounded on the
+# manifest side instead (hippocampus.roster_recent parses only the top-K), so the store can grow freely.
 _CAREER_MANIFEST_K = 5   # wake-seed career lines (one-liners + handles; full jobs stay paged out)
 
 
@@ -389,7 +356,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
 
 
 class SubagentHost:
-    """ToolHost wrapper that adds `spawn_subagent`. Delegates every real tool (and
+    """ToolHost wrapper that adds the `spawn_agent` delegation tool. Delegates every real tool (and
     read_text/accesses) to the wrapped host, so parent and child share one workspace."""
 
     def __init__(self, inner, *, llm, retriever, memory, policy,
@@ -438,29 +405,36 @@ class SubagentHost:
             if self.spec.tools is not None:
                 allow = set(self.spec.tools) - {"search_history"}   # child: search_history leaks the parent session
                 s = [x for x in s if x.get("function", {}).get("name") in allow]
-                # spawn_* tools are appended below for the unrestricted path — but an allowlist that NAMES a
-                # spawn tool would otherwise have it filtered out here. Offer the allowed ones (depth-gated).
-                if self.depth < self.max_depth:
-                    for sch in (_SUBAGENT_SCHEMA, _EXPLORE_SCHEMA, self._agent_schema()):
-                        if sch.get("function", {}).get("name") in allow:
-                            s.append(sch)
+                # ONE spawn tool now (spawn_agent subsumes the old spawn_explore/spawn_subagent aliases —
+                # measured parity on parallel fan-out). Offer it if the kind's allowlist permits delegation.
+                if self.depth < self.max_depth and {"spawn_agent", "spawn_explore", "spawn_subagent"} & allow:
+                    s.append(self._agent_schema())
                 return s
         if self.depth < self.max_depth:  # parent (or a general child) — offer delegation while depth remains
-            s.append(_SUBAGENT_SCHEMA)
-            s.append(_EXPLORE_SCHEMA)
             s.append(self._agent_schema())
         return s
 
     def _agent_schema(self) -> dict:
-        """The generic `spawn_agent` tool — delegate to a NAMED agent kind from the registry (one Agent
-        tool + a pluggable roster). The description enumerates the available kinds by name."""
-        roster = "; ".join(f"{n}: {sp.description}" for n, sp in self.agents.items())
+        """The ONE delegation tool — `spawn_agent`. It subsumes the former spawn_explore / spawn_subagent
+        (each was just this with agent='explorer' / 'general'); measured parity on parallel fan-out, so the
+        breadth nudge lives here in the description, not in a dedicated verb. The two orthogonal dials —
+        KIND (agent=) and IDENTITY (name=) — are spelled out so the model has the right mental model."""
+        kinds = "; ".join(f"{n} ({sp.description})" for n, sp in self.agents.items())
         return {"type": "function", "function": {
             "name": "spawn_agent",
-            "description": ("Delegate a self-contained sub-task to a NAMED agent kind that runs in its OWN "
-                            "bounded context and returns ONLY a summary. Available kinds — " + roster),
+            "description": (
+                "Delegate a self-contained sub-task to a child agent that runs in its OWN bounded context and "
+                "returns ONLY a short summary (its reads never enter your context). Two dials:\n"
+                "• agent = which KIND — " + kinds + ". For BREADTH (review/understand a repo, find a bug, "
+                "audit several modules) emit MULTIPLE spawn_agent(agent=\"explorer\", …) calls in ONE response "
+                "— explorers are read-only and run in PARALLEL; one per area/module/question, then synthesize "
+                "their summaries. Stay single-agent for one tightly-coupled change you're editing yourself.\n"
+                "• name = OPTIONAL identity. OMIT it → a one-shot TEMP (used once, then only its sealed report "
+                "remains). PASS one → HIRE a STANDING specialist that persists across sessions, accumulates "
+                "lessons, and can be WOKEN by re-using the same name later (see STANDING SPECIALISTS). Hire "
+                "when this is an area you'll revisit; use a temp for a one-off."),
             "parameters": {"type": "object", "properties": {
-                "agent": {"type": "string", "description": "the agent kind to run (a name from the list)"},
+                "agent": {"type": "string", "description": "the KIND to run (a name from the list above)"},
                 "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
                 "name": _NAME_PARAM, "grants": _GRANTS_PARAM,
             }, "required": ["agent", "task"]}}}
@@ -583,16 +557,12 @@ class SubagentHost:
         if child_name and self.memory is not None:
             profile = self.memory.roster_get(child_name)
             if not profile:
-                # ATOMIC get-or-create (cap enforced inside the lock). Under a concurrent same-name race the
-                # loser gets the WINNER's profile back — so the kind-stability check below runs against the
+                # ATOMIC get-or-create (no cap — the roster is unbounded). Under a concurrent same-name race
+                # the loser gets the WINNER's profile back, so the kind-stability check below runs against the
                 # authoritative identity, never a phantom the caller thought it created.
-                profile = self.memory.roster_hire(child_name, spec.name, cap=ROSTER_CAP)
+                profile = self.memory.roster_hire(child_name, spec.name)
                 if profile:
                     hired = bool(profile.pop("_created", False))   # ONLY the creating caller announces the hire
-                elif len(self.memory.roster_list()) >= ROSTER_CAP:
-                    # {} AND a genuinely full roster → the kernel says no (a real durable roster at capacity)
-                    return (f"Error: roster full ({ROSTER_CAP} standing specialists) — re-use or retire an "
-                            f'existing one (read_file("roster/index.md")) instead of hiring another.')
                 # else: {} from a memory with NO durable roster (NullMemory) or a transient write failure →
                 # run as a session TEMP (the name still labels this seal; no standing identity accrues).
             if profile:
