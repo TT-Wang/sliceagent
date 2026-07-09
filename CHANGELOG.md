@@ -5,6 +5,33 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-07-09
+
+### Added
+- **Standing specialist roster — hire once, wake many.** A named delegation
+  (`spawn_agent`/`spawn_explore` with `name="…"`) now HIRES a durable specialist; re-using the name WAKES
+  it, rehydrated from its own sealed archive at flat cost regardless of career length (identity is an
+  archive key, not a running process). A woken specialist is seeded with a bounded identity block: its
+  recent career manifest, its lessons, and an abstention self-model ("your memories are only your sealed
+  reports — say so beyond them"). The hippocampus now records who your agent works with, what they were
+  told, and what they found.
+- **Instance identity + verbatim-brief provenance.** Every sealed artifact carries the instance `name` and
+  the exact brief it was given, so a report's reader always sees the question alongside the answer;
+  `subagents/index.md` is the roster and `subagents/<name>.md` aliases a specialist's latest job.
+- **Capability grants.** A parent wires one child's sealed report to another by granting an exact handle in
+  the brief — default-deny, one-hop (no re-grant), spawn-time existence-checked — so children still couple
+  only through seals.
+- **Synthesiser agent + lessons + searchable delegated work.** A read-only `synthesiser` kind reduces N
+  granted sibling reports into one cited synthesis; a seal-time `LESSON:` reflection is curated into the
+  specialist's profile (deduped, capped, provenance-tagged); and delegated work is dual-written to the FTS5
+  index so `search_history` finds it by content without touching the turn timeline.
+
+### Fixed
+- **Race-safe hire + durable-store hardening.** Concurrent same-name hires are atomic (in-process lock +
+  `O_EXCL` create + cap enforced under the lock), profile writes are atomic (tmp + `os.replace`), and the
+  roster tolerates corrupt/legacy records (null date fields no longer crash the wake seed or the roster
+  listing) — surfaced and fixed across three adversarial bug-hunt rounds.
+
 ## [0.1.16] — 2026-07-08
 
 ### Added
