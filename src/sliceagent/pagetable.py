@@ -147,7 +147,12 @@ class PageTable:
         if self.memory is None or not isinstance(query, str) or not query.strip() or not self.session_id:
             return []                              # FAIL CLOSED: no current session → no within-session search
         hits = self.memory.search_episodes(query.strip(), limit=k, only_session=self.session_id)
-        return [PageRef(handle=str(h.get("turn")), kind="episode-search-thissession",
+        # W6': a DELEGATED-WORK hit (task_id 'subagent:sub-N', turn=0 — an FTS mirror row, not a turn)
+        # carries its subagents/ handle so the renderer points at the seal, never a bogus turn file.
+        return [PageRef(handle=(str(h.get("task_id"))[len("subagent:"):]
+                                if str(h.get("task_id") or "").startswith("subagent:")
+                                else str(h.get("turn"))),
+                        kind="episode-search-thissession",
                         preview=_pack_episode_preview(h), score=float(h.get("score") or 0.0),
                         untrusted=False) for h in hits]
 
@@ -190,7 +195,10 @@ class PageTable:
 def _episode_pageref(h: dict) -> PageRef:
     """Map one cross-session episode hit dict to a PageRef (lossless for the listing's display:
     locator in `handle`, ts/title/note/match packed into `preview`)."""
-    handle = f"{(h.get('session_id') or '')[:14]} · turn {h.get('turn')}"
+    tid = str(h.get("task_id") or "")
+    what = (tid[len("subagent:"):] if tid.startswith("subagent:")   # a past session's delegated seal,
+            else f"turn {h.get('turn')}")                            # read-only context (not mounted here)
+    handle = f"{(h.get('session_id') or '')[:14]} · {what}"
     return PageRef(handle=handle, kind="episode-xsession",
                    preview=_pack_episode_preview(h),
                    score=float(h.get("score") or 0.0), untrusted=True)

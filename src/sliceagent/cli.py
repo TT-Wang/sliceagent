@@ -374,9 +374,10 @@ def main() -> None:
     # far more readily than a bespoke recall tool (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is
     # written to disk here. search_history adds the one thing files can't: FTS5 over PAST sessions.
     if getattr(memory, "is_durable", False):
-        from .hippocampus import HistoryFS, SubagentFS, make_search_history_tool
+        from .hippocampus import HistoryFS, RosterFS, SubagentFS, make_search_history_tool
         base_tools._history = HistoryFS(memory, session.session_id)
         base_tools._subagents = SubagentFS(memory, session.session_id)
+        base_tools._roster = RosterFS(memory)   # the durable standing workforce (cross-session by design)
         base_tools.registry.register(make_search_history_tool(memory, session.session_id))
 
     # write side of the memory loop is CACHE-ONLY: distillation runs at session end in

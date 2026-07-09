@@ -73,6 +73,35 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
                       "work, then return a concise summary of what you changed and verified. Do NOT ask the "
                       "user; if the task is ambiguous, make the best reasonable choice and note it in the summary.",
     ),
+    # The REDUCE side of fan-out — and deliberately NOT special machinery: a synthesiser is just a
+    # read-only child whose brief GRANTS it the sibling reports to merge (spawn_agent with
+    # grants=[all N handles]). It pages them ONE AT A TIME through its own bounded slice (peak O(1) in N)
+    # and seals a synthesis whose refs are those handles — so the reduce is bounded AND lossless: any
+    # detail the synthesis dropped stays one read_file away.
+    "synthesiser": AgentSpec(
+        name="synthesiser",
+        description="REDUCE a fan-out: merges the sealed reports you grant it (grants=[...]) into ONE "
+                    "synthesis with per-claim citations, surfacing conflicts and coverage gaps. Spawn after "
+                    "several explorers finish, granting it their handles.",
+        tools=READ_ONLY_TOOLS, reasoning="full",
+        summary_is_deliverable=True,   # its summary IS the synthesis
+        system_prompt=(
+            "You are a SYNTHESISER subagent: your job is to REDUCE several sealed sibling reports into one "
+            "coherent synthesis WITHOUT laundering away detail or disagreement.\n"
+            "Method: read the granted INPUT REPORTS one at a time (each is a read_file call from your task); "
+            "extract each report's claims/findings; then merge.\n"
+            "Rules:\n"
+            "- CITE every merged claim to its source handle, e.g. (subagents/sub-2.md) — a claim you cannot "
+            "cite does not go in the synthesis.\n"
+            "- CONFLICTS between reports are FINDINGS, not noise: surface them explicitly ('sub-1 says X; "
+            "sub-3 says Y') rather than picking a side silently.\n"
+            "- COVERAGE GAPS are part of the synthesis: state what none of the inputs examined.\n"
+            "- Do NOT re-investigate the codebase yourself beyond spot-checking a citation; your input is "
+            "the reports. If they are insufficient, say exactly what is missing.\n"
+            "Deliver: a structured synthesis (merged findings with citations · conflicts · gaps · "
+            "recommendation if asked). Do NOT ask the user."
+        ),
+    ),
     # An independent ADVERSARIAL verifier. Runs in a FRESH
     # slice and returns only a VERDICT + evidence — so it complements the parent's structural done-gates
     # (OracleHook/SelfCheckHook) with a second, skeptical opinion WITHOUT any context crossing the seal.

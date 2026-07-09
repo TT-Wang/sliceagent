@@ -16,11 +16,62 @@ from __future__ import annotations
 
 import copy
 import os
+import posixpath
+import re
 
 from .access import AllAccess, ReadAllAccess
 from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, SUBAGENT_EXCLUDED_TOOLS, AgentSpec  # named-agent registry
-from .events import AssistantText, ToolStarted
+from .events import AssistantText, ToolResult, ToolStarted
 from .text_utils import one_line
+
+# INSTANCE identity — an optional short name the parent gives ONE delegation ("auth-explorer"). Distinct
+# from the KIND (the AgentSpec): the kind is the job description, the name is the employee. A named seal
+# is addressable as subagents/<name>.md (latest job by that name) in the roster manifest, so the parent
+# can refer to work by WHO did it, not just an ordinal. Validation is strict: it becomes a virtual-FS
+# leaf, so path chars are out, and it must not shadow the canonical handles (sub-N) or index.md.
+_VALID_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+_RESERVED_NAME = re.compile(r"^(sub-\d+|index|history|subagents|roster)$", re.IGNORECASE)
+
+_NAME_PARAM = {
+    "type": "string",
+    "description": ("optional stable identity for this delegation (e.g. 'auth-explorer'); names its sealed "
+                    "report in the DELEGATED WORK roster (subagents/<name>.md). Re-using a name later means "
+                    "'the same specialist' — its latest report lives at that address."),
+}
+
+
+def _valid_instance_name(name: str) -> bool:
+    return bool(_VALID_NAME.match(name)) and not _RESERVED_NAME.match(name)
+
+
+# CAPABILITY GRANTS — the governed handle channel (v3.5). The parent wires child A's output to child B by
+# granting B the EXACT address of A's sealed artifact; the payload flows archive→B without transiting the
+# parent's context (parent cost = O(edges), not O(payloads)). Rules that keep "children couple only through
+# seals" true: exact file handles only (never a dir or index.md), spawn-time existence validation + a hard
+# cap (the kernel can say no), and NO transitive propagation — only the PARENT mints grants.
+_MAX_GRANTS = 16
+_GRANT_SUB = re.compile(r"^sub-\d+\.md$")
+
+_GRANTS_PARAM = {
+    "type": "array", "items": {"type": "string"},
+    "description": ("optional: EXACT sealed-report handles this child may read as INPUT (e.g. "
+                    "[\"subagents/sub-1.md\", \"subagents/auth-explorer.md\"]) — hand a sibling's full "
+                    "report to the child without pasting it into the task."),
+}
+
+
+def _norm_vpath(path) -> str:
+    """CANONICAL virtual-namespace path ('./subagents\\sub-1.md/' -> 'subagents/sub-1.md'). posixpath.normpath
+    collapses '..' and '.' SEGMENTS — load-bearing for every prefix-based guard downstream: without it,
+    'roster/<own>/../other/job-1.md' passes an own-namespace prefix check and the mounted FS then normalizes
+    it into ANOTHER specialist's file (guard and FS must normalize identically, or the gap between them is
+    a traversal)."""
+    p = (path or "").strip().replace("\\", "/") if isinstance(path, str) else ""
+    if not p:
+        return ""
+    p = posixpath.normpath(p)
+    return "" if p == "." else p.rstrip("/")
+
 
 _SUBAGENT_SCHEMA = {
     "type": "function",
@@ -36,7 +87,7 @@ _SUBAGENT_SCHEMA = {
         ),
         "parameters": {
             "type": "object",
-            "properties": {"task": {"type": "string"}},
+            "properties": {"task": {"type": "string"}, "name": _NAME_PARAM, "grants": _GRANTS_PARAM},
             "required": ["task"],
         },
     },
@@ -57,7 +108,7 @@ _EXPLORE_SCHEMA = {
         ),
         "parameters": {
             "type": "object",
-            "properties": {"task": {"type": "string"}},
+            "properties": {"task": {"type": "string"}, "name": _NAME_PARAM, "grants": _GRANTS_PARAM},
             "required": ["task"],
         },
     },
@@ -111,6 +162,33 @@ class _CaptureLast:
             self.text = event.content
 
 
+_TRACE_MAX_LINES = 200   # bounded action trace per seal (a line is tiny; 200 covers any real child turn)
+
+
+class _TraceSink:
+    """W6': the child's ACTION TRACE, sealed into the artifact — one bounded line per tool result. This is
+    the 'what did you actually DO?' grounding a later rehydration needs (a report states conclusions; the
+    trace shows the path), without retaining any transcript: lines are locator-grade (tool + primary arg),
+    not payloads."""
+    def __init__(self):
+        self.lines: list[str] = []
+        self.dropped = 0
+
+    def __call__(self, event):
+        if isinstance(event, ToolResult):
+            if len(self.lines) >= _TRACE_MAX_LINES:
+                self.dropped += 1
+                return
+            mark = " ✗" if getattr(event, "failing", False) else ""
+            self.lines.append(one_line(f"{event.name} {_primary_arg(event.args)}".strip(), 160) + mark)
+
+    def text(self) -> str:
+        t = "\n".join(self.lines)
+        if self.dropped:
+            t += f"\n(+{self.dropped} more action(s) not recorded)"
+        return t
+
+
 def _primary_arg(args) -> str:
     """The one informative arg for a compact activity line (path/command/pattern/…), whitespace-collapsed."""
     if not isinstance(args, dict):
@@ -123,14 +201,51 @@ def _primary_arg(args) -> str:
 
 
 def _targets_reserved_ns(args) -> bool:
-    """True if a read tool's path targets the PARENT-only virtual namespaces (subagents/ or history/) — a
-    child shares the base host, so without this it could page the parent's trajectory or a sibling's sealed
-    artifact (a third channel the design forbids: children couple ONLY through the two seals)."""
-    p = (args.get("path") or "").strip().replace("\\", "/") if isinstance(args, dict) else ""
-    while p.startswith("./"):
-        p = p[2:]
-    p = p.rstrip("/")
-    return p in ("subagents", "history") or p.startswith("subagents/") or p.startswith("history/")
+    """True if a read tool's path targets the PARENT-only virtual namespaces (subagents/, history/ or
+    roster/) — a child shares the base host, so without this it could page the parent's trajectory, a
+    sibling's sealed artifact, or another specialist's career (a third channel the design forbids:
+    children couple ONLY through the two seals — or an EXPLICIT grant / their OWN roster files, both
+    checked by the caller: a grant is a pointer to a seal and self-memory is not a channel)."""
+    p = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
+    return (p in ("subagents", "history", "roster")
+            or p.startswith(("subagents/", "history/", "roster/")))
+
+
+# HIRE cap — the kernel can say no: a roster past this size is sprawl, not a team. Temps are unlimited
+# (they don't enter the roster); hiring past the cap errors with the retire hint.
+ROSTER_CAP = 32
+_CAREER_MANIFEST_K = 5   # wake-seed career lines (one-liners + handles; full jobs stay paged out)
+
+
+def _render_wake_block(profile: dict, jobs: list, name: str) -> str:
+    """The WAKE seed: identity + bounded career manifest + the abstention self-model. FLAT by construction —
+    lessons ≤ K (curated), career = last K one-liners with handles; the full jobs stay paged out in
+    roster/<name>/ (the specialist may read its OWN files). The abstention line is #114 one level down:
+    a persona + 'memories' is the maximal confabulation trap, so the seed says exactly what the memories
+    are (sealed reports) and what to do beyond them (say so)."""
+    lines = [f"YOUR STANDING IDENTITY — you are {name!r}, a standing {profile.get('kind', '?')} specialist "
+             f"(hired {(profile.get('created') or '?')[:10]}; {profile.get('jobs', 0)} completed job(s), "
+             f"last active {(profile.get('last_active') or '?')[:10]}).",
+             "Your memories are ONLY what your sealed reports say. If this task needs detail they don't "
+             "contain, say so in your report rather than reconstructing it. The workspace may have changed "
+             "since your last job — re-read files; never trust quoted content from an old report over the "
+             "file on disk."]
+    lessons = [L for L in (profile.get("lessons") or []) if isinstance(L, dict) and L.get("text")]
+    if lessons:
+        lines.append("LESSONS from your past jobs (advisory priors — they may be stale or wrong; ignore one "
+                     "when the evidence disagrees):")
+        lines += [f"- {L['text']}  ({L.get('job', '?')}, {(L.get('ts') or '')[:10]})" for L in lessons]
+    if jobs:
+        lines.append(f'YOUR CAREER (own sealed reports — read one in full: '
+                     f'read_file("roster/{name}/job-<N>.md")):')
+        for r in jobs[-_CAREER_MANIFEST_K:]:
+            a = r.get("artifact") or {}
+            lines.append(f"- {r.get('id')} · {a.get('status', '?')} · {(r.get('ts') or '')[:10]} — "
+                         f"{one_line(a.get('report') or a.get('task', ''), 90)}")
+        if len(jobs) > _CAREER_MANIFEST_K:
+            lines.append(f"(+{len(jobs) - _CAREER_MANIFEST_K} earlier job(s) — "
+                         f'read_file("roster/{name}/profile.md") for the full career)')
+    return "\n".join(lines)
 
 
 def _nested_sink(notify, depth: int):
@@ -149,7 +264,8 @@ def _nested_sink(notify, depth: int):
 
 def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  max_steps: int = 20, depth: int = 1, notify=None,
-                 read_only: bool = False, spec: AgentSpec | None = None, session_id: str = "") -> str:
+                 read_only: bool = False, spec: AgentSpec | None = None, session_id: str = "",
+                 name: str = "", grants: tuple = (), identity_block: str = "") -> str:
     """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
     The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
     context guarantee); only the summary crosses back.
@@ -168,8 +284,15 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         spec = BUILTIN_AGENTS["explorer" if read_only else "general"]
     read_only = spec.read_only   # the kind decides; everything below keys off the SPEC
 
+    # A grant the child can't SEE is a grant it never uses (the visible-manifest lesson, applied down a
+    # level): granted input reports are advertised in the child's own task text with the exact call.
+    child_task = task
+    if grants:
+        child_task = task + "\n\nINPUT REPORTS — sealed sibling work you may (and should) read:\n" + \
+            "\n".join(f'- read_file("{g}")' for g in sorted(grants))
+
     child_state = Slice()
-    child_state.reset(task)
+    child_state.reset(child_task)
     if read_only:
         # explorer: keep the whole exploration resident (no eviction churn → no "stuck") AND don't let the
         # read-only convergence nudge cut the review short before the key files are read — see
@@ -180,10 +303,20 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     # AGENT_EXPLORER_REASONING knob (EXPLORER_REASONING) instead of its hard-wired "fast", so the env var works.
     child_reasoning = EXPLORER_REASONING if spec.name == "explorer" else spec.reasoning
     child_llm = _profile_llm(llm, child_reasoning)
-    build = make_build_slice(child_state, tools, retriever, memory, task, system_extra=spec.system_prompt)
+    # A WOKEN specialist gets its identity block (career + lessons + abstention self-model) as an extra
+    # system layer under the kind prompt — the kind prompt stays IMMUTABLE; the identity is data.
+    system_extra = spec.system_prompt + ("\n\n" + identity_block if identity_block else "")
+    if name:
+        # W5' seal-time reflection — the proven trailing-marker pattern (VERDICT:). One optional line;
+        # curation (dedupe/cap/provenance) happens at the archive, not here.
+        system_extra += ("\n\nIf this job taught you something a future you should know (a pitfall, a "
+                         "convention, where the bodies are buried), end your summary with ONE line: "
+                         '"LESSON: <the lesson>". Only a real lesson — most jobs have none.')
+    build = make_build_slice(child_state, tools, retriever, memory, child_task, system_extra=system_extra)
 
     cap = _CaptureLast()
-    sinks = [slice_sink(child_state), cap]
+    trace = _TraceSink()
+    sinks = [slice_sink(child_state), cap, trace]
     if notify is not None:
         sinks.append(_nested_sink(notify, depth))
     child_dispatch = make_dispatcher(*sinks)
@@ -209,24 +342,43 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     summary_is_deliverable = read_only or getattr(spec, "summary_is_deliverable", False)
     success = result.stop_reason == "end_turn" and (summary_is_deliverable or not child_state.last_error)
     status = "ok" if success else result.stop_reason
-    label = {"explorer": "explore", "general": "subagent"}.get(spec.name, spec.name)  # named-kind label
+    kind_label = {"explorer": "explore", "general": "subagent"}.get(spec.name, spec.name)  # named-kind label
+    label = f"{name} ({kind_label})" if name else kind_label   # instance identity first, kind in parens
 
     # SEAL the child's work as a structured artifact and ARCHIVE it. The parent gets a bounded digest + a
     # recall handle; the FULL report lives at subagents/<id>.md — paged in on demand, out again next seal — so
     # the parent's context stays flat no matter how much the child did (the moat, one level up). No detail is
     # lost: the digest is a coarse-graining, the handle is its refinement map.
+    # `name` is the INSTANCE identity (who); `brief` is the VERBATIM ask (what they were told) — provenance:
+    # whoever later reads this report can see the question alongside the answer, so a narrowly-briefed child
+    # is never silently cited for broad claims.
+    # W5': lift the optional trailing "LESSON: ..." reflection out of the report into a typed field
+    # (the line stays in the report verbatim — the seal is honest; this is indexing, not editing).
+    _lm = re.findall(r"^LESSON:\s*(.+)$", cap.text or "", re.MULTILINE)
     artifact = {
-        "kind": spec.name, "task": task, "status": status, "steps": result.steps,
+        "kind": spec.name, "name": name, "task": task, "brief": {"task": task, "grants": sorted(grants)},
+        "lesson": one_line(_lm[-1], 200) if _lm else "",
+        "status": status, "steps": result.steps,
         "report": cap.text or "", "findings": list(child_state.findings),
         "change_set": sorted(child_state.edited_files), "files": list(child_state.active_files),
-        "coverage": f"{len(child_state.active_files)} file(s) touched; stop={result.stop_reason}", "refs": [],
+        "trace": trace.text(),   # W6': the action path, bounded — full-detail grounding for rehydration
+        "coverage": f"{len(child_state.active_files)} file(s) touched; stop={result.stop_reason}",
+        # refs = the sealed inputs this work was built ON (its granted reports) — the seal's refinement map
+        # back to its sources, so a synthesis is drillable to what it merged (invariant: every seal ships
+        # its refinement handle, in BOTH directions).
+        "refs": sorted(grants),
     }
-    handle = memory.append_subagent_artifact(session_id, artifact) if session_id else ""
+    handle = memory.append_subagent_artifact(session_id, artifact) if (memory is not None and session_id) else ""
+    if handle:   # W6': additive FTS5 mirror → search_history finds delegated work by CONTENT (never
+        memory.index_subagent_artifact(session_id, handle, artifact)   # written to the turn timeline)
+    if name and memory is not None:   # a STANDING specialist also accumulates the job in its durable career
+        memory.roster_append_job(name, artifact)   # (no-op for temps: roster_append_job needs a profile)
 
     head = f"[{label} {status} · {result.steps} steps · files: {files}]"
     if handle:   # archived → bounded digest + recall handle (the refinable seal)
         body = one_line(cap.text, 300) if cap.text else "(no summary produced)"
-        summary = f'{head} {body} → full report: read_file("subagents/{handle}.md")'
+        ref = f"{name}.md" if name else f"{handle}.md"   # a named seal is addressable by WHO did it
+        summary = f'{head} {body} → full report: read_file("subagents/{ref}")'
     else:        # no durable archive (eval/headless) → inline, back-compat with the pre-artifact behavior
         summary = head + (" " + one_line(cap.text, 400) if cap.text else "")
     if not success:
@@ -242,7 +394,8 @@ class SubagentHost:
 
     def __init__(self, inner, *, llm, retriever, memory, policy,
                  max_depth: int = 1, max_steps: int = 20, depth: int = 0, notify=None,
-                 read_only: bool = False, spec: AgentSpec | None = None, agents=None, session_id: str = ""):
+                 read_only: bool = False, spec: AgentSpec | None = None, agents=None, session_id: str = "",
+                 grants: frozenset = frozenset(), instance_name: str = ""):
         self.inner = inner
         self.llm = llm
         self.retriever = retriever
@@ -258,6 +411,12 @@ class SubagentHost:
         self.read_only = self.spec.read_only if self.spec is not None else False
         self.agents = agents or BUILTIN_AGENTS
         self.session_id = session_id   # the PARENT session — children archive artifacts under it (recall handle)
+        # W2: exact sealed-report handles THIS child may read (parent-minted; empty for temps/parents).
+        # A grant is a pointer to a SEAL, so the coupling law ("children couple only through seals") holds.
+        self.grants = frozenset(grants)
+        # W4': THIS child's standing identity (empty for temps/parents) — unlocks reads of its OWN
+        # roster/<name>/ files only (self-memory is not a third channel; siblings stay denied).
+        self.instance_name = instance_name
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -303,7 +462,42 @@ class SubagentHost:
             "parameters": {"type": "object", "properties": {
                 "agent": {"type": "string", "description": "the agent kind to run (a name from the list)"},
                 "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
+                "name": _NAME_PARAM, "grants": _GRANTS_PARAM,
             }, "required": ["agent", "task"]}}}
+
+    def _validate_grants(self, raw):
+        """Spawn-time grant validation (kernel says no, loudly): (err, frozenset). Rules — parent-minted only
+        (NO transitive propagation: a child cannot re-grant, so a handle's reach is one hop), exact file
+        handles only, must resolve to an EXISTING sealed artifact right now, hard cap."""
+        if not raw:
+            return "", frozenset()
+        if self.spec is not None:
+            return ("Error: a subagent cannot re-grant sealed-report handles to its own children — grants "
+                    "are minted by the parent only. Ask for what you need in your report instead.", frozenset())
+        if not isinstance(raw, (list, tuple)):
+            return "Error: 'grants' must be a list of sealed-report handles like [\"subagents/sub-1.md\"]", frozenset()
+        if len(raw) > _MAX_GRANTS:
+            return f"Error: too many grants ({len(raw)} > {_MAX_GRANTS}) — grant only the reports this child needs", frozenset()
+        arts = (self.memory.read_subagent_artifacts(self.session_id)
+                if (self.session_id and self.memory is not None) else [])
+        ids = {r.get("id") for r in arts}
+        names = {(r.get("artifact") or {}).get("name") for r in arts} - {"", None}
+        out = set()
+        for g in raw:
+            p = _norm_vpath(g)
+            if p and "/" not in p:                       # accept a bare leaf ("sub-1.md") for convenience
+                p = "subagents/" + p
+            leaf = p[len("subagents/"):] if p.startswith("subagents/") else ""
+            stem = leaf[:-3] if leaf.endswith(".md") else ""
+            ok = ("/" not in leaf) and leaf and (
+                (_GRANT_SUB.match(leaf) and stem in ids)                          # exact per-job handle
+                or (_valid_instance_name(stem) and stem in names))                # name alias (latest job)
+            if not ok:
+                return (f"Error: cannot grant {g!r} — grants must be EXACT existing sealed-report handles "
+                        f'(e.g. "subagents/sub-1.md" or "subagents/<name>.md"; never a directory or '
+                        f'index.md). See read_file("subagents/index.md") for what exists.', frozenset())
+            out.add(p)
+        return "", frozenset(out)
 
     def accesses(self, name: str, args: dict) -> list:
         if name == "spawn_explore":
@@ -341,9 +535,23 @@ class SubagentHost:
         # parent's memory, so block it too (and it's dropped from the child's schemas below).
         if self.spec is not None and (name == "search_history"
                                       or (name in ("read_file", "list_files", "grep") and _targets_reserved_ns(args))):
-            return ("Error: history/ and subagents/ (and search_history over them) are the parent's private "
-                    "namespaces — a subagent works only from its own task/brief. If you lack context, say so "
-                    "in your report.")
+            # W2 carve-out: an EXACT granted handle passes through (read_file/grep on that one file only —
+            # never list_files, never a directory, never index.md; those can't be granted). W4' carve-out:
+            # a standing specialist may read ITS OWN roster/<name>/ files (career, lessons, profile) —
+            # self-memory, not a channel. Everything else in the reserved namespaces stays default-deny.
+            p = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
+            if name in ("read_file", "grep") and p in self.grants:
+                return self.inner.run(name, args)
+            if self.instance_name and (p == f"roster/{self.instance_name}"
+                                       or p.startswith(f"roster/{self.instance_name}/")):
+                return self.inner.run(name, args)
+            hint = (" Your granted input reports: " + ", ".join(sorted(self.grants)) + "."
+                    if self.grants else "")
+            own = (f" Your own past work is under roster/{self.instance_name}/."
+                   if self.instance_name else "")
+            return ("Error: history/, subagents/ and roster/ (and search_history over them) are the "
+                    "parent's private namespaces — a subagent works only from its own task/brief."
+                    + hint + own + " If you lack context, say so in your report.")
         if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
             return self.inner.run(name, args)
         if self.depth >= self.max_depth:
@@ -351,6 +559,13 @@ class SubagentHost:
         task = (args.get("task") or "").strip()   # #59: missing/empty 'task' → clear error, not a KeyError
         if not task:
             return "Error: spawn requires a non-empty 'task' describing the self-contained sub-task"
+        child_name = (args.get("name") or "").strip()
+        if child_name and not _valid_instance_name(child_name):
+            return ("Error: invalid subagent name %r — use a short slug (letters/digits/-/_, starts with a "
+                    "letter, ≤40 chars; 'sub-N'/'index' are reserved), e.g. 'auth-explorer'." % child_name)
+        err, child_grants = self._validate_grants(args.get("grants"))
+        if err:
+            return err
         if name == "spawn_agent":
             spec = self.agents.get(args.get("agent", ""))
             if spec is None:
@@ -358,17 +573,57 @@ class SubagentHost:
                         % (args.get("agent", ""), ", ".join(self.agents)))
         else:   # back-compat built-in tools → their specs
             spec = BUILTIN_AGENTS["explorer" if name == "spawn_explore" else "general"]
+
+        # W4' — HIRE ONCE, WAKE MANY. A NAMED spawn resolves against the durable roster:
+        #   roster hit  → WAKE: same kind required; the child is seeded with its identity block
+        #                 (career manifest + lessons + abstention self-model), all bounded.
+        #   miss        → HIRE: mint the standing identity (cap-gated — the kernel can say no).
+        # Without a durable vault (NullMemory) hire returns {} and the named child runs as a temp.
+        identity_block, hired = "", False
+        if child_name and self.memory is not None:
+            profile = self.memory.roster_get(child_name)
+            if not profile:
+                # ATOMIC get-or-create (cap enforced inside the lock). Under a concurrent same-name race the
+                # loser gets the WINNER's profile back — so the kind-stability check below runs against the
+                # authoritative identity, never a phantom the caller thought it created.
+                profile = self.memory.roster_hire(child_name, spec.name, cap=ROSTER_CAP)
+                if profile:
+                    hired = bool(profile.pop("_created", False))   # ONLY the creating caller announces the hire
+                elif len(self.memory.roster_list()) >= ROSTER_CAP:
+                    # {} AND a genuinely full roster → the kernel says no (a real durable roster at capacity)
+                    return (f"Error: roster full ({ROSTER_CAP} standing specialists) — re-use or retire an "
+                            f'existing one (read_file("roster/index.md")) instead of hiring another.')
+                # else: {} from a memory with NO durable roster (NullMemory) or a transient write failure →
+                # run as a session TEMP (the name still labels this seal; no standing identity accrues).
+            if profile:
+                if profile.get("kind") != spec.name:   # identity is kind-stable; waking as another kind lies
+                    return (f"Error: {child_name!r} is a standing {profile.get('kind')!r} specialist — wake "
+                            f"it with spawn_agent(agent={profile.get('kind')!r}, name={child_name!r}, ...) "
+                            f"or pick a new name for a {spec.name!r}.")
+                if not hired:   # an EXISTING specialist → seed with its career; a fresh hire has none yet
+                    identity_block = _render_wake_block(profile, self.memory.roster_read_jobs(child_name),
+                                                        child_name)
+
         child_tools = SubagentHost(
             self.inner, llm=self.llm, retriever=self.retriever, memory=self.memory,
             policy=self.policy, max_depth=self.max_depth, max_steps=self.max_steps,
             depth=self.depth + 1, notify=self.notify, spec=spec, agents=self.agents,
             session_id=self.session_id,   # nested children archive under the SAME parent session
+            grants=child_grants,          # W2: one hop only — this child's grants never propagate further
+            instance_name=child_name,     # W4': unlocks the child's OWN roster/<name>/ files (self-memory)
         )
         try:
-            return run_subagent(
+            out = run_subagent(
                 task, tools=child_tools, llm=self.llm, retriever=self.retriever,
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
                 depth=self.depth + 1, notify=self.notify, spec=spec, session_id=self.session_id,
+                name=child_name, grants=tuple(child_grants), identity_block=identity_block,
             )
+            # announce the lifecycle event (visibility: an unadvertised wake channel stays dead) — but NOT
+            # onto a failed child's "Error: ..." return, where it would garble the parent's error tier (the
+            # hire is real regardless; it just isn't news worth mixing into an error line).
+            if hired and not out.startswith("Error:"):
+                out += f' | hired standing specialist {child_name!r} — re-use name="{child_name}" to wake it later'
+            return out
         except Exception as e:  # a child failure must not crash the parent
             return f"Error: subagent crashed: {e}"

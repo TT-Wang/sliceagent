@@ -34,7 +34,7 @@ def read_only_derivation():
 
 @check
 def load_agents_builtins_only_when_no_dirs():
-    assert set(load_agents([])) == {"explorer", "general", "verification"}
+    assert set(load_agents([])) == {"explorer", "general", "verification", "synthesiser"}
 
 
 @check

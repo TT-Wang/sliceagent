@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 
+os.environ["SLICEAGENT_VAULT"] = tempfile.mkdtemp(prefix="subidx-")   # hermetic: FTS index stays in tmp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.hippocampus import HippocampusMixin, SubagentFS  # noqa: E402

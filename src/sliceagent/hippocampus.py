@@ -36,6 +36,7 @@ import os
 import posixpath
 import re
 import threading
+import time
 from collections import deque
 
 from .events import AssistantText, Event, SliceBuilt, ToolResult, TurnEnd, TurnInterrupted
@@ -48,6 +49,12 @@ from .text_utils import format_ts, now_iso, one_line
 # actually happens. FileLock adds cross-PROCESS safety on POSIX, but flock is a no-op on Windows; this
 # in-process lock makes the sequential ids collision-proof regardless of flock availability.
 _SUBAGENT_APPEND_LOCK = threading.Lock()
+# Standing-specialist identity slug (mirrors subagent._VALID_NAME) — storage-side defense in depth:
+# roster names become directory names, so anything else must never touch the filesystem.
+_ROSTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+# Lessons cap — bounded by CURATION (count), never truncation: newest wins, exact duplicates collapse.
+# Deliberately small: the wake seed carries every lesson, so this IS a resident-context budget.
+_MAX_LESSONS = 8
 
 _EDIT_TOOL_NAMES = ("edit_file", "append_to_file", "str_replace", "write_file")
 
@@ -396,6 +403,195 @@ class HippocampusMixin:
         except Exception:
             return ""
 
+    # ── ROSTER — durable standing specialists (v3: hire once, wake many) ─────────────────────────────
+    # A NAMED delegation is a standing identity that survives sessions: <vault>/roster/<name>/ holds its
+    # profile (identity card), its CAREER (episodes.jsonl of sealed job artifacts), and later its lessons.
+    # Identity = archive key, NOT a runtime entity: a dormant specialist costs nothing; waking one is a
+    # fresh slice seeded from these files (flat cost regardless of career length).
+
+    @staticmethod
+    def _roster_name_ok(name: str) -> bool:
+        """Defense-in-depth path guard (spawn already validates): a bad name never touches the filesystem."""
+        return bool(name) and bool(_ROSTER_NAME.match(name))
+
+    def _roster_dir(self, name: str) -> str:
+        return os.path.join(self._vault, "roster", name)
+
+    def roster_get(self, name: str) -> dict | None:
+        """The specialist's profile, or None if never hired. Never raises."""
+        if not self._roster_name_ok(name):
+            return None
+        try:
+            with open(os.path.join(self._roster_dir(name), "profile.json"), encoding="utf-8") as f:
+                v = json.load(f)
+            return v if isinstance(v, dict) else None
+        except Exception:
+            return None
+
+    def _write_profile_atomic(self, d: str, profile: dict) -> None:
+        """Overwrite profile.json via tmp + os.replace — a reader (roster_get, unlocked) or a cross-process
+        peer always sees the OLD or NEW file WHOLE, never a torn half-written JSON. The tmp is pid-unique so
+        two processes can't clobber each other's staging file."""
+        tmp = os.path.join(d, f"profile.json.{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False)
+        os.replace(tmp, os.path.join(d, "profile.json"))
+
+    def roster_hire(self, name: str, kind: str, *, cap: int | None = None) -> dict:
+        """ATOMIC get-or-create of a standing identity; returns the AUTHORITATIVE profile (the pre-existing
+        one unchanged, or the just-created one) or {} on cap-full/failure. Never raises. The returned dict
+        of the caller that PERFORMED the create carries an EPHEMERAL '_created': True marker (never persisted)
+        — so exactly ONE caller under a same-name race owns the 'hired' lifecycle announcement (deriving it
+        from jobs==0 double-fires, since the race loser also sees jobs==0).
+
+        Race-safety (bug-hunt HIGH): the whole get→cap→create is under _SUBAGENT_APPEND_LOCK so parallel
+        spawn threads of the SAME name (the scheduler runs read-only children concurrently) can't both take
+        the create path — the loser gets the winner's profile back, so kind-stability is decided once. The
+        create uses O_CREAT|O_EXCL (atomic even ACROSS processes); cap is enforced HERE inside the lock."""
+        if not self._roster_name_ok(name):
+            return {}
+        with _SUBAGENT_APPEND_LOCK:
+            existing = self.roster_get(name)
+            if existing:
+                return existing                                  # idempotent — first kind wins (no _created)
+            if cap is not None and len(self.roster_list()) >= cap:
+                return {}                                        # kernel says no, atomically
+            try:
+                d = self._roster_dir(name)
+                os.makedirs(d, exist_ok=True)
+                profile = {"v": 1, "name": name, "kind": kind, "created": now_iso(),
+                           "jobs": 0, "last_active": now_iso()}
+                ppath = os.path.join(d, "profile.json")
+                body = json.dumps(profile, ensure_ascii=False).encode("utf-8")
+                try:
+                    fd = os.open(ppath, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError:
+                    # a cross-process peer claimed the name; its body may not be written yet (the file can be
+                    # observably EMPTY for the µs between its O_EXCL and its write). Re-read a few times,
+                    # yielding to the peer, so we return THEIR profile rather than {} (which would degrade
+                    # this one spawn to a temp). Bounded — a peer that never finishes → temp (a non-issue in
+                    # practice; only two processes first-hiring the SAME new name in the same instant race).
+                    for _ in range(8):
+                        got = self.roster_get(name)
+                        if got:
+                            return got
+                        time.sleep(0.002)
+                    return {}
+                try:                                             # single write() → the empty window is just
+                    os.write(fd, body)                           # open→write (sub-µs), not open→buffered-dump
+                finally:
+                    os.close(fd)
+                return {**profile, "_created": True}             # ephemeral: only the creator owns the announce
+            except Exception:
+                return {}
+
+    def roster_list(self) -> list[dict]:
+        """All standing specialists' profiles, most recently active first. Never raises."""
+        try:
+            base = os.path.join(self._vault, "roster")
+            if not os.path.isdir(base):
+                return []
+            out = []
+            for n in os.listdir(base):
+                if self._roster_name_ok(n):
+                    p = self.roster_get(n)
+                    if p:
+                        out.append(p)
+            # `or ""` not a default: a present-but-null last_active (hand-edited/legacy record) would make
+            # the sort compare None < str → TypeError, crashing roster_list (and everything built on it).
+            return sorted(out, key=lambda p: p.get("last_active") or "", reverse=True)
+        except Exception:
+            return []
+
+    def roster_append_job(self, name: str, artifact: dict) -> str:
+        """Append one sealed job to a specialist's CAREER; return its handle ('job-<n>') or ''. NO-OP for
+        names never hired (temps don't accumulate careers — hire is deliberate). Race-safe ids + the same
+        _clamp redaction as every other archive; bumps the profile's jobs/last_active under the same lock."""
+        if not self._roster_name_ok(name) or not self.roster_get(name):
+            return ""
+        try:
+            d = self._roster_dir(name)
+            path = os.path.join(d, "episodes.jsonl")
+            from .platform_compat import FileLock
+            with _SUBAGENT_APPEND_LOCK:
+                with open(path, "a+", encoding="utf-8") as f, FileLock(f):
+                    f.seek(0)
+                    # id = append-count (every non-empty line), the SAME convention as append_episode /
+                    # append_subagent_artifact — monotonic + unique. ponytail: an externally-corrupted torn
+                    # line would make this drift from roster_read_jobs' parse-count (a missing job-N then
+                    # 404s, jobs runs one high); accepted — a torn line is an anomaly, and diverging this one
+                    # appender from its siblings to "fix" it costs more than the harmless drift.
+                    n = sum(1 for ln in f if ln.strip()) + 1
+                    jid = f"job-{n}"
+                    f.write(json.dumps({"v": 1, "id": jid, "ts": now_iso(), "artifact": self._clamp(artifact)},
+                                       ensure_ascii=False, default=str) + "\n")
+                    profile = self.roster_get(name) or {}
+                    profile["jobs"] = n
+                    profile["last_active"] = now_iso()
+                    # W5' lesson curation: append with PROVENANCE (job + date), collapse exact duplicates
+                    # (a re-learned lesson refreshes its provenance instead of repeating), cap by count.
+                    lesson = self._clamp((artifact.get("lesson") or "").strip())
+                    if lesson:
+                        lessons = [L for L in (profile.get("lessons") or [])
+                                   if isinstance(L, dict)
+                                   and L.get("text", "").strip().lower() != lesson.strip().lower()]
+                        lessons.append({"text": lesson, "job": jid, "ts": now_iso()})
+                        profile["lessons"] = lessons[-_MAX_LESSONS:]
+                    self._write_profile_atomic(d, profile)   # tmp+replace: an unlocked reader never sees a torn file
+            return jid
+        except Exception:
+            return ""
+
+    def roster_read_jobs(self, name: str) -> list[dict]:
+        """A specialist's career in job order. Torn-line + non-dict tolerant. Never raises."""
+        if not self._roster_name_ok(name):
+            return []
+        try:
+            path = os.path.join(self._roster_dir(name), "episodes.jsonl")
+            if not os.path.exists(path):
+                return []
+            out = []
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln:
+                        try:
+                            v = json.loads(ln)
+                        except ValueError:
+                            continue
+                        if isinstance(v, dict):
+                            out.append(v)
+            return out
+        except Exception:
+            return []
+
+    def index_subagent_artifact(self, session_id: str, handle: str, artifact: dict) -> None:
+        """W6': additive FTS5 mirror of a sealed subagent artifact, so search_history finds delegated work
+        by CONTENT ("what did the auth explorer conclude about refresh?"). NEVER written to the episodic
+        JSONL, so the turn timeline (history/, the PAGED-OUT manifest) stays honest: a delegation seal is
+        not a turn. Degrades to no-op without FTS5. Redacted like everything persisted.
+
+        CRITICAL: the index is idempotent per (session_id, turn) — index_episode DELETEs the prior row
+        with the same key before inserting. So the mirror row's `turn` is the artifact's HANDLE ('sub-3'),
+        NOT a constant: a constant (e.g. 0) makes every delegation of a session share one key, and each new
+        seal EVICTS all earlier delegated rows (only the last stays searchable). The handle is unique per
+        seal AND collision-free with real turns (stored TEXT 'sub-3' != a numeric turn's '3'), so re-indexing
+        the same handle correctly replaces only itself."""
+        idx = self._episode_index()
+        if idx is None or not handle:
+            return
+        try:
+            a = artifact if isinstance(artifact, dict) else {}
+            who = a.get("name") or handle
+            title = f"[delegated] {who} ({a.get('kind', 'subagent')}): " + one_line(a.get("task", ""), 80)
+            body = " ".join(x for x in (a.get("report", ""), " ".join(a.get("findings") or ()),
+                                        a.get("lesson", ""), a.get("task", "")) if x)
+            idx.index_episode(session_id=session_id, task_id=f"subagent:{handle}", turn=handle, ts=now_iso(),
+                              title=self._clamp(title), note=self._clamp(one_line(a.get("lesson") or "", 120)),
+                              text=self._clamp(body))
+        except Exception:
+            pass
+
     def read_subagent_artifacts(self, session_id: str) -> list[dict]:
         """The parent session's archived subagent artifacts, in spawn order. Torn-line tolerant. Never raises."""
         try:
@@ -468,7 +664,10 @@ def render_search(mine, cross) -> str:
     if mine:
         out.append("# THIS SESSION — content matches (read the full turn with the call shown)")
         for r in mine:
-            out.append(f'- turn {r.handle}: {r.preview}  → read_file("history/turn-{r.handle}.md")')
+            if str(r.handle).isdigit():
+                out.append(f'- turn {r.handle}: {r.preview}  → read_file("history/turn-{r.handle}.md")')
+            else:   # W6': a DELEGATED-WORK hit — the seal lives under subagents/, not the turn timeline
+                out.append(f'- delegated {r.handle}: {r.preview}  → read_file("subagents/{r.handle}.md")')
     if cross:
         out.append("# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)")
         for r in cross:
@@ -649,6 +848,10 @@ def make_search_history_tool(memory, session_id: str):
 # the bounded digest the spawn tool returned. Served live from the archive; nothing new is written here.
 SUBAGENT_MOUNT = "subagents"
 _SUB_FILE = re.compile(r"^(sub-\d+)\.md$")
+# INSTANCE-NAME alias: subagents/<name>.md resolves to the LATEST artifact sealed under that identity
+# (a specialist may do several jobs in one session; sub-N stays the exact per-job handle). The pattern
+# mirrors subagent._VALID_NAME; sub-N is matched first so an alias can never shadow a canonical handle.
+_NAME_FILE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]{0,39})\.md$")
 
 
 def _subagent_leaf(path: str) -> str:
@@ -663,21 +866,31 @@ def _subagent_leaf(path: str) -> str:
 
 
 def render_artifact(rec: dict) -> str:
-    """A subagent artifact rendered as its full markdown report (what read_file('subagents/sub-N.md') returns)."""
+    """A subagent artifact rendered as its full markdown report (what read_file('subagents/sub-N.md') returns).
+    Leads with WHO (instance name · kind) and the VERBATIM BRIEF (what they were asked) before the report —
+    provenance: the question always travels with the answer, so a narrowly-briefed child is never silently
+    cited for broad claims."""
     a = rec.get("artifact") or {}
-    out = [f"# {rec.get('id', 'sub-?')} — {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
-           f"{a.get('steps', '?')} steps", f"task: {a.get('task', '')}"]
+    who = f"{a['name']} · {a.get('kind', 'subagent')}" if a.get("name") else a.get("kind", "subagent")
+    out = [f"# {rec.get('id', 'sub-?')} — {who} · {a.get('status', '?')} · {a.get('steps', '?')} steps"]
     if a.get("coverage"):
         out.append(f"coverage: {a['coverage']}")
     if a.get("change_set"):
         out.append("change-set: " + ", ".join(a["change_set"]))
     if a.get("files"):
         out.append("read: " + ", ".join(a["files"][:20]))
+    if a.get("refs"):   # the seal's refinement map back to its INPUTS (what this work was built on)
+        out.append("built on: " + ", ".join(a["refs"]))
+    brief_task = (a.get("brief") or {}).get("task") or a.get("task", "")
+    if brief_task:
+        out += ["", "## brief (verbatim task this agent was given)", brief_task]
     findings = a.get("findings") or []
     if findings:
         out += ["", "## findings"] + [f"- {f}" for f in findings]
     if a.get("report"):
         out += ["", "## report", a["report"]]
+    if a.get("trace"):   # W6': the action path (locator-grade lines) — how the conclusions were reached
+        out += ["", "## trace (actions taken)", a["trace"]]
     return "\n".join(out)
 
 
@@ -701,16 +914,25 @@ class SubagentFS:
     def _names(arts) -> list:
         return [f"{r.get('id')}.md" for r in arts if r.get("id")]
 
+    @staticmethod
+    def _by_name(arts, stem: str):
+        """The LATEST artifact sealed under instance identity `stem` (a specialist may have several jobs
+        this session; the name alias always means the most recent one)."""
+        sel = [r for r in arts if (r.get("artifact") or {}).get("name") == stem]
+        return sel[-1] if sel else None
+
     def index(self, arts=None) -> str:
         if arts is None:
             arts = self._arts()
         if not arts:
             return "# DELEGATED WORK (this session)\n(no subagent reports yet.)"
-        out = ["# DELEGATED WORK — your subagents' sealed reports this session "
-               "(read one IN FULL: read_file(\"subagents/sub-<N>.md\"))"]
+        out = ["# DELEGATED WORK — your subagents' sealed reports this session, the ROSTER "
+               "(read one IN FULL: read_file(\"subagents/sub-<N>.md\"); a NAMED agent's latest report "
+               "is also at read_file(\"subagents/<name>.md\"))"]
         for r in arts:
             a = r.get("artifact") or {}
-            out.append(f"- {r.get('id')}.md · {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
+            who = f" · {a['name']}" if a.get("name") else ""
+            out.append(f"- {r.get('id')}.md{who} · {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
                        f"{a.get('steps', '?')} steps — {_artifact_excerpt(r)}")
         return "\n".join(out)
 
@@ -726,11 +948,20 @@ class SubagentFS:
                 return render_artifact(sel[-1])
             return (f'subagents/{leaf}: no such subagent report this session. '
                     f'read_file("subagents/index.md") for the list.')
+        nm = _NAME_FILE.match(leaf)   # after _SUB_FILE: an alias can never shadow a canonical handle
+        if nm:
+            rec = self._by_name(arts, nm.group(1))
+            if rec is not None:
+                return render_artifact(rec)
+            return (f'subagents/{leaf}: no subagent named {nm.group(1)!r} this session. '
+                    f'read_file("subagents/index.md") for the roster.')
         return (f'subagents/{leaf}: not a subagent report. Available: index.md, '
                 f'{", ".join(self._names(arts)) or "(none yet)"}.')
 
     def listing(self, path: str = SUBAGENT_MOUNT) -> str:
-        return "\n".join(["index.md"] + self._names(self._arts())) + \
+        arts = self._arts()
+        aliases = sorted({f"{n}.md" for n in ((r.get("artifact") or {}).get("name") for r in arts) if n})
+        return "\n".join(["index.md"] + self._names(arts) + aliases) + \
             '\n(read index.md for the delegated-work manifest)'
 
     def _docs_for(self, path, arts) -> list:
@@ -740,10 +971,14 @@ class SubagentFS:
         if leaf == "index.md":
             return [("index.md", self.index(arts))]
         m = _SUB_FILE.match(leaf)
-        if not m:
-            return []
-        sel = [r for r in arts if r.get("id") == m.group(1)]
-        return [(leaf, render_artifact(sel[-1]))] if sel else []
+        if m:
+            sel = [r for r in arts if r.get("id") == m.group(1)]
+            return [(leaf, render_artifact(sel[-1]))] if sel else []
+        nm = _NAME_FILE.match(leaf)
+        if nm:
+            rec = self._by_name(arts, nm.group(1))
+            return [(leaf, render_artifact(rec))] if rec is not None else []
+        return []
 
     def grep(self, pattern: str, *, path: str = SUBAGENT_MOUNT, output_mode: str = "content",
              context: int = 0, offset: int = 0, limit: int = 50) -> str:
@@ -763,6 +998,150 @@ class SubagentFS:
             body_lines = [f"subagents/{n}" for n in counts]
         elif output_mode == "count":
             body_lines = [f"subagents/{n}:{c}" for n, c in counts.items()]
+        else:
+            body_lines = hits
+        window = body_lines[offset:offset + limit]
+        if not window:
+            return f"grep: no results at offset={offset} ({len(body_lines)} total)."
+        body = "\n".join(window)
+        if offset + limit < len(body_lines):
+            body += f"\n\n[truncated; use offset={offset + limit} to see more]"
+        return body
+
+
+# ── ROSTER/ virtual namespace — the standing workforce (parent-readable; a child sees ONLY its own) ────
+ROSTER_MOUNT = "roster"
+_JOB_FILE = re.compile(r"^(job-\d+)\.md$")
+
+
+def _roster_leaf(path: str) -> str:
+    """Normalized tail under the roster mount ('roster/auth-explorer/job-2.md' -> 'auth-explorer/job-2.md')."""
+    p = (path or "").strip().replace("\\", "/")
+    if not p:
+        return ""
+    p = posixpath.normpath(p)
+    if p == ROSTER_MOUNT:
+        return ""
+    return p[len(ROSTER_MOUNT) + 1:] if p.startswith(ROSTER_MOUNT + "/") else p
+
+
+def render_profile(profile: dict, jobs: list) -> str:
+    """A specialist's identity card + career manifest (what read_file('roster/<name>/profile.md') returns)."""
+    name = profile.get("name", "?")
+    out = [f"# {name} — standing {profile.get('kind', '?')} specialist",
+           f"hired: {profile.get('created') or '?'} · jobs: {profile.get('jobs', 0)} · "
+           f"last active: {profile.get('last_active') or '?'}"]
+    if jobs:
+        out += ["", "## career (sealed jobs — read one IN FULL: "
+                    f'read_file("roster/{name}/job-<N>.md"))']
+        for r in jobs:
+            a = r.get("artifact") or {}
+            out.append(f"- {r.get('id')}.md · {a.get('status', '?')} · {(r.get('ts') or '')[:10]} — "
+                       f"{_artifact_excerpt(r)}")
+    return "\n".join(out)
+
+
+class RosterFS:
+    """Read-only virtual FS over the DURABLE standing-specialist archive (<vault>/roster/). Duck-typed like
+    SubagentFS; the host routes read_file/list_files/grep under `roster/` here. The parent browses the whole
+    workforce; a CHILD is blocked at the SubagentHost guard except for its OWN files (self-memory is not a
+    third channel)."""
+
+    def __init__(self, memory):
+        self._memory = memory
+
+    def index(self) -> str:
+        profiles = self._memory.roster_list()
+        if not profiles:
+            return ("# ROSTER (standing specialists)\n(none hired yet. Naming a delegation hires one: "
+                    "spawn_agent/spawn_explore with name=\"...\" — re-using the name later WAKES the same "
+                    "specialist with its career and lessons.)")
+        out = ["# ROSTER — your standing specialists (wake one: spawn_agent(agent=<kind>, name=<name>, "
+               "task=...); browse one: read_file(\"roster/<name>/profile.md\"))"]
+        for p in profiles:
+            out.append(f"- {p.get('name')} · {p.get('kind', '?')} · {p.get('jobs', 0)} job(s) · "
+                       f"last active {(p.get('last_active') or '?')[:10]}")
+        return "\n".join(out)
+
+    def read_file(self, path: str) -> str:
+        leaf = _roster_leaf(path)
+        if leaf in ("", "index.md"):
+            return self.index()
+        name, _, rest = leaf.partition("/")
+        profile = self._memory.roster_get(name)
+        if profile is None:
+            return (f'roster/{leaf}: no standing specialist named {name!r}. '
+                    f'read_file("roster/index.md") for the roster.')
+        if rest in ("", "profile.md"):
+            return render_profile(profile, self._memory.roster_read_jobs(name))
+        if rest == "lessons.md":
+            lessons = profile.get("lessons") or []
+            if not lessons:
+                return f"roster/{name}/lessons.md: (no lessons recorded yet.)"
+            return "\n".join([f"# {name} — lessons from past jobs (advisory priors, may be stale)"] +
+                             [f"- {L.get('text', '')}  ({L.get('job', '?')}, {(L.get('ts') or '')[:10]})"
+                              for L in lessons if isinstance(L, dict)])
+        m = _JOB_FILE.match(rest)
+        if m:
+            sel = [r for r in self._memory.roster_read_jobs(name) if r.get("id") == m.group(1)]
+            if sel:
+                return render_artifact(sel[-1])
+            return (f'roster/{leaf}: no such job. read_file("roster/{name}/profile.md") for the career.')
+        return (f'roster/{leaf}: not a roster file. Available under roster/{name}/: profile.md, '
+                f'lessons.md, job-<N>.md.')
+
+    def listing(self, path: str = ROSTER_MOUNT) -> str:
+        leaf = _roster_leaf(path)
+        if leaf == "":
+            names = [p.get("name") for p in self._memory.roster_list()]
+            return "\n".join(["index.md"] + [f"{n}/" for n in names if n]) + \
+                "\n(read index.md for the standing-specialist roster)"
+        name = leaf.partition("/")[0]
+        if self._memory.roster_get(name) is None:
+            return f"roster/{leaf}: no standing specialist named {name!r}."
+        jobs = [f"{r.get('id')}.md" for r in self._memory.roster_read_jobs(name) if r.get("id")]
+        return "\n".join(["profile.md", "lessons.md"] + jobs)
+
+    def _docs_for(self, path) -> list:
+        leaf = _roster_leaf(path)
+        if leaf in ("", "index.md"):
+            docs = [("index.md", self.index())]
+            if leaf == "":   # whole-mount grep also sweeps every specialist's files
+                for p in self._memory.roster_list():
+                    n = p.get("name")
+                    if n:
+                        docs += self._docs_for(f"{ROSTER_MOUNT}/{n}")
+            return docs
+        name, _, rest = leaf.partition("/")
+        profile = self._memory.roster_get(name)
+        if profile is None:
+            return []
+        jobs = self._memory.roster_read_jobs(name)
+        if rest == "":
+            return ([(f"{name}/profile.md", render_profile(profile, jobs)),
+                     (f"{name}/lessons.md", self.read_file(f"roster/{name}/lessons.md"))] +
+                    [(f"{name}/{r.get('id')}.md", render_artifact(r)) for r in jobs])
+        doc = self.read_file(f"{ROSTER_MOUNT}/{leaf}")
+        return [] if doc.startswith(f"roster/{leaf}:") else [(leaf, doc)]
+
+    def grep(self, pattern: str, *, path: str = ROSTER_MOUNT, output_mode: str = "content",
+             context: int = 0, offset: int = 0, limit: int = 50) -> str:
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            return f"grep: invalid regex ({e})."
+        hits, counts = [], {}
+        for name, text in self._docs_for(path):
+            for i, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"roster/{name}:{i}:{line}")
+                    counts[name] = counts.get(name, 0) + 1
+        if not hits:
+            return "grep: no matches found."
+        if output_mode == "files_with_matches":
+            body_lines = [f"roster/{n}" for n in counts]
+        elif output_mode == "count":
+            body_lines = [f"roster/{n}:{c}" for n, c in counts.items()]
         else:
             body_lines = hits
         window = body_lines[offset:offset + limit]

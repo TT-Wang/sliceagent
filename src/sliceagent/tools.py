@@ -406,6 +406,7 @@ class LocalToolHost:
         # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
         self._history = None
         self._subagents = None   # a SubagentFS (subagents/ virtual namespace) — the parent's view of child seals
+        self._roster = None      # a RosterFS (roster/ virtual namespace) — the durable standing workforce
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
@@ -590,7 +591,8 @@ class LocalToolHost:
         while p.startswith("./"):
             p = p[2:]
         p = p.rstrip("/")
-        for mount, fs in (("history", self._history), ("subagents", self._subagents)):
+        for mount, fs in (("history", self._history), ("subagents", self._subagents),
+                          ("roster", self._roster)):
             if fs is None or not (p == mount or p.startswith(mount + "/")):
                 continue
             try:
@@ -608,6 +610,8 @@ class LocalToolHost:
             return None
         what = ("subagents/ is a read-only view of your subagents' sealed reports"
                 if fs is self._subagents else
+                "roster/ is a read-only view of your standing specialists (hire/wake them via spawn tools)"
+                if fs is self._roster else
                 "history/ is a read-only view of this session's past turns (the episodic archive)")
         return ToolText(f"{what} — you can read_file/list_files/grep it, but it can't be written. "
                         "Save work elsewhere.", ok=False)

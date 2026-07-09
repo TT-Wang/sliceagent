@@ -344,6 +344,25 @@ class NullMemory:
     def read_subagent_artifacts(self, session_id: str) -> list[dict]:
         return []
 
+    def index_subagent_artifact(self, session_id: str, handle: str, artifact: dict) -> None:
+        return None   # no FTS index without a vault
+
+    # roster (standing specialists) — no vault → no durable workforce; named spawns run as temps
+    def roster_get(self, name: str):
+        return None
+
+    def roster_hire(self, name: str, kind: str, *, cap: int | None = None) -> dict:
+        return {}
+
+    def roster_list(self) -> list[dict]:
+        return []
+
+    def roster_append_job(self, name: str, artifact: dict) -> str:
+        return ""
+
+    def roster_read_jobs(self, name: str) -> list[dict]:
+        return []
+
     def search_episodes(self, query: str, *, limit: int = 5,
                         exclude_session: str | None = None,
                         only_session: str | None = None) -> list[dict]:
