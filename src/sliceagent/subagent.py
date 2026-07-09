@@ -3,8 +3,8 @@
 A large, decomposable task can be split: the parent spawns a CHILD agent for a
 sub-task; the child runs its own loop with a FRESH slice, does the work in the SAME
 workspace, and returns ONLY a compact summary. The parent's slice never sees the
-child's transcript — just the summary — so parent context stays bounded no matter how
-much work the child did. That's the slice thesis applied recursively.
+child's transcript — just the summary — so parent context is bounded by that summary,
+not by the child's raw work-volume. That's the slice thesis applied recursively.
 
 Exposed as ONE tool (`spawn_agent`, agent=<kind>) via a ToolHost wrapper, so the loop is
 unchanged: from the parent loop's view it's one tool call that returns a summary string.
@@ -329,7 +329,7 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
 
     # SEAL the child's work as a structured artifact and ARCHIVE it. The parent gets a bounded digest + a
     # recall handle; the FULL report lives at subagents/<id>.md — paged in on demand, out again next seal — so
-    # the parent's context stays flat no matter how much the child did (the moat, one level up). No detail is
+    # the parent's context tracks the child's digest, not its raw work-volume (the moat, one level up). No detail is
     # lost: the digest is a coarse-graining, the handle is its refinement map.
     # `name` is the INSTANCE identity (who); `brief` is the VERBATIM ask (what they were told) — provenance:
     # whoever later reads this report can see the question alongside the answer, so a narrowly-briefed child

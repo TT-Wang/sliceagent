@@ -454,7 +454,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # STANDING SPECIALISTS manifest — advertise the durable, cross-session roster so the model uses
         # read_file("roster/index.md") / spawn_agent(name=…) instead of spelunking the raw vault (an
         # unadvertised channel is a dead one). roster_recent does BOUNDED WORK (rank by cheap stat, parse
-        # only the top-K) so the roster can be UNCAPPED without denting the flat-per-turn moat — a dormant
+        # only the top-K) so the roster can be UNCAPPED without denting the history-bounded moat — a dormant
         # specialist costs a stat, not a read. getattr-guarded like episode_manifest — a minimal memory
         # without a roster just yields "". Cross-session by design: NOT gated on is_session.
         roster_manifest = ""

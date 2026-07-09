@@ -218,7 +218,7 @@ class RipgrepCodeIndex:
 
         The query-INDEPENDENT graph (defs/edges/skeletons) is cached on this instance and rebuilt
         only when the tree changes (see _graph), so per-turn cost is just lexical search + PageRank,
-        not re-reading every file — the cost stays flat across a multi-turn session until an edit."""
+        not re-reading every file — the cost stays bounded across a multi-turn session, flexing only when an edit changes the tree."""
         g = self._graph(max_files)
         files = list(g["files"])
         if not files:

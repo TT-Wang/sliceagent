@@ -2,34 +2,37 @@
 
 [![CI](https://github.com/TT-Wang/sliceagent/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/sliceagent/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/sliceagent.svg)](https://pypi.org/project/sliceagent/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-> **A coding agent that reconstructs a small, exact working context every turn — instead of accumulating a chat transcript and summarizing it when it overflows.**
+> **A coding agent that reconstructs a history-bounded, task-elastic working context every turn — instead of accumulating a chat transcript and summarizing it when it overflows.**
 
-That one change is the whole product. Because context is rebuilt from ground truth each turn rather than piled up:
+That one change is the whole product. Because context is reconstructed from active semantic state and live ground truth each turn rather than piled up:
 
-- **Cheap at scale** — per-turn input stays flat no matter how long the session runs; no grow-to-window sawtooth, so tokens (and cost) don't balloon on long tasks.
-- **Less wall-clock** — a small, stable prompt each turn means less to send and less to reason over; long, iterative work finishes faster.
-- **No context rot, no compaction** — every turn re-reads the live files and the last error verbatim, so nothing drifts into a lossy summary and there is no history to compact.
+- **History-bounded cost** — when active task state stays stable, per-turn input does not grow merely because the session is older; there is no transcript-driven grow-to-window sawtooth.
+- **Task-elastic focus** — simple tasks stay lean, while real user constraints, coupled files, and unresolved evidence can expand the working slice when needed.
+- **Recoverable live state** — every turn re-observes relevant workspace state and faithfully carries current failures; retired detail pages out behind stable handles instead of forcing routine transcript compaction.
 
-The field's default is *bigger windows + summarize*. sliceagent does the opposite: **remember less, reconstruct precisely.**
+The field's default is *bigger windows + summarize*. sliceagent does the opposite: **carry what remains active; archive and recover the rest.**
 
 *Pre-1.0: on `0.x`, CLI flags, config keys, and APIs may change between releases; breaking changes are noted in the [CHANGELOG](CHANGELOG.md).*
 
-**Contents:** [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
+**Contents:** [Core design](CORE-DESIGN.md) · [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
 
 ## How it works
 
+For the precise meaning of “bounded”—history-bounded, task-elastic, and recoverable by construction—see
+the canonical [SliceAgent Core Design](CORE-DESIGN.md).
+
 <p align="center">
   <img src="assets/sliceagent-core-loop.gif" width="840"
-       alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a fixed-size seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stays ~12-15k, 112x smaller by turn 6. Real per-turn numbers from the s1 benchmark.">
+       alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a history-bounded, task-elastic seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stayed ~12-15k in the s1 benchmark, 112x smaller by turn 6.">
 </p>
 
-sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; a small **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a bounded working set from these — it never replays a growing transcript.
+sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript.
 
 | Region | Role |
 |---|---|
-| **Sensory cortex** — live perception | Re-derives the world each turn: git state, project facts, repo map. Never stored or recalled. |
-| **Prefrontal cortex** — working memory | The carried **Slice**: bounded, provenance-tagged state (findings, plan, change-set), sealed at each turn boundary. |
-| **Hippocampus** — episodic memory | Losslessly records each turn; pages a specific past turn back in on demand. |
+| **Sensory cortex** — live perception | Re-derives the world each turn—git state, project facts, repo map—rather than trusting remembered copies. |
+| **Prefrontal cortex** — working memory | The carried **Slice**: task-elastic, provenance-tagged state (intent, findings, plan, change-set), sealed at each turn boundary. |
+| **Hippocampus** — episodic memory | Archives each turn; pages a specific past turn back in on demand. |
 | **Neocortex** — long-term memory | Distills successful episodes into durable cross-session lessons, auto-surfaced when relevant. |
 
 ```text
@@ -54,17 +57,17 @@ sliceagent's memory is organized like a brain: fast, lossy **perception** of the
                       │   PFC updated · turn sealed to memory   │
                       └─────────────────────────────────────────┘
 
-  ↻  next turn: only the PFC slice carries forward —
-     everything else re-derives live from disk.
+  ↻  next turn: the active slice remains resident;
+     live views re-derive, archived detail returns by handle.
 ```
 
-Each turn faults in exactly what the turn references — the carried slice, live views, and any relevant lessons — and hands the model that bounded **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into the hippocampus; on success the neocortex distills a durable lesson. Net effect: **per-turn context stays flat no matter how long the session runs.**
+Each turn faults in what the active task references — the carried slice, live views, and any relevant lessons — and hands the model an elastic **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into the hippocampus; on success the neocortex may distill a durable lesson. Net effect: **for stable active task state, context does not grow merely with session age; it can still expand with genuine task complexity.**
 
 ## Benchmark
 
 On public benchmarks, sliceagent matches Codex's solve rate while using 2.5× fewer tokens and 1.3× less cost on ColBench, and up to 149× smaller peak input on long sessions.
 
-Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost flat** as a session grows? All four benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) — the fourth adds a third question: what does it cost to *orchestrate a subagent fleet*.
+Two questions decide whether reconstructing context every turn actually works: does it stay as **capable** as a transcript agent, and does it keep **per-turn cost history-bounded as the session grows** — sized to the current task, not the accumulated history? All four benchmarks are head-to-head vs **OpenAI Codex** on the same model (`gpt-5.5`) — the fourth adds a third question: what does it cost to *orchestrate a subagent fleet*.
 
 ### 1. In-turn capability — Terminal-Bench 2.0 (public)
 
@@ -113,7 +116,7 @@ Iterative coding sessions where a transcript really piles up. Each scenario is a
 | wall · total | **1,069s** | 1,761s | **61%** |
 | **cost** (cache-aware $) | **$1.30** | $9.43 | **14%** |
 
-Per task — note how the transcript agent's peak input scales with the session while the slice stays flat:
+Per task—the transcript agent's peak input scales with the session while the slice remained within a narrow band in these runs:
 
 | scenario | agent | solved | peak input | total tokens | wall |
 |---|---|:--:|--:|--:|--:|
@@ -148,7 +151,7 @@ Per turn (mean of 3 runs) — the orchestrator's context is what caps how large 
 | 5 · follow-up | 41,447 | 338,507 |
 | 6 · follow-up | 31,963 | 362,595 |
 
-sliceagent **seals each turn into a bounded digest**, so its orchestrator's largest single request averaged **~17k** no matter how many workers it spawned or how long the session ran (the turn-4 bump is a re-read to verify a value — many *bounded* steps, not a bigger context). A transcript orchestrator **re-carries the whole session every turn**, so the same delegation-heavy session grows unbounded — **~21× larger orchestrator peak, and ~3.7× more total tokens** once both agents' children are counted. Delegation is table stakes; both agents have it. **What makes sliceagent a natural substrate for a subagent system is the seal:** a bounded orchestrator plus durable, re-readable sealed subagent artifacts, so a long fleet-driven session never blows up the parent's context.
+In these runs, sliceagent's orchestrator peak stayed roughly flat because each turn retained active digests and handles rather than child trajectories; its largest single request averaged **~17k** across the six-turn workload. A transcript orchestrator **re-carries the whole session every turn**, so the same delegation-heavy session reached a **~21× larger orchestrator peak and ~3.7× more total tokens** once both agents' children were counted. Parent context does not grow with child trajectory length, though it may still grow when more delegated results are genuinely relevant. Delegation is table stakes; the architectural advantage is durable, re-readable child artifacts plus a history-bounded parent.
 
 *N = 3 runs, single model, one opponent, needs the Codex CLI installed. A value-recall sub-check varied wildly run-to-run (sliceagent 1–3 / 3, Codex 0–2 / 3) — it turns on a behavioral re-read choice, so it is within noise and **not** part of the claim. The defensible result is the orchestrator-context and total-token gap, which is structural and held across all three runs (orchestrator 8.8–14.3×, total 3.2–4.3×).*
 
@@ -188,7 +191,7 @@ One honest wrinkle worth naming: Codex's append-only transcript actually earns a
 
 </details>
 
-> The pattern across all four: **capability holds, and the cost gap grows with session length** — exactly the flat-per-turn-cost thesis, and it extends to orchestrating a subagent fleet, where a bounded orchestrator is the whole game. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
+> The pattern across all four is evidence for the **history-bounded-cost thesis in these scenarios**: capability held while per-turn cost tracked the current task rather than accumulated history. The same pattern extended to subagent orchestration. "Solved" is solution correctness, scored identically for both agents. ColBench is [public](https://huggingface.co/datasets/facebook/collaborative_agent_bench); the long-horizon scenarios are reproducible under [`benchmarks/`](benchmarks/).
 >
 > **These are early, small-scale results** — modest task counts (N = 32 / 20 / 3 tasks; §4 is one task × 3 runs), single trial per task, one model, one opponent. Treat them as a directional signal, not a settled claim. We're actively expanding to larger and more varied test sets, more trials, and more baselines, and will update these numbers as that work lands.
 
@@ -263,7 +266,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/plan` | draft a plan before it starts editing |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
-It can edit code (workspace-confined, reversible with `/undo`), run shell commands and interactive processes through a sandbox (`local` by default, `docker` for full isolation), search the tree and the web, delegate decomposable work to subagents (each on its own bounded slice), and remember lessons across sessions. Three permission modes gate it, all with a hard floor on catastrophic commands; secrets are scrubbed from anything it runs or logs.
+It can edit code (workspace-confined, reversible with `/undo`), run shell commands and interactive processes through a sandbox (`local` by default, `docker` for full isolation), search the tree and the web, delegate decomposable work to subagents (each on its own history-bounded, task-elastic slice), and remember lessons across sessions. Three permission modes gate it, all with a hard floor on catastrophic commands; secrets are scrubbed from anything it runs or logs.
 
 **Configuration.** `sliceagent config --list` prints every setting. Set them persistently in `~/.sliceagent/config.toml` (written by `init`), or override any one via an environment variable:
 

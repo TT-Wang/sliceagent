@@ -469,7 +469,7 @@ class HippocampusMixin:
         from jobs==0 double-fires, since the race loser also sees jobs==0).
 
         NO CAP: a dormant specialist is just files on disk (identity = archive key, not a runtime entity),
-        and a wake reads only THAT specialist's files — flat regardless of roster size. The roster isn't a
+        and a wake reads only THAT specialist's files — bounded regardless of roster size. The roster isn't a
         scarce resource, so the kernel doesn't ration it; the per-turn manifest cost is bounded instead
         (roster_recent parses only the top-K), not the number of specialists.
 

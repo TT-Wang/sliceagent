@@ -199,8 +199,8 @@ class Slice:
     def seal(self) -> None:
         """SEAL the loop at a TURN boundary — "bounded = seal the within-loop info" (the moat is the seal
         BETWEEN loops, never a cut WITHIN one). The finished loop's COMPLETE info was archived to the
-        durable cache on TurnEnd; here the NEXT loop starts FRESH so per-turn cost stays flat across a
-        long multi-turn session instead of growing like a transcript.
+        durable cache on TurnEnd; here the NEXT loop starts FRESH so per-turn cost stays bounded by the
+        current task rather than growing with session length like a transcript.
 
         CARRY (distilled, durable continuity): findings + their sources, the in-progress edited change-set
         (+ its edit anchors), conversation ring, goal, the OPEN USER REPORT blocker, deliberate pins, and
@@ -241,7 +241,8 @@ class Slice:
 # NOT: it CARRIES the distilled durable state, RESETS transient per-loop kernel state, and applies CUSTOM
 # bounding (cap/filter) to a few. Historically each field's seal behavior was encoded by OMISSION (a field
 # survives iff seal() happens not to touch it) — so adding a transient field and forgetting to reset it here
-# silently CARRIED it, accumulating across turns and breaking the flat-peak moat; forgetting a field in
+# silently CARRIED it, accumulating across turns and breaking the history-bounded moat (peak would then
+# grow with session age, like a transcript); forgetting a field in
 # reset() leaked it across unrelated tasks. This table makes the choice EXPLICIT, and test_slice_lifecycle
 # enforces: (a) every Slice field is classified here, (b) reset() wipes all fields, (c) seal() resets every
 # 'reset' field and preserves every 'carry' field. Add a Slice field → classify it here or the suite fails.

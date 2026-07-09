@@ -166,7 +166,7 @@ class PageTable:
         if not session_id:
             return []
         # Use the TAIL-only manifest read (O(k)/turn) when available, so a long session doesn't re-parse the
-        # whole JSONL every slice build — that was O(n²)/session, eroding the flat-per-turn-cost moat.
+        # whole JSONL every slice build — that was O(n²)/session, eroding the history-bounded-cost moat.
         manifest = getattr(self.memory, "episode_manifest", None)
         if manifest is not None:
             shown, total = manifest(session_id, k)

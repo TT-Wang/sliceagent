@@ -43,7 +43,7 @@ MAX_CONVERSATION = 4     # RECENT CONVERSATION ring — the last N completed use
 # VERBATIM (no per-message truncation). The bound is this COUNT, not a byte cap: the last few turns are the active
 # loop's antecedents ("go with your recommendation" / "save this") and must survive intact so a deictic follow-up
 # resolves against them directly instead of falling to relevance-recall. Peak flexes with recent reply size but
-# stays flat across SESSION LENGTH (older turns + re-readable bulk still page out to history/; recall pages back).
+# stays bounded across SESSION LENGTH (older turns + re-readable bulk still page out to history/; recall pages back).
 # (render_conversation drops the in-progress turn, so this surfaces the last MAX_CONVERSATION-1 completed turns.)
 
 
