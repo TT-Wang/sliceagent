@@ -17,8 +17,10 @@ from .events import (
     LessonSaved,
     SliceBuilt,
     ToolResult,
-    TurnEnd,
+    TurnCommitted,
     TurnInterrupted,
+    TurnPhaseChanged,
+    TurnStarted,
     make_dispatcher,
 )
 from .hooks import (BudgetHook, CompositeHooks, GuardrailHook, OracleHook,
@@ -143,17 +145,19 @@ def cli_sink(show_slice: bool = False):
             print(head)
         elif isinstance(e, AssistantText):
             if (e.content or "").strip():
-                print(f"\n{e.content}\n")
+                label = "[assistant update]\n" if not e.final else ""
+                print(f"\n{label}{e.content}\n")
         elif isinstance(e, ApiRetry):
             print(f"  …retry #{e.attempt} ({e.error})")
         elif isinstance(e, TurnInterrupted):
             print(f"\n[interrupted: {e.reason}]")
         elif isinstance(e, LessonSaved):
             print(f"  💡 learned: {e.title}")
-        elif isinstance(e, TurnEnd):
-            u = e.usage or {}            # usage is non-None from loop.py, but guard like every other sink
-            print(f"  [done: {e.stop_reason} · {e.steps} steps · "
-                  f"{u.get('prompt_tokens', 0) + u.get('completion_tokens', 0)} tokens]")
+        elif isinstance(e, TurnCommitted):
+            if e.ok:
+                print(f"  [turn saved: {e.stop_reason}]")
+            else:
+                print(f"  [save failed: {e.detail or e.stop_reason}]")
     return sink
 
 
@@ -478,15 +482,25 @@ def main() -> None:
         session.turn_task_id = session.active_id
         record_user(s, text, source_artifact=active.artifact_id)
 
-    def _seal_local_turn(stop_reason: str) -> bool:
-        """Required artifact-first seal; compatibility persistence happens only after it succeeds."""
+    def _seal_local_turn(stop_reason: str, event_dispatch=None) -> bool:
+        """Required artifact-first seal; emit completion only after durable activation succeeds."""
+        emit = event_dispatch or dispatch
+        emit(TurnPhaseChanged(
+            "saving",
+            "saving checkpoint" if stop_reason == "end_turn" else f"saving {stop_reason} state",
+        ))
         active = local_store.active
-        if active is None:
+
+        def _failed(detail: str) -> bool:
+            emit(TurnCommitted(ok=False, stop_reason=stop_reason, detail=one_line(detail, 180)))
             return False
+
+        if active is None:
+            return _failed("no active local turn to save")
+        artifact_id = active.artifact_id
         target = session.tasks.get(active.task_id)
         if target is None:
-            print(f"  · local seal failed: starting task {active.task_id!r} no longer exists")
-            return False
+            return _failed(f"starting task {active.task_id!r} no longer exists")
         closed = episodic.take_last_record() if episodic is not None else None
         if closed is not None:
             _pending_seal_records[active.artifact_id] = closed[1]
@@ -538,8 +552,9 @@ def main() -> None:
             except Exception:  # noqa: BLE001 — persistent storage failure remains an honest hard stop
                 recovered = None
             if recovered is None or recovered.status not in ("replayed", "attached", "cleaned"):
-                print(f"  · local seal incomplete ({type(_e).__name__}: {_e}); recovery journal retained")
-                return False
+                return _failed(
+                    f"local seal incomplete ({type(_e).__name__}: {_e}); recovery journal retained"
+                )
         # The journal-completeness safeguard may strengthen an apparently ordinary stop to INDETERMINATE
         # while committing (for example, ToolStarted was durable but Ctrl-C prevented ToolResult). Merge the
         # committed safety gate back into the live copy, or this process could immediately bypass a gate that
@@ -553,8 +568,7 @@ def main() -> None:
             sealed_target.reconciliation_required = task_state.reconciliation_required
             sealed_target.reconciliation_targets = list(task_state.reconciliation_targets)
         except Exception as exc:  # noqa: BLE001 — do not continue from a state weaker than durable truth
-            print(f"  · committed local state could not be activated ({type(exc).__name__}: {exc})")
-            return False
+            return _failed(f"committed local state could not be activated ({type(exc).__name__}: {exc})")
         session.tasks[active.task_id] = sealed_target
         session.turn_task_id = None
         _pending_seal_records.pop(active.artifact_id, None)
@@ -563,6 +577,12 @@ def main() -> None:
                 memory.checkpoint_task(task_state)  # derived compatibility view, after core commit
             except Exception as exc:  # noqa: BLE001 — optional memory cannot invalidate the core seal
                 print(f"  · legacy task mirror failed ({type(exc).__name__}: {exc})")
+        emit(TurnCommitted(
+            ok=True,
+            stop_reason=stop_reason,
+            artifact_id=artifact_id,
+            detail="checkpoint saved" if stop_reason == "end_turn" else f"{stop_reason} state saved",
+        ))
         return True
 
     class _DurabilityStop(RuntimeError):
@@ -652,7 +672,7 @@ def main() -> None:
     # EXACTLY ONE renderer is wired: the rich+prompt_toolkit sink (TUI), OR the plain stdout sink
     # (headless/eval). Never two.
     if _tui:
-        _rich = _tui.make_rich_sink(_console, _stats)
+        _rich = _tui.make_rich_sink(_console, _stats, await_commit=True)
         sinks.append(_rich)
         llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner
         # child agent activity → one dynamic spinner line. NOT in live mode: a rich console Status would
@@ -998,24 +1018,48 @@ def main() -> None:
             else:
                 session.continue_topic(text)
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
-        _begin_local_turn(text)
-        _expand_mentions(text)            # @path → pin the file into OPEN FILES
-        build = make_build_slice(session, tools, retriever, memory, text, session.session_id, model_id=llm.model)
-        # live mode must wire the SAME host sinks as the REPL path (episodic cache, durable log, metrics) —
-        # not just slice+renderer — else the cache→memory loop and /cost produce NOTHING in live mode.
+        # Build the live-mode dispatcher before slice construction so the same shared progress state sees
+        # the host lifecycle from its real beginning.  Required sinks are safe once _begin_local_turn runs.
         _live_sinks = []
         if episodic is not None:
             _live_sinks.append(episodic)
         _live_sinks.append(log_sink(root))
         if metrics is not None:
             _live_sinks.append(metrics)
-        if monitor_sink is not None:        # live mode must feed the web monitor too (was silently omitted)
+        if monitor_sink is not None:
             _live_sinks.append(monitor_sink)
         _live_sinks.append(sink)
         live_dispatch = make_dispatcher(
             *_live_sinks,
             required=(_journal_event, _reduce_event),
         )
+        _begin_local_turn(text)
+        live_dispatch(TurnStarted(
+            request=text,
+            task_title=_stats["topic"],
+            task_id=session.active_id or "",
+            plan=list(session.active().plan or ()),
+        ))
+        try:
+            _expand_mentions(text)        # @path → pin the file into OPEN FILES
+            build = make_build_slice(
+                session, tools, retriever, memory, text, session.session_id, model_id=llm.model,
+            )
+        except KeyboardInterrupt:
+            live_dispatch(TurnInterrupted("aborted", "cancelled during context preparation"))
+            if _seal_local_turn("aborted", live_dispatch):
+                from . import recovery as _rec
+                _rec.clear(root)
+                return
+            raise _DurabilityStop("required local seal failed after cancellation")
+        except Exception as exc:  # noqa: BLE001 — preparation is inside the required durability lifecycle
+            message = f"context preparation failed ({type(exc).__name__}: {exc})"
+            live_dispatch(TurnInterrupted("error", message))
+            if _seal_local_turn("error", live_dispatch):
+                from . import recovery as _rec
+                _rec.clear(root)
+                return
+            raise _DurabilityStop("required local seal failed after a context-preparation error")
         llm.set_delta_sink(sink.on_delta)
         import time as _t
         _t0 = _t.monotonic()
@@ -1025,7 +1069,7 @@ def main() -> None:
                           consolidate=lambda: consolidate_checkpoint(session.active(), compact=False),
                           checkpoint=lambda m, s, _g=text: _rec.record(root, goal=_g, messages=m, step=s),
                           turn_id=local_store.active.artifact_id if local_store.active else "")
-        if _seal_local_turn(result.stop_reason):
+        if _seal_local_turn(result.stop_reason, live_dispatch):
             _rec.clear(root)                               # clear legacy WAL only after required local commit
         else:
             raise _DurabilityStop(
@@ -1114,8 +1158,8 @@ def main() -> None:
                 session.continue_topic(line)
             else:                                              # route: continue / new / resume (no junk topic)
                 # route() is lexical by default (instant, zero round-trips); AGENT_ROUTER=llm restores the
-                # classifier (a provider round-trip). Cover it with a 'routing…' spinner so the llm mode has
-                # no silent freeze before run_turn's own 'thinking…' spinner (which only starts at SliceBuilt).
+                # classifier (a provider round-trip). Cover it with a 'routing…' spinner; the shared turn
+                # progress state begins immediately after routing and remains live through slice construction.
                 if _tui:
                     with _console.status("[grey50]routing…[/]", spinner="dots"):
                         action, tid = route(llm, line, session)
@@ -1132,15 +1176,31 @@ def main() -> None:
                     print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
             _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
             _begin_local_turn(line)              # journal + exact intent + short-range continuity
-            _expand_mentions(line)               # @path → pin the file into OPEN FILES
+            dispatch(TurnStarted(
+                request=line,
+                task_title=_stats["topic"],
+                task_id=session.active_id or "",
+                plan=list(session.active().plan or ()),
+            ))
             try:
                 # slice-build phase happens BEFORE run_turn's own KeyboardInterrupt handling — a ctrl-c
                 # here (e.g. during the one-time repo-map build) must cancel the turn, not crash the REPL.
+                _expand_mentions(line)           # @path → pin the file into OPEN FILES
                 build = make_build_slice(session, tools, retriever, memory, line, session.session_id, model_id=llm.model)
             except KeyboardInterrupt:
-                if _seal_local_turn("aborted"):
+                dispatch(TurnInterrupted("aborted", "cancelled during context preparation"))
+                if _seal_local_turn("aborted", dispatch):
                     recovery.clear(root)
                     print("\n  · cancelled")
+                    continue
+                print("\n  · required local seal failed; stopping before accepting another request")
+                break
+            except Exception as exc:  # noqa: BLE001 — preparation belongs to the required turn lifecycle
+                message = f"context preparation failed ({type(exc).__name__}: {exc})"
+                dispatch(TurnInterrupted("error", message))
+                if _seal_local_turn("error", dispatch):
+                    recovery.clear(root)
+                    print(f"\n  · {message}")
                     continue
                 print("\n  · required local seal failed; stopping before accepting another request")
                 break
@@ -1150,8 +1210,8 @@ def main() -> None:
                 def build(_b=_b):
                     _s = _tt.monotonic()
                     r = _b()
-                    print(f"  ⏱ slice build {(_tt.monotonic() - _s) * 1000:.0f} ms (spinner appears here; "
-                          "the rest of the wait is the model's first token)", flush=True)
+                    print(f"  ⏱ slice build {(_tt.monotonic() - _s) * 1000:.0f} ms (progress was already "
+                          "visible; the remaining wait is the model's first token)", flush=True)
                     return r
             # ctrl-c OR esc during the turn (incl. while the LLM is thinking) raises KeyboardInterrupt, which
             # run_turn catches → aborts the turn cleanly and returns here to the prompt (then ctrl-d quits).
@@ -1172,7 +1232,7 @@ def main() -> None:
             finally:
                 if _esc is not None:
                     _esc.stop()
-            if _seal_local_turn(result.stop_reason):
+            if _seal_local_turn(result.stop_reason, dispatch):
                 recovery.clear(root)                           # clear legacy WAL only after core commit
             else:
                 print("  · required local seal failed; stopping before accepting another request")

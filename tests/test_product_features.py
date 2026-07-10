@@ -199,15 +199,18 @@ def plain_sink_is_readable_and_quiet_on_reads():
 
 @check
 def plain_sink_survives_none_usage():
-    # review round 1: cli_sink must not crash if TurnEnd.usage is None (guard like every other sink)
+    # TurnEnd is the model-loop boundary, not durable completion; a later commit owns the saved claim.
     import contextlib
     import io
     from sliceagent.cli import cli_sink
-    from sliceagent.events import TurnEnd
+    from sliceagent.events import TurnCommitted, TurnEnd
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        cli_sink()(TurnEnd("end_turn", 5, None))
-    assert "done" in buf.getvalue()
+        sink = cli_sink()
+        sink(TurnEnd("end_turn", 5, None))
+        assert "done" not in buf.getvalue()
+        sink(TurnCommitted(True, "end_turn"))
+    assert "turn saved" in buf.getvalue()
 
 
 # ---- streaming-to-content (RichSink) ----------------------------------------
@@ -215,19 +218,23 @@ def plain_sink_survives_none_usage():
 def richsink_streams_content_then_finalizes_once():
     import io
     from rich.console import Console
-    from sliceagent.events import AssistantText, SliceBuilt
+    from sliceagent.events import AssistantText, TurnCommitted, TurnEnd, TurnStarted
     from sliceagent.tui import make_rich_sink
     for force in (False, True):                    # non-tty (fallback) AND tty-like (Live) must both be safe
         buf = io.StringIO()
         c = Console(file=buf, force_terminal=force, width=80, soft_wrap=False)
-        sink = make_rich_sink(c, {"model": "test-model"})
-        sink(SliceBuilt("req"))                    # starts the thinking spinner
-        sink.on_delta("content", "Hello ")         # deltas flip the live label to "writing…" (no preview)
+        sink = make_rich_sink(c, {"model": "test-model"}, await_commit=True)
+        sink(TurnStarted("req"))                   # starts truthful progress before slice construction
+        sink.on_delta("content", "Hello ")         # deltas change semantic phase (no preview)
         sink.on_delta("content", "world — the fix is X.")
-        assert sink._label == "writing…", sink._label
-        sink(AssistantText("Hello world — the fix is X."))   # finalize (live region torn down; panel printed)
+        assert sink.progress.snapshot().phase.value == "writing"
+        sink(AssistantText("Hello world — the fix is X."))
+        assert "fix is X" not in buf.getvalue(), "terminal answer must wait for completion + commit"
+        sink(TurnEnd("end_turn", 1, {}))
+        sink(TurnCommitted(True, "end_turn"))
         out = buf.getvalue()
         assert "fix is X" in out, f"(force_terminal={force}) reply missing: {out!r}"
+        assert out.count("fix is X") == 1, out
 
 
 @check
@@ -255,15 +262,15 @@ def streaming_reply_shows_a_fixed_single_line_status_not_a_growing_region():
     import io
     from rich.console import Console
     from sliceagent.tui import make_rich_sink, _LiveStatus
-    from sliceagent.events import SliceBuilt
+    from sliceagent.events import TurnStarted
     sink = make_rich_sink(Console(file=io.StringIO(), force_terminal=True, width=80), {"model": "x"})
-    sink(SliceBuilt("req"))                             # arms the status region (like a real turn)
+    sink(TurnStarted("req"))                            # arms the status before slice construction
     try:
         assert not hasattr(sink, "_live"), "on_delta must not create a separate rich.live.Live panel"
         before = _LiveStatus(sink).__rich__().plain
         sink.on_delta("content", "z" * 5000)           # a very long reply must not enlarge the status line
         after = _LiveStatus(sink).__rich__().plain
-        assert "writing" in after, f"the status must reflect the writing phase, got {after!r}"
+        assert "Writing" in after, f"the status must reflect the writing phase, got {after!r}"
         assert "z" * 40 not in after, "the status line must NOT embed the growing reply text"
         assert len(after) < 120 and abs(len(after) - len(before)) < 20, \
             f"the status must stay a short, fixed-length single line regardless of reply length ({len(after)})"

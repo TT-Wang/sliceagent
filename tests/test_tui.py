@@ -17,8 +17,8 @@ except Exception:
 
 from rich.console import Console  # noqa: E402
 from sliceagent import tui  # noqa: E402
-from sliceagent.events import (AssistantText, ApiRetry, StepEnd, ToolResult,  # noqa: E402
-                             TurnEnd, TurnInterrupted)
+from sliceagent.events import (AssistantText, ApiRetry, StepBegin, StepEnd, ToolResult,  # noqa: E402
+                               TurnCommitted, TurnEnd, TurnInterrupted, TurnPhaseChanged, TurnStarted)
 
 CHECKS = []
 def check(fn):
@@ -29,7 +29,7 @@ def check(fn):
 def _render(events):
     c = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
     stats = {"model": "m", "policy": "allow", "topic": "", "tokens": 0}
-    sink = tui.make_rich_sink(c, stats)
+    sink = tui.make_rich_sink(c, stats, await_commit=True)
     for e in events:
         sink(e)
     sink._flush_reads()   # a real turn always ends with TurnEnd, which flushes buffered read-only cards
@@ -38,10 +38,10 @@ def _render(events):
 
 
 @check
-def tool_result_ok_shows_check_and_header():
-    # a MUTATING tool renders its own ✓ card (read-only tools coalesce — see the next test)
+def tool_result_ok_uses_a_quiet_activity_rail():
+    # Ordinary success stays quiet; green ✓ is reserved for the durable turn boundary.
     out, _ = _render([ToolResult("edit_file", {"path": "src/foo.py"}, "ok", False)])
-    assert "✓" in out and "write" in out and "foo.py" in out, out
+    assert "│ write" in out and "foo.py" in out and "✓" not in out, out
 
 
 @check
@@ -52,7 +52,7 @@ def read_only_tools_coalesce_into_one_dim_line():
         ToolResult("grep", {"pattern": "foo"}, "matches", False),
         TurnEnd("end_turn", 1, {}),
     ])
-    assert "2 read" in out and "1 grep" in out, out      # one coalesced summary…
+    assert "2 read" in out and "1 search" in out, out    # one coalesced summary…
     assert "a.py" in out and "b.py" in out, out          # …that still names the files
     assert "✓ read" not in out, out                      # …not three separate ✓ cards
 
@@ -61,6 +61,21 @@ def read_only_tools_coalesce_into_one_dim_line():
 def tool_result_fail_shows_cross():
     out, _ = _render([ToolResult("run_command", {"command": "pytest"}, "Exit code 1", True)])
     assert "✗" in out and "run" in out, out
+
+
+@check
+def successful_tool_notes_become_deduplicated_milestones():
+    out, _ = _render([
+        TurnStarted("verify retry behavior"),
+        ToolResult("run_command", {"command": "pytest", "note": "The retry regression now passes."},
+                   "1 passed", False),
+        ToolResult("run_command", {"command": "pytest", "note": "The retry regression now passes."},
+                   "1 passed", False),
+        ToolResult("run_command", {"command": "pytest", "note": "A failed claim must stay hidden."},
+                   "exit 1", True),
+    ])
+    assert out.count("◆ The retry regression now passes.") == 1, out
+    assert "A failed claim must stay hidden." not in out, out
 
 
 @check
@@ -78,8 +93,85 @@ def assistant_text_renders_markdown():
 
 @check
 def turn_end_and_retry_render():
-    out, _ = _render([ApiRetry(1, "timeout"), TurnEnd("end_turn", 3, {"prompt_tokens": 100, "completion_tokens": 20})])
-    assert "retry" in out and "done" in out and "3 steps" in out, out
+    out, _ = _render([
+        TurnStarted("fix retries"),
+        ApiRetry(1, "timeout"),
+        TurnEnd("end_turn", 3, {"prompt_tokens": 100, "completion_tokens": 20}),
+        TurnCommitted(True, "end_turn", detail="checkpoint saved"),
+    ])
+    assert "retry" in out and "turn saved" in out, out
+
+
+@check
+def read_wave_flushes_at_step_end_before_any_answer_or_turn_end():
+    out, _ = _render([
+        TurnStarted("inspect files"),
+        ToolResult("read_file", {"path": "a.py"}, "ok", False),
+        ToolResult("grep", {"pattern": "needle"}, "matches", False),
+        StepEnd(1, {}, "tool_use"),
+    ])
+    assert "1 read" in out and "1 search" in out and "a.py" in out, out
+
+
+@check
+def rejected_completion_draft_is_replaced_before_commit():
+    out, _ = _render([
+        TurnStarted("fix and verify"),
+        StepBegin(1),
+        AssistantText("draft that failed verification"),
+        StepEnd(1, {}, "end_turn"),
+        TurnPhaseChanged("checking_completion", "running checks"),
+        StepBegin(2),                 # completion gate requested another pass → discard prior draft
+        AssistantText("final verified response"),
+        StepEnd(2, {}, "end_turn"),
+        TurnEnd("end_turn", 2, {}),
+        TurnCommitted(True, "end_turn"),
+    ])
+    assert "draft that failed verification" not in out, out
+    assert out.count("final verified response") == 1 and "turn saved" in out, out
+
+
+@check
+def committed_turn_cannot_swallow_chitchat_or_be_resurrected_by_late_deltas():
+    c = Console(file=StringIO(), force_terminal=False, width=100, color_system=None)
+    sink = tui.make_rich_sink(c, {}, await_commit=True)
+    sink(TurnStarted("finish the task"))
+    sink(AssistantText("task response"))
+    sink(TurnEnd("end_turn", 1, {}))
+    sink(TurnCommitted(True, "end_turn"))
+    terminal = sink.progress.snapshot()
+    assert terminal.committed and not terminal.active
+
+    sink(AssistantText("You are welcome!"))     # cheap chitchat has no TurnStarted/TurnCommitted pair
+    assert "You are welcome!" in c.file.getvalue()
+    assert sink._pending_answer == "" and not sink.progress.snapshot().active
+    sink.on_delta("content", "late stale bytes")
+    assert sink.progress.snapshot() == terminal, "late deltas must not reopen a committed turn"
+    assert sink._status is None
+
+
+@check
+def partial_and_unsaved_answers_are_never_styled_as_normal_final_responses():
+    interrupted, _ = _render([
+        TurnStarted("long response"),
+        AssistantText("PARTIAL RESPONSE"),
+        TurnInterrupted("max_tokens", "response was truncated"),
+    ])
+    assert "assistant · partial" in interrupted and "PARTIAL RESPONSE" in interrupted, interrupted
+
+    unsaved, _ = _render([
+        TurnStarted("save response"),
+        AssistantText("UNSAVED RESPONSE"),
+        TurnEnd("end_turn", 1, {}),
+        TurnCommitted(False, "end_turn", detail="disk full"),
+    ])
+    assert "assistant · unsaved" in unsaved and "save failed" in unsaved, unsaved
+
+    update, _ = _render([
+        TurnStarted("use a tool"),
+        AssistantText("I will inspect that now.", final=False),
+    ])
+    assert "assistant · update" in update and "I will inspect" in update, update
 
 
 @check
@@ -118,7 +210,7 @@ def tui_enabled_honors_the_flag():
 
 @check
 def tool_header_picks_primary_arg():
-    assert "grep" in tui._tool_header("grep", {"pattern": "TODO", "note": "x"})
+    assert "search" in tui._tool_header("grep", {"pattern": "TODO", "note": "x"})
     assert "TODO" in tui._tool_header("grep", {"pattern": "TODO"})
 
 

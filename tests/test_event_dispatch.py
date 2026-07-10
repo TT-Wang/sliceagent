@@ -31,6 +31,14 @@ def main():
     except RuntimeError as exc:
         assert str(exc) == "state failed"
     assert not any(kind == "should-not-run" for kind, _ in calls)
+
+    # Host progress observations may report that a task/checkpoint is missing. They must reach UI observers
+    # without the authoritative Slice reducer first trying to resolve that same missing active task.
+    from sliceagent.events import TurnCommitted
+    from sliceagent.memory import NullMemory
+    from sliceagent.pfc import slice_sink
+    from sliceagent.session import Session
+    slice_sink(Session(NullMemory()))(TurnCommitted(False, "error", detail="missing task"))
     print("PASS required sinks propagate and observers stay isolated")
 
 

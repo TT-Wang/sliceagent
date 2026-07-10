@@ -9,8 +9,8 @@ Design (a rich + prompt_toolkit terminal UI):
   - SCROLLBACK model: Rich prints finalized output to history; prompt_toolkit owns the input line.
     They are TEMPORALLY separate (output during the synchronous run_turn, input between turns), so
     there is no patch_stdout/threading minefield.
-  - tool-call CARDS (spinner -> ✓/✗, primary-arg header, inline diff for edits),
-  - a two-line STATUS footer (model · policy · workspace · tokens),
+  - quiet, width-safe activity rails with stronger durable milestones,
+  - one truthful live progress row plus a responsive identity footer,
   - a SLASH-command palette wired to existing session ops (/new /switch /resume /threads /help /exit),
   - graceful ctrl-c AND esc: a physical Ctrl-C (SIGINT) aborts a running turn via Python's own
     KeyboardInterrupt delivery; Esc does the SAME thing via `_EscSentinel`, a narrow background thread that
@@ -20,8 +20,10 @@ Design (a rich + prompt_toolkit terminal UI):
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
+from collections import Counter
 
 from rich import box as _box
 from rich.console import Console, Group
@@ -31,20 +33,22 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-import shutil
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.utils import get_cwidth
 
-from .events import (AssistantText, ApiRetry, Event, LessonSaved, SliceBuilt, StepBegin, StepEnd,
-                     ToolResult, ToolStarted, TurnEnd, TurnInterrupted)
+from .events import (AssistantText, ApiRetry, Event, LessonSaved, StepBegin, StepEnd,
+                     ToolResult, TurnCommitted, TurnEnd, TurnInterrupted, TurnStarted)
+from .progress import ProgressPhase, TurnProgress
 
 # ── theme (semantic tokens; one place to retheme) ───────────────────────────────────────────
 TH = {
     "accent": "bright_cyan", "ok": "green", "fail": "red", "warn": "yellow",
-    "dim": "grey50", "tool": "magenta", "add": "green", "del": "red", "user": "bright_cyan",
+    "dim": "grey50", "gutter": "grey35", "tool": "default", "inspect": "blue",
+    "edit": "magenta", "run": "cyan", "verify": "bright_blue",
+    "add": "green", "del": "red", "user": "bright_cyan",
 }
 
 # Rich's DEFAULT markdown styles are "bold cyan on black" / "cyan on black" — so any file path or inline
@@ -57,24 +61,25 @@ def make_console() -> Console:
     """A Rich Console themed so inline `code` / file paths aren't highlighted on a black background."""
     return Console(theme=MD_THEME)
 
-# per-tool emoji + a short verb + which arg is the "primary" one to show in the card header
+# Calm, terminal-stable tool presentation: a short verb + the informative argument.  Avoid emoji here;
+# their double-width behavior varies by terminal and makes settled output visibly jitter.
 _TOOL = {
-    "read_file":      ("📖", "read",   "path"),
-    "edit_file":      ("✏️ ", "write",  "path"),
-    "append_to_file": ("➕", "append", "path"),
-    "str_replace":    ("✏️ ", "edit",   "path"),
-    "list_files":     ("📂", "list",   "path"),
-    "run_command":    ("⚡", "run",    "command"),
-    "execute_code":   ("🐍", "exec",   "code"),
-    "grep":           ("🔍", "grep",   "pattern"),
-    "glob":           ("🔍", "glob",   "pattern"),
-    "skill":          ("📚", "skill",  "name"),
-    "search_history": ("🕮 ", "search", "query"),
-    "new_topic":      ("🟢", "topic",  "goal"),
-    "switch_topic":   ("🔀", "switch", "task_id"),
-    "spawn_agent":    ("🤖", "agent",  "task"),   # the ONE delegation tool
-    "spawn_subagent": ("🤖", "agent",  "task"),   # back-compat display for the old names
-    "spawn_explore":  ("🔭", "explore", "task"),
+    "read_file":      ("read",    "path"),
+    "edit_file":      ("write",   "path"),
+    "append_to_file": ("append",  "path"),
+    "str_replace":    ("edit",    "path"),
+    "list_files":     ("list",    "path"),
+    "run_command":    ("run",     "command"),
+    "execute_code":   ("execute", "code"),
+    "grep":           ("search",  "pattern"),
+    "glob":           ("find",    "pattern"),
+    "skill":          ("skill",   "name"),
+    "search_history": ("recall",  "query"),
+    "new_topic":      ("task",    "goal"),
+    "switch_topic":   ("switch",  "task_id"),
+    "spawn_agent":    ("delegate", "task"),
+    "spawn_subagent": ("delegate", "task"),
+    "spawn_explore":  ("explore",  "task"),
 }
 
 
@@ -83,7 +88,7 @@ _TOOL = {
 # is deliberately NOT here: it's the cross-session memory channel and stays its own visible card. (A
 # read_file/grep under history/ coalesces like any other read — it IS an ordinary file read now.)
 _COALESCE = {"read_file", "list_files", "grep", "glob"}
-_READ_VERB = {"read_file": "read", "list_files": "list", "grep": "grep", "glob": "glob"}
+_READ_VERB = {"read_file": "read", "list_files": "list", "grep": "search", "glob": "find"}
 
 
 def _shorten(s: str, n: int = 64) -> str:
@@ -91,8 +96,36 @@ def _shorten(s: str, n: int = 64) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _shorten_cells(value: object, width: int) -> str:
+    """Normalize and crop prompt-toolkit text by terminal cells, including CJK and combining text."""
+    text = " ".join(str(value or "").split())
+    width = max(1, int(width))
+    if get_cwidth(text) <= width:
+        return text
+    out, used = [], 0
+    for char in text:
+        cells = max(0, get_cwidth(char))
+        if used + cells > width - 1:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out) + "…"
+
+
+def _crop_cells(text: str, width: int) -> str:
+    """Hard cell crop used only as a final safety net for a formatted one-line footer."""
+    out, used = [], 0
+    for char in text:
+        cells = max(0, get_cwidth(char))
+        if used + cells > max(0, width):
+            break
+        out.append(char)
+        used += cells
+    return "".join(out)
+
+
 def _primary(name: str, args: dict) -> str:
-    key = _TOOL.get(name, (None, None, None))[2]
+    key = _TOOL.get(name, (None, None))[1]
     val = args.get(key) if (key and isinstance(args, dict)) else None
     if val is None and isinstance(args, dict):  # fallback: first non-note string arg
         val = next((v for k, v in args.items() if k != "note" and isinstance(v, str)), "")
@@ -100,12 +133,12 @@ def _primary(name: str, args: dict) -> str:
 
 
 def _tool_header(name: str, args: dict) -> str:
-    emoji, verb, _ = _TOOL.get(name, ("•", name, None))
+    verb, _ = _TOOL.get(name, (name.replace("_", " "), None))
     p = _primary(name, args)
-    return f"{emoji} {verb} {p}".rstrip()
+    return f"{verb} {p}".rstrip()
 
 
-def _diff(name: str, args: dict):
+def _diff(name: str, args: dict, width: int = 100):
     """A compact inline diff for a str_replace (old → new). Returns a Rich renderable or None."""
     if name != "str_replace" or not isinstance(args, dict):
         return None
@@ -113,35 +146,38 @@ def _diff(name: str, args: dict):
     if not old and not new:
         return None
     lines = []
-    for ln in old.splitlines()[:12]:
-        lines.append(Text(f"- {ln}", style=TH["del"]))
-    for ln in new.splitlines()[:12]:
-        lines.append(Text(f"+ {ln}", style=TH["add"]))
-    extra = max(0, len(old.splitlines()) - 12) + max(0, len(new.splitlines()) - 12)
+    for ln in old.splitlines()[:4]:
+        lines.append(_fit_line(Text(f"- {ln}", style=TH["del"]), max(1, width - 2)))
+    for ln in new.splitlines()[:4]:
+        lines.append(_fit_line(Text(f"+ {ln}", style=TH["add"]), max(1, width - 2)))
+    extra = max(0, len(old.splitlines()) - 4) + max(0, len(new.splitlines()) - 4)
     if extra:
-        lines.append(Text(f"… {extra} more diff lines", style=TH["dim"]))
+        lines.append(_fit_line(Text(f"… {extra} more diff lines", style=TH["dim"]), max(1, width - 2)))
     return Group(*lines) if lines else None
 
 
-_PLAN_GLYPH = {"done": ("✓", "ok"), "in_progress": ("▶", "accent"), "pending": ("○", "dim")}
-
-
-def _render_plan(steps: list):
-    """A live PLAN/TODO checklist panel: '✓ done', '▶ in-progress', '○ pending'.
-    Surfaces the model's update_plan tier as first-class UI instead of a generic tool card."""
-    lines = []
-    for it in steps:
-        if not isinstance(it, dict):
-            continue
-        status = it.get("status", "pending")
-        glyph, gstyle = _PLAN_GLYPH.get(status, ("○", "dim"))
-        text_style = TH["dim"] if status == "done" else "default"
-        lines.append(Text.assemble(Text(f"{glyph} ", style=TH.get(gstyle, gstyle)),
-                                   Text(_shorten(str(it.get("step", "")), 80), style=text_style)))
-    done = sum(1 for it in steps if isinstance(it, dict) and it.get("status") == "done")
-    title = Text(f"plan · {done}/{len(steps)} done", style=TH["accent"])
-    return Panel(Group(*lines) if lines else Text("(empty plan)", style=TH["dim"]),
-                 title=title, border_style=TH["dim"], expand=False)
+def _render_plan(steps: list, width: int = 100) -> Text:
+    """One settled plan summary; ``/plan`` remains the home for the full checklist."""
+    steps = steps if isinstance(steps, list) else []
+    valid = [it for it in steps if isinstance(it, dict)]
+    done = sum(1 for it in valid if it.get("status") == "done")
+    current = next((str(it.get("step", "")) for it in valid
+                    if it.get("status") == "in_progress" and it.get("step")), "")
+    if not current:
+        current = next((str(it.get("step", "")) for it in valid
+                        if it.get("status") != "done" and it.get("step")), "")
+    if not valid:
+        tail = "empty"
+    elif done == len(valid):
+        tail = "complete"
+    else:
+        tail = _shorten(current or "next step pending", 100)
+    return _fit_line(Text.assemble(
+        Text("│ ", style=TH["gutter"]),
+        Text("plan", style=f"bold {TH['accent']}"),
+        Text(f" {done}/{len(valid)} · ", style=TH["dim"]),
+        Text(tail, style=TH["dim"] if not valid or done == len(valid) else "default"),
+    ), width)
 
 
 # ── the rendering sink (consumes the loop's events) ──────────────────────────────────────────
@@ -151,41 +187,81 @@ def _box_width(console: Console) -> int:
         w = int(console.width)
     except Exception:
         w = 100
-    return max(48, min(w - 2, 100))
+    return min(max(1, w - 2), 96)
 
 
-def _response_panel(content: str, console: Console) -> Panel:
+def _line_width(console: Console) -> int:
+    """Usable width for settled rows, leaving a small right margin."""
+    try:
+        return max(1, int(console.width) - 2)
+    except Exception:
+        return 98
+
+
+def _response_panel(content: str, console: Console, *, title: str = "assistant",
+                    border_style: str | None = None) -> Panel:
     """The assistant reply as Rich Markdown in a clean HORIZONTALS box: light
     top/bottom rules, a left-aligned label, generous padding, bounded width — vs bare full-width Markdown."""
     return Panel(
         Markdown(content),
-        title=f"[bold {TH['accent']}]assistant[/]",
+        title=Text(title, style=f"bold {border_style or TH['accent']}"),
         title_align="left",
-        border_style=TH["accent"],
+        border_style=border_style or TH["accent"],
         box=_box.HORIZONTALS,
-        padding=(1, 2),
+        padding=(0, 1),
         width=_box_width(console),
     )
 
 
-def _render_tool_result(e):
+def _render_milestone(note: str, width: int = 100) -> Text:
+    """A tool-backed conclusion: visually stronger than activity, quieter than a result card."""
+    return _fit_line(Text.assemble(
+        Text("│ ", style=TH["gutter"]), Text("◆ ", style=f"bold {TH['accent']}"),
+        Text(_shorten(note, 160)),
+    ), width)
+
+
+def _render_read_summary(reads: list, width: int = 100) -> Text | None:
+    """One terminal-stable line for a settled read wave, shared by both TUI adapters."""
+    if not reads:
+        return None
+    counts = Counter(name for name, _ in reads)
+    work = " · ".join(f"{count} {_READ_VERB.get(name, name.replace('_', ' '))}"
+                      for name, count in counts.items())
+    names = [value for _, value in reads if value]
+    tail = ""
+    if names:
+        tail = "  " + ", ".join(_shorten(value, 30) for value in names[:5])
+        if len(names) > 5:
+            tail += f"  +{len(names) - 5}"
+    return _fit_line(Text.assemble(
+        Text("│ ", style=TH["gutter"]), Text(work, style=TH["dim"]), Text(tail),
+    ), width)
+
+
+def _render_tool_result(e, width: int = 100):
     """The renderable for a ToolResult — SHARED by RichSink (REPL) and LiveSink (live box) so they can't
-    drift. The model-curated tiers render as first-class UI (a live PLAN checklist);
-    everything else is a dim '┊'-gutter card: mark · header · optional inline diff · bounded output (shown
+    drift. Plan updates render as one settled summary;
+    everything else is a dim '│'-gutter rail: header · optional inline diff · bounded output (shown
     only for action tools / failures — read/list say it all in the header)."""
     if e.name == "update_plan" and not e.failing:
-        return _render_plan(e.args.get("steps") or [])
-    mark = Text("✓", style=TH["ok"]) if not e.failing else Text("✗", style=TH["fail"])
-    head = Text.assemble(Text("┊ ", style=TH["dim"]), mark, " ",
-                         Text(_tool_header(e.name, e.args), style=TH["tool"]))
-    body = [head]
-    d = _diff(e.name, e.args)
+        args = e.args if isinstance(e.args, dict) else {}
+        return _render_plan(args.get("steps") or [], width)
+    mark = Text("✗ ", style=TH["fail"]) if e.failing else Text()
+    head = Text.assemble(
+        Text("│ ", style=TH["gutter"]), mark, Text(_tool_header(e.name, e.args)),
+    )
+    body = [_fit_line(head, width)]
+    d = _diff(e.name, e.args, width)
     if d is not None:
         body.append(Padding(d, (0, 0, 0, 2)))      # indent the diff under the gutter
     if e.failing or e.name not in ("read_file", "list_files"):
         out = _shorten(e.output, 200)
         if out:
-            body.append(Text(f"  ┊   {out}", style=TH["fail"] if e.failing else TH["dim"]))
+            body.append(_fit_line(Text.assemble(
+                Text("│   ", style=TH["gutter"]),
+                Text(out, style=TH["fail"] if e.failing else TH["dim"]),
+            ), width))
     return Group(*body)
 
 
@@ -382,263 +458,424 @@ def make_esc_sentinel() -> "_EscSentinel":
     return _EscSentinel()
 
 
-# running turn tally — bucket each completed tool by KIND so the status line shows "how far along" at a glance
-_VERB_BUCKET = {"read_file": "read", "list_files": "read", "grep": "read", "glob": "read",
-                "edit_file": "edit", "str_replace": "edit", "append_to_file": "edit",
-                "run_command": "cmd", "execute_code": "cmd"}
-
-
 def _fmt_tally(tally: dict) -> str:
     """Compact 'N read · N edit · N cmd · N fail' — only non-zero buckets, in a stable order."""
     return " · ".join(f"{tally[k]} {k}" for k in ("read", "edit", "cmd", "fail") if tally.get(k))
 
 
-class _LiveStatus:
-    """A Rich RichCast whose __rich__ RECOMPUTES the elapsed clocks every frame off the Status Live loop —
-    so the timer ticks with NO extra thread (console.status() already redraws ~12×/s to animate the dots).
+_PHASE_STYLE = {
+    ProgressPhase.IDLE:        ("·", "Idle", "dim"),
+    ProgressPhase.PREPARING:   ("◌", "Preparing", "accent"),
+    ProgressPhase.THINKING:    ("◌", "Thinking", "accent"),
+    ProgressPhase.WRITING:     ("◌", "Writing", "accent"),
+    ProgressPhase.INSPECTING:  ("◌", "Inspecting", "inspect"),
+    ProgressPhase.EDITING:     ("◌", "Editing", "edit"),
+    ProgressPhase.RUNNING:     ("◌", "Running", "run"),
+    ProgressPhase.DELEGATING:  ("◌", "Delegating", "accent"),
+    ProgressPhase.WAITING:     ("?", "Waiting", "warn"),
+    ProgressPhase.RETRYING:    ("↻", "Retrying", "warn"),
+    ProgressPhase.COMPACTING:  ("◌", "Fitting context", "warn"),
+    ProgressPhase.INTEGRATING: ("◌", "Integrating", "accent"),
+    ProgressPhase.VERIFYING:   ("◌", "Checking", "verify"),
+    ProgressPhase.FINALIZING:  ("◌", "Finalizing", "accent"),
+    ProgressPhase.SAVING:      ("◌", "Saving", "accent"),
+    ProgressPhase.COMPLETE:    ("✓", "Saved", "ok"),
+    ProgressPhase.INTERRUPTED: ("!", "Interrupted", "warn"),
+    ProgressPhase.FAILED:      ("✗", "Failed", "fail"),
+}
 
-    HARD RULE: the object handed to console.status() must be THIS instance, never a Text/str — a static
-    body freezes the timer. __rich__ emits ONLY Text.assemble segments (never an f-string into markup), so a
-    bracketed path/command in the action label can't trigger a MarkupError. It reads its fields off the sink
-    under the sink's lock, so a parallel subagent write can't tear a frame; any error degrades to a bare Text
-    (a progress indicator must never crash the run)."""
+_DETAIL_PREFIX = {
+    ProgressPhase.PREPARING: "building ", ProgressPhase.WRITING: "drafting ",
+    ProgressPhase.INSPECTING: "reading ", ProgressPhase.EDITING: "editing ",
+    ProgressPhase.RUNNING: "running ", ProgressPhase.DELEGATING: "delegating ",
+    ProgressPhase.INTEGRATING: "integrating ", ProgressPhase.SAVING: "saving ",
+}
+
+
+def _duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    if total >= 3600:
+        return f"{total // 3600}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _fit_line(value: Text, width: int) -> Text:
+    """Make a Rich Text a literal, one-physical-line terminal row."""
+    line = value.copy()
+    line.no_wrap = True
+    line.overflow = "ellipsis"
+    line.truncate(max(1, int(width)), overflow="ellipsis")
+    return line
+
+
+def _progress_focus(snap) -> str:
+    if snap.plan.total:
+        if snap.plan.current:
+            pos = snap.plan.current_index or min(snap.plan.done + 1, snap.plan.total)
+            return f"{pos}/{snap.plan.total} {snap.plan.current}"
+        return f"{snap.plan.done}/{snap.plan.total} plan complete"
+    return snap.task_title or ""
+
+
+def _render_progress(snap, width: int, *, now: float | None = None,
+                     include_glyph: bool = True) -> Text:
+    """Responsive progress projection: activity always survives; diagnostics appear only when roomy."""
+    now = time.monotonic() if now is None else now
+    started = snap.started_at if snap.started_at is not None else now
+    glyph, label, style_key = _PHASE_STYLE.get(snap.phase, ("◌", "Working", "accent"))
+    detail = " ".join((snap.detail or "").split())
+    prefix = _DETAIL_PREFIX.get(snap.phase, "")
+    if prefix and detail.lower().startswith(prefix):
+        detail = detail[len(prefix):]
+
+    elapsed = _duration(now - started)
+    diagnostics = []
+    if width >= 110:
+        if snap.model_pass:
+            diagnostics.append(f"pass {snap.model_pass}")
+        if snap.provider_attempt > 1:
+            diagnostics.append(f"attempt {snap.provider_attempt}")
+        tally = _fmt_tally(snap.counts)
+        if tally:
+            diagnostics.append(tally)
+    suffix_plain = f" · {elapsed}" + ((" · " + " · ".join(diagnostics)) if diagnostics else "")
+    prefix_plain = f"{glyph} " if include_glyph else ""
+    body_width = max(8, int(width) - len(prefix_plain) - len(suffix_plain))
+
+    activity = Text(label, style=f"bold {TH[style_key]}")
+    if detail:
+        activity.append(" " + detail)
+    focus = _progress_focus(snap)
+    body = Text()
+    if focus and width >= 72 and body_width >= 28:
+        focus_width = min(44, max(12, body_width // 2))
+        action_width = max(12, body_width - focus_width - 3)
+        focus_text = Text(focus, style="bold")
+        focus_text.truncate(focus_width, overflow="ellipsis")
+        activity.truncate(action_width, overflow="ellipsis")
+        body.append_text(focus_text)
+        body.append(" · ", style=TH["dim"])
+        body.append_text(activity)
+    else:
+        activity.truncate(body_width, overflow="ellipsis")
+        body.append_text(activity)
+
+    rendered = Text()
+    if include_glyph:
+        rendered.append(glyph + " ", style=f"bold {TH[style_key]}")
+    rendered.append_text(body)
+    rendered.append(suffix_plain, style=TH["dim"])
+    return _fit_line(rendered, width)
+
+
+def _render_completion(snap, event: TurnCommitted, width: int, *, now: float | None = None) -> Text:
+    now = time.monotonic() if now is None else now
+    stop_reason = event.stop_reason or snap.stop_reason or "turn"
+    if not event.ok:
+        return _fit_line(Text.assemble(
+            Text("✗ ", style=f"bold {TH['fail']}"), Text("save failed"),
+            Text(" · " + _shorten(event.detail or stop_reason, 120), style=TH["dim"]),
+        ), width)
+    started = snap.started_at if snap.started_at is not None else now
+    label = "turn saved" if stop_reason == "end_turn" else f"{stop_reason} state saved"
+    details = []
+    if snap.plan.total:
+        details.append(f"plan {snap.plan.done}/{snap.plan.total}")
+    if snap.model_pass:
+        details.append(f"{snap.model_pass} pass{'es' if snap.model_pass != 1 else ''}")
+    tally = _fmt_tally(snap.counts)
+    if tally:
+        details.append(tally)
+    details.append(_duration(now - started))
+    return _fit_line(Text.assemble(
+        Text("✓ ", style=f"bold {TH['ok']}"), Text(label),
+        Text(" · " + " · ".join(details), style=TH["dim"]),
+    ), width)
+
+
+class _LiveStatus:
+    """Self-refreshing Rich projection of the shared :class:`TurnProgress` snapshot."""
 
     def __init__(self, sink: "RichSink"):
         self._sink = sink
 
     def __rich__(self) -> Text:
-        s = self._sink
         try:
-            with s._lock:
-                label, step = (s._subagent or s._label or "working…"), s._step
-                a0, t0, tally = s._action_t0, s._turn_t0, dict(s._tally)
-            now = time.monotonic()
-            a, turn = max(0.0, now - (a0 or now)), max(0.0, now - (t0 or now))
-            parts = []
-            if step:
-                parts.append((f"step {step} · ", TH["dim"]))
-            parts.append((str(label), TH["tool"]))          # str() + Text.assemble → never parsed as markup
-            parts.append((f" · {a:.0f}s", TH["dim"]))
-            tally_str = _fmt_tally(tally)
-            parts.append((f"   ·  {tally_str + ' · ' if tally_str else ''}{turn:.0f}s", TH["dim"]))
-            return Text.assemble(*parts)
+            snap = self._sink.progress.snapshot()
+            # Rich Status contributes the animated activity glyph; reserve four cells for it.
+            width = max(24, int(getattr(self._sink.c, "width", 100) or 100) - 4)
+            return _render_progress(snap, width, include_glyph=False)
         except Exception:  # noqa: BLE001 — a progress indicator must never break the run
             return Text("working…", style=TH["dim"])
 
 
 class RichSink:
-    """An event sink that renders the live turn with Rich. Drop-in for cli_sink."""
+    """Canonical Rich renderer over one UI-neutral progress reducer."""
 
-    def __init__(self, console: Console, stats: dict):
+    def __init__(self, console: Console, stats: dict, *, await_commit: bool = False):
         global _ACTIVE_RICH_SINK
         _ACTIVE_RICH_SINK = self        # so ask_user/confirm can pause the live region before reading input
         self.c = console
         self.stats = stats
+        self.progress = TurnProgress(await_commit=await_commit)
+        self._await_commit = await_commit
         self._lock = threading.RLock()   # parallel explorer threads call subagent_notify concurrently; serialize
-        #                                  all _status transitions (rich Status is not thread-safe)
         self._status = None
-        # AGENT_SPINNER=off disables the animated in-place status spinner (a Rich live region), keeping every
-        # other Rich element (reply panel, markdown, tool cards). Default ON everywhere. (The mid-turn garble
-        # once blamed on the spinner + Terminal.app was actually the Esc-sentinel clearing OPOST — fixed in
-        # _EscSentinel._enter_raw — so the spinner is safe again; this stays as a plain user preference.)
         self._spinner_on = os.environ.get("AGENT_SPINNER", "on").strip().lower() not in ("off", "0", "false", "no")
-        self._reads: list = []   # buffered consecutive read-only tool cards (coalesced on the next event)
-        # LIVE STATUS fields (read each frame by _LiveStatus.__rich__ under _lock): the current action label,
-        # step number, per-action + whole-turn start clocks, running verb tally, and any active subagent line.
-        self._body = None        # the _LiveStatus handed to console.status() (None ⇒ no live region)
-        self._label = "thinking…"
-        self._subagent = None
-        self._step = 0
-        self._action_t0 = None   # monotonic start of the CURRENT action (resets each step/tool)
-        self._turn_t0 = None     # monotonic start of the WHOLE turn (armed on SliceBuilt, survives step churn)
-        self._tally: dict = {}   # bucket -> count (read/edit/cmd/fail) for the "how far along" summary
+        self._reads: list = []
+        self._body = None
+        self._pending_answer = ""
+        self._last_plain_status = ""
 
     def _stop(self) -> None:
-        """Tear down the live status region, if any, and reset the label to idle. The transient Status already
-        erases the visible line on stop; resetting _label/_subagent keeps the sink's resting state honest so a
-        stale 'writing…' can never render via a later path that reuses the region without going through _spin."""
-        with self._lock:   # serialize vs parallel subagent_notify on _status
+        """Tear down only the renderer; the shared semantic state remains intact."""
+        with self._lock:
             if self._status is not None:
                 self._status.stop()
                 self._status = None
             self._body = None
-            self._label = "thinking…"
-            self._subagent = None
 
-    def _spin(self, label: str) -> None:
-        """Set the CURRENT action and ensure the ticking status region is live. MUTATES in place when the
-        region already exists (no tear-down → no flicker, and the turn clock keeps ticking); only creates the
-        Status the first time. On a non-tty, console.status() no-ops its animation (no ANSI, body never
-        refreshed) — same degraded behaviour as before, so on_delta's 'a step is active' gate still holds."""
-        with self._lock:   # serialize vs parallel subagent_notify on _status
-            self._label = label
-            self._subagent = None
-            self._action_t0 = time.monotonic()
-            if self._turn_t0 is None:
-                self._turn_t0 = self._action_t0
-            if self._spinner_on and self._status is None:   # create once; MUTATE the same region every frame
+    def _sync_status(self) -> None:
+        """Project the latest reducer snapshot without independently interpreting the event."""
+        snap = self.progress.snapshot()
+        if not snap.active:
+            self._stop()
+            return
+        with self._lock:
+            if self._spinner_on and self._status is None:
                 self._body = _LiveStatus(self)
                 self._status = self.c.status(self._body, spinner="dots")
                 self._status.start()
+            elif not self._spinner_on:
+                line = _render_progress(snap, _line_width(self.c))
+                if line.plain != self._last_plain_status:
+                    self.c.print(line)
+                    self._last_plain_status = line.plain
 
     def subagent_notify(self, text: str) -> None:
-        """A child agent's CURRENT activity → the status line's action segment (overwrites in place), so a
-        subagent doing 80 reads shows a single updating line, not 80. Called from PARALLEL explorer worker
-        threads → guarded by self._lock; each now writes ONE field instead of the non-thread-safe Status.update."""
+        """Bridge the current legacy child callback into the shared semantic state."""
         try:
-            with self._lock:
-                self._subagent = text
-                if self._action_t0 is None:
-                    self._action_t0 = time.monotonic()
-                if self._spinner_on and self._status is None:
-                    self._body = _LiveStatus(self)
-                    self._status = self.c.status(self._body, spinner="dots")
-                    self._status.start()
+            self.progress.subagent_activity(text)
+            self._sync_status()
         except Exception:  # noqa: BLE001 — a progress indicator must never break the run
             pass
 
-    def _bump_tally(self, name: str, failing: bool) -> None:
-        with self._lock:
-            if failing:
-                self._tally["fail"] = self._tally.get("fail", 0) + 1
-            bucket = _VERB_BUCKET.get(name)
-            if bucket:
-                self._tally[bucket] = self._tally.get(bucket, 0) + 1
-
     def on_delta(self, kind: str, text: str) -> None:
-        """Live token sink wired to OpenAILLM.set_delta_sink. While a reply streams, the live region just
-        flips its label to a calm, FIXED single-line "writing…" (same shape as the "thinking…" spinner, with
-        the running clock) — it does NOT render a live preview of the reply text. The full, formatted reply
-        prints once when streaming ends, via AssistantText → _response_panel.
-
-        Why no live preview: three separate live reports of stacked "assistant streaming…" panels traced to
-        one root cause shared by every variant that showed the GROWING reply (a Markdown rich.live.Live
-        panel, then a plain-text bounded panel, then a bounded text tail inside this status line). Any region
-        that grows/wraps eventually reaches the bottom of the terminal and forces a scroll, and ANSI
-        cursor-up/erase codes cannot un-scroll content already committed to scrollback — so stale frames pile
-        up. A fixed one-line indicator has no height to grow and nothing to scroll, which removes the whole
-        bug class regardless of terminal size or emulator. No-op until a step is active (nothing streams
-        during routing)."""
-        if kind != "content" or not text or self._status is None:
-            return
-        with self._lock:
-            self._label = "writing…"   # thinking → writing: the status line reflects the phase (+ its clock)
+        """Streaming changes phase only; chain-of-thought content is never displayed."""
+        self.progress.on_delta(kind, text)
+        self._sync_status()
 
     def _flush_reads(self) -> None:
-        """Emit ONE compact dim line for a buffered run of read-only tools (📖 7 read · 🔍 3 grep · names),
-        instead of one card each — so a review that reads a dozen files doesn't bury the window."""
+        """Emit one compact row for a buffered read wave."""
         if not self._reads:
             return
         reads, self._reads = self._reads, []
-        from collections import Counter
-        cnt = Counter(n for n, _ in reads)
-        parts = [f"{_TOOL.get(n, ('•',))[0]} {c} {_READ_VERB.get(n, n)}" for n, c in cnt.items()]
-        names = [v for _, v in reads if v]
-        tail = ""
-        if names:
-            tail = "  " + ", ".join(_shorten(x, 30) for x in names[:5]) + (f"  +{len(names) - 5}" if len(names) > 5 else "")
-        self.c.print(Text(f"┊ {' · '.join(parts)}{tail}", style=TH["dim"]))
+        rendered = _render_read_summary(reads, _line_width(self.c))
+        if rendered is not None:
+            self.c.print(rendered)
+
+    def _flush_answer(self, *, title: str = "assistant", border_style: str | None = None) -> None:
+        content, self._pending_answer = self._pending_answer, ""
+        if content.strip():
+            self.c.print(_response_panel(content, self.c, title=title, border_style=border_style))
 
     def __call__(self, e: Event) -> None:
-        if isinstance(e, SliceBuilt):
-            self._turn_t0 = time.monotonic()              # arm the whole-turn clock (once per turn)
-            self._tally = {}
-            self._step = 0
-            self._spin("thinking…")
-            if not self._spinner_on:                       # spinner off → one plain line so it's not silent
-                self.c.print(Text("  · thinking…", style=TH["dim"]))
+        before = self.progress.snapshot()
+        was_active = before.active
+        after = self.progress.reduce(e)
+        milestone = bool(
+            isinstance(e, ToolResult) and not e.failing and after.last_milestone
+            and after.last_milestone != before.last_milestone
+        )
+        if isinstance(e, TurnStarted):
+            self._reads = []
+            self._pending_answer = ""
+            self._last_plain_status = ""
         elif isinstance(e, StepBegin):
-            self._step = e.step                           # the step counter the status line shows
-            self._spin("thinking…")                       # new step → reset the action clock, keep the turn clock
-        elif isinstance(e, ToolStarted):
-            self._spin(_tool_header(e.name, e.args))       # the ticking action segment (spinner conveys "…")
+            # A completion gate that requests another model pass rejected the previous draft.
+            self._pending_answer = ""
         elif isinstance(e, ToolResult):
-            self._bump_tally(e.name, e.failing)            # grow the running "how far along" summary
             if e.name in _COALESCE and not e.failing:      # buffer a read-only run → one line on next event; the
                 self._reads.append((e.name, _primary(e.name, e.args)))  # status stays LIVE so the timer keeps
-                return                                     # ticking through a 12-file read run (no dead air)
-            self._flush_reads()                            # a mutating/failing tool ends the read run
-            self.c.print(_render_tool_result(e))           # prints ABOVE the live status region
+            else:
+                self._flush_reads()
+                self.c.print(_render_tool_result(e, _line_width(self.c)))
+            if milestone:
+                self._flush_reads()
+                self.c.print(_render_milestone(after.last_milestone, _line_width(self.c)))
         elif isinstance(e, AssistantText):
-            self._stop()
             self._flush_reads()
             if (e.content or "").strip():
-                self.c.print(_response_panel(e.content, self.c))
+                if e.final and self._await_commit and was_active:
+                    self._pending_answer = e.content
+                elif not e.final:
+                    self.c.print(_response_panel(
+                        e.content, self.c, title="assistant · update", border_style=TH["dim"],
+                    ))
+                else:
+                    self.c.print(_response_panel(e.content, self.c))
         elif isinstance(e, ApiRetry):
-            self._stop()
             self._flush_reads()
-            self.c.print(Text(f"  …retry #{e.attempt} ({_shorten(e.error, 60)})", style=TH["warn"]))
+            delay = f" in {e.delay_s:.1f}s" if e.delay_s > 0 else ""
+            self.c.print(_fit_line(Text.assemble(
+                Text("│ ", style=TH["gutter"]), Text("↻ ", style=TH["warn"]),
+                Text(f"model retry {e.attempt + 1}/{e.max_attempts}{delay}", style=TH["warn"]),
+                Text(f" · {_shorten(e.error, 60)}", style=TH["dim"]),
+            ), _line_width(self.c)))
         elif isinstance(e, StepEnd):
             u = e.usage or {}
             self.stats["tokens"] = self.stats.get("tokens", 0) + u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
-            # FRESH (non-cache-read) input — the moat metric (typed usage from the llm adapter). Shown in
-            # the toolbar so the user sees the bounded-slice cost stay flat, not the gross token count.
             self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
             _accrue_cost(self.stats, u)
+            if e.stop_reason == "tool_use":
+                self._flush_reads()                         # completed reads become visible before model wait
         elif isinstance(e, LessonSaved):
             self._flush_reads()
-            self.c.print(Text(f"  💡 learned: {_shorten(e.title, 70)}", style=TH["dim"]))
+            self.c.print(_fit_line(Text.assemble(
+                Text("│ ", style=TH["gutter"]), Text("◆ ", style=TH["accent"]),
+                Text("learned · ", style=TH["dim"]), Text(_shorten(e.title, 100)),
+            ), _line_width(self.c)))
         elif isinstance(e, TurnInterrupted):
             self._stop()
-            self._turn_t0 = None                           # disarm the turn clock (next turn re-arms on SliceBuilt)
             self._flush_reads()
-            self.c.print(Text(f"  ⚠ interrupted: {e.message or e.reason}", style=TH["warn"]))
+            self._flush_answer(title="assistant · partial", border_style=TH["warn"])
+            self.c.print(_fit_line(Text.assemble(
+                Text("! ", style=f"bold {TH['warn']}"), Text("interrupted", style=TH["warn"]),
+                Text(f" · {e.message or e.reason}", style=TH["dim"]),
+            ), _line_width(self.c)))
         elif isinstance(e, TurnEnd):
-            self._stop()
-            self._turn_t0 = None
             self._flush_reads()
-            tok = (e.usage or {}).get("prompt_tokens", 0) + (e.usage or {}).get("completion_tokens", 0)
-            self.c.print(Text(f"  ✓ done · {e.steps} steps · {tok} tokens", style=TH["dim"]))
+            if not self._await_commit:
+                self._stop()
+                self._flush_answer()
+                self.c.print(_fit_line(Text.assemble(
+                    Text("✓ ", style=f"bold {TH['ok']}"), Text("turn finished"),
+                    Text(f" · {e.steps} pass{'es' if e.steps != 1 else ''}", style=TH["dim"]),
+                ), _line_width(self.c)))
+        elif isinstance(e, TurnCommitted):
+            self._stop()
+            self._flush_reads()
+            if e.ok:
+                self._flush_answer()
+            else:
+                self._flush_answer(title="assistant · unsaved", border_style=TH["warn"])
+            self.c.print(_render_completion(after, e, _line_width(self.c)))
+        self._sync_status()
 
 
-def make_rich_sink(console: Console, stats: dict) -> RichSink:
-    return RichSink(console, stats)
+def make_rich_sink(console: Console, stats: dict, *, await_commit: bool = False) -> RichSink:
+    return RichSink(console, stats, await_commit=await_commit)
 
 
 class LiveSink:
-    """Event sink for the LIVE composer (AGENT_TUI=live). Static output — tool cards, the reply panel —
-    prints ABOVE the pinned box via the Rich console (routed to scrollback by patch_stdout, verified to
-    compose: Rich reads sys.stdout dynamically). The transient spinner + streamed tail live in the app's
-    STATUS line via a callback, so no Rich Live fights the running prompt_toolkit Application for the screen."""
+    """Pinned-composer renderer over the same progress reducer as :class:`RichSink`."""
 
-    def __init__(self, console: Console, stats: dict, set_status):
+    def __init__(self, console: Console, stats: dict, set_status, *, await_commit: bool = False):
         self.c = console
         self.stats = stats
-        self._set_status = set_status      # callable(str|None) → update the app status line (thread-safe)
-        self._stream = ""
+        self.progress = TurnProgress(await_commit=await_commit)
+        self._await_commit = await_commit
+        self._set_status = set_status
+        self._pending_answer = ""
+        self._reads: list = []
+
+    def _sync_status(self) -> None:
+        snap = self.progress.snapshot()
+        self._set_status(_render_progress(snap, _line_width(self.c)).plain if snap.active else None)
+
+    def _flush_reads(self) -> None:
+        if not self._reads:
+            return
+        reads, self._reads = self._reads, []
+        rendered = _render_read_summary(reads, _line_width(self.c))
+        if rendered is not None:
+            self.c.print(rendered)
+
+    def _flush_answer(self, *, title: str = "assistant", border_style: str | None = None) -> None:
+        content, self._pending_answer = self._pending_answer, ""
+        if content.strip():
+            self.c.print(_response_panel(content, self.c, title=title, border_style=border_style))
 
     def on_delta(self, kind: str, text: str) -> None:
-        if kind != "content" or not text:
-            return
-        self._stream += text
-        self._set_status("writing… " + " ".join(self._stream.split())[-80:])
+        self.progress.on_delta(kind, text)
+        self._sync_status()
 
     def __call__(self, e: Event) -> None:
-        if isinstance(e, SliceBuilt):
-            self._stream = ""; self._set_status("thinking…")
-        elif isinstance(e, ToolStarted):
-            self._stream = ""; self._set_status(f"{_tool_header(e.name, e.args)} …")
+        before = self.progress.snapshot()
+        was_active = before.active
+        after = self.progress.reduce(e)
+        milestone = bool(
+            isinstance(e, ToolResult) and not e.failing and after.last_milestone
+            and after.last_milestone != before.last_milestone
+        )
+        if isinstance(e, TurnStarted):
+            self._pending_answer = ""
+            self._reads = []
+        elif isinstance(e, StepBegin):
+            self._pending_answer = ""
         elif isinstance(e, ToolResult):
-            self.c.print(_render_tool_result(e))      # static card ABOVE the pinned box
-            self._set_status("working…")
+            if e.name in _COALESCE and not e.failing:
+                self._reads.append((e.name, _primary(e.name, e.args)))
+            else:
+                self._flush_reads()
+                self.c.print(_render_tool_result(e, _line_width(self.c)))
+            if milestone:
+                self._flush_reads()
+                self.c.print(_render_milestone(after.last_milestone, _line_width(self.c)))
         elif isinstance(e, AssistantText):
-            self._set_status(None)     # reply complete → clear "writing…" BEFORE the panel, not at TurnEnd
-            self._stream = ""          # (else the final answer prints above a stale streaming spinner)
             if (e.content or "").strip():
-                self.c.print(_response_panel(e.content, self.c))
+                if e.final and self._await_commit and was_active:
+                    self._pending_answer = e.content
+                elif not e.final:
+                    self.c.print(_response_panel(
+                        e.content, self.c, title="assistant · update", border_style=TH["dim"],
+                    ))
+                else:
+                    self.c.print(_response_panel(e.content, self.c))
         elif isinstance(e, ApiRetry):
-            self.c.print(Text(f"  …retry #{e.attempt} ({_shorten(e.error, 60)})", style=TH["warn"]))
+            self._flush_reads()
+            delay = f" in {e.delay_s:.1f}s" if e.delay_s > 0 else ""
+            self.c.print(_fit_line(Text.assemble(
+                Text("│ ", style=TH["gutter"]), Text("↻ ", style=TH["warn"]),
+                Text(f"model retry {e.attempt + 1}/{e.max_attempts}{delay}", style=TH["warn"]),
+                Text(f" · {_shorten(e.error, 60)}", style=TH["dim"]),
+            ), _line_width(self.c)))
         elif isinstance(e, StepEnd):
             u = e.usage or {}
             self.stats["tokens"] = self.stats.get("tokens", 0) + u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
             self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
             _accrue_cost(self.stats, u)
+            if e.stop_reason == "tool_use":
+                self._flush_reads()
         elif isinstance(e, LessonSaved):
-            self.c.print(Text(f"  💡 learned: {_shorten(e.title, 70)}", style=TH["dim"]))
+            self._flush_reads()
+            self.c.print(_fit_line(Text.assemble(
+                Text("│ ", style=TH["gutter"]), Text("◆ ", style=TH["accent"]),
+                Text("learned · ", style=TH["dim"]), Text(_shorten(e.title, 100)),
+            ), _line_width(self.c)))
         elif isinstance(e, TurnInterrupted):
-            self.c.print(Text(f"  ⚠ interrupted: {e.message or e.reason}", style=TH["warn"]))
+            self._flush_reads()
+            self._flush_answer(title="assistant · partial", border_style=TH["warn"])
+            self.c.print(_fit_line(Text.assemble(
+                Text("! ", style=f"bold {TH['warn']}"), Text("interrupted", style=TH["warn"]),
+                Text(f" · {e.message or e.reason}", style=TH["dim"]),
+            ), _line_width(self.c)))
         elif isinstance(e, TurnEnd):
-            self._set_status(None)
+            self._flush_reads()
+            if not self._await_commit:
+                self._flush_answer()
+                self.c.print(_fit_line(Text.assemble(
+                    Text("✓ ", style=f"bold {TH['ok']}"), Text("turn finished"),
+                    Text(f" · {e.steps} pass{'es' if e.steps != 1 else ''}", style=TH["dim"]),
+                ), _line_width(self.c)))
+        elif isinstance(e, TurnCommitted):
+            self._flush_reads()
+            if e.ok:
+                self._flush_answer()
+            else:
+                self._flush_answer(title="assistant · unsaved", border_style=TH["warn"])
+            self.c.print(_render_completion(after, e, _line_width(self.c)))
+        self._sync_status()
 
 
 def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_turn, handle_slash=None,
@@ -657,7 +894,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
     from prompt_toolkit.widgets import Frame, TextArea
 
     state = {"status": "", "running": False, "signal": None, "last": None, "threads": []}
-    toolbar = _toolbar(stats)
+    toolbar = _toolbar(stats, lambda: console.width)
 
     def set_status(text):                  # called from the worker thread; invalidate() is thread-safe
         state["status"] = text or ""
@@ -668,9 +905,19 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
 
     def _status_line():
         if state["running"] or state["status"]:
-            return FormattedText([("fg:ansibrightcyan", "  ✶ "),
-                                  ("fg:ansibrightblack", _shorten(state["status"] or "working…", 110))])
-        return toolbar()                   # idle → the model · policy · topic · tokens bar
+            status = state["status"] or "◌ Working"
+            glyph = status[0] if status[0] in "◌?↻!✗✓" else "◌"
+            body = status[1:].lstrip() if status[0] == glyph else status
+            glyph_style = {
+                "?": "fg:ansiyellow bold", "↻": "fg:ansiyellow bold",
+                "!": "fg:ansiyellow bold", "✗": "fg:ansired bold", "✓": "fg:ansigreen bold",
+            }.get(glyph, "fg:ansibrightcyan bold")
+            width = max(12, int(getattr(console, "width", 100) or 100))
+            return FormattedText([
+                (glyph_style, f"  {glyph} "),
+                ("", _shorten_cells(body, max(8, width - 5))),
+            ])
+        return toolbar()                   # idle → stable product/workspace/model identity
 
     hist_dir = os.path.expanduser("~/.sliceagent")
     os.makedirs(hist_dir, exist_ok=True)
@@ -697,15 +944,18 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
             handle_slash(text); return
         user_echo(console, text)           # echo ABOVE the box (instant), THEN run the turn
         state["last"] = text
-        sink = LiveSink(console, stats, set_status)
+        sink = LiveSink(console, stats, set_status, await_commit=True)
         sig = threading.Event()
-        state["running"] = True; state["signal"] = sig; state["status"] = "thinking…"
+        state["running"] = True; state["signal"] = sig; state["status"] = "◌ Preparing · starting turn"
 
         def _work():
             try:
                 run_one_turn(text, sink, sig)
             except Exception as exc:       # a turn crash must NOT kill the composer
-                console.print(Text(f"  ✗ turn error: {type(exc).__name__}: {exc}", style=TH["fail"]))
+                console.print(_fit_line(Text.assemble(
+                    Text("✗ ", style=f"bold {TH['fail']}"), Text("turn error", style=TH["fail"]),
+                    Text(f" · {type(exc).__name__}: {exc}", style=TH["dim"]),
+                ), _line_width(console)))
                 if getattr(exc, "stop_session", False):
                     try:
                         app.exit()
@@ -724,7 +974,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
     def _(ev):
         if state["running"] and state["signal"] is not None:
             state["signal"].set()          # abort the running turn at the next step boundary
-            set_status("interrupting…")
+            set_status("! Interrupt requested · waiting for current operation")
         else:
             ev.app.exit()
 
@@ -737,7 +987,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
         if state["running"]:
             if state["signal"] is not None:
                 state["signal"].set()      # abort the running turn at the next step boundary
-                set_status("interrupting…")
+                set_status("! Interrupt requested · waiting for current operation")
             return
         if ta.text.strip():
             ta.text = ""
@@ -1048,32 +1298,59 @@ def _saved_dollars(stats: dict):
     return stats.get("saved_cached_tok", 0) * pr[1] / 1_000_000
 
 
-def _toolbar(stats: dict):
-    """A pinned status bar (re-rendered each redraw). FormattedText, not HTML — so a workspace
-    name containing < & > can never break the markup."""
-    _dim, _accent, _val = "fg:ansibrightblack", "fg:ansibrightcyan bold", "fg:ansicyan"
-    sep = (_dim, "  │  ")
+def _toolbar(stats: dict, width_fn=None):
+    """Responsive idle identity row; volatile cost detail stays in ``/cost``."""
+    width_fn = width_fn or (lambda: shutil.get_terminal_size((100, 24)).columns)
+    dim, accent, value = "fg:ansibrightblack", "fg:ansibrightcyan bold", "fg:ansicyan"
+    separator = (dim, " · ")
 
     def render():
-        ws = _shorten(stats.get("workspace") or "—", 28)
-        ft = [
-            (_accent, " ◆ "), (_val, str(stats.get("model", "?"))),
-            sep, ("", str(stats.get("policy", "?"))),
-            sep, (_dim, f"📂 {ws}"),
-            sep, (_dim, f"Σ {stats.get('tokens', 0)} tok · {stats.get('fresh', 0)} fresh"),
-        ]
-        # Headline the MOAT number — $ SAVED vs a full-transcript agent (priced at the current model; flips
-        # automatically on /model switch). Falls back to token-savings when the model price is unknown.
-        saved = _saved_dollars(stats)
-        if saved:
-            ft += [sep, ("fg:ansigreen bold", f"💰 ${saved:.4f} saved")]
-        elif stats.get("saved_cached_tok"):
-            ft += [sep, (_dim, f"💰 {stats['saved_cached_tok'] // 1000}k tok saved")]
-        t = stats.get("last_turn_s")
-        if t is not None:
-            ft += [sep, (_dim, f"⏲ {t:.0f}s")]
-        ft.append((_dim, "   "))
-        return FormattedText(ft)
+        try:
+            width = max(12, int(width_fn()))
+        except Exception:
+            width = 100
+        workspace = str(stats.get("workspace") or "—")
+        model = str(stats.get("model") or "—")
+        policy = str(stats.get("policy") or "—")
+        topic = str(stats.get("topic") or "no active task")
+
+        if width < 72:
+            fields = [
+                (accent, " sliceagent"),
+                ("", _shorten_cells(workspace, 18)),
+                (value, _shorten_cells(model, max(8, width - 35))),
+            ]
+        elif width < 110:
+            fields = [
+                (accent, " sliceagent"),
+                ("", _shorten_cells(workspace, 18)),
+                (value, _shorten_cells(model, 24)),
+                (dim, _shorten_cells(policy, max(8, width - 62))),
+            ]
+        else:
+            fields = [
+                (accent, " sliceagent"),
+                ("", _shorten_cells(workspace, 18)),
+                (value, _shorten_cells(model, 26)),
+                (dim, _shorten_cells(policy, 18)),
+                ("", _shorten_cells(topic, max(12, width - 85))),
+            ]
+
+        segments = []
+        for index, field in enumerate(fields):
+            if index:
+                segments.append(separator)
+            segments.append(field)
+        clipped = []
+        remaining = width
+        for style, content in segments:
+            if remaining <= 0:
+                break
+            piece = _crop_cells(content, remaining)
+            if piece:
+                clipped.append((style, piece))
+                remaining -= get_cwidth(piece)
+        return FormattedText(clipped)
     return render
 
 
@@ -1397,8 +1674,9 @@ def confirm(console: Console, name: str, detail: str, reason: str) -> str:
     is live mid-run), returns 'yes' | 'no' | 'always'. Arrow-key selectable; falls back to a typed
     prompt where no TTY is available."""
     console.print(Text.assemble(
-        Text("  ⚠ allow ", style=TH["warn"]), Text(name, style=TH["tool"]),
-        Text(f" {_shorten(detail, 60)!r}? ", style=TH["dim"]), Text(f"({reason})", style=TH["dim"])))
+        Text("? ", style=f"bold {TH['warn']}"), Text("permission · ", style=TH["dim"]),
+        Text(name, style=TH["tool"]), Text(f" {_shorten(detail, 60)!r}", style=TH["dim"]),
+        Text(f" · {reason}", style=TH["dim"])))
     _pause_active_live()        # stop the turn spinner + release the Esc-sentinel's hold on the tty
     try:
         console.file.flush()    # commit the "allow…" line before the selector's raw ANSI writes (no interleave)
@@ -1420,7 +1698,10 @@ def confirm(console: Console, name: str, detail: str, reason: str) -> str:
 def ask_user(console: Console, question: str, options=None) -> str:
     """The ask_user prompt (the 'come back and ask a follow-up' capability). Synchronous — no pt app
     is live mid-run — so a Rich prompt is safe. Returns the user's answer (a chosen option or free text)."""
-    console.print(Text.assemble(Text("  ❓ ", style=TH["accent"]), Text(question, style="bold")))
+    console.print(Text.assemble(
+        Text("? ", style=f"bold {TH['warn']}"), Text("input needed · ", style=TH["dim"]),
+        Text(question, style="bold"),
+    ))
     if options:
         for i, o in enumerate(options, 1):
             console.print(Text(f"     {i}. {o}", style=TH["dim"]))

@@ -158,10 +158,12 @@ def with_retry(
             retry = is_retryable(e) if is_retryable else classify(e)["retryable"]
             if not retry or attempt == max_attempts:
                 raise
-            if dispatch:
-                dispatch(ApiRetry(attempt=attempt, error=str(e)[:200]))
             delay = jittered_backoff(attempt)
             ra = _retry_after_seconds(e)
             if ra is not None:
                 delay = max(delay, min(ra, 60.0))   # honor server Retry-After, capped so a huge value can't stall the turn
+            if dispatch:
+                dispatch(ApiRetry(
+                    attempt=attempt, error=str(e)[:200], delay_s=delay, max_attempts=max_attempts,
+                ))
             time.sleep(delay)

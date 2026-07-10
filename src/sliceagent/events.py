@@ -19,6 +19,24 @@ class Event:
 
 
 @dataclass
+class TurnStarted(Event):
+    """Host boundary emitted after task routing and before slice construction."""
+
+    request: str
+    task_title: str = ""
+    task_id: str = ""
+    plan: list | None = None
+
+
+@dataclass
+class TurnPhaseChanged(Event):
+    """Long host/core phase that cannot be derived from a model or tool event."""
+
+    phase: str
+    detail: str = ""
+
+
+@dataclass
 class StepBegin(Event):
     step: int
 
@@ -55,6 +73,9 @@ class ModelCallPrepared(Event):
 @dataclass
 class AssistantText(Event):
     content: str
+    # Tool-using responses may contain explanatory text before execution.  Only a terminal
+    # response is held behind completion verification and durable commit by interactive UIs.
+    final: bool = True
 
 
 @dataclass
@@ -80,12 +101,15 @@ class ToolResult(Event):
 class ApiRetry(Event):
     attempt: int
     error: str
+    delay_s: float = 0.0
+    max_attempts: int = 3
 
 
 @dataclass
 class SliceTightened(Event):
     level: int
     reason: str = "context_overflow"
+    detail: str = ""
 
 
 @dataclass
@@ -93,6 +117,16 @@ class TurnEnd(Event):
     stop_reason: str
     steps: int
     usage: dict
+
+
+@dataclass
+class TurnCommitted(Event):
+    """Host durability boundary; ``TurnEnd`` alone is never a saved/completed claim."""
+
+    ok: bool
+    stop_reason: str
+    artifact_id: str = ""
+    detail: str = ""
 
 
 @dataclass

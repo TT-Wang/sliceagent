@@ -1,5 +1,5 @@
-"""TUI rendering of the new tiers: the RichSink surfaces the PLAN checklist + MISSION
-line and tracks FRESH-input cost. Skips cleanly if the `tui` extra (rich) isn't installed. No model.
+"""TUI rendering checks for calm rails, responsive progress furniture, and token accounting.
+Skips cleanly if the `tui` extra (rich) isn't installed. No model.
 Run: PYTHONPATH=src python tests/test_tui_render.py
 """
 import io
@@ -9,8 +9,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
+    from rich.cells import cell_len  # noqa: E402
     from rich.console import Console  # noqa: E402
-    from sliceagent.tui import RichSink, _render_plan  # noqa: E402
+    from sliceagent.tui import (RichSink, _box_width, _render_plan, _render_read_summary,  # noqa: E402
+                                _render_tool_result, _response_panel, _toolbar)
     from sliceagent.events import StepEnd, ToolResult   # noqa: E402
 except Exception as _e:  # noqa: BLE001 — tui extra (rich) not installed → skip, don't fail the suite
     print(f"SKIP test_tui_render (tui extra not available: {_e})")
@@ -29,16 +31,16 @@ def _sink_capture():
 
 
 @check
-def plan_renders_as_a_checklist():
+def plan_renders_as_one_settled_summary():
     sink, buf = _sink_capture()
     sink(ToolResult("update_plan", {"steps": [
         {"step": "write the parser", "status": "done"},
         {"step": "add error handling", "status": "in_progress"},
         {"step": "write tests", "status": "pending"}]}, "PLAN updated", failing=False))
     out = buf.getvalue()
-    assert "plan" in out and "1/3 done" in out, out
-    assert "write the parser" in out and "add error handling" in out and "write tests" in out
-    assert "✓" in out and "▶" in out and "○" in out, "status glyphs must render"
+    assert out == "│ plan 1/3 · add error handling\n", out
+    assert "write the parser" not in out and "write tests" not in out, \
+        "full plan history belongs in /plan, not scrollback"
 
 
 @check
@@ -52,8 +54,55 @@ def fresh_tokens_tracked_for_toolbar():
 
 @check
 def render_plan_handles_empty_and_bad_input():
-    assert _render_plan([]) is not None                 # empty → "(empty plan)" panel, no crash
+    assert _render_plan([]) is not None                 # empty → compact "plan 0/0" row, no crash
     assert _render_plan([{"step": "x", "status": "weird"}, "not a dict"]) is not None
+
+
+@check
+def settled_rows_never_wrap_at_common_terminal_widths():
+    event = ToolResult(
+        "run_command", {"command": "pytest -q " + "very_long_test_name_" * 8},
+        "128 passed; " + "verification detail " * 12, False,
+    )
+    reads = [("read_file", "src/" + "deeply_nested/" * 8 + "parser.py") for _ in range(4)]
+    plan = [
+        {"step": "inspect", "status": "done"},
+        {"step": "add a deliberately long regression test " * 5, "status": "in_progress"},
+    ]
+    for width in (60, 80, 120):
+        assert cell_len(_render_plan(plan, width).plain) <= width
+        summary = _render_read_summary(reads, width)
+        assert summary is not None and cell_len(summary.plain) <= width
+        buf = io.StringIO()
+        console = Console(file=buf, width=width, force_terminal=False, color_system=None, soft_wrap=False)
+        console.print(_render_tool_result(event, width))
+        assert all(cell_len(line) <= width for line in buf.getvalue().splitlines()), buf.getvalue()
+
+
+@check
+def response_panel_and_footer_are_responsive_at_60_80_and_120():
+    stats = {
+        "workspace": "demo", "model": "model-x", "policy": "ask-before-write",
+        "topic": "fix retry handling", "tokens": 999_999, "saved_cached_tok": 42_000,
+    }
+    for width, expected_box in ((60, 58), (80, 78), (120, 96)):
+        buf = io.StringIO()
+        console = Console(file=buf, width=width, force_terminal=False, color_system=None, soft_wrap=False)
+        assert _box_width(console) == expected_box
+        console.print(_response_panel("A response with `code` and enough prose to wrap cleanly.", console))
+        assert all(cell_len(line) <= width for line in buf.getvalue().splitlines()), buf.getvalue()
+
+        footer = _toolbar(stats, lambda width=width: width)()
+        plain = "".join(fragment[1] for fragment in footer)
+        assert cell_len(plain) <= width and "sliceagent" in plain and "demo" in plain and "model-x" in plain
+        assert ("ask-before-write" in plain) is (width >= 80)
+        assert ("fix retry handling" in plain) is (width >= 120)
+        assert "999" not in plain and "saved" not in plain, "volatile cost detail belongs in /cost"
+
+        unicode_stats = dict(stats, workspace="切片代理工作区非常长", topic="修复重试逻辑并验证")
+        unicode_footer = _toolbar(unicode_stats, lambda width=width: width)()
+        unicode_plain = "".join(fragment[1] for fragment in unicode_footer)
+        assert cell_len(unicode_plain) <= width, (width, unicode_plain)
 
 
 @check

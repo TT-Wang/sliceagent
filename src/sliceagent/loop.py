@@ -30,6 +30,7 @@ from .events import (
     ToolStarted,
     TurnEnd,
     TurnInterrupted,
+    TurnPhaseChanged,
 )
 from .guardrails import DEDUP_SAFE_TOOL_NAMES, canonical_tool_args
 from .guidance import BUDGET_EXHAUSTED, STUCK
@@ -359,16 +360,16 @@ def _final_answer(llm, msgs: list, tools, dispatch, guidance: str, *, seed_plan=
         if getattr(tc, "name", "") == "ask_user":
             q = (getattr(tc, "args", None) or {}).get("question")
             if q:
-                dispatch(AssistantText(str(q)))
+                dispatch(AssistantText(str(q), final=False))
                 return usage
     content = (getattr(resp, "content", "") or "").strip()
     if content:                                              # a real (or short) summary — keep it
-        dispatch(AssistantText(content))
+        dispatch(AssistantText(content, final=False))
         return usage
     dispatch(AssistantText(                                  # deterministic, never-empty, honest fallback
         "I had to stop here (" + guidance.strip().rstrip(".") + "). I could not confirm the task is fully "
         "complete — please review the changes so far, or re-run with more steps, and tell me if you'd like "
-        "me to continue."))
+        "me to continue.", final=False))
     return usage
 
 
@@ -687,7 +688,6 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     total = Usage()
     steps = 0
     total_blocked = 0
-    said_anything = False    # did the turn emit ANY assistant text? (never end truly silent)
     messages: list = []      # defined BEFORE the seed build so _park's closure is safe even if it throws
     seed_len = 0
     seed_plan = None
@@ -858,8 +858,11 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                                 # A different model owns a different capacity. Do not carry the primary's
                                 # learned physical hint across the routing boundary; project afresh.
                                 reactive_seed_capacity = None
-                                dispatch(AssistantText(f"[context overflow — switching to {llm.model} "
-                                                       "for a larger window]"))
+                                dispatch(SliceTightened(
+                                    level=overflow_tries,
+                                    reason="model_fallback",
+                                    detail=f"switching to {llm.model} for a larger context window",
+                                ))
                                 overflow_tries = 0
                                 continue
                             return _park("overflow", OVERFLOW_MSG, closeout=False)
@@ -888,24 +891,25 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 if signal is not None and signal.is_set():
                     dispatch(StepEnd(steps, step_usage.as_dict(), "aborted"))
                     return _park("aborted", None, closeout=False)
-                if resp.content:
-                    dispatch(AssistantText(resp.content))
-                    said_anything = True
                 stop = _normalize_stop(resp)
+                candidate = resp.content or ""
 
                 if budget_stop:
                     # F: a token-budget stop is a PARK, never end_turn/done. Append the final content (never
                     # a dangling tool_calls); no closeout — we're already at the ceiling.
-                    if resp.content:
-                        messages.append({"role": "assistant", "content": resp.content})
+                    if candidate:
+                        messages.append({"role": "assistant", "content": candidate})
+                        dispatch(AssistantText(candidate, final=False))
                     dispatch(StepEnd(steps, step_usage.as_dict(), "token_budget"))
                     return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
 
                 if stop != "tool_use":
-                    # the LLM ended the while(true): append its FINAL text only — never a dangling tool_calls.
-                    if resp.content:
-                        messages.append({"role": "assistant", "content": resp.content})
+                    # Keep the candidate in the model trajectory so a failed completion gate can explain what
+                    # to revise, but do not publish it as assistant truth until the gate accepts this attempt.
+                    if candidate:
+                        messages.append({"role": "assistant", "content": candidate})
                     dispatch(StepEnd(steps, step_usage.as_dict(), stop))
+                    dispatch(TurnPhaseChanged("checking_completion", "checking whether the turn can finish"))
                     cont = _safe_advisory("should_continue_after_stop", lambda: hooks.should_continue_after_stop(stop))
                     if cont and cont.get("park"):
                         return _park("indeterminate", cont.get("reason") or
@@ -915,16 +919,19 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         continue
                     if stop in ("max_tokens", "filtered"):
                         # #11: a truncated (length) or content-filtered response is INCOMPLETE — park it as
-                        # interrupted instead of sealing a partial answer as a clean turn. Content (if any)
-                        # was already emitted + appended above; no closeout (it would truncate again too).
+                        # interrupted instead of sealing a partial answer as a clean turn. Surface any partial
+                        # content explicitly as an update, never as the accepted terminal response.
+                        if candidate:
+                            dispatch(AssistantText(candidate, final=False))
                         return _park(stop, MAX_TOKENS_MSG if stop == "max_tokens" else FILTERED_MSG,
                                      closeout=False)
-                    if not said_anything:   # never end the turn truly silent (e.g. empty end_turn after tools)
-                        dispatch(AssistantText("Done — no summary to add."))
+                    dispatch(AssistantText(candidate or "Done — no summary to add.", final=True))
                     dispatch(TurnEnd(stop, steps, total.as_dict()))   # the ONE clean-exit event
                     return TurnResult(stop, steps, total)
 
                 # tool_use: accumulate the assistant turn (with tool_calls), run, accumulate the tool results
+                if candidate:
+                    dispatch(AssistantText(candidate, final=False))
                 messages.append(_assistant_message(resp, step=steps))
                 tool_phase = True
                 blocked, results = run_tool_batch(

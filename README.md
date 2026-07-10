@@ -14,7 +14,7 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
 
 *Pre-1.0: on `0.x`, CLI flags, config keys, and APIs may change between releases; breaking changes are noted in the [CHANGELOG](CHANGELOG.md).*
 
-**Contents:** [How it works](#how-it-works) · [Core design](CORE-DESIGN.md) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
+**Contents:** [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
 
 ## How it works
 
@@ -23,7 +23,7 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
        alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a history-bounded, task-elastic seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stayed ~12-15k in the s1 benchmark, 112x smaller by turn 6.">
 </p>
 
-sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** backed by always-on local artifacts; and an optional **neocortex** that derives durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript. The precise invariants and non-claims live in the canonical **[Core Design](CORE-DESIGN.md)**.
+sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** backed by always-on local artifacts; and an optional **neocortex** that derives durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript.
 
 | Region | Role |
 |---|---|
@@ -237,13 +237,19 @@ Run `sliceagent` in your project and type what you want in plain language. It re
 ```text
 ❯ why does retry_with_backoff drop the last attempt? fix it
 
-  🔍 grep "retry_with_backoff"   📖 read errors.py:40-72   ✎ edit errors.py
+  │ 1 search · 2 read  retry.py, tests/test_retry.py
+  │ write retry.py
+  │ plan 2/3 · add a regression test
+  ◌ 2/3 add a regression test · Running pytest -q · 00:12
+  │ run pytest -q
+  │   38 passed
+  │ ◆ The regression reproduces the bug and passes with the fix.
   ┌─ assistant ─────────────────────────────────────────────┐
   │ The loop exits on `attempt == max` before the final      │
   │ sleep+retry, so the last attempt never runs. Changed the  │
   │ bound to `attempt <= max` and added a regression test.    │
   └──────────────────────────────────────────────────────────┘
-  ✓ done · 4 steps · 6.1k tokens
+  ✓ turn saved · plan 3/3 · 2 passes · 4 read · 1 edit · 1 cmd · 00:18
 ```
 
 Attach a file or path to your message with `@`: `@src/errors.py explain the backoff`.
@@ -260,7 +266,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/skills` · `/tools` · `/mcp` · `/plugins` · `/agents` | list what's available to the agent |
 | `/threads` · `/resume` | switch between, or resume, parked topics |
 | `/learn <note>` | save a durable lesson yourself |
-| `/plan` | draft a plan before it starts editing |
+| `/plan` | show the current task plan |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
 Prefix an unrelated request with `New task:` to start it with fresh task state while parking the current task

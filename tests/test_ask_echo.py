@@ -29,8 +29,9 @@ class _FakeConsole:
 def ask_user_pauses_the_live_spinner_before_reading():
     from rich.console import Console
     from sliceagent import tui
+    from sliceagent.events import TurnStarted
     sink = tui.RichSink(Console(), {})        # registers itself as the active live sink
-    sink._spin("working…")
+    sink(TurnStarted("working"))
     assert sink._status is not None, "precondition: a turn spinner is live"
     fc = _FakeConsole("blue")
     ans = tui.ask_user(fc, "which color?")
@@ -42,8 +43,9 @@ def ask_user_pauses_the_live_spinner_before_reading():
 def confirm_pauses_the_live_spinner_before_reading():
     from rich.console import Console
     from sliceagent import tui
+    from sliceagent.events import TurnStarted
     sink = tui.RichSink(Console(), {})
-    sink._spin("working…")
+    sink(TurnStarted("working"))
     assert sink._status is not None
     ans = tui.confirm(_FakeConsole("y"), "run_command", "rm -rf x", "danger")
     assert ans == "yes"

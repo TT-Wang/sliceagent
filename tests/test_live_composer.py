@@ -27,52 +27,63 @@ def _rec_console():
 @check
 def livesink_status_transitions_and_prints_above():
     from sliceagent.tui import LiveSink
-    from sliceagent.events import SliceBuilt, ToolStarted, ToolResult, AssistantText, TurnEnd
+    from sliceagent.events import (AssistantText, StepBegin, StepEnd, ToolResult, ToolStarted,
+                                   TurnCommitted, TurnEnd, TurnStarted)
     console, buf = _rec_console()
     statuses = []
-    sink = LiveSink(console, {}, lambda s: statuses.append(s))
+    sink = LiveSink(console, {}, lambda s: statuses.append(s), await_commit=True)
 
-    sink(SliceBuilt("the request"))                                   # → thinking…
-    sink(ToolStarted("read_file", {"path": "parser.py"}))            # → 'read parser.py …'
-    sink(ToolResult("read_file", {"path": "parser.py"}, "code", False))   # prints card; → working…
-    sink.on_delta("content", "here is the answer")                    # → writing… tail
-    sink(AssistantText("the final answer text"))                     # prints reply panel
-    sink(TurnEnd("end_turn", 2, {}))                                  # → None (idle)
+    sink(TurnStarted("the request"))                                  # → preparing
+    sink(StepBegin(1))                                                 # → thinking
+    sink(ToolStarted("read_file", {"path": "parser.py"}))            # → inspecting
+    sink(ToolResult("read_file", {"path": "parser.py"}, "code", False))
+    sink(StepEnd(1, {}, "tool_use"))                                  # publishes read wave → integrating
+    sink.on_delta("content", "here is the answer")                    # → writing, no response tail
+    sink(AssistantText("the final answer text"))                      # held until durable commit
+    sink(TurnEnd("end_turn", 2, {}))                                  # → finalizing, not done
+    sink(TurnCommitted(True, "end_turn", detail="checkpoint saved"))  # → reply + saved + idle
 
-    assert "thinking…" in statuses, statuses
-    assert any("read" in (s or "") and "parser.py" in (s or "") for s in statuses), statuses
-    assert "working…" in statuses, statuses
-    assert any((s or "").startswith("writing…") and "answer" in (s or "") for s in statuses), statuses
-    assert statuses[-1] is None, "TurnEnd must clear the status to idle"
+    assert any("Thinking" in (s or "") for s in statuses), statuses
+    assert any("Inspecting" in (s or "") and "parser.py" in (s or "") for s in statuses), statuses
+    assert any("Integrating" in (s or "") for s in statuses), statuses
+    assert any("Writing" in (s or "") for s in statuses), statuses
+    assert any("Finalizing" in (s or "") for s in statuses), statuses
+    assert statuses[-1] is None, "only durable commit may clear the active status"
     out = buf.getvalue()
     assert "the final answer text" in out, "the reply must print ABOVE the box"
     assert "parser.py" in out, "the tool card must print above the box"
+    assert "turn saved" in out, out
 
 
 @check
-def livesink_clears_the_writing_status_when_the_response_arrives():
-    # AssistantText means the reply is done → the "writing…" status must clear THEN, not linger until
-    # TurnEnd, so the finished panel isn't shown above a stale streaming spinner. (RichSink already stops its
-    # transient status on AssistantText; this gives LiveSink the same guarantee.)
+def livesink_keeps_finalizing_until_the_response_is_committed():
     from sliceagent.tui import LiveSink
-    from sliceagent.events import SliceBuilt, AssistantText
-    console, _ = _rec_console()
+    from sliceagent.events import AssistantText, TurnCommitted, TurnEnd, TurnStarted
+    console, buf = _rec_console()
     statuses = []
-    sink = LiveSink(console, {}, lambda s: statuses.append(s))
-    sink(SliceBuilt("q"))
-    sink.on_delta("content", "streaming the answer now")     # → writing… …
-    assert (statuses[-1] or "").startswith("writing…"), statuses
-    sink(AssistantText("the final answer"))                  # must clear the status right here
-    assert statuses[-1] is None, f"AssistantText must clear the streaming status, got {statuses[-1]!r}"
+    sink = LiveSink(console, {}, lambda s: statuses.append(s), await_commit=True)
+    sink(TurnStarted("q"))
+    sink.on_delta("content", "streaming the answer now")
+    assert "Writing" in (statuses[-1] or ""), statuses
+    sink(AssistantText("the final answer"))
+    assert "Finalizing" in (statuses[-1] or ""), statuses
+    assert "the final answer" not in buf.getvalue(), "terminal answer must wait for commit"
+    sink(TurnEnd("end_turn", 1, {}))
+    assert statuses[-1] is not None, "TurnEnd is not durable completion"
+    sink(TurnCommitted(True, "end_turn"))
+    assert statuses[-1] is None and "the final answer" in buf.getvalue()
 
 
 @check
 def livesink_read_card_is_header_only_like_richsink():
     # parity with RichSink: read/list cards show no content dump (shared _render_tool_result)
     from sliceagent.tui import LiveSink
-    from sliceagent.events import ToolResult
+    from sliceagent.events import StepEnd, ToolResult, TurnStarted
     console, buf = _rec_console()
-    LiveSink(console, {}, lambda s: None)(ToolResult("read_file", {"path": "x.py"}, "SECRET-CONTENT", False))
+    sink = LiveSink(console, {}, lambda s: None)
+    sink(TurnStarted("inspect x.py"))
+    sink(ToolResult("read_file", {"path": "x.py"}, "SECRET-CONTENT", False))
+    sink(StepEnd(1, {}, "tool_use"))
     assert "SECRET-CONTENT" not in buf.getvalue(), "read card should not dump file content"
     assert "x.py" in buf.getvalue()
 
@@ -148,9 +159,8 @@ def live_app_slash_is_handled_not_run_as_a_turn():
 
 
 @check
-def richsink_refactor_is_render_identical():
-    # the shared _render_tool_result must produce the SAME output RichSink did before extraction:
-    # plan panel, gutter card with ✓/✗, and read-card header-only.
+def shared_tool_renderer_uses_the_same_visual_grammar():
+    # Both adapters share the same calm rails: compact plan, neutral success, explicit failure.
     from sliceagent.tui import _render_tool_result
     from sliceagent.events import ToolResult
     from rich.console import Console
@@ -160,9 +170,11 @@ def richsink_refactor_is_render_identical():
         c.print(_render_tool_result(e))
         return c.file.getvalue()
 
-    assert "plan ·" in render(ToolResult("update_plan", {"steps": [{"step": "a", "status": "done"}]}, "", False))
+    assert "│ plan 1/1 · complete" in render(
+        ToolResult("update_plan", {"steps": [{"step": "a", "status": "done"}]}, "", False)
+    )
     run_ok = render(ToolResult("run_command", {"command": "pytest"}, "3 passed", False))
-    assert "✓" in run_ok and "pytest" in run_ok and "3 passed" in run_ok, run_ok
+    assert "│ run pytest" in run_ok and "3 passed" in run_ok and "✓" not in run_ok, run_ok
     run_bad = render(ToolResult("run_command", {"command": "x"}, "boom", True))
     assert "✗" in run_bad and "boom" in run_bad
 

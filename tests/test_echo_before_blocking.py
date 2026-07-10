@@ -37,7 +37,7 @@ def inline_repl_echoes_before_route_topic():
 @check
 def inline_repl_routing_has_a_spinner():
     # the silent-gap fix: routing must be covered by a status spinner so the UI isn't frozen+silent during an
-    # AGENT_ROUTER=llm round-trip (RichSink only spins on SliceBuilt, which fires later inside run_turn).
+    # AGENT_ROUTER=llm round-trip (the shared turn progress starts only after routing and local-turn begin).
     from sliceagent import cli
     repl = inspect.getsource(cli.main)
     repl = repl[repl.find("while True:"):]
@@ -60,6 +60,19 @@ def live_path_echoes_before_dispatching_the_turn():
     i_thread = src.find("threading.Thread")
     assert i_echo != -1 and i_thread != -1, "build_live_app shape changed (test stale?)"
     assert i_echo < i_thread, "REGRESSION: the live composer spawns the turn worker before echoing the message"
+
+
+@check
+def both_interactive_paths_seal_an_ordinary_context_preparation_failure():
+    from sliceagent import cli
+    src = inspect.getsource(cli.main)
+    live = src[src.find("def _run_one_turn"):src.find("def _try_live")]
+    repl = src[src.find("while True:"):]
+    for name, section, dispatcher in (("live", live, "live_dispatch"), ("inline", repl, "dispatch")):
+        assert "context preparation failed" in section, f"{name} preparation exceptions are not surfaced"
+        assert 'TurnInterrupted("error"' in section, f"{name} preparation failure does not interrupt the turn"
+        assert f'_seal_local_turn("error", {dispatcher})' in section, \
+            f"{name} preparation failure leaves the required local turn unsealed"
 
 
 def main():

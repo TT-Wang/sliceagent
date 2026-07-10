@@ -221,6 +221,12 @@ def slice_sink(state):
     is a Slice or a Session — events fold into the CURRENT active slice (so a topic switch redirects
     subsequent folding)."""
     def sink(event: Event) -> None:
+        # Host/presentation lifecycle events share the dispatcher but do not reduce task state. Reject them
+        # before resolving an active Slice so a missing task can still report a commit failure to observers.
+        if not isinstance(event, (
+            StepBegin, StepEnd, TurnEnd, TurnInterrupted, ToolStarted, AssistantText, ToolResult,
+        )):
+            return
         s = _active(state)
         if isinstance(event, StepBegin):
             s.runtime.step = event.step
