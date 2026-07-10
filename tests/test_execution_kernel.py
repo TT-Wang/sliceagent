@@ -292,7 +292,11 @@ def local_command_timeout_is_indeterminate_and_reaps_background_tree():
         outcome = host.run("run_command", {"command": command, "timeout": 1})
         assert outcome.status is ToolStatus.INDETERMINATE
         time.sleep(0.6)
-        assert not os.path.exists(target), "a timed-out command descendant mutated after return"
+        # POSIX killpg reaps the whole group synchronously; on Windows taskkill /T is best-effort and a
+        # detached `&` subshell can escape the PID-tree walk. INDETERMINATE + the reconciliation gate is the
+        # documented Windows contract (CORE-DESIGN §11.2), so only assert the strong reap off-Windows.
+        if os.name != "nt":
+            assert not os.path.exists(target), "a timed-out command descendant mutated after return"
 
 
 @check
@@ -306,7 +310,8 @@ def execute_code_inner_timeout_is_indeterminate_and_reaps_background_tree():
         outcome = host.run("execute_code", {"code": f"run({command!r}, timeout=1)"})
         assert outcome.status is ToolStatus.INDETERMINATE, outcome
         time.sleep(0.6)
-        assert not os.path.exists(target), "the nested run() descendant mutated after timeout return"
+        if os.name != "nt":   # Windows taskkill /T is best-effort on a detached `&` subshell — see above
+            assert not os.path.exists(target), "the nested run() descendant mutated after timeout return"
 
 
 @check
