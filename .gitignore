@@ -27,6 +27,9 @@ scratch/
 evals/prompt_ab/variants/
 evals/prompt_ab/runs/
 
+# internal design doc — kept local, not published to the repo or the sdist
+CORE-DESIGN.md
+
 # local sliceagent state / monitor runtime (personal; not part of the repo)
 .sliceagent/
 .memagent/          # legacy pre-rename state dir (ignore so an upgraded checkout stays clean)
