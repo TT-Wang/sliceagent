@@ -61,15 +61,26 @@ class TaskState:
     (file paths + anchors), never file contents — ground truth is re-read from disk on resume.
     Transient tiers (recent, action_log, active_skills) are intentionally NOT serialized."""
     task_id: str
+    schema_version: int = 2
     session_id: str = ""
     title: str = ""
     status: str = "active"
     goal: str = ""
+    goal_source: str = ""
+    objective_status: str = "active"
     findings: list[str] = field(default_factory=list)
     finding_source: dict[str, str] = field(default_factory=dict)  # finding -> provenance tier (carried; else resume upgrades 'claim'→'tool-note')
-    requirements: list[dict] = field(default_factory=list)  # STANDING REQUIREMENTS contract (carried)
+    # v2 typed intent. `requirements` remains a derived v1 compatibility field for old checkpoint readers;
+    # when intent_entries is present it is authoritative and taskstate ignores requirements on restore.
+    current_request: str = ""
+    intent_entries: list[dict] = field(default_factory=list)
+    intent_next_id: int = 1
+    requirements: list[dict] = field(default_factory=list)
     plan: list[dict] = field(default_factory=list)          # PLAN / TodoWrite steps + status (carried)
+    progress_signals: list[dict] = field(default_factory=list)  # small task-scoped semantic ring
     open_report: str = ""                                   # OPEN USER REPORT blocker (carried; the "it's broken" push-back must survive resume)
+    reconciliation_required: str = ""                       # unresolved outcome; effects stay gated until observed+cleared
+    reconciliation_targets: list[str] = field(default_factory=list)
     world: dict = field(default_factory=dict)               # agent WORLD MODEL (carried; was dropped on resume)
     active_files: list[str] = field(default_factory=list)
     edited_files: list[str] = field(default_factory=list)   # list on the wire; a set in the Slice

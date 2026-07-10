@@ -17,10 +17,11 @@ Python children flush to the logfile promptly instead of after exit.
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 
-from .platform_compat import SIG_KILL, capture_pgid, popen_group_kwargs, signal_pgid, sh as _sh
+from .platform_compat import (ProcessGroupTerminationError, capture_pgid,
+                              popen_group_kwargs, process_group_alive, sh as _sh,
+                              terminate_process_group)
 import tempfile
 
 from .sandbox import _scrub_env
@@ -29,7 +30,7 @@ _TAIL_CHARS = 4000  # cap a tail read so a chatty process can't flood the slice
 
 
 class _Proc:
-    __slots__ = ("handle", "cmd", "popen", "log_path", "log_fh", "pgid")
+    __slots__ = ("handle", "cmd", "popen", "log_path", "log_fh", "pgid", "group_extinct")
 
     def __init__(self, handle: str, cmd: str, popen, log_path: str, log_fh, pgid=None):
         self.handle = handle
@@ -38,13 +39,17 @@ class _Proc:
         self.log_path = log_path
         self.log_fh = log_fh
         self.pgid = pgid   # POSIX process-group id captured at spawn (== leader pid); None on Windows
+        self.group_extinct = False
 
 
 class ProcManager:
     """Registry of live background processes. Not threadsafe (the agent loop is single-threaded)."""
 
-    def __init__(self, *, scrub_secrets: bool = True):
+    def __init__(self, *, scrub_secrets: bool = True, term_grace: float = 3.0,
+                 kill_grace: float = 2.0):
         self.scrub_secrets = scrub_secrets
+        self.term_grace = max(0.0, float(term_grace))
+        self.kill_grace = max(0.0, float(kill_grace))
         self._procs: dict[str, _Proc] = {}
         self._n = 0
 
@@ -92,7 +97,17 @@ class ProcManager:
             except Exception:  # noqa: BLE001
                 pass
             p.log_fh = None
-        return "running" if rc is None else f"exited {rc}"
+        if rc is None:
+            return "running"
+        if p.group_extinct:
+            return f"exited {rc}"
+        group_alive = process_group_alive(p.pgid, p.popen)
+        if group_alive is False:
+            p.group_extinct = True
+            return f"exited {rc}"
+        if group_alive is True:
+            return f"leader exited {rc}; descendants running"
+        return f"leader exited {rc}; descendant state unknown"
 
     def tail(self, handle: str, lines: int = 40) -> str:
         p = self._get(handle)
@@ -102,28 +117,26 @@ class ProcManager:
     def wait(self, handle: str, timeout: float) -> str:
         p = self._get(handle)
         try:
-            rc = p.popen.wait(timeout=timeout)
-            status = f"exited {rc}"
-            self.poll(handle)   # release the write fd on self-exit (mirror poll/kill) — else wait() leaks one fd/proc
+            p.popen.wait(timeout=timeout)
+            status = self.poll(handle)  # includes whole-group state, not merely the leader's return code
         except subprocess.TimeoutExpired:
             status = f"running (still alive after {timeout:g}s)"
         return f"[{handle} {status}]\n{self._read_log(p, 40)}"
 
     def kill(self, handle: str) -> str:
         p = self._get(handle)
-        # Signal the whole GROUP unconditionally — NOT only when the leader is alive. A background child can
-        # outlive the shell leader (leader exited/reaped, so poll() != None) yet still be in the group; gating
-        # the signal on leader-alive orphaned it (external review H-14). SIGTERM reaches the group members;
-        # escalate to SIGKILL if the leader is still hanging on after the grace period.
-        self._signal_group(p, signal.SIGTERM)
-        try:
-            p.popen.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            self._signal_group(p, SIG_KILL)
-            try:
-                p.popen.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
+        # Termination success is about the whole spawn-captured GROUP, not the shell leader. The shared
+        # primitive signals even after the leader exits, waits for group extinction, then escalates. Never
+        # report "killed" merely because Popen.wait() reaped the leader while descendants survived.
+        extinct = terminate_process_group(
+            p.pgid, p.popen, term_timeout=self.term_grace, kill_timeout=self.kill_grace,
+        )
+        if not extinct:
+            raise ProcessGroupTerminationError(
+                f"could not prove process group for {handle} is extinct after TERM/KILL; "
+                "descendants may still be running"
+            )
+        p.group_extinct = True
         status = self.poll(handle)
         # Release the open FD now (the process is dead, so nothing more writes the log) — a long session that
         # starts/kills many procs would otherwise leak one fd per cycle, marching toward EMFILE. Keep the
@@ -184,9 +197,3 @@ class ProcManager:
         if len(tail) > _TAIL_CHARS:
             tail = "…[earlier output elided]…\n" + tail[-_TAIL_CHARS:]
         return tail or "(no output yet)"
-
-    @staticmethod
-    def _signal_group(p: _Proc, sig: int) -> None:
-        # Signal the whole group via the pgid captured at spawn (POSIX) so we still reach a background child
-        # after the shell leader was reaped; Windows falls back to taskkill /T. All through the seam.
-        signal_pgid(p.pgid, sig, p.popen)

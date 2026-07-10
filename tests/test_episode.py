@@ -8,8 +8,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.hippocampus import EpisodeSink, make_episode_sink   # noqa: E402
-from sliceagent.events import (AssistantText, SliceBuilt, ToolResult,   # noqa: E402
-                             TurnEnd, TurnInterrupted)
+from sliceagent.events import (AssistantText, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult,  # noqa: E402
+                               TurnEnd, TurnInterrupted)
 from sliceagent.memory import NullMemory   # noqa: E402
 
 CHECKS = []
@@ -38,6 +38,17 @@ def gating():
     assert make_episode_sink(NullMemory(), session_id="s", task_id_fn=lambda: "t") is None
     assert make_episode_sink(DurableDouble(), session_id="s", task_id_fn=lambda: "t") is not None
 
+
+@check
+def local_collector_works_without_semantic_memory():
+    sink = make_episode_sink(
+        NullMemory(), session_id="s", task_id_fn=lambda: "t", collect=True,
+    )
+    sink(SliceBuilt("seed")); sink(AssistantText("done")); sink(TurnEnd("end_turn", 1, {}))
+    turn, record = sink.take_last_record()
+    assert turn == 1 and record["note"] == "done"
+    assert sink.take_last_record() is None, "the required seal path consumes each record exactly once"
+
 @check
 def one_turn_one_record():
     d = DurableDouble(); s = _sink(d)
@@ -56,6 +67,33 @@ def one_turn_one_record():
     assert rec["meta"]["ptok"] == 100 and rec["meta"]["ctok"] == 20   # from TurnEnd, not StepEnd
     assert rec["meta"]["stop_reason"] == "end_turn"
     assert "a.py" in rec["meta"]["files"]
+
+
+@check
+def physical_attempts_stay_inside_one_episode_segment():
+    d = DurableDouble(); sink = _sink(d)
+    sink(SliceBuilt("SLICE"))
+    sink(ModelCallPrepared(1, 1, [{"role": "user", "content": "FULL"}],
+                           "roomy", "compatibility-unknown"))
+    sink(ModelCallPrepared(1, 2, [{"role": "user", "content": "LOCATOR"}],
+                           "critical", "compatibility-unknown"))
+    sink(tr("read_file", "ok", path="a.py"))
+    sink(TurnEnd("end_turn", 1, {}))
+
+    steps = d.records[0][3]["steps"]
+    assert len(steps) == 1, "provider retries must not fabricate semantic episode steps"
+    assert steps[0]["action"][0]["name"] == "read_file"
+    assert [(item["step"], item["attempt"]) for item in steps[0]["model_attempts"]] == [(1, 1), (1, 2)]
+
+
+@check
+def turn_artifact_keeps_task_identity_from_start():
+    d = DurableDouble(); current = ["task-A"]
+    sink = EpisodeSink(d, session_id="s1", task_id_fn=lambda: current[0])
+    sink(SliceBuilt("seed"))
+    current[0] = "task-B"  # model-facing topic switch during the running turn
+    sink(TurnEnd("end_turn", 1, {}))
+    assert d.records[0][1] == "task-A", "artifact identity cannot drift at flush time"
 
 @check
 def per_turn_reset():
@@ -78,8 +116,10 @@ def lossless_observation():
 def aborted_turn_flushes():
     d = DurableDouble(); s = _sink(d)
     s(SliceBuilt("A")); s(tr("edit_file", out="x", path="a.py"))
+    s(StepEnd(1, {"prompt_tokens": 7, "completion_tokens": 3}, "closeout"))
     s(TurnInterrupted("aborted"))                       # loop returns WITHOUT TurnEnd
     assert len(d.records) == 1 and d.records[0][3]["meta"]["stop_reason"] == "aborted"
+    assert d.records[0][3]["meta"]["ptok"] == 7 and d.records[0][3]["meta"]["ctok"] == 3
     s(SliceBuilt("B")); s(tr("edit_file", out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
     assert len(d.records) == 2 and d.records[1][3]["meta"]["files"] == ["b.py"]
 

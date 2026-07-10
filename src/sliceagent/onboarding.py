@@ -251,7 +251,10 @@ def _test_key(model: str, api_key: str, base_url: str, llm_factory) -> tuple[boo
             os.environ.pop("LLM_BASE_URL", None)
             os.environ.pop("OPENAI_BASE_URL", None)
         llm = llm_factory(model)
-        resp = llm.complete([{"role": "user", "content": "Reply with the single word: ok"}], [])
+        from .model_runner import complete_model_call
+        resp = complete_model_call(
+            llm, [{"role": "user", "content": "Reply with the single word: ok"}], [], retry=False,
+        )
         txt = (getattr(resp, "content", "") or "").strip()
         return (True, txt[:40] or "(empty reply, but the call succeeded)")
     except Exception as e:  # noqa: BLE001

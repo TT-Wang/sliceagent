@@ -76,6 +76,25 @@ def wait_short_then_done():
 
 
 @check
+def poll_does_not_equate_leader_exit_with_group_extinction():
+    if os.name != "posix":
+        return
+    wd, h = _host()
+    h.run("proc_start", {"command": "sleep 30 & exit 0"})
+    deadline = time.time() + 3
+    status = ""
+    while time.time() < deadline:
+        status = h.run("proc_poll", {"handle": "p1"})
+        if status.startswith("leader exited"):
+            break
+        time.sleep(0.05)
+    try:
+        assert "descendants running" in status, status
+    finally:
+        h.run("proc_kill", {"handle": "p1"})
+
+
+@check
 def server_start_probe_kill():
     """The canonical 'start a server, keep it alive, probe it' flow — impossible with one-shot run."""
     wd, h = _host()

@@ -7,7 +7,7 @@ Hook return conventions (all optional, return None to no-op):
   before_step(step)                     -> {"block": bool, "reason": str} | None
   record_step_usage(usage)              -> {"stop_turn": bool} | None
   after_step(step, usage, stop_reason)  -> {"stop_turn": bool} | None
-  should_continue_after_stop(stop)      -> {"continue": bool} | None
+  should_continue_after_stop(stop)      -> {"continue"|"park": bool, "exclusive"?: bool} | None
   authorize_tool(name, args)            -> ToolDecision
 """
 from __future__ import annotations
@@ -65,6 +65,10 @@ class Hooks:
     def record_step_usage(self, usage: dict):
         return None
 
+    def remaining_token_budget(self) -> int | None:
+        """Return the remaining task-token allowance, or None when uncapped."""
+        return None
+
     def after_step(self, step: int, usage: dict, stop_reason: str):
         return None
 
@@ -111,16 +115,30 @@ class CompositeHooks(Hooks):
         flags = [(h.record_step_usage(usage) or {}).get("stop_turn") for h in self.hooks]
         return {"stop_turn": True} if any(flags) else None
 
+    def remaining_token_budget(self):
+        remaining = [value for h in self.hooks
+                     if (value := h.remaining_token_budget()) is not None]
+        return min(remaining) if remaining else None
+
     def after_step(self, step, usage, stop_reason):
         flags = [(h.after_step(step, usage, stop_reason) or {}).get("stop_turn") for h in self.hooks]
         return {"stop_turn": True} if any(flags) else None
 
     def should_continue_after_stop(self, stop_reason):
+        continuation = None
         for h in self.hooks:
             r = h.should_continue_after_stop(stop_reason)
-            if r and r.get("continue"):
+            # Some completion gates own the turn while active.  In particular, reconciliation must run
+            # before verification/oracle hooks because those hooks can execute commands.  ``exclusive`` is
+            # deliberately a completion-only composition signal: it prevents later callbacks from observing
+            # (or changing) a terminal decision while leaving ordinary continue/park aggregation intact.
+            if r and r.get("exclusive"):
                 return r
-        return None
+            if r and r.get("park"):
+                return r
+            if continuation is None and r and r.get("continue"):
+                continuation = r
+        return continuation
 
     def authorize_tool(self, name, args):
         for h in self.hooks:
@@ -164,9 +182,19 @@ class OracleHook(Hooks):
         if stop_reason != "end_turn":
             return None
         try:
-            ok, output = self.oracle.verify()
+            result = self.oracle.verify()
+            ok, output = result
         except Exception as e:  # noqa: BLE001 — a verify ERROR must FORCE another turn, never silently pass the done-gate
             ok, output = False, f"verification could not run: {type(e).__name__}: {e}"
+            result = None
+        from .execution import ToolStatus, coerce_tool_status
+        if result is not None and getattr(result, "status", None) is not None:
+            if coerce_tool_status(result.status) is ToolStatus.INDETERMINATE:
+                return {
+                    "park": True,
+                    "reason": "verification outcome is indeterminate; do not continue or seal cleanly"
+                              + (f"\n{output}" if output else ""),
+                }
         if ok:
             return None
         self.on_feedback(output)   # also record into the slice (for the NEXT turn's seed / durable cache)
@@ -302,16 +330,99 @@ class BudgetHook(Hooks):
         # session-wide cap, if ever wanted, should be a separate named hook — not this one.
         self.spent = 0
 
+    def before_step(self, step):
+        if self.spent >= self.max:
+            return {"block": True, "reason": "token budget exhausted"}
+        return None
+
     def record_step_usage(self, usage):
         self.spent += int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
         return {"stop_turn": True} if self.spent >= self.max else None
 
-    def record_external(self, tokens: int) -> None:
-        """Charge tokens spent OUTSIDE the parent's own LLM calls — a child subagent's usage — to the SAME
-        per-turn budget, so a fan-out of children can't blow the cap invisibly (external review S5). The
-        parent turn stops at its next record_step_usage once spent (parent + children) crosses max."""
-        self.spent += int(tokens or 0)
+    def remaining_token_budget(self):
+        return max(0, self.max - self.spent)
 
+
+class ReconciliationHook(Hooks):
+    """Permit observation, then require an explicit resolution before any further effect."""
+
+    _OBSERVATION_TOOLS = frozenset({
+        "read_file", "list_files", "grep", "glob", "code_review",
+        "proc_poll", "proc_tail", "proc_wait", "terminal_read", "terminal_wait", "ask_user",
+    })
+
+    def __init__(self, state_provider):
+        self.state_provider = state_provider
+        self._key: tuple[str, tuple[str, ...]] = ("", ())
+        self._observed: set[str] = set()
+
+    def _required(self) -> tuple[str, tuple[str, ...]]:
+        try:
+            state = self.state_provider()
+            marker = str(getattr(state, "reconciliation_required", "") or "")
+            targets = tuple(str(target) for target in
+                            (getattr(state, "reconciliation_targets", ()) or ("workspace:*",)))
+            return marker, targets
+        except Exception as exc:  # noqa: BLE001 - unavailable gate state must fail closed
+            return f"reconciliation state unavailable ({type(exc).__name__})", ("workspace:*",)
+
+    def _sync(self) -> tuple[str, tuple[str, ...]]:
+        key = self._required()
+        if key != self._key:
+            self._key = key
+            self._observed = set()
+        return key
+
+    def reset_for_turn(self):
+        self._key = self._required()
+        self._observed = set()
+
+    def authorize_tool(self, name, args):
+        marker, targets = self._sync()
+        if not marker:
+            return ALLOW
+        if name in self._OBSERVATION_TOOLS:
+            return ALLOW
+        if name == "reconcile_execution":
+            from .execution import reconciliation_covered
+            if reconciliation_covered(targets, self._observed):
+                return ALLOW
+            missing = ", ".join(target for target in targets
+                                if not reconciliation_covered((target,), self._observed))
+            hint = ("; for workspace:* use code_review(include_ignored=true)"
+                    if any(target == "workspace:*" for target in targets) else "")
+            return ToolDecision(False, "reconciliation still needs matching live observation for: "
+                                + missing + hint)
+        return ToolDecision(
+            False,
+            "an earlier operation is indeterminate; use read-only observation tools, then "
+            "reconcile_execution before any further side effect",
+        )
+
+    def transform_tool_result(self, name, args, output):
+        marker, _targets = self._sync()
+        if marker and name in self._OBSERVATION_TOOLS:
+            from .execution import (ToolStatus, coerce_tool_status,
+                                    observation_targets)
+            if coerce_tool_status(getattr(output, "status", None), legacy_text=str(output)) \
+                    is ToolStatus.SUCCEEDED:
+                if name != "ask_user" or "no interactive user is available" not in str(output).lower():
+                    self._observed.update(observation_targets(name, args, output))
+        return None
+
+    def should_continue_after_stop(self, stop_reason):
+        marker, targets = self._sync()
+        if marker and stop_reason == "end_turn":
+            return {
+                "continue": True,
+                "exclusive": True,
+                "feedback": "Execution is still indeterminate. Re-observe every affected target with "
+                            "matching read-only tools, then call reconcile_execution before finishing: "
+                            + ", ".join(targets)
+                            + (". For workspace:* use code_review(include_ignored=true)."
+                               if "workspace:*" in targets else ""),
+            }
+        return None
 
 class GuardrailHook(Hooks):
     """Cross-step loop guard: block a tool call that repeats an identical failing call,

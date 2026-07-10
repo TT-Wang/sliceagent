@@ -39,7 +39,8 @@ import threading
 import time
 from collections import deque
 
-from .events import AssistantText, Event, SliceBuilt, ToolResult, TurnEnd, TurnInterrupted
+from .events import (AssistantText, Event, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult,
+                     TurnEnd, TurnInterrupted)
 from .pfc import edited_paths_in_code, paths_in_code  # noqa: F401  (paths_in_code kept for back-compat callers)
 from .safety import redact_text
 from .text_utils import format_ts, now_iso, one_line
@@ -155,22 +156,53 @@ class EpisodeSink:
         self.title_fn = title_fn       # () -> human title (goal one-liner) for cheap trace-back
         self.outcome_fn = outcome_fn   # () -> {} of task-OUTCOME signals (e.g. requirements_open) for meta
         self._turn = 0
+        self._last_record: tuple[int, dict] | None = None
         self._reset()
+
+    def take_last_record(self) -> tuple[int, dict] | None:
+        """Return the most recently closed turn record once.
+
+        The always-on local seal coordinator consumes this after ``run_turn`` returns. Keeping collection
+        separate from the optional semantic-memory writer makes local durability required while the legacy
+        JSONL/index path remains a compatibility observer.
+        """
+        record = self._last_record
+        self._last_record = None
+        return record
 
     def _reset(self) -> None:
         self._steps: list[dict] = []
         self._note = ""
         self._meta = {"failing": False, "files": []}
+        self._task_id: str | None = None
+        self._title: str | None = None
+        self._usage: dict[str, int | float] = {}
 
     def _cur(self) -> dict:
         if not self._steps:
-            self._steps.append({"slice": "", "action": [], "observation": []})
+            self._steps.append({"slice": "", "action": [], "observation": [], "model_attempts": []})
         return self._steps[-1]
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SliceBuilt):
             # the loop dispatches SliceBuilt for the seed → opens a new step segment
-            self._steps.append({"slice": event.rendered, "action": [], "observation": []})
+            if self._task_id is None:
+                self._task_id = self.task_id_fn()  # stable identity even if a topic tool switches mid-turn
+                try:
+                    self._title = self.title_fn() or ""
+                except Exception:  # noqa: BLE001 — captured title is a breadcrumb, never a turn blocker
+                    self._title = ""
+            self._steps.append({
+                "slice": event.rendered, "action": [], "observation": [], "model_attempts": [],
+            })
+        elif isinstance(event, ModelCallPrepared):
+            # Physical retries/re-projections belong to the existing semantic segment. Persist only compact
+            # attempt metadata here; the monitor owns exact request inspection and the artifact must not copy
+            # the full provider trajectory once per attempt.
+            self._cur().setdefault("model_attempts", []).append({
+                "step": event.step, "attempt": event.attempt, "pressure": event.pressure,
+                "preflight_mode": event.preflight_mode,
+            })
         elif isinstance(event, AssistantText):
             if event.content and event.content.strip():   # content-emitting models' note
                 self._note = event.content.strip()
@@ -185,10 +217,14 @@ class EpisodeSink:
             if event.failing:
                 self._meta["failing"] = True
             self._meta["files"] += _files_of(event)
+        elif isinstance(event, StepEnd):
+            for key, value in (event.usage or {}).items():
+                if isinstance(value, (int, float)):
+                    self._usage[key] = self._usage.get(key, 0) + value
         elif isinstance(event, TurnEnd):
             self._flush(event.stop_reason, event.usage)   # usage = per-turn TOTAL
         elif isinstance(event, TurnInterrupted):
-            self._flush(event.reason, {})                 # abort path: loop returns WITHOUT TurnEnd
+            self._flush(event.reason, self._usage)        # abort path: loop returns WITHOUT TurnEnd
 
     def _flush(self, stop_reason: str, usage: dict) -> None:
         if not self._steps and not self._note and not self._meta["files"]:
@@ -196,7 +232,7 @@ class EpisodeSink:
         self._turn += 1
         try:
             try:
-                title = self.title_fn() or ""
+                title = self._title if self._title is not None else (self.title_fn() or "")
             except Exception:   # noqa: BLE001 — a title hiccup must not lose the record
                 title = ""
             try:
@@ -217,16 +253,24 @@ class EpisodeSink:
                 "markdown": turn_markdown(title, self._steps, self._note, meta),
                 "meta": meta,
             }
-            self.memory.append_episode(self.session_id, self.task_id_fn(), self._turn, record)
+            self._last_record = (self._turn, record)
+            if self.memory is not None:
+                self.memory.append_episode(self.session_id, self._task_id or self.task_id_fn(), self._turn, record)
         finally:
             self._reset()  # reset regardless, so a turn can never bleed into the next
 
 
-def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: "", outcome_fn=lambda: {}):
-    """None for non-durable memory (NullMemory) → host skips it → evals untouched."""
-    if not getattr(memory, "is_durable", False):
+def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: "", outcome_fn=lambda: {},
+                      collect: bool = False):
+    """Build the turn collector.
+
+    Historical behavior (``collect=False``) returns ``None`` for non-durable memory. The core runtime uses
+    ``collect=True`` so it can seal to the always-on local store even when semantic memory is unavailable.
+    """
+    durable = bool(getattr(memory, "is_durable", False))
+    if not durable and not collect:
         return None
-    return EpisodeSink(memory, session_id=session_id, task_id_fn=task_id_fn, title_fn=title_fn,
+    return EpisodeSink(memory if durable else None, session_id=session_id, task_id_fn=task_id_fn, title_fn=title_fn,
                        outcome_fn=outcome_fn)
 
 

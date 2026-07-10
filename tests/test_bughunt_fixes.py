@@ -68,12 +68,31 @@ def mixed_case_authorization_is_redacted():
     assert "sk-secrettoken12345" not in redact_text("AUTHorization: Bearer sk-secrettoken12345")
 
 
-# ── MED: a timed-out oracle is a FAILURE, not a thrown exception ──────────────────────────────
+# ── MED: a timed-out oracle is INDETERMINATE, not a thrown exception ──────────────────────────
 @check
-def oracle_timeout_is_failure_not_raise():
+def oracle_timeout_is_indeterminate_not_raise():
+    from sliceagent.execution import ToolStatus
     from sliceagent.oracle import CommandOracle
-    ok, out = CommandOracle("sleep 5", timeout=1).verify()
+    result = CommandOracle("sleep 5", timeout=1).verify()
+    ok, out = result
+    assert result.status is ToolStatus.INDETERMINATE
     assert ok is False and "timed out" in out, (ok, out)
+
+
+@check
+def oracle_timeout_reaps_background_descendants():
+    import shlex
+    import time
+    from sliceagent.execution import ToolStatus
+    from sliceagent.oracle import CommandOracle
+
+    root = tempfile.mkdtemp(prefix="oracle-timeout-")
+    target = os.path.join(root, "late.txt")
+    command = f"(sleep 1.4; echo late > {shlex.quote(target)}) & sleep 10"
+    result = CommandOracle(command, timeout=1).verify()
+    assert result.status is ToolStatus.INDETERMINATE
+    time.sleep(0.6)
+    assert not os.path.exists(target), "verification descendants must not mutate after timeout return"
 
 
 # ── MED: unknown skill returns a failure flag (so it isn't folded into ACTIVE SKILLS) ─────────
@@ -575,9 +594,9 @@ def resume_preserves_topic_goal():
     sess = Session(NullMemory())
     sess.new_topic("refactor the auth module to use async")
     tid = sess.active_id
-    sess.continue_topic("go look at something else")   # a normal directive DOES change the goal
+    sess.continue_topic("go look at something else")   # a normal directive changes request, not objective
     sess.continue_topic("come back to it", resume=True)  # a resume cue must NOT
-    assert sess.active().goal == "go look at something else", sess.active().goal
+    assert sess.active().goal == "refactor the auth module to use async", sess.active().goal
 
 
 # ── R15 HIGH: read_file('../x') must NOT escape the workspace boundary (resolve_read/locate fallback) ──
@@ -1154,13 +1173,16 @@ def floor_catches_etc_cred_globs():
     assert not b("cat /etc/hostname")   # an ordinary /etc read is not blocked
 
 
-# ── R25 HIGH: oracle returns (False, output) on a timeout-with-output (no bytes+str TypeError crash) ──
+# ── R25 HIGH: oracle remains tuple-compatible on timeout-with-output ─────────────────────────────
 @check
 def oracle_timeout_with_output_no_crash():
+    from sliceagent.execution import ToolStatus
     from sliceagent.oracle import CommandOracle
     py = "python" if sys.platform == "win32" else "python3"   # windows-latest Git Bash has python.exe but no python3 shim
     cmd = f"{py} -u -c \"import sys,time; print('partial'); sys.stdout.flush(); time.sleep(5)\""
-    ok, out = CommandOracle(cmd, timeout=0.5).verify()
+    result = CommandOracle(cmd, timeout=0.5).verify()
+    ok, out = result
+    assert result.status is ToolStatus.INDETERMINATE
     assert ok is False and "timed out" in out   # must RETURN a failure, never raise
 
 
@@ -1302,24 +1324,14 @@ def glob_finds_directories_not_just_files():
 
 
 @check
-def rerooting_the_host_switches_the_slice_workspace():
-    # what /cwd does: set the host root → the slice's REPO MAP / project facts re-root to the new dir.
-    from sliceagent.memory import NullMemory
-    from sliceagent.pfc import Slice
-    from sliceagent.seed import make_build_slice
-    from sliceagent.tools import LocalToolHost
+def cwd_command_keeps_one_workspace_identity_per_process():
+    from sliceagent.cli import _cwd_message
     a = tempfile.mkdtemp(prefix="wsA-")
     b = tempfile.mkdtemp(prefix="wsB-")
-    os.makedirs(os.path.join(b, "pkg"))
-    open(os.path.join(b, "pkg", "core.py"), "w").write("def f():\n    return 1\n")
-    open(os.path.join(b, "pyproject.toml"), "w").write("[project]\nname='b'\n")
-    host = LocalToolHost(root=a)
-    assert host.root() == os.path.realpath(a)
-    host._root = os.path.realpath(b)                        # the re-root /cwd performs
-    assert host.root() == os.path.realpath(b)
-    s = Slice(); s.reset("go")
-    sysmsg = make_build_slice(s, host, None, NullMemory(), "go")()[0]["content"]
-    assert "core.py" in sysmsg, "repo map must reflect the NEW workspace root after a re-root"
+    host_root = os.path.realpath(a)
+    msg = _cwd_message(host_root, b)
+    assert host_root == os.path.realpath(a), "the command projection must not mutate the live workspace"
+    assert "fixed for this SliceAgent process" in msg and os.path.realpath(b) in msg, msg
 
 
 @check
@@ -1414,8 +1426,8 @@ def slash_handlers_print_bracketed_paths_without_markup_crash():
 
     from rich.console import Console
     con = Console(file=StringIO(), force_terminal=False)
-    # a real /cwd echo: `_reroot("~/proj/[/]")` returns "not a directory: ~/proj/[/]" — '[/]' is a Rich
-    # closing tag with nothing to close (the verifiers' exact repro).
+    # a real /cwd echo can return "not a directory: ~/proj/[/]" — '[/]' is a Rich closing tag with
+    # nothing to close (the verifiers' exact repro).
     con.print("  ✓ not a directory: ~/proj/[/]", markup=False)                 # must not raise
     con.print("  Undid the last edit to app/[id]/page.tsx (1 change).", markup=False)
     raised = False

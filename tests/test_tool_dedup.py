@@ -107,16 +107,20 @@ def dedup_propagates_errors_identically():
 
 
 @check
-def duplicate_is_free_no_extra_event():
-    # the dup must NOT dispatch a second ToolStarted/ToolResult (not re-folded into slice/episode, not counted).
+def duplicate_has_one_physical_start_and_one_logical_outcome_each():
+    # Only one tool physically starts, but every provider invocation gets an auditable durable outcome.
+    # The duplicate outcome is explicitly non-reducing because the source effects were already applied.
     events = []
     host = _CountHost()
     tcs = [_TC("read_file", {"path": "a.py"}, "c1"), _TC("read_file", {"path": "a.py"}, "c2")]
     _batch(tcs, host, sink=events.append)
-    n_res = sum(1 for e in events if isinstance(e, ToolResult))
+    results = [e for e in events if isinstance(e, ToolResult)]
+    n_res = len(results)
     n_start = sum(1 for e in events if isinstance(e, ToolStarted))
-    assert n_res == 1, f"deduped dup must not dispatch a 2nd ToolResult; got {n_res}"
+    assert n_res == 2, f"every logical invocation must dispatch one ToolResult; got {n_res}"
     assert n_start == 1, f"deduped dup must not dispatch a 2nd ToolStarted; got {n_start}"
+    assert [event.invocation_id for event in results] == ["c1", "c2"]
+    assert results[0].apply_effects is True and results[1].apply_effects is False
 
 
 @check

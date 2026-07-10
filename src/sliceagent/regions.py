@@ -14,16 +14,16 @@ from __future__ import annotations
 import os
 import re
 
+from .context import (ContextBlock, ContextSelection, ElasticityController, Fidelity,
+                      FreshnessClass, InstructionClass, RepresentationLoss)
 from .safety import wrap_untrusted
 from .text_utils import normalize_ws, one_line
 
 MANIFEST_TURNS = 50      # PAGED-OUT HISTORY manifest window — bounded locator count (the moat: constant
 # size regardless of session length; content is paged in on demand, never accumulated into the slice).
 MAX_OPEN_THREADS = 6  # OTHER OPEN THREADS tier cap — bounded presentation of parked topics
-MAX_FINDINGS = 8         # bounded ring of distilled conclusions (anti-re-derivation; not a transcript)
+MAX_FINDINGS = 8         # legacy compact-render default; the elastic SeedPlan projects the full relevant set
 MAX_FINDING_CHARS = 300  # each finding is ONE compact line — distilled, never narration (causal tail matters)
-MAX_REQUIREMENTS = 20    # bounded STANDING REQUIREMENTS contract (count) — the moat's no-unbounded-growth
-MAX_REQ_CHARS = 300      # each requirement is ONE compact line (contracts — a long signature must survive)
 MAX_PLAN_ITEMS = 20      # bounded PLAN (TodoWrite) — same no-unbounded-growth rule as requirements
 MAX_PLAN_CHARS = 300     # each plan step is ONE compact line (multi-file scope must survive)
 _PLAN_MARK = {"done": "x", "in_progress": "~", "pending": " "}
@@ -144,21 +144,6 @@ def render_threads(refs) -> str:
     return "\n".join(lines)
 
 
-def render_user_log(s) -> str:
-    """USER INSTRUCTIONS tier: EVERY user message this topic, verbatim, in order — the authoritative
-    record of what was asked. The user's stated intent/constraints are IRREDUCIBLE ground truth (they
-    cannot be re-derived from disk or from an archived turn's gist), so unlike the RECENT CONVERSATION
-    ring this is uncapped and never truncated. Excludes the in-progress turn (it renders separately as
-    CURRENT REQUEST at the salient tail). Empty until there is at least one PRIOR user message."""
-    log = getattr(s, "user_log", None)
-    if not log:
-        return ""
-    prior = log[:-1]   # the last entry is the current turn's message == the CURRENT REQUEST
-    if not prior:
-        return ""
-    return "\n".join(f"- [turn {e['turn']}] {e['text']}" for e in prior)
-
-
 def render_conversation(s) -> str:
     """The RECENT CONVERSATION tier: the last few COMPLETED user<->assistant exchanges (the in-progress
     one is excluded — its user message is the current task). Ends with a pointer to recall the rest."""
@@ -167,9 +152,10 @@ def render_conversation(s) -> str:
         return ""
     lines = []
     for e in prior:
-        lines.append(f"- user: {e['user']}")
+        lines.extend(("--- recent exchange ---", "user (verbatim):", str(e["user"])))
         if e.get("assistant"):
-            lines.append(f"  you:  {e['assistant']}")   # VERBATIM — no per-message cut, so no recall pointer here
+            lines.extend(("assistant (verbatim):", str(e["assistant"])))
+        lines.append("--- end recent exchange ---")
     older = s.turns - len(prior) - 1  # turns beyond the ring (minus the current in-progress turn)
     tail = (f"\n(+{older} earlier turn(s) this session not shown — they're listed in PAGED-OUT HISTORY "
             "below; read_file(\"history/turn-N.md\") to view any)") if older > 0 else ""
@@ -232,7 +218,8 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
 
     The slice carries no transcript, so a reasoning model would otherwise re-derive the
     situation each turn (costly reasoning bursts). This lets it carry its OWN conclusions
-    forward — bounded (ring of MAX_FINDINGS) and deduped so it stays distilled, not a log.
+    forward as task-elastic, deduplicated semantic state rather than an elapsed-turn log. Physical
+    pressure is handled by the shared context controller, not destructive insertion-time truncation.
 
     I1 PROVENANCE: a finding is a FACT FROM THE WORLD, never raw narration. Notes that announce
     intent ("Let me…", "I'll…") are dropped — they're transcript, not established state. `source`
@@ -240,10 +227,8 @@ def record_note(s, text: str, source: str = "tool-note") -> bool:
     is downgraded to "claim" unless the caller passed an observed source, so it can't ratchet into
     an ESTABLISHED truth. No extra LLM call — pure lexical, captured from the note arg on a real call.
 
-    RECALL BRIDGE: a long AssistantText reply (e.g. a multi-item bug-hunt report) folds in here as a
-    "claim" — a hard per-item cut to MAX_FINDING_CHARS, since findings must stay compact. See
-    _cut_with_recall_marker: without a signal, a later "what were those bugs" sees ONLY the surviving
-    fragment and re-derives the rest from the code instead of recalling it — a confirmed fabrication."""
+    Long assistant replies do not enter this path: they remain in bounded continuity and immutable turn
+    artifacts. This helper is only for explicit tool-backed notes/claims."""
     note = _cut_with_recall_marker(text, MAX_FINDING_CHARS)
     if not note:
         return False
@@ -302,15 +287,113 @@ def render_world(world: dict) -> str:
 
 
 def render_requirements(requirements: list[dict]) -> str:
-    """The STANDING REQUIREMENTS contract body: the constraints that must hold when the task is DONE.
-    Self-suppresses when empty (a greeting/question has no contract → no bytes, no binding spec — the
-    structural kill for the 'first message becomes the spec' bug). Append-order + status-flip-in-place
-    (open '- [ ]', satisfied '- [x] … (done)') so a change touches only its own line and unrelated
-    turns stay byte-identical (warm STABLE prefix). Bounded by MAX_REQUIREMENTS (folded in slice_sink)."""
+    """Legacy v1 requirement rows, retained as a rendering compatibility helper."""
     if not requirements:
         return ""
     return "\n".join(f"- [{'x' if r.get('done') else ' '}] {r.get('text', '')}" + (" (done)" if r.get("done") else "")
                      for r in requirements)
+
+
+def render_intent(intent, *, authorities: tuple[str, ...] | None = None,
+                  kinds: tuple[str, ...] = ("constraint",)) -> str:
+    """Render every resident typed obligation without an arbitrary semantic cap.
+
+    Provisional completion stays visibly distinct from user-accepted satisfaction. Superseded/deferred
+    records remain available to persistence but are not active context.
+    """
+    if intent is None:
+        return ""
+    entries = intent.resident_entries() if hasattr(intent, "resident_entries") else []
+    if authorities is not None:
+        entries = [entry for entry in entries if getattr(entry, "authority", "legacy") in authorities]
+    entries = [entry for entry in entries if getattr(entry, "kind", "constraint") in kinds]
+    lines = []
+    for entry in entries:
+        if entry.status == "active":
+            lines.append(f"- [ ] {entry.verbatim_clause}")
+        elif entry.status == "provisionally_satisfied":
+            lines.append(f"- [~] {entry.verbatim_clause} (provisionally satisfied; not user-finalized)")
+    return "\n".join(lines)
+
+
+def render_corrections(intent) -> str:
+    """Render exact newer wording without pretending every clarification is an acceptance obligation."""
+    if intent is None:
+        return ""
+    return "\n".join(
+        f"- {entry.verbatim_clause}"
+        for entry in intent.resident_entries()
+        if getattr(entry, "authority", "legacy") == "user"
+        and getattr(entry, "kind", "constraint") == "correction"
+    )
+
+
+def render_task_objective(s) -> str:
+    """Keep the task anchor resident after the recent-conversation ring advances.
+
+    It is the original user-authored objective, not a mutable assistant summary. The current request remains
+    more recent authority and explicitly supersedes any conflicting detail.
+    """
+    raw_goal = str(getattr(getattr(s, "task", None), "goal", "") or "")
+    goal = raw_goal.strip()
+    current = str(getattr(getattr(s, "intent", None), "current_request", "") or "").strip()
+    if not goal or goal == current:
+        return ""
+    source = str(getattr(getattr(s, "task", None), "goal_source", "") or "").strip()
+    # The objective is the original request, but a clause explicitly superseded later is no longer active
+    # authority. Remove only verified source ranges whose bytes still match; the archived artifact retains
+    # the original wording and ACTIVE USER INTENT carries the replacement.
+    spans = []
+    for entry in getattr(getattr(s, "intent", None), "entries", ()):
+        same_source = (not source and not entry.source_artifact) or entry.source_artifact == source
+        if entry.status != "superseded" or not same_source or entry.source_range is None:
+            continue
+        start, end = entry.source_range
+        if 0 <= start < end <= len(raw_goal) and raw_goal[start:end] == entry.verbatim_clause:
+            spans.append((start, end))
+    if spans:
+        pieces, cursor = [], 0
+        for start, end in sorted(spans):
+            if start >= cursor:
+                pieces.append(raw_goal[cursor:start])
+                cursor = end
+        pieces.append(raw_goal[cursor:])
+        goal = " ".join("".join(pieces).strip(" \t\r\n;,.—-").split())
+        if not goal:
+            return ""
+    provenance = f"\nsource artifact: {source}" if source else ""
+    has_corrections = bool(render_corrections(getattr(s, "intent", None)))
+    provisional = getattr(getattr(s, "task", None), "objective_status", "active") \
+        == "provisionally_satisfied"
+    if provisional:
+        return (
+            "# PRIOR TASK BACKGROUND (the original objective completed cleanly but is not user-finalized; "
+            "the CURRENT REQUEST is the active instruction. Use this only for topic continuity)\n"
+            f"{goal}{provenance}\n\n"
+        )
+    return (
+        "# STABLE TASK OBJECTIVE (original user objective; keep it active across follow-ups. "
+        + ("The RETAINED USER CORRECTIONS below are newer and override conflicting base details"
+           if has_corrections else "A newer retained user correction supersedes any conflicting detail")
+        + ")\n"
+        f"{goal}{provenance}\n\n"
+    )
+
+
+def render_reconciliation(s) -> str:
+    marker = str(getattr(s, "reconciliation_required", "") or "").strip()
+    if not marker:
+        return ""
+    targets = tuple(getattr(s, "reconciliation_targets", ()) or ("workspace:*",))
+    scope = ", ".join(f"`{target}`" for target in targets)
+    return (
+        "# EXECUTION RECONCILIATION REQUIRED (an earlier operation may still have side effects. Before "
+        "ANY write, command, network mutation, or delegation: re-observe EVERY affected target below "
+        "with matching read-only tools; an opaque target also requires asking the user for live confirmation. "
+        "Then call reconcile_execution with the evidence-backed resolution. "
+        "Effectful tools and task switching remain blocked until that call succeeds.)\n"
+        f"affected targets: {scope}\n{marker}\n\n"
+    )
 
 
 def render_plan(plan: list[dict]) -> str:
@@ -322,6 +405,16 @@ def render_plan(plan: list[dict]) -> str:
         return ""
     return "\n".join(f"{i}. [{_PLAN_MARK.get(it.get('status'), ' ')}] {it.get('step', '')}"
                      for i, it in enumerate(plan, 1))
+
+
+def render_progress_signals(signals) -> str:
+    """Small cross-turn semantic progress ring; never raw calls or tool output."""
+    if not signals:
+        return ""
+    return "\n".join(
+        f"- {signal.kind}: {signal.detail}" + (f" (x{signal.count})" if signal.count > 1 else "")
+        for signal in signals
+    )
 
 
 # ── ANTI-LOOP / RECENT / CURRENT ERROR ────────────────────────────────────────
@@ -616,8 +709,8 @@ _NOW_FOOTER = ("# NOW: address the CURRENT REQUEST above. If it asks a QUESTION 
 def render_current_request(goal: str) -> str:
     """The live user ask, rendered OUTSIDE the context fence (used at BOTH primacy and recency from
     one source). Empty goal → '' (no header)."""
-    g = (goal or "").strip()
-    return f"{_CURRENT_REQUEST_HDR}{g}\n\n" if g else ""
+    g = str(goal or "")
+    return f"{_CURRENT_REQUEST_HDR}{g}\n\n" if g.strip() else ""
 
 
 def render_now(hints: str = "") -> str:
@@ -632,18 +725,15 @@ def render_now(hints: str = "") -> str:
 # literals below — relocated verbatim from render_slice, not duplicated.)
 REGION_ORDER = (
     # ──────────── TIER 1 · INTENT — what the user wants (the contract). STABLE, slot-0: leads the cache prefix. ────────────
-    # STANDING REQUIREMENTS — the live contract that must hold when the task is DONE: a model-curated set
-    # of constraints (exact signature, output format, stated rule, an added requirement), maintained in-band
-    # via require/requirement_done/drop_requirement. NOT the frozen first message — EMPTY by default, so a
-    # greeting/question renders nothing (the structural kill for the 'first message = binding spec' bug).
-    # STABLE/slot-0 but write-RARELY (changes only on a require/drop/done event) → the prefix stays cache-warm.
-    ("requirements",   STABLE,   lambda c: (f"# STANDING REQUIREMENTS (the contract that must HOLD when the task is done — honor each EXACTLY; '[x]' = already satisfied)\n{render_requirements(c['s'].requirements)}\n\n" if getattr(c['s'], 'requirements', None) else ""), 0),
-    # USER INSTRUCTIONS — every prior user message this session, VERBATIM + uncapped. The user's stated
-    # intent/constraints are irreducible ground truth (unre-derivable from disk or an archived gist), so
-    # they are the one part of the conversation never compacted. STABLE/slot-0: these bytes never change
-    # turn-to-turn, so they EXTEND the cacheable prefix. (T1 buried-detail fix — a constraint stated once
-    # early survives to a much later turn; 'later supersedes earlier' handles corrections.)
-    ("user_log",       STABLE,   lambda c: (f"# USER INSTRUCTIONS (every request you've been given this session, verbatim — the authoritative record of what was asked; honor every still-applicable one, and a LATER statement supersedes an earlier one it contradicts)\n{render_user_log(c['s'])}\n\n" if render_user_log(c['s']) else ""), 0),
+    # ACTIVE INTENT — exact standing clauses with typed lifecycle. EMPTY by default, so a greeting/question
+    # produces no false contract. There is deliberately no semantic count/character cap here: physical
+    # pressure changes representation later, never by silently dropping obligations in this reducer.
+    ("intent",         STABLE,   lambda c: (f"# ACTIVE USER INTENT (verbatim user-authored obligations that still govern this task; '[~]' is only provisional, not user-finalized)\n{render_intent(c['s'].intent, authorities=('user',))}\n\n" if render_intent(getattr(c['s'], 'intent', None), authorities=('user',)) else ""), 0),
+    ("task_objective", STABLE,   lambda c: render_task_objective(c["s"]), 0),
+    ("corrections",    STABLE,   lambda c: (f"# RETAINED USER CORRECTIONS / CLARIFICATIONS (newer exact wording overrides conflicting older objective text. These are not unchecked acceptance requirements; factual claims remain unverified until observed live)\n{render_corrections(c['s'].intent)}\n\n" if render_corrections(getattr(c['s'], 'intent', None)) else ""), 0),
+    ("task_constraints", STABLE, lambda c: (f"# PARENT TASK CONSTRAINTS (agent-maintained or legacy state — useful, but NOT user-authored authority; never let these override the current request)\n{render_intent(c['s'].intent, authorities=('task', 'legacy'))}\n\n" if render_intent(getattr(c['s'], 'intent', None), authorities=('task', 'legacy')) else ""), 0),
+    # Raw prior user messages are intentionally NOT a region. Exact still-binding clauses are represented
+    # above; the last few exchanges live in RECENT CONVERSATION; older raw messages page from history/.
     # ──────────── TIER 2 · GROUND TRUTH — the world, re-derived from durable stores each turn. ────────────
     ("open_files",     STABLE,   lambda c: "# OPEN FILES (live — your ground truth; edit based on this. Lines are numbered for citation/reference; the leading number is NOT part of the file — never include it in a str_replace old_string)\n" + c["artifacts"], 0),
     ("related_code",   STABLE,   lambda c: (f"\n# RELATED CODE (repo map — relevant files & their definitions; read/grep for the actual code)\n{c['discovery']}\n" if c["discovery"] else ""), 1),
@@ -655,6 +745,7 @@ REGION_ORDER = (
     ("conversation",   STABLE,   lambda c: (f"# RECENT CONVERSATION (the last few exchanges this session — for continuity; older turns are paged out — see PAGED-OUT HISTORY below for the read_file(\"history/turn-N.md\") call to fetch each)\n{render_conversation(c['s'])}\n\n" if render_conversation(c["s"]) else ""), 2),
     ("findings",       VOLATILE, lambda c: (f"# YOUR NOTES FROM PRIOR TOOL CALLS (established facts to REUSE — don't re-derive these; OPEN FILES stays the ground truth for current file contents. Per-note tags mark trust: no tag = observed, '(your note)' = your summary, '(UNVERIFIED claim)' = not yet confirmed)\n{render_findings(c['s'].findings[-c['max_findings']:], c['s'].finding_source)}\n\n" if render_findings(c["s"].findings[-c["max_findings"]:], c["s"].finding_source) else ""), 3),
     ("plan",           VOLATILE, lambda c: (f"# PLAN (your ordered steps & live progress — keep exactly ONE step in_progress; '[~]'=in progress, '[x]'=done, '[ ]'=pending; update with update_plan)\n{render_plan(c['s'].plan)}\n\n" if getattr(c['s'], 'plan', None) else ""), 3),
+    ("progress",       VOLATILE, lambda c: (f"# PROGRESS SIGNALS (small task-scoped observations carried across turns; details remain in history/)\n{render_progress_signals(c['s'].task.progress_signals)}\n\n" if render_progress_signals(c['s'].task.progress_signals) else ""), 3),
     ("world",          VOLATILE, lambda c: (f"# WORLD MODEL (durable task state YOU maintain — your map / inventory / progress; update with world_set, it persists across turns until the task changes)\n{render_world(c['s'].world)}\n\n" if c['s'].world else ""), 3),
     # ──────────── TIER 4 · RECALL — paged out of the slice; fetched on demand. ────────────
     ("threads",        VOLATILE, lambda c: (f"# OTHER OPEN THREADS (parked topics — resume one with switch_topic; do NOT mix them into the current task)\n{c['threads']}\n\n" if c["threads"] else ""), 3),
@@ -685,6 +776,7 @@ REGION_ORDER = (
     # OPEN USER REPORT rides ABOVE the error (a stale "done" note can't outrank a user's BROKEN report);
     # both are the highest-authority, freshest tail right above NOW.
     ("user_report",    VOLATILE, lambda c: (f"# OPEN USER REPORT (the user reports this is BROKEN — treat it as an UNRESOLVED blocker; do NOT claim it is done or already working until you have VERIFIED the fix against the real artifact, e.g. run/open it and observe success)\n{c['s'].open_report}\n\n" if c["s"].open_report else ""), 6),
+    ("reconciliation", VOLATILE, lambda c: render_reconciliation(c["s"]), 6),
     ("error",          VOLATILE, lambda c: (f"# CURRENT ERROR (unresolved — fix this, verbatim)\n{c['s'].last_error}\n\n" if c["s"].last_error else ""), 6),
     ("closure",        VOLATILE, lambda c: render_closure(c["s"]), 6),
     ("convergence",    VOLATILE, lambda c: render_convergence(c["s"]), 6),
@@ -698,13 +790,145 @@ def render_regions(ctx: dict) -> str:
     separator between the action tally (slot 4) and the high-authority tail (slot 6) keeps the stable bulk
     leading for prompt-cache locality and the volatile salient tail trailing. `ctx` carries the Slice + the
     pre-rendered passthroughs (artifacts / discovery / memory / threads) + the max_findings cap."""
+    blocks = build_context_blocks(ctx)
+    selection = ElasticityController().select(blocks)
+    return render_context_selection(selection)
+
+
+_REGION_META = {
+    "intent": (100, InstructionClass.USER, FreshnessClass.LIVE, True),
+    "task_objective": (97, InstructionClass.USER, FreshnessClass.REVISION_BOUND, True),
+    "task_constraints": (75, InstructionClass.TASK_STATE, FreshnessClass.REVISION_BOUND, False),
+    "open_files": (95, InstructionClass.DATA, FreshnessClass.LIVE, False),
+    "related_code": (45, InstructionClass.DATA, FreshnessClass.DERIVED, False),
+    "skills": (65, InstructionClass.TASK_STATE, FreshnessClass.REVISION_BOUND, False),
+    "memory": (20, InstructionClass.DATA, FreshnessClass.HISTORICAL, False),
+    "conversation": (80, InstructionClass.USER, FreshnessClass.HISTORICAL, False),
+    "findings": (82, InstructionClass.TASK_STATE, FreshnessClass.REVISION_BOUND, False),
+    "plan": (88, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+    "progress": (35, InstructionClass.TASK_STATE, FreshnessClass.HISTORICAL, False),
+    "world": (85, InstructionClass.TASK_STATE, FreshnessClass.REVISION_BOUND, False),
+    "threads": (25, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+    "cache_manifest": (30, InstructionClass.DATA, FreshnessClass.HISTORICAL, False),
+    "roster": (10, InstructionClass.DATA, FreshnessClass.HISTORICAL, False),
+    "action_header": (18, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+    "action_history": (18, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+    "focus": (78, InstructionClass.DATA, FreshnessClass.LIVE, False),
+    "worktree": (92, InstructionClass.DATA, FreshnessClass.LIVE, False),
+    "user_report": (99, InstructionClass.USER, FreshnessClass.LIVE, True),
+    "reconciliation": (100, InstructionClass.TASK_STATE, FreshnessClass.LIVE, True),
+    "error": (98, InstructionClass.TASK_STATE, FreshnessClass.LIVE, True),
+    "closure": (50, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+    "convergence": (55, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False),
+}
+
+
+def _locator_region(name: str, ctx: dict) -> tuple[str, tuple[str, ...], bool] | None:
+    """Return a smaller faithful locator only where refinement/re-observation is real."""
+    s = ctx.get("s")
+    if name == "task_objective":
+        source = str(getattr(getattr(s, "task", None), "goal_source", "") or "").strip()
+        handle = f"artifacts/{source}.md" if source else "artifacts/index.md"
+        return (f'# PRIOR TASK BACKGROUND\n- read_file("{handle}") for the original objective',
+                (handle,), False)
+    if name == "open_files":
+        paths = tuple(dict.fromkeys(getattr(s, "active_files", ()) or ()))
+        body = "\n".join(f'- read_file("{path}")' for path in paths)
+        return ("# OPEN FILES (paged under context pressure — re-read live before acting)\n"
+                + (body or "(no resident file body)"), paths or ("workspace",), True)
+    if name == "related_code":
+        return ("# RELATED CODE (derived view omitted under pressure — use grep/glob on the live repo)\n"
+                "(re-observe when needed)", ("workspace",), True)
+    if name == "skills":
+        names = tuple(str(item.get("name")) for item in getattr(s, "active_skills", ()) if item.get("name"))
+        return ("# ACTIVE SKILL(S) (bodies paged under pressure; reload with the skill tool)\n"
+                + "\n".join(f"- {item}" for item in names), names or ("skill-catalog",), True)
+    if name == "memory":
+        return ("# RELEVANT MEMORY (historical candidates omitted under pressure; re-query if needed)\n"
+                "- search_history or rebuild the next seed", ("history/index.md",), True)
+    if name == "conversation":
+        handles = tuple(
+            f"artifacts/{row.get('artifact_id')}.md" for row in getattr(s, "conversation", ())[:-1]
+            if row.get("artifact_id")
+        ) or ("artifacts/index.md",)
+        return ("# RECENT CONVERSATION (paged under pressure; exact turns remain in the artifact/history view)\n"
+                + "\n".join(f'- read_file("{handle}")' for handle in handles), handles, False)
+    if name == "findings":
+        return ('# YOUR NOTES FROM PRIOR TOOL CALLS (paged under context pressure)\n'
+                '- read_file("artifacts/index.md") and refine the relevant sealed turn',
+                ("artifacts/index.md",), False)
+    if name in ("progress", "action_header", "action_history"):
+        return ("# EXECUTION PROGRESS (detail paged under pressure)\n"
+                '- read_file("artifacts/index.md") for sealed turn detail', ("artifacts/index.md",), False)
+    if name == "threads":
+        return ("# OTHER OPEN THREADS (details omitted under pressure; switch_topic by task id to refine)\n"
+                + str(ctx.get("threads") or ""), ("task-checkpoints",), True)
+    if name == "cache_manifest":
+        return ('# PAGED-OUT HISTORY\n- read_file("history/index.md") for the full manifest',
+                ("history/index.md",), False)
+    if name == "roster":
+        return ('# STANDING SPECIALISTS\n- read_file("roster/index.md") for the roster',
+                ("roster/index.md",), False)
+    if name == "focus":
+        return ("# CURRENT PROJECT (live locator)\n" + str(ctx.get("focus") or ""),
+                ("workspace",), True)
+    if name == "worktree":
+        return ("# REPO STATE (live view omitted under pressure — re-run git status before relying on it)",
+                ("workspace",), True)
+    if name in ("closure", "convergence"):
+        return ("# TURN STEERING (compact under pressure)\nContinue only while useful; verify before claiming done.",
+                ("turn-runtime",), True)
+    return None
+
+
+def build_context_blocks(ctx: dict) -> tuple[ContextBlock, ...]:
+    """Project every non-empty region into the shared elasticity contract."""
+    out = []
+    for order, (name, _tier, render, slot) in enumerate(REGION_ORDER):
+        content = render(ctx)
+        if not content:
+            continue
+        priority, authority, freshness, mandatory = _REGION_META.get(
+            name, (50, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, False))
+        if (name == "task_objective"
+                and getattr(getattr(ctx.get("s"), "task", None), "objective_status", "active")
+                == "provisionally_satisfied"):
+            # Same topic does not mean "redo the original request".  Once a clean turn provisionally
+            # completes it, retain it as lower-authority, pageable background until an explicit resume or
+            # failure report reactivates it.
+            priority, authority, freshness, mandatory = (
+                28, InstructionClass.TASK_STATE, FreshnessClass.HISTORICAL, False,
+            )
+        group = f"region:{name}"
+        out.append(ContextBlock(
+            block_id=f"{group}:full", item_id=group, alternative_group=group,
+            priority=priority, instruction_class=authority, freshness=freshness,
+            fidelity=Fidelity.FULL, representation_loss=RepresentationLoss.NONE,
+            content=content, mandatory=mandatory, order=order, slot=slot,
+        ))
+        locator = None if mandatory else _locator_region(name, ctx)
+        if locator is not None and len(locator[0]) < len(content):
+            locator_content, handles, reobservable = locator
+            out.append(ContextBlock(
+                block_id=f"{group}:locator", item_id=group, alternative_group=group,
+                priority=priority, instruction_class=authority, freshness=freshness,
+                fidelity=Fidelity.LOCATOR, representation_loss=RepresentationLoss.POINTER_ONLY,
+                content=locator_content, handles=tuple(handles), reobservable=reobservable,
+                order=order, slot=slot,
+            ))
+    return tuple(out)
+
+
+def render_context_selection(selection: ContextSelection) -> str:
+    """Render one selected alternative per region using the existing stable slot layout."""
     slots: dict[int, str] = {}
-    for _name, _tier, render, slot in REGION_ORDER:
-        slots[slot] = slots.get(slot, "") + render(ctx)
-    if not slots:
+    for block in selection.blocks:
+        slots[block.slot] = slots.get(block.slot, "") + block.content
+    if not REGION_ORDER:
         return ""
     # #17: assemble by iterating ALL slot positions rather than a hand-synced literal index list — that
     # list KeyError'd if a leading slot was empty and SILENTLY DROPPED any region added at a gap slot
     # (e.g. 5). Slot 5 stays the reserved blank separator between the stable bulk (≤4, cache-leading) and
     # the volatile high-authority tail (≥6); an empty slot renders as "" (a blank line), as before.
-    return "\n".join(slots.get(i, "") for i in range(max(slots) + 1))
+    max_slot = max(entry[3] for entry in REGION_ORDER)
+    return "\n".join(slots.get(i, "") for i in range(max_slot + 1))

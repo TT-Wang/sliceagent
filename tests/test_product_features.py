@@ -68,6 +68,67 @@ def code_review_returns_the_diff():
 
 
 @check
+def code_review_inventory_does_not_hide_untracked_files():
+    if not shutil.which("git"):
+        print("  (skip: git not installed)"); return
+    wd = tempfile.mkdtemp(prefix="cr-untracked-")
+    _git(wd, "init", "-q")
+    _git(wd, "config", "user.email", "t@t.dev")
+    _git(wd, "config", "user.name", "t")
+    open(os.path.join(wd, "tracked.py"), "w").write("x = 1\n")
+    _git(wd, "add", "-A"); _git(wd, "commit", "-qm", "init")
+    open(os.path.join(wd, "new.py"), "w").write("created = True\n")
+    out = LocalToolHost(root=wd)._t_code_review({"ref": "HEAD"})
+    assert out.startswith("[code review: tracked + untracked inventory]")
+    assert "?? new.py" in out and "no untracked files exist" not in out.lower(), out
+
+
+@check
+def code_review_inventory_does_not_hide_ignored_late_effects():
+    if not shutil.which("git"):
+        print("  (skip: git not installed)"); return
+    wd = tempfile.mkdtemp(prefix="cr-ignored-")
+    _git(wd, "init", "-q")
+    _git(wd, "config", "user.email", "t@t.dev")
+    _git(wd, "config", "user.name", "t")
+    open(os.path.join(wd, ".gitignore"), "w").write("build/\n*.late\n")
+    open(os.path.join(wd, "tracked.py"), "w").write("x = 1\n")
+    _git(wd, "add", "-A"); _git(wd, "commit", "-qm", "init")
+    os.makedirs(os.path.join(wd, "build", "nested"))
+    open(os.path.join(wd, "build", "nested", "result.bin"), "wb").write(b"late")
+    open(os.path.join(wd, "effect.late"), "w").write("landed")
+    out = LocalToolHost(root=wd)._t_code_review({"ref": "HEAD", "include_ignored": True})
+    assert out.startswith("[workspace observation: tracked + untracked + ignored inventory complete]")
+    assert "!! effect.late" in out and "!! build/nested/result.bin" in out, out
+
+
+@check
+def only_the_explicit_full_workspace_review_can_clear_workspace_reconciliation():
+    if not shutil.which("git"):
+        print("  (skip: git not installed)"); return
+    from types import SimpleNamespace as NS
+    from sliceagent.hooks import ReconciliationHook
+
+    wd = tempfile.mkdtemp(prefix="cr-reconcile-")
+    _git(wd, "init", "-q")
+    _git(wd, "config", "user.email", "t@t.dev")
+    _git(wd, "config", "user.name", "t")
+    open(os.path.join(wd, ".gitignore"), "w").write("*.late\n")
+    _git(wd, "add", "-A"); _git(wd, "commit", "-qm", "init")
+    host = LocalToolHost(root=wd)
+    state = NS(reconciliation_required="uncertain shell", reconciliation_targets=["workspace:*"])
+    hook = ReconciliationHook(lambda: state); hook.reset_for_turn()
+
+    ordinary = host._t_code_review({"ref": "HEAD"})
+    hook.transform_tool_result("code_review", {"ref": "HEAD"}, ordinary)
+    assert not hook.authorize_tool("reconcile_execution", {"resolution": "clean"}).allow
+
+    complete = host._t_code_review({"ref": "HEAD", "include_ignored": True})
+    hook.transform_tool_result("code_review", {"ref": "HEAD", "include_ignored": True}, complete)
+    assert hook.authorize_tool("reconcile_execution", {"resolution": "clean"}).allow
+
+
+@check
 def code_review_errors_outside_a_repo():
     wd = tempfile.mkdtemp(prefix="cr-nogit-")
     host = LocalToolHost(root=wd)

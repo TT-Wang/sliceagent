@@ -7,7 +7,10 @@ contained so a frontend can't break the loop.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from .execution import ToolInvocation, ToolOutcome
 
 
 @dataclass
@@ -29,8 +32,24 @@ class StepEnd(Event):
 
 @dataclass
 class SliceBuilt(Event):
-    rendered: str  # the volatile user message this turn (for debugging/inspection)
-    messages: list | None = None  # the FULL model-visible messages [system, user] (monitor/inspection)
+    rendered: str  # the initial volatile user message; also the once-per-turn lifecycle boundary
+    messages: list | None = None  # initial prepared request; later physical calls use ModelCallPrepared
+
+
+@dataclass
+class ModelCallPrepared(Event):
+    """Exact prepared request immediately before one physical provider attempt.
+
+    ``attempt`` is 1-based within ``step`` and includes SDK-level retries as well as reactive
+    re-projections. Unlike :class:`SliceBuilt`, this is an observation event: consumers must not
+    interpret it as a new turn or semantic-step boundary.
+    """
+
+    step: int
+    attempt: int
+    messages: list
+    pressure: str = "unknown"
+    preflight_mode: str = ""
 
 
 @dataclass
@@ -42,6 +61,7 @@ class AssistantText(Event):
 class ToolStarted(Event):
     name: str
     args: dict
+    invocation: "ToolInvocation | None" = None
 
 
 @dataclass
@@ -50,6 +70,10 @@ class ToolResult(Event):
     args: dict
     output: str
     failing: bool
+    status: str | None = None
+    invocation_id: str = ""
+    outcome: "ToolOutcome | None" = None
+    apply_effects: bool = True  # false for a logical dedup reply whose source outcome was already reduced
 
 
 @dataclass
@@ -86,8 +110,17 @@ class LessonSaved(Event):
 Dispatcher = Callable[[Event], None]
 
 
-def make_dispatcher(*sinks: Callable[[Event], None]) -> Dispatcher:
+def make_dispatcher(*sinks: Callable[[Event], None],
+                    required: tuple[Callable[[Event], None], ...] = ()) -> Dispatcher:
+    """Compose required reducers/journals with best-effort observers.
+
+    Required sinks run first and propagate failure into the turn. UI, metrics and logging observers remain
+    isolated. This prevents authoritative state reduction or crash journaling from being silently skipped by
+    the same blanket exception policy used for presentation.
+    """
     def dispatch(event: Event) -> None:
+        for sink in required:
+            sink(event)
         for sink in sinks:
             try:
                 sink(event)

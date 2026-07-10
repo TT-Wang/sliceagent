@@ -14,7 +14,7 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
 
 *Pre-1.0: on `0.x`, CLI flags, config keys, and APIs may change between releases; breaking changes are noted in the [CHANGELOG](CHANGELOG.md).*
 
-**Contents:** [How it works](#how-it-works) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
+**Contents:** [How it works](#how-it-works) · [Core design](CORE-DESIGN.md) · [Benchmark](#benchmark) · [Install & quickstart](#install--quickstart) · [Usage](#usage) · [License](#license) · [Acknowledgements](#acknowledgements) · [Contact](#contact)
 
 ## How it works
 
@@ -23,14 +23,14 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
        alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a history-bounded, task-elastic seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stayed ~12-15k in the s1 benchmark, 112x smaller by turn 6.">
 </p>
 
-sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** that records what just happened; and a **neocortex** that distills durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript.
+sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** backed by always-on local artifacts; and an optional **neocortex** that derives durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript. The precise invariants and non-claims live in the canonical **[Core Design](CORE-DESIGN.md)**.
 
 | Region | Role |
 |---|---|
 | **Sensory cortex** — live perception | Re-derives the world each turn—git state, project facts, repo map—rather than trusting remembered copies. |
 | **Prefrontal cortex** — working memory | The carried **Slice**: task-elastic, provenance-tagged state (intent, findings, plan, change-set), sealed at each turn boundary. |
-| **Hippocampus** — episodic memory | Archives each turn; pages a specific past turn back in on demand. |
-| **Neocortex** — long-term memory | Distills successful episodes into durable cross-session lessons, auto-surfaced when relevant. |
+| **Hippocampus** — episodic memory | Seals each turn or child report into the always-on local artifact store; pages a specific record back in on demand. |
+| **Neocortex** — long-term memory | Optionally derives and retrieves provenance-tagged cross-session lessons; it is not required for task recovery. |
 
 ```text
 ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
@@ -51,14 +51,14 @@ sliceagent's memory is organized like a brain: fast, lossy **perception** of the
                          └───────────────────────────────────┘
                                            ▼
                       ┌─────────────────────────────────────────┐
-                      │   PFC updated · turn sealed to memory   │
+                      │  PFC updated · turn sealed to artifact  │
                       └─────────────────────────────────────────┘
 
   ↻  next turn: the active slice remains resident;
      live views re-derive, archived detail returns by handle.
 ```
 
-Each turn faults in what the active task references — the carried slice, live views, and any relevant lessons — and hands the model an elastic **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into the hippocampus; on success the neocortex may distill a durable lesson. Net effect: **for stable active task state, context does not grow merely with session age; it can still expand with genuine task complexity.**
+Each turn faults in what the active task references — the carried slice, live views, selected artifacts, and any relevant derived lessons — and hands the model an elastic **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into an immutable local artifact and the next checkpoint is published. If semantic memory is available, it may additionally distill a durable lesson. Net effect: **for stable active task state, context does not grow merely with session age; it can still expand with genuine task complexity.**
 
 ## Benchmark
 
@@ -206,7 +206,7 @@ curl -fsSL https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.sh 
 irm https://raw.githubusercontent.com/TT-Wang/sliceagent/main/install.ps1 | iex
 ```
 
-(Installs `uv` + sliceagent, and Git Bash + ripgrep if you don't have them — the agent's shell commands run under Git Bash, same as other coding agents. Interactive PTY sessions (`terminal_open`) aren't available natively yet; everything else works. Prefer WSL2? The Linux one-liner above works there as-is.)
+(Installs `uv` + sliceagent, and Git Bash + ripgrep if you don't have them — the agent's shell commands run under Git Bash, same as other coding agents. Persistent process and interactive PTY tools are optional and disabled by default everywhere; `AGENT_ADVANCED_TOOLS=1` enables them where supported, but `terminal_open` is not available on native Windows yet. Prefer WSL2? The Linux one-liner above works there as-is.)
 
 **The installer handles everything**: `uv`, its own Python 3.12, ripgrep, and sliceagent — in an isolated tool env, no sudo, no prerequisites, no conflict with any Python you already have (conda base at 3.10? Rosetta-Intel conda on an M-series Mac? Doesn't matter). Then just:
 
@@ -255,7 +255,7 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/config` · `/model` · `/reasoning` | add/switch providers · switch model / reasoning effort (persists) |
 | `/mode` | permission mode: **baby-sitter** (confirm each edit + command) · **teenager** (default; confirm risky ones) · **let-it-go** (auto-run all but catastrophic) |
 | `/undo` | revert the last edit(s) |
-| `/cwd <path>` | change the workspace root mid-session |
+| `/cwd [path]` | show the fixed workspace root; with a path, show where to relaunch |
 | `/cost` | tokens and estimated $ spent this session |
 | `/skills` · `/tools` · `/mcp` · `/plugins` · `/agents` | list what's available to the agent |
 | `/threads` · `/resume` | switch between, or resume, parked topics |
@@ -263,7 +263,19 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/plan` | draft a plan before it starts editing |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
-It can edit code (workspace-confined, reversible with `/undo`), run shell commands and interactive processes through a sandbox (`local` by default, `docker` for full isolation), search the tree and the web, delegate decomposable work to subagents (each on its own history-bounded, task-elastic slice), and remember lessons across sessions. Three permission modes gate it, all with a hard floor on catastrophic commands; secrets are scrubbed from anything it runs or logs.
+Prefix an unrelated request with `New task:` to start it with fresh task state while parking the current task
+for `/resume`. Ambiguous follow-ups deliberately continue the active task so context is never discarded on a
+guess.
+
+It can edit code (workspace-confined, reversible with `/undo`), run regular shell commands through a sandbox (`local` by default, `docker` for full isolation), search the tree and the web, and delegate decomposable research to a fresh one-shot read-only explorer (each child gets its own history-bounded, task-elastic slice). That narrow surface is the demo default. Set `AGENT_ADVANCED_AGENTS=1` to expose writable and named specialist delegation (and nested delegation when `AGENT_SUBAGENT_DEPTH` is raised above its default of `1`), or `AGENT_ADVANCED_TOOLS=1` to expose persistent process and interactive terminal tools. The flags are independent. Three permission modes gate actions, all with a hard floor on catastrophic commands; secrets are scrubbed from anything persisted or logged.
+
+Every clean or interrupted agent task turn and every subagent report is sealed into the always-on local artifact/checkpoint path, independently of semantic memory. The model can refine retained detail through the read-only `artifacts/` namespace. Cross-session semantic lessons are a separate, optional derived layer powered by memem; task recovery does not depend on it.
+
+If a timeout or disconnect leaves an operation's side effects uncertain, SliceAgent carries a durable,
+target-scoped reconciliation gate into the next turn: it permits matching live read-only inspection, then
+requires an explicit evidence-backed resolution before more effects or task switching in that workspace.
+Opaque shell/code effects also require live user confirmation; a directory listing is never treated as proof
+of file contents. Ambiguous recovery journals stop startup before plugins or MCP processes run.
 
 **Configuration.** `sliceagent config --list` prints every setting. Set them persistently in `~/.sliceagent/config.toml` (written by `init`), or override any one via an environment variable:
 
@@ -273,7 +285,12 @@ It can edit code (workspace-confined, reversible with `/undo`), run shell comman
 | `AGENT_POLICY` | `teenager` | permission mode |
 | `AGENT_SANDBOX` | `local` | `local` or `docker` (isolated) |
 | `AGENT_MAX_STEPS` | `60` | per-turn step ceiling |
-| `SLICEAGENT_VAULT` | `~/.sliceagent/vault` | where episodic memory + task state persist (cross-session memory is on by default) |
+| `AGENT_CONTEXT_WINDOW` | *(catalog or unset)* | explicit provider window for strict per-call preflight; unknown models otherwise use compatibility mode |
+| `AGENT_ADVANCED_AGENTS` | *(off)* | enable writable and named specialists; unlock the nested surface subject to the depth ceiling |
+| `AGENT_SUBAGENT_DEPTH` | `1` | delegation depth ceiling; raise it to permit nested advanced agents |
+| `AGENT_ADVANCED_TOOLS` | *(off)* | enable persistent process and interactive terminal tools |
+| `SLICEAGENT_CACHE_DIR` | `~/.sliceagent` | always-on local checkpoints, immutable artifacts, and recovery journals |
+| `SLICEAGENT_VAULT` | `~/.sliceagent/vault` | optional semantic-memory and legacy compatibility records |
 | `AGENT_VERIFY_CMD` | *(unset)* | test command used as the verification oracle |
 
 ## License
@@ -282,7 +299,7 @@ It can edit code (workspace-confined, reversible with `/undo`), run shell comman
 
 ## Acknowledgements
 
-sliceagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. Cross-session memory is powered by [memem](https://github.com/TT-Wang/memem). With thanks to their authors.
+sliceagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. The optional cross-session semantic-memory layer is powered by [memem](https://github.com/TT-Wang/memem); local artifacts and recovery do not depend on it. With thanks to their authors.
 
 ## Contact
 

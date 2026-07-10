@@ -18,10 +18,11 @@ import tempfile
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .fuzzy import fuzzy_find_unique
-from .platform_compat import IS_WINDOWS, is_win_abs, msys_to_win, norm_rel, win_path_candidates
+from .platform_compat import (IS_WINDOWS, ProcessGroupTerminationError, is_win_abs,
+                              msys_to_win, norm_rel, win_path_candidates)
 from .procman import ProcManager
 from .registry import ToolEntry, ToolRegistry, ToolText
-from .sandbox import LocalSandbox
+from .sandbox import SANDBOX_TIMEOUT, LocalSandbox
 from .sensory_cortex import _is_ignored
 from .terminal import SessionManager
 
@@ -124,10 +125,50 @@ def str_replace(path, old, new):
 def list_files(path="."):
     return sorted(_os.listdir(_confine(path)))
 
+def _run_group_kwargs():
+    if _os.name != "nt": return {"start_new_session": True}
+    return {"creationflags": (_sp.CREATE_NEW_PROCESS_GROUP |
+                               getattr(_sp, "CREATE_NO_WINDOW", 0))}
+
+def _kill_run_tree(process, force=False):
+    if _os.name == "nt":
+        _force = ["/F"] if force else []
+        try: _sp.run(["taskkill", *_force, "/T", "/PID", str(process.pid)],
+                     capture_output=True, timeout=10)
+        except Exception:
+            try: process.kill() if force else process.terminate()
+            except OSError: pass
+        return
+    import signal as _signal
+    try: _os.killpg(_os.getpgid(process.pid), _signal.SIGKILL if force else _signal.SIGTERM)  # windows-footgun: ok — POSIX branch of a dual-platform worker template
+    except OSError:
+        try: process.kill() if force else process.terminate()
+        except OSError: pass
+
 def run(cmd, timeout=60):
-    _r = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-    _o = (_r.stdout or "") + (_r.stderr or "")
-    return _o if _r.returncode == 0 else f"[exit {_r.returncode}]\\n{_o}"
+    _p = _sp.Popen(cmd, shell=True, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True,
+                   **_run_group_kwargs())
+    try:
+        _stdout, _stderr = _p.communicate(timeout=timeout)
+    except _sp.TimeoutExpired as _timeout:
+        _kill_run_tree(_p)
+        try: _stdout, _stderr = _p.communicate(timeout=0.5)
+        except _sp.TimeoutExpired as _late:
+            _kill_run_tree(_p, force=True)
+            try: _stdout, _stderr = _p.communicate(timeout=2)
+            except _sp.TimeoutExpired:
+                _stdout = _late.stdout or _timeout.stdout or ""
+                _stderr = _late.stderr or _timeout.stderr or ""
+        if isinstance(_stdout, bytes): _stdout = _stdout.decode("utf-8", "replace")
+        if isinstance(_stderr, bytes): _stderr = _stderr.decode("utf-8", "replace")
+        _partial = (_stdout or "") + (_stderr or "")
+        if _partial: print(_partial, end="" if _partial.endswith("\\n") else "\\n", flush=True)
+        print(f"[run timed out after {timeout}s; process tree was reaped]",
+              file=_sys.stderr, flush=True)
+        # Reserved child exit: ToolHost projects it as INDETERMINATE, never an ordinary failed script.
+        raise SystemExit(124)
+    _o = (_stdout or "") + (_stderr or "")
+    return _o if _p.returncode == 0 else f"[exit {_p.returncode}]\\n{_o}"
 '''
 
 
@@ -236,7 +277,11 @@ TOOL_SCHEMAS = [
         "claiming a leak, remember this is a single-user LOCAL tool (self-edited config / same-user files are "
         "trusted), and report each finding only with a concrete inputs→wrong-outcome you actually traced. For "
         "a big or multi-area review, spawn_agent(agent=\"reviewer\", …) — one per area — instead.",
-        {"ref": {"type": "string"}}, []),
+        {"ref": {"type": "string"},
+         "include_ignored": {
+             "type": "boolean",
+             "description": "Set true only for execution reconciliation: computes the complete ignored-file manifest too",
+         }}, []),
     _fn("str_replace",
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
         "changing a file you've read. `old_string` should be the SMALLEST unique snippet — usually 2-4 adjacent "
@@ -318,6 +363,13 @@ TOOL_SCHEMAS = [
         {"key": {"type": "string"}, "value": {"type": "string"}}, ["key", "value"]),
     _fn("world_clear", "Remove a key from your WORLD MODEL (omit key to clear all of it).",
         {"key": {"type": "string"}}, []),
+    _fn("reconcile_execution",
+        "Resolve a prior INDETERMINATE operation only AFTER using read-only tools in this turn to observe "
+        "every affected workspace/process target. For an opaque target, ask the user for live confirmation "
+        "too. Record what settled and the evidence observed; this clears the effectful-tool gate. Never call "
+        "it from assumption or prior memory.",
+        {"resolution": {"type": "string", "description": "evidence-backed observed final state"}},
+        ["resolution"]),
     _fn("require",
         "Record a STANDING REQUIREMENT that must HOLD when the task is done — an exact name/signature, an "
         "output format, a stated rule, or a constraint the user adds. It joins your STANDING REQUIREMENTS "
@@ -328,8 +380,14 @@ TOOL_SCHEMAS = [
         "Mark a STANDING REQUIREMENT satisfied (after verifying it against the real end-state). It stays "
         "shown as '[x] done' so it is not re-flagged but not forgotten. `text` must match the requirement.",
         {"text": {"type": "string"}}, ["text"]),
+    _fn("supersede_requirement",
+        "Replace an existing user-authored requirement only when the CURRENT user message explicitly "
+        "corrects or changes it. `new_text` must be an exact substring of the current request; this cannot "
+        "be used for a model-authored reinterpretation.",
+        {"old_text": {"type": "string"}, "new_text": {"type": "string"}}, ["old_text", "new_text"]),
     _fn("drop_requirement",
-        "Remove a STANDING REQUIREMENT the user RETRACTED or that no longer applies. `text` must match.",
+        "Defer an agent-maintained STANDING REQUIREMENT that no longer applies. This cannot retract a "
+        "user-authored clause; use supersede_requirement only for an explicit correction in the current request.",
         {"text": {"type": "string"}}, ["text"]),
     _fn("update_plan",
         "Maintain an ordered PLAN (a TODO list) for a multi-step task. Pass the COMPLETE list of steps "
@@ -410,6 +468,7 @@ class LocalToolHost:
         # The read-only VIRTUAL `history/` namespace (this session's sealed turns as files). Injected by the
         # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
         self._history = None
+        self._artifacts = None  # authoritative local turn/subagent artifacts (always-on in the CLI)
         self._subagents = None   # a SubagentFS (subagents/ virtual namespace) — the parent's view of child seals
         self._roster = None      # a RosterFS (roster/ virtual namespace) — the durable standing workforce
         # ask_user (the "come back and ask" capability): a host callback that prompts the real user and
@@ -448,7 +507,9 @@ class LocalToolHost:
             "terminal_read": self._t_terminal_read, "terminal_wait": self._t_terminal_wait,
             "terminal_close": self._t_terminal_close,
             "world_set": self._t_world_set, "world_clear": self._t_world_clear,
+            "reconcile_execution": self._t_reconcile_execution,
             "require": self._t_require, "requirement_done": self._t_requirement_done,
+            "supersede_requirement": self._t_supersede_requirement,
             "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
             "code_review": self._t_code_review,
         }
@@ -602,7 +663,8 @@ class LocalToolHost:
         while p.startswith("./"):
             p = p[2:]
         p = p.rstrip("/")
-        for mount, fs in (("history", self._history), ("subagents", self._subagents),
+        for mount, fs in (("artifacts", self._artifacts), ("history", self._history),
+                          ("subagents", self._subagents),
                           ("roster", self._roster)):
             if fs is None or not (p == mount or p.startswith(mount + "/")):
                 continue
@@ -619,7 +681,9 @@ class LocalToolHost:
         fs = self._history_route(path)
         if fs is None:
             return None
-        what = ("subagents/ is a read-only view of your subagents' sealed reports"
+        what = ("artifacts/ is the read-only authoritative local artifact archive"
+                if fs is self._artifacts else
+                "subagents/ is a read-only view of your subagents' sealed reports"
                 if fs is self._subagents else
                 "roster/ is a read-only view of your standing specialists (hire/wake them via spawn tools)"
                 if fs is self._roster else
@@ -1022,36 +1086,105 @@ class LocalToolHost:
         return f"attached image {path} ({len(raw) // 1024} KB, {mime}) — vision turn, costs more than a text turn"
 
     def _t_code_review(self, args: dict) -> str:
-        """Return the git diff for the workspace so the model can review it (read-only; task-agnostic)."""
+        """Return a diff plus an explicit tracked/untracked/ignored inventory."""
         import subprocess
         ref = (args.get("ref") or "HEAD").strip() or "HEAD"
+        include_ignored = bool(args.get("include_ignored"))
         # SECURITY: `ref` is model-controlled. An option-shaped ref (e.g. --output=/path, -O, --ext-diff)
         # would be parsed by git as a FLAG → arbitrary out-of-workspace file write / command exec, bypassing
         # the file-tool confinement. Reject leading-dash refs (a real ref/range never starts with '-') and
         # pass `--` so the ref can never be read as an option. Valid ranges (main...HEAD, HEAD~3) still work.
         if ref.startswith("-"):
             return ToolText(f"Error: invalid ref {ref!r} (a ref must not start with '-').", ok=False)
+        base = [
+            "git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+            "-C", self.root(),
+        ]
         try:
+            # `git diff` omits untracked files. A reconciliation tool that says "No changes" on a workspace
+            # containing them is false evidence, so always pair it with a porcelain inventory. Disable a
+            # repo-configured fsmonitor command: merely observing an untrusted repo must not execute it.
+            status = subprocess.run(
+                [*base, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                capture_output=True, text=True, timeout=30,
+            )
+            ignored = None
+            if include_ignored:
+                # `git status` deliberately hides ignored paths, but an uncertain command can write them too.
+                # Enumerate recursively only for the expensive reconciliation view; ordinary reviews stay lean.
+                ignored = subprocess.run(
+                    [*base, "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+                    capture_output=True, text=True, timeout=30,
+                )
             # --no-ext-diff / --no-textconv: a hostile repo's .gitattributes + .git/config can register a diff
             # driver whose external/textconv command git would otherwise EXECUTE while rendering the diff
             # (external review H-06). Disable both so reviewing a repo never runs repo-controlled helpers.
-            p = subprocess.run(["git", "-C", self.root(), "diff", "--no-ext-diff", "--no-textconv", ref, "--"],
-                               capture_output=True, text=True, timeout=30)
+            p = subprocess.run(
+                [*base, "diff", "--no-ext-diff", "--no-textconv", ref, "--"],
+                capture_output=True, text=True, timeout=30,
+            )
         except FileNotFoundError:
             return ToolText("Error: git is not installed.", ok=False)
         except subprocess.SubprocessError as e:
-            return ToolText(f"Error: git diff failed ({type(e).__name__}: {e}).", ok=False)
+            return ToolText(f"Error: git workspace observation failed ({type(e).__name__}: {e}).", ok=False)
+        if status.returncode != 0:
+            return ToolText(f"Error: `git status` failed — {status.stderr.strip()[:300]} "
+                            "(is this a git repo?)", ok=False)
+        if ignored is not None and ignored.returncode != 0:
+            return ToolText(f"Error: ignored-file inventory failed — {ignored.stderr.strip()[:300]} "
+                            "(workspace observation is incomplete)", ok=False)
         if p.returncode != 0:
             return ToolText(f"Error: `git diff {ref}` failed — {p.stderr.strip()[:300]} "
                             "(is this a git repo? is the ref valid?)", ok=False)
         diff = p.stdout
-        if not diff.strip():
-            return f"No changes vs {ref} — the working tree matches it. Nothing to review."
-        # PAGE a large diff out (full diff preserved on disk, reachable via read_file) instead of a hard
-        # truncation that silently discarded the tail — a review/security task must not miss bugs past the cut.
-        body = self._page_out(diff, label=f"git-diff-{ref}")
-        return (f"git diff {ref} ({len(diff)} chars). Review for correctness, security, and edge cases; "
-                f"cite file:line per issue.\n\n{body}")
+        # NUL-delimited porcelain makes hostile newline/control filenames unambiguous. repr() keeps those
+        # delimiters escaped in the model-visible inventory instead of letting a filename forge a status row.
+        rows = [repr(row) for row in status.stdout.split("\0") if row]
+        ignored_paths = [
+            row for row in (ignored.stdout.split("\0") if ignored is not None else ()) if row
+            # Do not let code_review's own paged blobs make each subsequent review invent another blob.
+            and not row.replace("\\", "/").startswith(".sliceagent/blobs/workspace-review-")
+        ]
+        ignored_rows = [repr("!! " + row) for row in ignored_paths]
+        if len(ignored_rows) > 240:
+            import hashlib
+            digest = hashlib.sha256("\0".join(ignored_paths).encode("utf-8", "surrogatepass")).hexdigest()
+            omitted = len(ignored_rows) - 240
+            ignored_rows = [
+                *ignored_rows[:200],
+                f"'!! … {omitted} additional ignored paths represented by manifest sha256:{digest}'",
+                *ignored_rows[-40:],
+            ]
+        inventory_rows = [*rows, *ignored_rows]
+        tracked_inventory = "\n".join(rows) if rows else "(no tracked or untracked changes)"
+        ignored_inventory = ("\n".join(ignored_rows) if ignored_rows else
+                             "(no ignored files)" if include_ignored else "(not enumerated)")
+        inventory = ("\n".join(inventory_rows) if inventory_rows else
+                     "(clean: no tracked or untracked changes; ignored files not enumerated)"
+                     if not include_ignored else
+                     "(clean: no tracked, untracked, or ignored files outside HEAD)")
+        marker = ("[workspace observation: tracked + untracked + ignored inventory complete]"
+                  if include_ignored else "[code review: tracked + untracked inventory]")
+        if not diff.strip() and not inventory_rows:
+            suffix = (" and no untracked or ignored files exist" if include_ignored else
+                      " and no untracked files exist (ignored files were not enumerated)")
+            body = (f"{marker}\nGit status:\n{inventory}\n\nNo changes vs {ref} — the tracked "
+                    f"working tree matches it{suffix}. Nothing to review.")
+        elif not diff.strip():
+            body = (f"{marker}\nGit status (includes files omitted by git diff):\n{inventory}\n\n"
+                    f"No tracked diff vs {ref}; inspect the listed untracked/ignored/status entries before concluding "
+                    "the workspace is unchanged.")
+        else:
+            # Put the actionable tracked diff before the potentially large ignored manifest so ordinary code
+            # review remains useful; the full computed observation is still retained/paged as one value.
+            body = (f"{marker}\nGit status (tracked + untracked):\n{tracked_inventory}\n\n"
+                    f"git diff {ref} ({len(diff)} chars). Review for correctness, security, and edge cases; "
+                    f"cite file:line per issue.\n\n{diff}\n\n"
+                    f"Ignored-file inventory ({'complete computation' if include_ignored else 'not requested'}; "
+                    f"bounded presentation):\n{ignored_inventory}")
+        # A large observation is paged losslessly after both commands completed; the full detail remains
+        # available for analysis while the typed observation can still prove that live inventory ran.
+        return self._page_out(body, label=f"workspace-review-{ref}")
 
     def _t_ask_user(self, args: dict) -> str:
         q = (args.get("question") or "").strip()
@@ -1063,7 +1196,10 @@ class LocalToolHost:
             ans = (self.on_ask_user or _default_ask_user)(q, opts)
         except (EOFError, KeyboardInterrupt):
             ans = "(no answer)"
-        return f"User answered: {str(ans).strip()}"
+        answer = str(ans).strip()
+        if not answer or answer.casefold() in {"(no answer)", "(cancelled)", "(canceled)"}:
+            return ToolText("No user answer was received.", ok=False)
+        return f"User answered: {answer}"
 
     def _t_run_command(self, args: dict) -> str:
         # Optional per-call timeout (default self.timeout, hard ceiling 600s) so slow builds don't
@@ -1076,6 +1212,11 @@ class LocalToolHost:
         code, out = self.sandbox.run(args["command"], cwd=self.root(), timeout=t)
         self._grant_shell_paths(args.get("command", ""))  # I2 reach=action: dirs the shell touched
         out = out.strip()
+        if code == SANDBOX_TIMEOUT:
+            return ToolText(
+                f"Exit code 124\n{self._page_out(out, label='command output') or '(no output)'}",
+                status="indeterminate",
+            )
         if code != 0:
             return ToolText(f"Exit code {code}\n{self._page_out(out, label='command output') or '(no output)'}", ok=False)
         return self._page_out(out, label="command output") if out else "(command produced no output)"
@@ -1113,7 +1254,10 @@ class LocalToolHost:
         return self.procs.wait(args["handle"], max(0.05, min(t, 600.0)))
 
     def _t_proc_kill(self, args: dict) -> str:
-        return self.procs.kill(args["handle"])
+        try:
+            return self.procs.kill(args["handle"])
+        except ProcessGroupTerminationError as exc:
+            return ToolText(f"Error: INDETERMINATE process teardown: {exc}", status="indeterminate")
 
     # --- interactive PTY sessions (terminal) ---
     def _t_terminal_open(self, args: dict) -> str:
@@ -1145,7 +1289,10 @@ class LocalToolHost:
         return self.terminals.wait(name, args["until"], timeout=max(0.1, min(t, 600.0)))
 
     def _t_terminal_close(self, args: dict) -> str:
-        return self.terminals.close(args.get("session") or "main")
+        try:
+            return self.terminals.close(args.get("session") or "main")
+        except ProcessGroupTerminationError as exc:
+            return ToolText(f"Error: INDETERMINATE terminal teardown: {exc}", status="indeterminate")
 
     # --- world model (durable agent scratchpad; state lives in the Slice, folded by slice_sink) ---
     def _t_world_set(self, args: dict) -> str:
@@ -1161,6 +1308,12 @@ class LocalToolHost:
     def _t_world_clear(self, args: dict) -> str:
         k = (args.get("key") or "").strip()
         return f"WORLD MODEL: cleared {repr(k) if k else '(all keys)'}."
+
+    def _t_reconcile_execution(self, args: dict) -> str:
+        resolution = " ".join(str(args.get("resolution") or "").split())
+        if not resolution:
+            return ToolText("Error: reconcile_execution requires an observed resolution.", ok=False)
+        return f"INDETERMINATE EXECUTION reconciled from live observation: {resolution}"
 
     # --- standing requirements (the durable contract; state lives in the Slice, folded by slice_sink) ---
     def _t_require(self, args: dict) -> str:
@@ -1180,6 +1333,13 @@ class LocalToolHost:
         if not t:
             return ToolText("Error: drop_requirement needs the requirement 'text'.", ok=False)
         return f"REQUIREMENT dropped: {t}."
+
+    def _t_supersede_requirement(self, args: dict) -> str:
+        old = " ".join((args.get("old_text") or "").split())
+        new = " ".join((args.get("new_text") or "").split())
+        if not old or not new:
+            return ToolText("Error: supersede_requirement needs non-empty old_text and new_text.", ok=False)
+        return f"REQUIREMENT supersession requested: {old} → {new}."
 
     def _t_update_plan(self, args: dict) -> str:
         # The STATE lives in the slice's PLAN tier (folded by slice_sink from this event); the handler
@@ -1212,6 +1372,13 @@ class LocalToolHost:
             cmd = f"{shlex.quote(self.sandbox.python_cmd)} {shlex.quote(os.path.basename(path))}"
             code_n, out = self.sandbox.run(cmd, cwd=root, timeout=self.timeout)
             out = out.strip()
+            # 124 is reserved by the in-script run() helper after it reaps a timed-out process group.
+            # Like an outer sandbox timeout, deliberate detachment cannot be disproved.
+            if code_n in (SANDBOX_TIMEOUT, 124):
+                return ToolText(
+                    f"Exit code 124\n{self._page_out(out, label='execute_code output') or '(no output)'}",
+                    status="indeterminate",
+                )
             if code_n != 0:
                 return ToolText(f"Exit code {code_n}\n{self._page_out(out, label='execute_code output') or '(no output)'}", ok=False)
             return self._page_out(out, label="execute_code output") if out else "(execute_code produced no output)"

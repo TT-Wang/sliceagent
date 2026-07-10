@@ -60,6 +60,7 @@ def _mcp_handler(server, tool, page_out):
     host page_out (eval/headless), returns the raw text (already OOM-capped by _result_to_text)."""
     def _handle(args):
         out = server.call(tool, args)
+        status = getattr(out, "status", None)
         ok = getattr(out, "ok", True)   # capture BEFORE page_out — str.translate() (inside page_out's
         # control-char strip) always returns a plain str, silently dropping the ToolText subclass and
         # its .ok flag even on the success path. Re-wrapping with the captured `ok` below (not just on
@@ -71,7 +72,7 @@ def _mcp_handler(server, tool, page_out):
                 out = page_out(out, label=f"mcp-{tool}")
             except Exception:  # noqa: BLE001 — paging must never fail the tool call
                 pass
-        return ToolText(str(out), ok=ok)
+        return ToolText(str(out), status=status) if status is not None else ToolText(str(out), ok=ok)
     return _handle
 
 
@@ -188,7 +189,14 @@ class McpServer:
         try:
             return _result_to_text(self.runtime.submit(_do(), timeout))
         except Exception as e:  # noqa: BLE001
-            return ToolText(f"Error: MCP call {self.name}.{tool} failed: {e}", ok=False)
+            # Once the request has crossed into the long-lived server worker, cancelling this waiter does
+            # not prove that the remote operation stopped. Report honest uncertainty so the execution
+            # kernel blocks dependent barriers and refuses a clean seal.
+            return ToolText(
+                f"Error: MCP call {self.name}.{tool} outcome indeterminate after transport/timeout "
+                f"failure: {type(e).__name__}: {e}",
+                status="indeterminate",
+            )
 
     def close(self):
         try:

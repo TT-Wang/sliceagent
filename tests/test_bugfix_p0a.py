@@ -36,14 +36,14 @@ def record_action_uses_authoritative_failing_flag():  # #2
 
 
 @check
-def seal_bounds_findings_carry_and_clears_pre_defs():  # #1 + #15
+def seal_keeps_task_elastic_findings_and_clears_stale_pre_defs():  # #1 + #15
     s = Slice(); s.reset("x")
     for i in range(MAX_FINDINGS + 12):
         record_note(s, f"fact number {i} established", source="observed")
     assert len(s.findings) > MAX_FINDINGS, "within a loop, findings are NOT cut (carry whole)"
     s.pre_defs = {"a.py": {"foo"}}
     s.seal()
-    assert len(s.findings) == MAX_FINDINGS, "seal bounds the cross-loop carry to MAX_FINDINGS"
+    assert len(s.findings) == MAX_FINDINGS + 12, "seal must not silently discard active evidence"
     assert all(k in set(s.findings) for k in s.finding_source), "finding_source pruned to live findings"
     assert s.pre_defs == {}, "seal clears transient pre_defs"
 

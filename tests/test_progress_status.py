@@ -27,7 +27,10 @@ def check(fn):
 
 
 def _sink(force=True):
-    return RichSink(Console(file=io.StringIO(), force_terminal=force, width=100), {})
+    # Pin both dimensions and a non-dumb TERM: Rich's dumb-terminal fallback otherwise ignores an explicit
+    # width and disables periodic Live refresh in headless/CI environments.
+    return RichSink(Console(file=io.StringIO(), force_terminal=force, width=100, height=25,
+                            _environ={"TERM": "xterm"}), {})
 
 
 @check
@@ -36,9 +39,14 @@ def live_status_ticks_and_a_text_body_would_freeze():
     # thread; a static Text body would render once (frozen). Guards the freeze-trap for future edits.
     s = _sink(); s._turn_t0 = s._action_t0 = time.monotonic(); s._step = 4; s._label = "⚡ run npm test"
     calls = {"n": 0}
-    body = _LiveStatus(s)
-    real = body.__rich__
-    body.__rich__ = lambda: (calls.__setitem__("n", calls["n"] + 1) or real())
+    class CountingStatus(_LiveStatus):
+        # Python resolves special methods on the type, so assigning ``body.__rich__`` on one instance does
+        # not intercept Rich's rendering protocol. A tiny subclass measures the real dispatch path.
+        def __rich__(self):
+            calls["n"] += 1
+            return super().__rich__()
+
+    body = CountingStatus(s)
     lv = Live(body, console=s.c, refresh_per_second=12, transient=True); lv.start()
     time.sleep(0.3); lv.stop()
     assert calls["n"] > 1, f"status body must re-render each frame (ticks), got {calls['n']}"

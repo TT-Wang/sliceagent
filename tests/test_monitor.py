@@ -9,7 +9,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.events import (  # noqa: E402
-    AssistantText, SliceBuilt, StepEnd, ToolResult, TurnEnd, TurnInterrupted)
+    AssistantText, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult, TurnEnd, TurnInterrupted)
 from sliceagent.monitor import SliceMonitor, serve  # noqa: E402
 
 CHECKS = []
@@ -29,6 +29,25 @@ def captures_full_messages():
     s = m.snapshot()["steps"][0]
     assert s["system"] == "SYS" and s["user"] == "USER-SLICE"
     assert s["turn"] == 1 and s["step"] == 1 and s["i"] == 0
+
+
+@check
+def physical_attempts_do_not_create_fake_monitor_steps():
+    m = SliceMonitor()
+    m.sink(sb("SYS", "INITIAL-SLICE"))
+    first = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "FULL"}]
+    second = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "LOCATOR"}]
+    m.sink(ModelCallPrepared(1, 1, first, "roomy", "compatibility-unknown"))
+    m.sink(ModelCallPrepared(1, 2, second, "critical", "compatibility-unknown"))
+    first[1]["content"] = "MUTATED-AFTER-DISPATCH"
+
+    snap = m.snapshot()
+    assert len(snap["steps"]) == 1 and snap["steps_total"] == 1
+    step = snap["steps"][0]
+    assert step["user"] == "INITIAL-SLICE", "attempt inspection must not replace the lifecycle slice"
+    assert [(call["step"], call["attempt"]) for call in step["model_calls"]] == [(1, 1), (1, 2)]
+    assert step["model_calls"][0]["messages"][1]["content"] == "FULL"
+    assert step["model_calls"][1]["messages"] == second
 
 
 @check

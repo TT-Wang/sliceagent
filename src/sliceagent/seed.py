@@ -17,6 +17,7 @@ import os
 import re
 import sys
 
+from .context import SeedPlan
 from .pagetable import PageTable
 from .pfc import Slice, _active
 from .regions import (
@@ -27,11 +28,13 @@ from .regions import (
     MAX_FINDINGS,
     REGION_LINES,
     ROSTER_MANIFEST_K,
+    build_context_blocks,
     render_cache_manifest,
     render_roster,
     render_current_request,
     render_focus,
     render_now,
+    render_context_selection,
     render_regions,
     render_threads,
 )
@@ -220,7 +223,17 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
     tail trails). The per-build caps (window / max_findings) and the pre-rendered passthroughs
     (artifacts / discovery / memory / threads) ride in via the ctx dict. SUBDIRECTORY CONTEXT is NOT a
     region here — it's framed by the caller into the NOW footer (make_build_slice → render_now)."""
-    ctx = {
+    return render_regions(_slice_context(
+        s, artifacts, discovery, memory, threads, worktree, repo_map, cache_manifest, focus, roster,
+        max_findings=max_findings,
+    ))
+
+
+def _slice_context(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
+                   worktree: str = "", repo_map: str = "", cache_manifest: str = "",
+                   focus: str = "", roster: str = "", *, max_findings: int = MAX_FINDINGS) -> dict:
+    """Build the single renderer context consumed by both legacy rendering and the elastic seed plan."""
+    return {
         "s": s,
         "artifacts": artifacts,
         "discovery": discovery,
@@ -233,7 +246,6 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
         "roster": roster,
         "max_findings": max_findings,
     }
-    return render_regions(ctx)
 
 
 def _attach_images(user_text: str, host):
@@ -275,10 +287,10 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         f"\n\n# PROJECT ROOT & BOUNDARY\nYou start in: {cwd} — reference files here by their RELATIVE path "
         "(e.g. 'pkg/mod.py', 'test_x.py'); run_command already starts here.\n"
         "Your file tools are confined to your authorized directories — this is the BOUNDARY. To act outside "
-        "it, use run_command/execute_code (the shell is unconfined). When the user asks you to switch "
-        "workspace / cd / open a different project, CALL change_workspace(path) — it re-roots your file tools, "
-        "run_command cwd, repo map and git to that dir (the user can also type `/cwd <path>` themselves). Do "
-        "NOT claim you switched unless change_workspace actually succeeded. You can also work on any file "
+        "it, use run_command/execute_code (the shell is unconfined). Workspace identity is a host boundary: "
+        "it is fixed for this SliceAgent process, so do not claim you changed it. To work from a different "
+        "workspace, ask the user to exit and relaunch SliceAgent from that directory. "
+        "You can work on any file "
         "inside your authorized dirs by its path. If you move into another authorized project it appears under "
         "CURRENT PROJECT in the context, and bare relative paths resolve THERE — not pinned to the start dir."
     ) if cwd else ""
@@ -424,7 +436,11 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     def build() -> list[dict]:
         s = _active(state)                                             # PFC: resolve the active slice
         swap.prefetch(s)   # SENSORY CORTEX: refresh change-set deps from the code graph, BEFORE any eviction
-        goal = s.goal or task                                          # PFC: carried goal
+        # CURRENT REQUEST and the topic/task label are distinct. The typed intent value is the sole
+        # rendering authority; `task` is a compatibility fallback for callers constructing an old/empty
+        # slice. This matters on resume: the parked topic keeps its goal, but the new resume message is what
+        # the user is asking for RIGHT NOW.
+        goal = getattr(getattr(s, "intent", None), "current_request", "") or task
         if goal not in lessons_memo:
             # NEOCORTEX through the ONE read seam (memory-lessons backend) — no sibling recall.
             # R1: pass the files in play at topic-recall time so memem bonuses lessons tagged with them.
@@ -469,21 +485,23 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         if hasattr(tools, "focus") and hasattr(tools, "root"):
             _focus_path, _extra_roots = tools.focus()   # PFC: carried ToolHost state (set by change_workspace)
             focus_text = render_focus(_focus_path, _extra_roots, home=os.path.expanduser("~"), workspace=tools.root())
-        body = render_slice(s, artifacts, discovery, lessons_memo[goal], threads,
-                            worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix;
-                            roster=roster_manifest,                     # subdir hints ride the NOW footer (nowblock) below
-                            max_findings=_NO_CAP)
+        ctx = _slice_context(
+            s, artifacts, discovery, lessons_memo[goal], threads,
+            worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
+            roster=roster_manifest, max_findings=_NO_CAP,
+        )
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
         # the two copies never diverge — and the intent-aware NOW footer is the OUTERMOST tail, so the final
         # instruction reads as an instruction, not as fenced context. (Primacy+recency U-curve / sandwich.)
         reqblock = render_current_request(goal)
         nowblock = render_now(render_subdir_hints(hint_text))
-        user = (f"{reqblock}<context>\n{body}\n</context>\n\n"
-                f"{reqblock}{nowblock}")
-        # IMAGE INPUT: text-only turns return a plain STRING (the moat path, unchanged). Only when the user
-        # @-attached image(s) for a vision-capable model does the content become a multimodal parts list.
-        return [{"role": "system", "content": _system()},
-                {"role": "user", "content": _attach_images(user, tools)}]
+        attached = _attach_images("", tools)
+        media_parts = attached[1:] if isinstance(attached, list) else ()
+        return SeedPlan(
+            system=_system(), blocks=build_context_blocks(ctx),
+            render_blocks=render_context_selection,
+            request_block=reqblock, now_block=nowblock, media_parts=media_parts,
+        )
 
     return build

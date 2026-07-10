@@ -28,7 +28,8 @@ SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user"})
 # other writers); an allowlist with none of them is read-only (parallelizes as a swarm).
 WRITE_TOOLS = frozenset({
     "edit_file", "append_to_file", "str_replace", "run_command", "execute_code",
-    "world_set", "world_clear", "require", "drop_requirement", "requirement_done", "update_plan",
+    "world_set", "world_clear", "require", "drop_requirement", "requirement_done",
+    "supersede_requirement", "update_plan", "reconcile_execution",
     "terminal_open", "terminal_send", "terminal_read", "terminal_wait", "terminal_close",
     "proc_start", "proc_poll", "proc_tail", "proc_wait", "proc_kill",
     "spawn_subagent", "spawn_explore", "spawn_agent",

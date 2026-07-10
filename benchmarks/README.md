@@ -16,7 +16,9 @@ Each folder has: `meta.json` (turns, step cap, notes), `prompts.json` (the order
 
 ## Run it
 
-Needs `pip install "sliceagent[tui]"` and an LLM configured (`sliceagent init`, or export `LLM_API_KEY` + `AGENT_MODEL`).
+Needs `pip install "sliceagent[tui]"` and an LLM configured (`sliceagent init`, or export `LLM_API_KEY` +
+`AGENT_MODEL`). The runner uses the same env-over-config provider resolution as the app, preserves one stable
+task objective across turns, and seals turn-local runtime state after every prompt.
 
 ```bash
 python benchmarks/run.py                          # all three

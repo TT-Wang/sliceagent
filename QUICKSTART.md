@@ -1,6 +1,7 @@
 # Quickstart
 
-Get from zero to your first completed task in ~5 minutes.
+Get from zero to your first completed task in ~5 minutes. For the architecture behind the CLI, see the
+canonical [Core Design](CORE-DESIGN.md): **history-bounded, task-elastic, and recoverable by construction**.
 
 ## 1. Install
 
@@ -64,10 +65,27 @@ You get an inline prompt with a pinned input box. Type a task — e.g. *"add a `
 test for it"* — and watch it work. The conversation stays in your normal terminal scrollback, so
 **select + copy/paste and scroll work natively** on any terminal (including macOS Terminal.app).
 
+The demo defaults to the narrow core: the parent can edit and run regular commands, while delegation creates
+a fresh, one-shot, read-only explorer. Advanced surfaces are explicit opt-ins:
+
+```bash
+export AGENT_ADVANCED_AGENTS=1   # writable and named specialists; nesting uses AGENT_SUBAGENT_DEPTH
+export AGENT_ADVANCED_TOOLS=1    # persistent processes and interactive terminal/PTY tools
+```
+
+The flags are independent; leave either unset to keep that surface out of the model's tool set. Delegation
+depth defaults to `1`; raise `AGENT_SUBAGENT_DEPTH` only if you intentionally want advanced agents to spawn
+children. Local checkpoints and immutable turn/subagent artifacts are always on and can be read through
+`artifacts/`. Semantic cross-session lessons are an optional derived layer; recovery does not depend on them.
+An uncertain timeout parks the task and gates further effects until the agent re-observes every affected
+live target and records reconciliation; unrelated reads cannot clear the gate, and opaque effects require
+live user confirmation.
+
 Useful keys & commands:
 
 - **Enter** sends · **Ctrl-J** inserts a newline · **Ctrl-C** aborts the current turn · **Ctrl-D** quits.
 - `/help` lists slash commands · `/plan` shows the agent's plan · `/threads` lists topics · `/exit` quits.
+- Start an unrelated task explicitly with `New task: ...`; the current task is parked for `/resume`.
 
 UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned box, streams above it) ·
 `off` (plain stdout, good for pipes/CI).
@@ -75,9 +93,12 @@ UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned bo
 ## 4. Reading the output
 
 The status bar reads `model · net · policy · Σ tokens · fresh`. The **fresh** number is the one to watch:
-it's the per-turn non-cached input cost, and sliceagent's whole design keeps it flat as a session grows.
+it's the per-turn non-cached input cost. With active task state held stable, it does not grow merely because
+the session is older; it can still expand when the task gains genuine constraints, files, or evidence.
 
 ## Troubleshooting
 
 Common snags: no API key (run `sliceagent init`), `rg` (ripgrep) not installed, or an MCP server that fails to
-start. `sliceagent config --list` shows every setting and its current value.
+start. For a model whose context window is not in the catalog, set `AGENT_CONTEXT_WINDOW` to its documented
+token limit to enable strict per-call capacity rejection; leaving it unset uses the explicit compatibility
+mode. `sliceagent config --list` shows every setting and its current value.

@@ -28,33 +28,23 @@ def s8_reserved_ns_blocks_sliceagent_private_dir():
         assert not _targets_reserved_ns({"path": p}), f"a normal repo path must NOT be blocked: {p!r}"
 
 
-# ---- S5: child tokens are charged to the parent budget, and the child seals its usage --------------------
+# ---- S5: one typed usage path; no second callback accountant --------------------------------------------
 
 @check
-def s5_budget_hook_charges_external_child_tokens():
+def s5_budget_hook_accounts_every_usage_record_through_one_method():
     from sliceagent.hooks import BudgetHook
     b = BudgetHook(1000)
     assert b.record_step_usage({"prompt_tokens": 100, "completion_tokens": 100}) is None   # 200, under cap
-    b.record_external(900)                                                                  # a child burned 900
-    # now at 1100 ≥ 1000 → the parent's NEXT own step must stop the turn
-    assert b.record_step_usage({"prompt_tokens": 1, "completion_tokens": 0}) == {"stop_turn": True}
+    assert b.record_step_usage({"prompt_tokens": 800, "completion_tokens": 100}) == {"stop_turn": True}
+    assert not hasattr(b, "record_external"), "child usage must not have a second accounting API"
 
 
 @check
-def s5_subagent_host_holds_and_propagates_budget_sink():
+def s5_subagent_host_has_no_parallel_budget_sink_state():
     from sliceagent.subagent import SubagentHost
-    calls = []
-    sink = lambda n: calls.append(n)   # noqa: E731 — a stable callable ref (list.append rebinds each access)
     host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
-                        max_depth=1, depth=0, budget_sink=sink)
-    assert host.budget_sink is sink, "budget_sink must be stored for child accounting"
-    host.budget_sink(42)
-    assert calls == [42], "the sink must actually charge tokens"
-    # a nested child host built inside run() must carry the SAME sink so nested cost also bills up — assert the
-    # constructor path preserves it (mirrors the SubagentHost(...) nested build in run()).
-    nested = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
-                          max_depth=1, depth=1, budget_sink=host.budget_sink)
-    assert nested.budget_sink is host.budget_sink
+                        max_depth=1, depth=0)
+    assert "budget_sink" not in vars(host)
 
 
 # ---- S12: durable subagent/roster state is 0600 (files) / 0700 (dirs), not umask 0644 -------------------

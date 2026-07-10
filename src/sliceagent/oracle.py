@@ -4,9 +4,27 @@ The loop can gate "done" on this so a retrieval miss can't masquerade as complet
 """
 from __future__ import annotations
 
-import subprocess
+import os
+from dataclasses import dataclass
 
-from .platform_compat import sh as _sh
+from .execution import ToolStatus
+from .sandbox import SANDBOX_TIMEOUT, LocalSandbox
+
+
+@dataclass(frozen=True)
+class OracleResult:
+    """Typed completion-gate result with tuple-unpacking compatibility."""
+
+    status: ToolStatus
+    output: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status is ToolStatus.SUCCEEDED
+
+    def __iter__(self):
+        yield self.ok
+        yield self.output
 
 
 class CommandOracle:
@@ -16,23 +34,19 @@ class CommandOracle:
         self.cmd = cmd
         self.timeout = timeout
 
-    def verify(self) -> tuple[bool, str]:
-        try:
-            r = subprocess.run(**_sh(self.cmd), capture_output=True, text=True, timeout=self.timeout)
-        except subprocess.TimeoutExpired as e:
-            # A timed-out verification is a FAILURE, not a thrown exception — otherwise it propagates out
-            # of the oracle and silently BYPASSES the done-gate (a hung test would mark the task complete).
-            # On timeout, .stdout/.stderr may each be bytes OR str OR None (version/stream dependent) —
-            # decode EACH before concat, else a bytes+str mix (e.g. stdout bytes, stderr None→"") raises
-            # TypeError and the crash bypasses the done-gate. Coerce per-operand.
-            def _s(x):
-                return x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
-            out = _s(e.stdout) + _s(e.stderr)
-            return False, (out + f"\n[verification timed out after {self.timeout}s]").strip()
-        out = ((r.stdout or "") + (r.stderr or "")).strip()
-        return r.returncode == 0, out
+    def verify(self) -> OracleResult:
+        # Verification inherits the caller environment for compatibility, but shares the same owned
+        # process-group lifecycle as command tools. A timeout is still conservatively indeterminate:
+        # ordinary descendants are reaped, yet a deliberately detached process cannot be disproved.
+        code, output = LocalSandbox(scrub_secrets=False).run(
+            self.cmd, cwd=os.getcwd(), timeout=self.timeout,
+        )
+        output = output.strip()
+        if code == SANDBOX_TIMEOUT:
+            return OracleResult(ToolStatus.INDETERMINATE, output)
+        return OracleResult(ToolStatus.SUCCEEDED if code == 0 else ToolStatus.FAILED, output)
 
 
 class NullOracle:
-    def verify(self) -> tuple[bool, str]:
-        return True, ""
+    def verify(self) -> OracleResult:
+        return OracleResult(ToolStatus.SUCCEEDED)

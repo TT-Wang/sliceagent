@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.events import AssistantText, ToolResult  # noqa: E402
 from sliceagent.neocortex import is_self_inflicted, pitfall_signature  # noqa: E402
-from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.pfc import Slice, record_user, slice_sink  # noqa: E402
 from sliceagent.seed import render_slice  # noqa: E402
 from sliceagent.prompt import SYSTEM_PROMPT  # noqa: E402
 from sliceagent.regions import is_done_claim, record_note, render_findings  # noqa: E402
@@ -36,17 +36,28 @@ def system_prompt_forbids_narration_in_replies():
 # --- findings come ONLY from notes on real tool calls (NOT assistant narration) ----------
 
 @check
-def assistant_text_folded_as_unverified_claim():
-    # root-cause revision of F1/C3: assistant reasoning IS carried forward (anti-re-derivation),
-    # but as an UNVERIFIED claim — never an established fact — and pure narration is still dropped.
+def assistant_text_is_archived_for_continuity_not_promoted_to_evidence():
+    # Generic answer prose is not typed evidence. It remains in the bounded conversation ring and sealed
+    # artifact, while load-bearing conclusions must come through an observed/tool-note path.
     s = Slice(); s.reset("build it")
+    record_user(s, "build it")
     sink = slice_sink(s)
-    sink(AssistantText("The aggregator is built and its tests pass"))  # substantive → folded as claim
-    sink(AssistantText("Let me run it now"))                            # pure narration → dropped
-    assert s.findings == ["The aggregator is built and its tests pass"], s.findings
-    assert s.finding_source[s.findings[0]] == "claim", s.finding_source
-    rendered = render_findings(s.findings, s.finding_source)
-    assert "UNVERIFIED" in rendered and "do not re-derive" not in rendered.lower(), rendered
+    answer = "The aggregator is built and its tests pass"
+    sink(AssistantText(answer))
+    assert s.findings == [] and s.conversation[-1]["assistant"] == answer
+    assert render_findings(s.findings, s.finding_source) == ""
+
+
+@check
+def distinct_assistant_status_turns_do_not_form_a_shadow_transcript():
+    s = Slice(); s.reset("long task")
+    sink = slice_sink(s)
+    for index in range(25):
+        record_user(s, f"continue {index}")
+        sink(AssistantText(f"status update {index}: still working"))
+        s.seal()
+    assert len(s.conversation) == 4
+    assert s.findings == [] and s.finding_source == {}
 
 
 @check

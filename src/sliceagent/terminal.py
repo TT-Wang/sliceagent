@@ -19,7 +19,6 @@ import codecs
 import os
 import re
 import select
-import signal
 import subprocess
 import time
 
@@ -30,19 +29,22 @@ except ImportError:  # Windows
     fcntl = pty = None  # type: ignore[assignment]
 
 from .sandbox import _scrub_env
+from .platform_compat import (ProcessGroupTerminationError, capture_pgid,
+                              process_group_alive, terminate_process_group)
 
 _READ_CHUNK = 65536
 _BUF_CAP = 200_000  # keep the tail of a chatty session bounded
 
 
 class _Session:
-    __slots__ = ("name", "cmd", "master", "popen", "buf", "_decoder")
+    __slots__ = ("name", "cmd", "master", "popen", "pgid", "buf", "_decoder")
 
-    def __init__(self, name, cmd, master, popen):
+    def __init__(self, name, cmd, master, popen, pgid):
         self.name = name
         self.cmd = cmd
         self.master = master
         self.popen = popen
+        self.pgid = pgid
         self.buf = ""  # output accumulated since the last read/wait returned it
         # STATEFUL utf-8 decoder: a multibyte char split across two os.read() boundaries must not decode to
         # U+FFFD on both halves — the decoder holds the partial sequence until its continuation bytes arrive.
@@ -52,8 +54,11 @@ class _Session:
 class SessionManager:
     """Registry of live interactive PTY sessions. Single-threaded (the agent loop is)."""
 
-    def __init__(self, *, scrub_secrets: bool = True):
+    def __init__(self, *, scrub_secrets: bool = True, term_grace: float = 3.0,
+                 kill_grace: float = 2.0):
         self.scrub_secrets = scrub_secrets
+        self.term_grace = max(0.0, float(term_grace))
+        self.kill_grace = max(0.0, float(kill_grace))
         self._s: dict[str, _Session] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────────────
@@ -75,17 +80,21 @@ class SessionManager:
         except BaseException:
             os.close(master)                      # #19: Popen failed — don't leak the master fd too
             raise
+        pgid = capture_pgid(popen)                 # capture while the leader is alive; descendants may outlive it
         try:   # a fcntl failure AFTER spawn must tear down both the master fd AND the orphaned child (#19)
             flags = fcntl.fcntl(master, fcntl.F_GETFL)
             fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        except BaseException:
-            try:
-                os.killpg(os.getpgid(popen.pid), signal.SIGKILL)
-            except Exception:  # noqa: BLE001
-                pass
+        except BaseException as error:
+            extinct = terminate_process_group(
+                pgid, popen, term_timeout=self.term_grace, kill_timeout=self.kill_grace,
+            )
             os.close(master)
+            if not extinct:
+                raise ProcessGroupTerminationError(
+                    "PTY setup failed and its process-group extinction could not be proven"
+                ) from error
             raise
-        self._s[name] = _Session(name, command or "(shell)", master, popen)
+        self._s[name] = _Session(name, command or "(shell)", master, popen, pgid)
         return name
 
     def _spawn_pty(self, command, cwd, env, slave):
@@ -176,25 +185,15 @@ class SessionManager:
 
     def close(self, name: str) -> str:
         sess = self._get(name)
-        if sess.popen.poll() is None:
-            try:
-                os.killpg(os.getpgid(sess.popen.pid), signal.SIGTERM)
-            except OSError:
-                try:
-                    sess.popen.terminate()
-                except OSError:
-                    pass
-            try:
-                sess.popen.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(sess.popen.pid), signal.SIGKILL)
-                except OSError:
-                    pass
-                try:
-                    sess.popen.wait(timeout=2)   # reap the SIGKILLed child so it isn't left a zombie at fd close
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
+        if not terminate_process_group(
+                sess.pgid, sess.popen,
+                term_timeout=self.term_grace, kill_timeout=self.kill_grace):
+            # Keep the session handle/master open so reconciliation can retry or inspect it. Removing the
+            # entry here would falsely turn an unproved live descendant into a successful close.
+            raise ProcessGroupTerminationError(
+                f"could not prove terminal process group {name!r} is extinct after TERM/KILL; "
+                "descendants may still be running"
+            )
         try:
             os.close(sess.master)
         except OSError:
@@ -244,4 +243,11 @@ class SessionManager:
     @staticmethod
     def _status(sess: _Session) -> str:
         rc = sess.popen.poll()
-        return "alive" if rc is None else f"exited {rc}"
+        if rc is None:
+            return "alive"
+        group_alive = process_group_alive(sess.pgid, sess.popen)
+        if group_alive is False:
+            return f"exited {rc}"
+        if group_alive is True:
+            return f"leader exited {rc}; descendants alive"
+        return f"leader exited {rc}; descendant state unknown"

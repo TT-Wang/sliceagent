@@ -209,7 +209,9 @@ def spawn_validates_grants_against_existing_seals():
                                      "grants": ["subagents/sub-1.md", "auth-explorer.md"]})
     assert "[synth (explore) ok" in out, out
     art = mem.read_subagent_artifacts("s1")[-1]["artifact"]
-    assert art["brief"]["grants"] == ["subagents/auth-explorer.md", "subagents/sub-1.md"], art["brief"]
+    # Mutable aliases resolve ONCE at grant validation; the brief/refinement map stores only the immutable
+    # canonical job handle. Both requested paths named sub-1 here, so they dedupe to one dependency.
+    assert art["brief"]["grants"] == ["subagents/sub-1.md"], art["brief"]
 
 
 @check

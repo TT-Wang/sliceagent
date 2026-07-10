@@ -18,13 +18,18 @@ parent and child share one workspace and one sandbox.
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import posixpath
 import re
+import threading
 
 from .access import AllAccess, ReadAllAccess
 from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, SUBAGENT_EXCLUDED_TOOLS, AgentSpec  # named-agent registry
 from .events import AssistantText, ToolResult, ToolStarted
+from .execution import CHILD_TOKEN_BUDGET_ARG
+from .safety import redact_text
+from .subagent_contract import SubagentArtifact, SubagentBrief
 from .text_utils import one_line
 
 # INSTANCE identity — an optional short name the parent gives ONE delegation ("auth-explorer"). Distinct
@@ -60,6 +65,23 @@ _GRANTS_PARAM = {
     "description": ("optional: EXACT sealed-report handles this child may read as INPUT (e.g. "
                     "[\"subagents/sub-1.md\", \"subagents/auth-explorer.md\"]) — hand a sibling's full "
                     "report to the child without pasting it into the task."),
+}
+
+_SCOPE_PARAM = {
+    "type": "array", "items": {"type": "string"},
+    "description": "optional concrete areas/files/questions that are in scope for this delegation",
+}
+_EXCLUSIONS_PARAM = {
+    "type": "array", "items": {"type": "string"},
+    "description": "optional explicit exclusions; the child reports rather than crossing them",
+}
+_REPORT_SHAPE_PARAM = {
+    "type": "string",
+    "description": "optional exact shape/content required from the child's sealed report",
+}
+_DRIFT_POLICY_PARAM = {
+    "type": "string", "enum": ["report", "fail", "ignore"],
+    "description": "how the parent should treat later drift in files fingerprinted by the child",
 }
 
 
@@ -100,6 +122,17 @@ EXPLORER_READ_BUDGET = 64
 # the parent). A per-PROFILE subagent reasoning setting, applied via a per-child llm VIEW so the
 # shared parent llm is never mutated and parallel siblings never race on it.
 EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lower()
+
+
+def _redact_archive_value(value):
+    """Redact both values and structural keys before canonical child persistence."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {redact_text(str(key)): _redact_archive_value(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_archive_value(child) for child in value]
+    return value
 
 
 def _profile_llm(llm, reasoning):
@@ -180,8 +213,8 @@ def _targets_reserved_ns(args) -> bool:
     # `.sliceagent/` is the host's PRIVATE dir — paged-out blobs (.sliceagent/blobs/, the L1→L2 store for big
     # tool results), config, agents. A child shares the base host, so without blocking it a child could
     # read_file/list a parent-created blob = an undocumented parent→child output channel (external review S8).
-    return (p in ("subagents", "history", "roster", ".sliceagent")
-            or p.startswith(("subagents/", "history/", "roster/", ".sliceagent/")))
+    return (p in ("artifacts", "subagents", "history", "roster", ".sliceagent")
+            or p.startswith(("artifacts/", "subagents/", "history/", "roster/", ".sliceagent/")))
 
 
 # NO hire cap — a dormant specialist is just files on disk and a wake reads only its own files (flat in
@@ -238,7 +271,10 @@ def _nested_sink(notify, depth: int):
 def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  max_steps: int = 20, depth: int = 1, notify=None,
                  read_only: bool = False, spec: AgentSpec | None = None, session_id: str = "",
-                 name: str = "", grants: tuple = (), identity_block: str = "", budget_sink=None) -> str:
+                 name: str = "", grants: tuple = (), identity_block: str = "",
+                 brief: SubagentBrief | None = None, workspace_id: str = "", task_id: str = "",
+                 parent_id: str = "", artifact_store=None, artifact_id: str = "",
+                 artifact_ref_sink=None, token_budget: int | None = None) -> str:
     """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
     The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
     context guarantee); only the summary crosses back.
@@ -248,21 +284,60 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     as an EXPLORER — its tool host exposes only the read-only allowlist, so it cannot mutate the workspace."""
     from .events import make_dispatcher
     from .guardrails import ToolCallGuardrailConfig
-    from .hooks import CompositeHooks, GuardrailHook, PermissionHook
+    from .hooks import BudgetHook, CompositeHooks, GuardrailHook, PermissionHook
     from .loop import run_turn
     from .pfc import Slice, slice_sink
     from .seed import make_build_slice
+
+    child_journal = None
+    if artifact_store is not None and artifact_id:
+        from .persistence import PendingTurnJournal
+        child_journal = PendingTurnJournal.begin(
+            artifact_store.root, artifact_id=artifact_id,
+            workspace_id=workspace_id or "workspace-unknown",
+            session_id=session_id or "session-ephemeral", task_id=task_id or "task-unknown",
+            base_generation=0, user_request=redact_text(task),
+        )
+
+    def journal_sink(event):
+        if child_journal is None:
+            return
+        def safe(value):
+            if isinstance(value, str):
+                return redact_text(value)
+            if isinstance(value, dict):
+                return {redact_text(str(key)): safe(child) for key, child in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [safe(child) for child in value]
+            return value
+
+        if isinstance(event, ToolStarted) and event.invocation is not None:
+            child_journal.record_invocation(
+                event.invocation.id, name=event.name, args=safe(dict(event.args or {})),
+            )
+        elif isinstance(event, ToolResult) and event.outcome is not None:
+            outcome = event.outcome
+            child_journal.record_invocation(
+                outcome.invocation.id, name=outcome.invocation.name,
+                args=safe(dict(outcome.invocation.args)),
+            )
+            child_journal.record_outcome(outcome.invocation.id, safe({
+                "status": outcome.status.value, "text": outcome.text,
+                "effects": [{"id": effect.id, "kind": effect.kind,
+                             "payload": dict(effect.payload)} for effect in outcome.effects],
+            }))
 
     if spec is None:
         spec = BUILTIN_AGENTS["explorer" if read_only else "general"]
     read_only = spec.read_only   # the kind decides; everything below keys off the SPEC
 
-    # A grant the child can't SEE is a grant it never uses (the visible-manifest lesson, applied down a
-    # level): granted input reports are advertised in the child's own task text with the exact call.
-    child_task = task
-    if grants:
-        child_task = task + "\n\nINPUT REPORTS — sealed sibling work you may (and should) read:\n" + \
-            "\n".join(f'- read_file("{g}")' for g in sorted(grants))
+    # The brief is the ONLY parent→child semantic channel. Direct legacy callers get the same objective
+    # and grants projected into the typed shape; SubagentHost supplies intent/scope/source provenance.
+    brief = brief or SubagentBrief.create(task, canonical_refs=grants)
+    if brief.objective != task:
+        raise ValueError("subagent task and typed brief objective disagree")
+    grants = tuple(brief.canonical_refs)
+    child_task = brief.render()
 
     child_state = Slice()
     child_state.reset(child_task)
@@ -289,12 +364,16 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
 
     cap = _CaptureLast()
     trace = _TraceSink()
-    sinks = [slice_sink(child_state), cap, trace]
+    reducer = slice_sink(child_state)
+    sinks = [cap, trace]
     if notify is not None:
         sinks.append(_nested_sink(notify, depth))
-    child_dispatch = make_dispatcher(*sinks)
+    required = (journal_sink, reducer) if child_journal is not None else (reducer,)
+    child_dispatch = make_dispatcher(*sinks, required=required)
 
     _child_hooks = [PermissionHook(policy)] if policy is not None else []
+    if token_budget is not None:
+        _child_hooks.append(BudgetHook(max(0, int(token_budget))))
     # An EXPLORER does read-only investigation: a repeated read/list/grep is at most inefficient, never the
     # write-loop disaster the anti-loop HARD-BLOCK guards against — and max_steps already bounds it. So relax
     # the READ axes (no-progress / result-repeat) for explorers while KEEPING exact-failure (a repeated
@@ -304,16 +383,22 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     _child_hooks.append(GuardrailHook(_guard_cfg))
     hooks = CompositeHooks(*_child_hooks)
     result = run_turn(build_slice=build, llm=child_llm, tools=tools, dispatch=child_dispatch,
-                      hooks=hooks, max_steps=max_steps)
-    # S5: a child's tokens were invisible to the parent's budget — a fan-out of N children could blow the
-    # per-turn cap unseen. Charge the child's usage back to the parent budget so the parent turn stops once
-    # the TOTAL (parent + all children) crosses the ceiling. usage is also sealed into the artifact below.
+                      hooks=hooks, max_steps=max_steps, turn_id=artifact_id)
+    # Child usage is sealed into the artifact and returned as a typed ToolEffect. The parent loop consumes
+    # that effect exactly once into TurnOutcome, StepEnd metrics, and the same task budget.
     _child_usage = dict(getattr(result, "usage", None) or {})
-    if budget_sink is not None:
-        try:
-            budget_sink(int(_child_usage.get("prompt_tokens", 0)) + int(_child_usage.get("completion_tokens", 0)))
-        except Exception:  # noqa: BLE001 — budget accounting must never crash a returned child result
-            pass
+
+    def child_result(text: str, *, ok: bool, outcome_status: str | None = None):
+        from .execution import ToolEffect, Usage
+        from .registry import ToolText
+        usage = Usage.from_value(_child_usage)
+        identity = artifact_id or ("ephemeral-" + hashlib.sha256(
+            f"{workspace_id}|{task_id}|{parent_id}|{depth}|{name}|{task}".encode("utf-8", "replace")
+        ).hexdigest()[:24])
+        return ToolText(
+            text, ok=ok, status=outcome_status,
+            effects=(ToolEffect(f"{identity}:model-usage", "model_usage", usage.as_dict()),),
+        )
 
     _af = list(child_state.active_files)   # BOUND the resident head: a child that read 100 files must not
     files = (", ".join(_af[:20]) + (f" +{len(_af) - 20} more" if len(_af) > 20 else "")) or "(none)"
@@ -337,40 +422,115 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     # W5': lift the optional trailing "LESSON: ..." reflection out of the report into a typed field
     # (the line stays in the report verbatim — the seal is honest; this is indexing, not editing).
     _lm = re.findall(r"^LESSON:\s*(.+)$", cap.text or "", re.MULTILINE)
-    artifact = {
-        "kind": spec.name, "name": name, "task": task, "brief": {"task": task, "grants": sorted(grants)},
-        "lesson": one_line(_lm[-1], 200) if _lm else "",
-        "status": status, "steps": result.steps, "usage": _child_usage,   # S5: child cost, sealed + billed up
-        "report": cap.text or "", "findings": list(child_state.findings),
-        "change_set": sorted(child_state.edited_files), "files": list(child_state.active_files),
-        "trace": trace.text(),   # W6': the action path, bounded — full-detail grounding for rehydration
-        "coverage": f"{len(child_state.active_files)} file(s) touched; stop={result.stop_reason}",
-        # refs = the sealed inputs this work was built ON (its granted reports) — the seal's refinement map
-        # back to its sources, so a synthesis is drillable to what it merged (invariant: every seal ships
-        # its refinement handle, in BOTH directions).
-        "refs": sorted(grants),
-    }
-    handle = memory.append_subagent_artifact(session_id, artifact) if (memory is not None and session_id) else ""
+    try:
+        workspace_root = tools.root() if hasattr(tools, "root") else os.getcwd()
+    except Exception:  # noqa: BLE001 — a missing root becomes visible uncertainty, not a lost child result
+        workspace_root = os.getcwd()
+    child_files = list(dict.fromkeys([*child_state.active_files, *sorted(child_state.edited_files)]))
+    evidence_refs = tuple(dict.fromkeys([
+        *grants, *(clause.source_artifact for clause in brief.intent_clauses if clause.source_artifact),
+    ]))
+    gaps = (() if success else (child_state.last_error or f"child stopped with {result.stop_reason}",))
+    uncertainty = (() if cap.text else ("child produced no final report text",))
+    typed_artifact = SubagentArtifact.create(
+        kind=spec.name, name=name, workspace_id=workspace_id or os.path.realpath(workspace_root),
+        session_id=session_id or "session-ephemeral", task_id=task_id or "task-unknown",
+        parent_id=parent_id, brief=brief, status=status,
+        coverage=f"{len(child_files)} file(s) examined or changed; stop={result.stop_reason}",
+        report=cap.text or "", findings=tuple(child_state.findings),
+        evidence_refs=evidence_refs, files=child_files, workspace_root=workspace_root,
+        change_set=tuple(sorted(child_state.edited_files)), gaps=gaps, uncertainty=uncertainty,
+        error=(child_state.last_error or ("" if success else str(result.stop_reason))),
+        steps=result.steps, usage=_child_usage,
+        trace=trace.text(),   # W6': locator-grade path; detailed payload stays outside parent context
+        lesson=one_line(_lm[-1], 200) if _lm else "",
+    )
+    artifact = typed_artifact.to_record()
+    core_handle, core_archive_error = "", ""
+    if artifact_store is not None and artifact_id:
+        try:
+            from datetime import datetime, timezone
+            from .persistence import Artifact
+            safe_artifact = _redact_archive_value(artifact)
+            core = Artifact(
+                id=artifact_id, kind="subagent", workspace_id=typed_artifact.workspace_id,
+                session_id=typed_artifact.session_id, task_id=typed_artifact.task_id,
+                parent_id=typed_artifact.parent_id,
+                timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                status=typed_artifact.status,
+                title=redact_text(typed_artifact.name or typed_artifact.brief.objective),
+                brief=_redact_archive_value(typed_artifact.brief.to_dict()),
+                summary=redact_text(one_line(typed_artifact.report, 300)),
+                structured_body=safe_artifact,
+                files=tuple(redact_text(path) for path in typed_artifact.files),
+                refs=tuple(redact_text(ref) for ref in typed_artifact.evidence_refs
+                           if not ref.startswith(("history/", "subagents/"))),
+                uncertainty=tuple(redact_text(item) for item in typed_artifact.uncertainty),
+                error=redact_text(typed_artifact.error),
+            )
+            artifact_store.put(core)
+            # Publish the downward parent dependency before closing the child journal or returning success.
+            # If this handoff fails, the child stays recoverable but is not accepted as parent state.
+            if artifact_ref_sink is not None:
+                artifact_ref_sink(core.id)
+            if child_journal is not None:
+                child_journal.mark_artifact_written(core)
+                child_journal.mark_sealed()
+                child_journal.cleanup()
+            core_handle = core.id
+        except Exception as exc:  # noqa: BLE001 — a missing canonical seal invalidates child acceptance
+            core_archive_error = f"{type(exc).__name__}: {exc}"
+    if artifact_store is not None and not core_handle:
+        why = core_archive_error or "canonical artifact identity was not allocated"
+        return child_result(
+            "Error: subagent result is indeterminate: its canonical local report could not be sealed "
+            f"({why}). No child finding was accepted; rerun or repair the local artifact store.",
+            ok=False, outcome_status="indeterminate")
+    handle, archive_error = "", ""
+    if memory is not None and session_id:
+        try:
+            handle = memory.append_subagent_artifact(session_id, artifact)
+        except Exception as exc:  # noqa: BLE001 — convert durable-seal failure into an honest tool result
+            archive_error = f"{type(exc).__name__}: {exc}"
+    durable_archive_required = bool(memory is not None and getattr(memory, "is_durable", False))
     if handle:   # W6': additive FTS5 mirror → search_history finds delegated work by CONTENT (never
-        memory.index_subagent_artifact(session_id, handle, artifact)   # written to the turn timeline)
-    if name and memory is not None:   # a STANDING specialist also accumulates the job in its durable career
-        memory.roster_append_job(name, artifact)   # (no-op for temps: roster_append_job needs a profile)
+        try:
+            memory.index_subagent_artifact(session_id, handle, artifact)   # derived index; artifact is authority
+        except Exception:  # noqa: BLE001 — a rebuildable search mirror cannot invalidate the durable seal
+            pass
+    if handle and name and memory is not None:   # career duplicates only a successfully sealed job
+        try:
+            memory.roster_append_job(name, artifact)   # extension view; canonical session artifact is authority
+        except Exception:  # noqa: BLE001 — roster indexing cannot invalidate an already durable child seal
+            pass
 
     head = f"[{label} {status} · {result.steps} steps · files: {files}]"
-    if handle:   # archived → bounded digest + recall handle (the refinable seal)
-        body = one_line(cap.text, 300) if cap.text else "(no summary produced)"
+    durable_handle = core_handle or handle
+    if durable_archive_required and not durable_handle:
+        why = core_archive_error or archive_error or (
+            "missing session id" if not session_id else "artifact store returned no handle")
+        return child_result(
+            "Error: subagent result is indeterminate: its durable report could not be sealed "
+            f"({why}). No child finding was accepted; rerun or repair the local artifact store.",
+            ok=False, outcome_status="indeterminate")
+    if durable_handle:   # archived → bounded digest + recall handle (the refinable seal)
+        body = one_line(redact_text(cap.text), 300) if cap.text else "(no summary produced)"
         # ALWAYS hand back the CANONICAL immutable id (sub-N.md), never the subagents/<name>.md alias: the
         # alias retargets to the LATEST job for that name, so a later same-name job would silently make an
         # earlier tool result / grant open a DIFFERENT report (external review S11). The <name>.md alias
         # stays resolvable in SubagentFS as a convenience; the sealed handle the parent stores is immutable.
-        summary = f'{head} {body} → full report: read_file("subagents/{handle}.md")'
+        target = f"artifacts/{core_handle}.md" if core_handle else f"subagents/{handle}.md"
+        summary = f'{head} {body} → full report: read_file("{target}")'
     else:        # no durable archive (eval/headless) → inline, back-compat with the pre-artifact behavior
         summary = head + (" " + one_line(cap.text, 400) if cap.text else "")
     if not success:
         if child_state.last_error:
             summary += " | unresolved: " + one_line(child_state.last_error, 160)
-        return "Error: subagent did not finish cleanly: " + summary  # surfaces in parent's error tier
-    return summary
+        return child_result(
+            "Error: subagent did not finish cleanly: " + summary, ok=False,
+            outcome_status="indeterminate" if result.stop_reason == "indeterminate" else None,
+        )
+    return child_result(summary, ok=True)
 
 
 class SubagentHost:
@@ -380,7 +540,9 @@ class SubagentHost:
     def __init__(self, inner, *, llm, retriever, memory, policy,
                  max_depth: int = 1, max_steps: int = 20, depth: int = 0, notify=None,
                  read_only: bool = False, spec: AgentSpec | None = None, agents=None, session_id: str = "",
-                 grants: frozenset = frozenset(), instance_name: str = "", budget_sink=None):
+                 grants: frozenset = frozenset(), instance_name: str = "",
+                 intent_provider=None, task_id_fn=None, parent_id_fn=None, workspace_id: str = "",
+                 artifact_store=None, artifact_ref_sink=None, core_mode: bool = False):
         self.inner = inner
         self.llm = llm
         self.retriever = retriever
@@ -402,9 +564,30 @@ class SubagentHost:
         # W4': THIS child's standing identity (empty for temps/parents) — unlocks reads of its OWN
         # roster/<name>/ files only (self-memory is not a third channel; siblings stay denied).
         self.instance_name = instance_name
-        # S5: a callable(int) that charges child tokens back to the parent's per-turn budget (set by the CLI
-        # after the budget hook exists). Propagated to nested children so ALL delegated cost bills upward.
-        self.budget_sink = budget_sink
+        # Typed brief provenance. The provider receives the delegated objective and returns ONLY the exact
+        # relevant IntentEntry selection (or an IntentState); no parent transcript crosses this seam.
+        self.intent_provider = intent_provider
+        self.task_id_fn = task_id_fn
+        self.parent_id_fn = parent_id_fn
+        self.workspace_id = workspace_id
+        self.artifact_store = artifact_store
+        self.artifact_ref_sink = artifact_ref_sink
+        self.core_mode = bool(core_mode)
+        self._artifact_seq = 0
+        self._artifact_lock = threading.Lock()
+
+    def _next_artifact_id(self, *, task_id: str, parent_id: str) -> str:
+        if self.artifact_store is None:
+            return ""
+        from .persistence import deterministic_artifact_id
+        with self._artifact_lock:
+            self._artifact_seq += 1
+            sequence = self._artifact_seq
+        return deterministic_artifact_id(
+            kind="subagent", workspace_id=self.workspace_id or "workspace-unknown",
+            session_id=self.session_id or "session-ephemeral", task_id=task_id,
+            logical_id=f"{parent_id or 'parent-none'}:{sequence}",
+        )
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -441,6 +624,14 @@ class SubagentHost:
         breadth nudge lives here in the description, not in a dedicated verb. The two orthogonal dials —
         KIND (agent=) and IDENTITY (name=) — are spelled out so the model has the right mental model."""
         kinds = "; ".join(f"{n} ({sp.description})" for n, sp in self.agents.items())
+        properties = {
+            "agent": {"type": "string", "description": "the KIND to run (a name from the list above)"},
+            "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
+            "scope": _SCOPE_PARAM, "exclusions": _EXCLUSIONS_PARAM,
+            "report_shape": _REPORT_SHAPE_PARAM, "drift_policy": _DRIFT_POLICY_PARAM,
+        }
+        if not self.core_mode:
+            properties.update({"name": _NAME_PARAM, "grants": _GRANTS_PARAM})
         return {"type": "function", "function": {
             "name": "spawn_agent",
             "description": (
@@ -450,15 +641,36 @@ class SubagentHost:
                 "audit several modules) emit MULTIPLE spawn_agent(agent=\"explorer\", …) calls in ONE response "
                 "— explorers are read-only and run in PARALLEL; one per area/module/question, then synthesize "
                 "their summaries. Stay single-agent for one tightly-coupled change you're editing yourself.\n"
+                + ("Core mode exposes one-shot read-only children only."
+                   if self.core_mode else
                 "• name = OPTIONAL identity. OMIT it → a one-shot TEMP (used once, then only its sealed report "
                 "remains). PASS one → HIRE a STANDING specialist that persists across sessions, accumulates "
                 "lessons, and can be WOKEN by re-using the same name later (see STANDING SPECIALISTS). Hire "
-                "when this is an area you'll revisit; use a temp for a one-off."),
-            "parameters": {"type": "object", "properties": {
-                "agent": {"type": "string", "description": "the KIND to run (a name from the list above)"},
-                "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
-                "name": _NAME_PARAM, "grants": _GRANTS_PARAM,
-            }, "required": ["agent", "task"]}}}
+                "when this is an area you'll revisit; use a temp for a one-off.")),
+            "parameters": {"type": "object", "properties": properties,
+                           "required": ["agent", "task"]}}}
+
+    def _brief(self, task: str, args: dict, canonical_refs: frozenset) -> SubagentBrief:
+        intent_entries = ()
+        if self.intent_provider is not None:
+            # A configured provenance seam failing must block delegation; silently dropping binding
+            # constraints would create a deceptively successful but under-scoped child report.
+            intent_entries = (self.intent_provider(task) if callable(self.intent_provider)
+                              else self.intent_provider)
+        return SubagentBrief.create(
+            task, intent_entries=intent_entries,
+            scope=args.get("scope") or (), exclusions=args.get("exclusions") or (),
+            report_shape=(args.get("report_shape") or None),
+            canonical_refs=tuple(sorted(canonical_refs)),
+            drift_policy=args.get("drift_policy") or "report",
+        )
+
+    @staticmethod
+    def _context_id(provider, fallback: str) -> str:
+        if provider is None:
+            return fallback
+        value = provider() if callable(provider) else provider
+        return str(value or fallback)
 
     def _validate_grants(self, raw):
         """Spawn-time grant validation (kernel says no, loudly): (err, frozenset). Rules — parent-minted only
@@ -475,8 +687,15 @@ class SubagentHost:
             return f"Error: too many grants ({len(raw)} > {_MAX_GRANTS}) — grant only the reports this child needs", frozenset()
         arts = (self.memory.read_subagent_artifacts(self.session_id)
                 if (self.session_id and self.memory is not None) else [])
-        ids = {r.get("id") for r in arts}
-        names = {(r.get("artifact") or {}).get("name") for r in arts} - {"", None}
+        ids = {str(r.get("id")) for r in arts if r.get("id")}
+        # A mutable identity alias is accepted at the public edge for convenience, then resolved ONCE to
+        # the latest immutable job. Neither the child brief nor the resulting artifact retains the alias.
+        names: dict[str, str] = {}
+        for record in arts:
+            identity = (record.get("artifact") or {}).get("name")
+            handle = record.get("id")
+            if identity and handle:
+                names[str(identity)] = str(handle)
         out = set()
         for g in raw:
             p = _norm_vpath(g)
@@ -484,14 +703,17 @@ class SubagentHost:
                 p = "subagents/" + p
             leaf = p[len("subagents/"):] if p.startswith("subagents/") else ""
             stem = leaf[:-3] if leaf.endswith(".md") else ""
-            ok = ("/" not in leaf) and leaf and (
-                (_GRANT_SUB.match(leaf) and stem in ids)                          # exact per-job handle
-                or (_valid_instance_name(stem) and stem in names))                # name alias (latest job)
-            if not ok:
+            canonical = ""
+            if "/" not in leaf and leaf:
+                if _GRANT_SUB.match(leaf) and stem in ids:
+                    canonical = stem
+                elif _valid_instance_name(stem) and stem in names:
+                    canonical = names[stem]
+            if not canonical:
                 return (f"Error: cannot grant {g!r} — grants must be EXACT existing sealed-report handles "
                         f'(e.g. "subagents/sub-1.md" or "subagents/<name>.md"; never a directory or '
                         f'index.md). See read_file("subagents/index.md") for what exists.', frozenset())
-            out.add(p)
+            out.add(f"subagents/{canonical}.md")
         return "", frozenset(out)
 
     def accesses(self, name: str, args: dict) -> list:
@@ -510,6 +732,10 @@ class SubagentHost:
         return self.inner.read_text(path)
 
     def run(self, name: str, args: dict) -> str:
+        # Scheduler-owned metadata is not a model argument. Consume it at the host edge before any
+        # public validation, and never pass it to briefs, policies, artifacts, or nested tool calls.
+        token_budget = args.get(CHILD_TOKEN_BUDGET_ARG)
+        args = {key: value for key, value in args.items() if key != CHILD_TOKEN_BUDGET_ARG}
         if self.spec is not None and name in SUBAGENT_EXCLUDED_TOOLS:
             # defense-in-depth: even if the model calls a tool it was not offered, a CHILD can't ask the
             # end-user — return a directive instead of blocking on input (which would stall the parent).
@@ -555,6 +781,8 @@ class SubagentHost:
         if not task:
             return "Error: spawn requires a non-empty 'task' describing the self-contained sub-task"
         child_name = (args.get("name") or "").strip()
+        if self.core_mode and (child_name or args.get("grants")):
+            return "Error: core delegation is one-shot and does not expose names, careers, or artifact grants"
         if child_name and not _valid_instance_name(child_name):
             return ("Error: invalid subagent name %r — use a short slug (letters/digits/-/_, starts with a "
                     "letter, ≤40 chars; 'sub-N'/'index' are reserved), e.g. 'auth-explorer'." % child_name)
@@ -568,6 +796,13 @@ class SubagentHost:
                         % (args.get("agent", ""), ", ".join(self.agents)))
         else:   # back-compat built-in tools → their specs
             spec = BUILTIN_AGENTS["explorer" if name == "spawn_explore" else "general"]
+        if self.core_mode and (name != "spawn_agent" or not spec.read_only):
+            return ("Error: core delegation exposes only spawn_agent(agent='explorer'); enable "
+                    "AGENT_ADVANCED_AGENTS for writable or legacy delegation")
+        try:
+            child_brief = self._brief(task, args, child_grants)
+        except Exception as exc:  # noqa: BLE001 — never delegate after silently losing/warping constraints
+            return f"Error: invalid subagent brief: {type(exc).__name__}: {exc}"
 
         # W4' — HIRE ONCE, WAKE MANY. A NAMED spawn resolves against the durable roster:
         #   roster hit  → WAKE: same kind required; the child is seeded with its identity block
@@ -595,6 +830,14 @@ class SubagentHost:
                     identity_block = _render_wake_block(profile, self.memory.roster_read_jobs(child_name),
                                                         child_name)
 
+        try:
+            _root = self.inner.root() if hasattr(self.inner, "root") else os.getcwd()
+        except Exception:  # noqa: BLE001
+            _root = os.getcwd()
+        _task_id = self._context_id(self.task_id_fn, "task-unknown")
+        _parent_id = self._context_id(self.parent_id_fn, "")
+        _artifact_id = self._next_artifact_id(task_id=_task_id, parent_id=_parent_id)
+
         child_tools = SubagentHost(
             self.inner, llm=self.llm, retriever=self.retriever, memory=self.memory,
             policy=self.policy, max_depth=self.max_depth, max_steps=self.max_steps,
@@ -602,7 +845,14 @@ class SubagentHost:
             session_id=self.session_id,   # nested children archive under the SAME parent session
             grants=child_grants,          # W2: one hop only — this child's grants never propagate further
             instance_name=child_name,     # W4': unlocks the child's OWN roster/<name>/ files (self-memory)
-            budget_sink=self.budget_sink, # S5: nested child cost bills up to the same per-turn budget
+            intent_provider=self.intent_provider, task_id_fn=self.task_id_fn,
+            # Nested children attach to this immediate child's immutable artifact, not the top-level turn.
+            # That also makes sibling nested ID namespaces disjoint even though each child host starts at 1.
+            parent_id_fn=((lambda artifact_id=_artifact_id: artifact_id)
+                          if _artifact_id else self.parent_id_fn),
+            workspace_id=self.workspace_id,
+            artifact_store=self.artifact_store, artifact_ref_sink=self.artifact_ref_sink,
+            core_mode=self.core_mode,
         )
         try:
             out = run_subagent(
@@ -610,13 +860,23 @@ class SubagentHost:
                 memory=self.memory, policy=self.policy, max_steps=self.max_steps,
                 depth=self.depth + 1, notify=self.notify, spec=spec, session_id=self.session_id,
                 name=child_name, grants=tuple(child_grants), identity_block=identity_block,
-                budget_sink=self.budget_sink,
+                brief=child_brief, workspace_id=self.workspace_id or os.path.realpath(_root),
+                task_id=_task_id, parent_id=_parent_id,
+                artifact_store=self.artifact_store,
+                artifact_id=_artifact_id,
+                artifact_ref_sink=self.artifact_ref_sink,
+                token_budget=(max(0, int(token_budget)) if token_budget is not None else None),
             )
             # announce the lifecycle event (visibility: an unadvertised wake channel stays dead) — but NOT
             # onto a failed child's "Error: ..." return, where it would garble the parent's error tier (the
             # hire is real regardless; it just isn't news worth mixing into an error line).
             if hired and not out.startswith("Error:"):
-                out += f' | hired standing specialist {child_name!r} — re-use name="{child_name}" to wake it later'
+                suffix = f' | hired standing specialist {child_name!r} — re-use name="{child_name}" to wake it later'
+                if hasattr(out, "effects"):
+                    from .registry import ToolText
+                    out = ToolText(str(out) + suffix, status=out.status, effects=out.effects)
+                else:
+                    out += suffix
             return out
         except Exception as e:  # a child failure must not crash the parent
             return f"Error: subagent crashed: {e}"

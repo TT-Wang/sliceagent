@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 IS_WINDOWS = sys.platform == "win32"
 _warned_no_bash = False
@@ -22,6 +23,10 @@ _warned_no_bash = False
 # never equal SIGTERM — otherwise kill_tree's `sig == SIG_KILL` force-check would be True for the
 # GRACEFUL phase too and procman's TERM->wait->KILL ladder would collapse to an immediate /F kill.
 SIG_KILL = getattr(signal, "SIGKILL", None) or -9
+
+
+class ProcessGroupTerminationError(RuntimeError):
+    """Raised when a process-tree teardown cannot prove that the owned group is extinct."""
 
 
 def norm_rel(path: str) -> str:
@@ -93,38 +98,50 @@ def popen_group_kwargs() -> dict:
     return {"creationflags": flags}
 
 
-def kill_tree(popen: subprocess.Popen, sig: int) -> None:
+def kill_tree(popen: subprocess.Popen, sig: int) -> bool:
     """Terminate a process AND its descendants.
     POSIX: the pre-existing ladder — killpg(getpgid(pid)) falling back to send_signal.
-    win32: `taskkill /T` (+/F when the caller asked for SIGKILL-strength), stdlib-only."""
+    win32: `taskkill /T` (+/F when the caller asked for SIGKILL-strength), stdlib-only.
+
+    The return value says whether a tree-wide signal was delivered. A direct-leader fallback remains useful
+    for best-effort cleanup but returns False because it cannot prove anything about descendants.
+    """
     if not IS_WINDOWS:
         try:
             os.killpg(os.getpgid(popen.pid), sig)
+            return True
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 popen.send_signal(sig)
             except OSError:
                 pass
-        return
+            return False
     force = ["/F"] if sig == SIG_KILL else []
     try:
-        subprocess.run(["taskkill", *force, "/T", "/PID", str(popen.pid)],
-                       capture_output=True, timeout=10)
+        result = subprocess.run(["taskkill", *force, "/T", "/PID", str(popen.pid)],
+                                capture_output=True, timeout=10)
+        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         try:
             popen.kill() if force else popen.terminate()
         except OSError:
             pass
+        return False
 
 
 def capture_pgid(popen: subprocess.Popen):
-    """POSIX: the process-group id of a just-spawned group leader (== its pid), captured while it is still
-    alive — os.getpgid raises once the leader exits and is reaped. Returns None on Windows / on failure."""
+    """Return the owned group id for a process spawned with ``popen_group_kwargs``.
+
+    POSIX ``start_new_session=True`` makes the child a group leader, so pgid is exactly its stable pid; using
+    the known pid avoids a race where a very short-lived leader exits before ``os.getpgid`` runs while a
+    background descendant remains. Windows tree termination is keyed by the live leader PID instead.
+    """
     if IS_WINDOWS:
         return None
     try:
-        return os.getpgid(popen.pid)
-    except (AttributeError, OSError):
+        pid = int(popen.pid)
+        return pid if pid > 0 else None
+    except (AttributeError, TypeError, ValueError):
         return None
 
 
@@ -147,6 +164,87 @@ def signal_pgid(pgid, sig: int, popen: subprocess.Popen = None) -> None:
             popen.send_signal(sig)
         except OSError:
             pass
+
+
+def process_group_alive(pgid, popen: subprocess.Popen = None) -> bool | None:
+    """Return the observed process-group state; ``None`` means extinction cannot be proven.
+
+    POSIX uses the pgid captured while the group leader was alive, so descendants remain observable after
+    that leader exits. If capture failed and the leader is gone, its former descendants cannot be identified
+    safely and the result is deliberately unknown. Windows' tree operation is synchronous at the compatibility
+    seam; the owned leader's settled state is the available proof there.
+    """
+    if popen is not None:
+        try:
+            leader_alive = popen.poll() is None
+        except Exception:  # noqa: BLE001 - a broken process handle cannot prove extinction
+            leader_alive = None
+    else:
+        leader_alive = None
+    if IS_WINDOWS:
+        # A dead leader alone says nothing about descendants; only a successful synchronous taskkill /T
+        # in terminate_process_group can provide tree-wide proof on this platform.
+        return True if leader_alive else None
+    if pgid is None:
+        return True if leader_alive else None
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        # Permission/race/OS errors are not evidence that the group disappeared.
+        return True
+
+
+def wait_process_group_extinct(pgid, popen: subprocess.Popen = None, timeout: float = 0.0) -> bool:
+    """Wait up to *timeout* for a captured process group to disappear, returning proof only."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if process_group_alive(pgid, popen) is False:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
+def terminate_process_group(pgid, popen: subprocess.Popen, *, term_timeout: float = 3.0,
+                            kill_timeout: float = 2.0) -> bool:
+    """TERM→KILL an owned process group and return only after proving group extinction.
+
+    Crucially, signaling is keyed by the spawn-captured pgid and never gated on the leader still running.
+    This reaches background descendants after their shell leader has already exited.
+    """
+    if IS_WINDOWS:
+        # If the leader already vanished, taskkill can no longer identify its tree. Be honest instead of
+        # treating leader exit as descendant extinction. While it is alive, taskkill /T is synchronous; a
+        # zero return followed by leader settlement is the available tree-wide proof.
+        try:
+            if popen.poll() is not None:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        delivered = kill_tree(popen, signal.SIGTERM)
+        try:
+            popen.wait(timeout=max(0.0, float(term_timeout)))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if delivered and popen.poll() is not None:
+            return True
+        delivered = kill_tree(popen, SIG_KILL)
+        try:
+            popen.wait(timeout=max(0.0, float(kill_timeout)))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return bool(delivered and popen.poll() is not None)
+    if wait_process_group_extinct(pgid, popen, 0.0):
+        return True
+    signal_pgid(pgid, signal.SIGTERM, popen)
+    if wait_process_group_extinct(pgid, popen, term_timeout):
+        return True
+    signal_pgid(pgid, SIG_KILL, popen)
+    return wait_process_group_extinct(pgid, popen, kill_timeout)
 
 
 # ---------------------------------------------------------------------------

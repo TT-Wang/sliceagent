@@ -1,10 +1,10 @@
 """bounded = SEAL the within-loop info, NOT a size/relevance cut. Under the accumulate-only loop the
 raw trajectory IS the native transcript (kept whole within the turn, sealed at the boundary — see
-test_loop_overflow); the distilled FINDINGS tier embodies the same principle inside the slice:
+test_loop_overflow); the semantic slice embodies the same principle without applying a second blunt cut:
 (1) WITHIN a loop, NO slice section is size-bounded — every distinct finding stays whole (a cut harms
     the LLM).
-(2) the bound is the loop-boundary SEAL — seal() CARRIES the distilled context (findings + in-progress
-    change-set) and drops the raw exploratory trajectory; reset() (a new task) wipes everything.
+(2) the bound is history, not useful task state — seal() CARRIES findings and the adaptive working set;
+    physical context projection and SwapManager evict under real pressure. reset() wipes a new task.
 No model. Run: PYTHONPATH=src python tests/test_bound_is_relevance.py
 """
 import os
@@ -31,8 +31,8 @@ def within_loop_keeps_all_findings():
 
 
 @check
-def seal_carries_distilled_drops_raw():
-    # the BOUND is the seal at a TURN boundary: CARRY the distilled context, SEAL the raw trajectory.
+def seal_carries_distilled_and_adaptive_working_set():
+    # A turn seal drops the raw model trajectory, but does not blindly discard still-useful task state.
     s = Slice(); s.reset("loop one")
     touch_file(s, "feature.py", edited=True)        # in-progress change-set
     touch_file(s, "explored.py")                    # exploratory read
@@ -40,9 +40,8 @@ def seal_carries_distilled_drops_raw():
         record_note(s, f"conclusion {i} about the feature")
     assert s.findings and "explored.py" in s.active_files, "loop one accumulated complete info"
     s.seal()                                        # the turn-boundary seal (continue_topic calls this)
-    # SEALED (raw exploratory reads → re-readable / recallable on demand):
-    assert "explored.py" not in s.active_files, "exploratory reads are sealed (re-readable on demand)"
-    # CARRIED (distilled continuity into the next loop):
+    # CARRIED: SwapManager owns pressure-aware eviction; seal does not impose an edited-files-only policy.
+    assert "explored.py" in s.active_files, "the adaptive working set survives an arbitrary turn boundary"
     assert len(s.findings) == 6, "distilled findings carry across the seal"
     assert "feature.py" in s.active_files and "feature.py" in s.edited_files, "in-progress change-set carries"
 

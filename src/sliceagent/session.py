@@ -25,6 +25,14 @@ from .text_utils import one_line
 from .taskstate import slice_to_task_state, task_state_to_slice
 
 
+_CONTINUATION_ONLY = re.compile(
+    r"^\s*(?:please\s+)?(?:continue|keep\s+going|go\s+on|proceed|try\s+again|retry|"
+    r"another\s+approach|try\s+(?:a\s+)?different\s+approach|pick\s+up(?:\s+where\s+you\s+left\s+off)?)"
+    r"[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
 def _mint_task_id() -> str:
     return "t-" + uuid.uuid4().hex[:8]
 
@@ -35,9 +43,20 @@ class Session:
         self.session_id = session_id or ("s-" + uuid.uuid4().hex[:12])
         self.tasks: dict[str, Slice] = {}     # task_id -> live bounded slice (in-session)
         self.active_id: str | None = None
+        self.turn_task_id: str | None = None  # immutable task binding while one model/tool turn runs
 
     def active(self) -> Slice:
         return self.tasks[self.active_id]
+
+    def _require_reconciled_boundary(self) -> None:
+        if self.active_id is None or self.active_id not in self.tasks:
+            return
+        detail = getattr(self.tasks[self.active_id], "reconciliation_required", "")
+        if detail:
+            raise RuntimeError(
+                "cannot change tasks while an earlier operation is indeterminate; continue this task, "
+                "re-observe the live state, and call reconcile_execution first"
+            )
 
     def _park(self, status: str = "parked") -> None:
         """Durably checkpoint the active topic (for cross-session resume); a no-op under NullMemory.
@@ -54,6 +73,7 @@ class Session:
 
     def new_topic(self, goal: str) -> str:
         """Park the current topic and start a fresh one. Returns the new task_id."""
+        self._require_reconciled_boundary()
         self._park()
         tid = _mint_task_id()
         s = Slice()
@@ -65,6 +85,7 @@ class Session:
     def switch_topic(self, task_id: str) -> Slice:
         """Park the current topic and activate another — from the live set if present, else resumed
         from the durable vault (distilled). Raises KeyError if neither has it."""
+        self._require_reconciled_boundary()
         self._park()
         if task_id not in self.tasks:
             ts = self.memory.load_task(task_id)
@@ -99,19 +120,32 @@ class Session:
         it is NOT cleared by continue_topic (a new directive does not mean the user retracted the
         report — only verifying the fix, or a real topic change, clears it)."""
         s = self.active()
-        # SEAL the prior loop at this turn boundary: the finished loop was archived on TurnEnd; start the
-        # next loop fresh — CARRY the distilled context (findings + edited change-set + conversation), SEAL
-        # the raw trajectory (recent/step-cache/exploratory reads → recall-on-demand). This is what keeps
-        # per-turn cost flat across a long session (the moat) while within-loop info stays complete.
-        s.seal()
-        if not resume:
-            s.goal = message   # a RESUME cue ("go back to the auth task") must NOT replace the topic's defining goal
-        s.last_error = ""
-        # demote (don't clear): keep counts, drop the failing flag — see WS2 above
-        for sig, a in s.action_log.items():
-            a["failing"] = False
+        # The completed turn was already sealed at its actual terminal boundary by the runtime. Do not seal
+        # again here: a second seal would reset the new TurnRuntime epoch and apply working-set contraction
+        # twice before the follow-up starts.
+        # ``goal`` is the stable task objective. A follow-up—resume cue or ordinary continuation—changes
+        # only current_request; otherwise "yes, do that" destroys the objective in the next checkpoint.
+        # The topic label/objective and the CURRENT REQUEST are distinct. A resume cue should not rename the
+        # parked task, but it is still the user's authoritative request for this turn and must be rendered.
+        # record_user() repeats this assignment after routing (and adds the conversation entry); keeping it here
+        # preserves direct Session callers/tests that build a seed immediately after continue_topic().
+        s.intent.begin_turn(message)
+        resuming_unresolved_work = bool(resume or _CONTINUATION_ONLY.fullmatch(str(message or "")))
+        if not resuming_unresolved_work:
+            # A substantive new directive starts a fresh blocker focus. A bare resume cue does not: the
+            # unresolved error and its failing action row are the state the user asked us to continue from.
+            s.last_error = ""
+            # demote (don't clear): keep counts, drop the failing flag — see WS2 above
+            for _sig, action in s.action_log.items():
+                action["failing"] = False
         s.since_edit = 0
-        capture_user_report(s, message)   # a failure report rides forward as an OPEN USER REPORT blocker
+        failure_report = capture_user_report(
+            s, message,
+        )  # a failure report rides forward as an OPEN USER REPORT blocker
+        if resuming_unresolved_work or failure_report:
+            # Topic identity and execution authority are separate: a completed objective normally becomes
+            # background, but an explicit resume or user push-back makes the exact original outstanding again.
+            s.task.activate_objective()
         return s
 
 
@@ -133,8 +167,11 @@ def route_topic(llm, message: str, session: "Session") -> tuple[str, str]:
     usr = (f"ACTIVE TASK: {session.active().goal or '(none)'}\nPARKED TOPICS:\n{parked}\n"
            f"NEW MESSAGE: {message}")
     try:
-        resp = llm.complete([{"role": "system", "content": sys_msg},
-                             {"role": "user", "content": usr}], [])
+        from .model_runner import complete_model_call
+        resp = complete_model_call(
+            llm, [{"role": "system", "content": sys_msg},
+                  {"role": "user", "content": usr}], [],
+        )
         m = re.search(r"\{.*\}", resp.content or "", re.S)
         d = json.loads(m.group(0)) if m else {}
         action = d.get("action", "continue")
@@ -150,16 +187,20 @@ def route_topic(llm, message: str, session: "Session") -> tuple[str, str]:
 
 _RESUME_CUES = ("go back", "going back", "back to", "return to", "returning to", "resume",
                 "switch back", "switch to", "revisit", "pick up where", "pick back up")
+_EXPLICIT_NEW_TASK = re.compile(
+    r"^\s*(?:new\s+(?:task|topic)|start\s+(?:a\s+)?new\s+(?:task|topic))\s*[:—-]\s*\S",
+    re.IGNORECASE,
+)
 
 
 def route_topic_lexical(message: str, session: "Session") -> tuple[str, str]:
     """Routing WITHOUT an LLM round-trip (the moat-aligned default): the dominant 'continue' case pays
-    nothing, and the host never *guesses* 'new' — a genuinely new task is the agent's call via its own
-    new_topic tool (make_topic_tools), which is recoverable and parks the old topic. The host only acts
-    on an UNAMBIGUOUS resume signal: an explicit parked task_id in the message, or a resume cue
-    ('go back to…') plus a title-keyword match. Everything else → continue. Same signature/return contract
-    as route_topic, so it's a drop-in. See memory route-topic-hidden-llm-call for why this exists."""
+    nothing and ambiguous messages continue. The host acts only on explicit boundary language: a
+    ``New task: ...`` prefix, a parked task id, or a resume cue plus title-keyword match. Everything else
+    continues. Same signature/return contract as route_topic, so it is a drop-in."""
     if session.active_id is None:
+        return ("new", "")
+    if _EXPLICIT_NEW_TASK.search(message):
         return ("new", "")
     threads = session.open_threads(include_active=False)
     if threads:
@@ -184,8 +225,8 @@ def route(llm, message: str, session: "Session") -> tuple[str, str]:
     """The configured topic router. DEFAULT = lexical (zero LLM round-trips — moat-aligned: a follow-up
     no longer pays a per-message provider call before the turn even starts). Set AGENT_ROUTER=llm to
     restore the classifier (tighter automatic 'new'-task detection, at one round-trip per follow-up).
-    Measured (evals/route_accuracy.py): lexical == llm on continue+resume (15/15); they differ only on
-    'new', which lexical defers to the agent's new_topic tool. Single call site for both UI paths."""
+    Explicit ``New task:`` boundary language is deterministic; ambiguous unrelatedness still follows the
+    fail-safe continuation law. Single call site for both UI paths."""
     if os.environ.get("AGENT_ROUTER", "lexical").strip().lower() == "llm":
         return route_topic(llm, message, session)
     return route_topic_lexical(message, session)
@@ -197,10 +238,16 @@ def make_topic_tools(session: "Session"):
     from .registry import ToolEntry
 
     def _new(args: dict) -> str:
+        if session.turn_task_id is not None:
+            return ("Error: topic changes are turn-boundary operations. Finish this turn, then start the "
+                    "new topic from the next user request or host command.")
         tid = session.new_topic(args["goal"])
         return f"Started new topic [{tid}]: {one_line(args['goal'], 80)}. Previous topic parked (resumable)."
 
     def _switch(args: dict) -> str:
+        if session.turn_task_id is not None:
+            return ("Error: topic changes are turn-boundary operations. Finish this turn, then switch from "
+                    "the next user request or host command.")
         try:
             s = session.switch_topic(args["task_id"])
         except KeyError:

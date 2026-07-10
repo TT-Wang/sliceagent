@@ -84,7 +84,7 @@ def world_model_flows_end_to_end():
 def requirements_flow_end_to_end():
     s = Slice(); s.reset("keep the API stable")
     user, _ = _run(s, _host(), _resp(calls=[_TC("require", {"text": "public signatures must not change"})]))
-    assert "# STANDING REQUIREMENTS" in user and "public signatures must not change" in user, user[:300]
+    assert "# PARENT TASK CONSTRAINTS" in user and "public signatures must not change" in user, user[:300]
 
 
 @check

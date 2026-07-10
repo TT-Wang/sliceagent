@@ -1,7 +1,7 @@
 """The lexical topic router (route_topic_lexical) + the env dispatcher (route). Deterministic, no model.
 Contract: continue is the default (zero cost), resume fires only on an explicit parked id or a resume-cue
-+ title match, and the host NEVER guesses 'new' (deferred to the agent's new_topic tool — a false-'new'
-would wrongly discard the active working set, so it's avoided by design).
++ title match, and only explicit ``New task:`` boundary language starts a fresh task. Ambiguous unrelatedness
+continues so the host never guesses away the active working set.
 
 Run: PYTHONPATH=src python tests/test_route_lexical.py
 """
@@ -69,12 +69,17 @@ def resume_cue_without_title_match_stays_continue():
 
 
 @check
-def new_task_is_deferred_to_continue_not_guessed():
-    # the host never returns 'new' on its own — the agent's new_topic tool handles a real new task
+def ambiguous_new_task_language_is_not_guessed():
     for msg in ["separate thing — set up CI", "unrelated: optimize the SQL queries",
-                "new task: build a CSV export CLI", "completely different feature: dark mode"]:
+                "completely different feature: dark mode"]:
         action, _ = route_topic_lexical(msg, _Sess("fix the parser"))
         assert action == "continue", f"host guessed 'new' (risk: false reset): {msg!r}"
+
+
+@check
+def explicit_new_task_prefix_starts_a_fresh_task():
+    for msg in ["New task: build a CSV export CLI", "start a new topic — audit deployment"]:
+        assert route_topic_lexical(msg, _Sess("fix the parser")) == ("new", "")
 
 
 @check

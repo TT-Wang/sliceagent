@@ -1,10 +1,11 @@
 """Active-memory-slice monitor — a web view of EXACTLY what the LLM sees each turn.
 
 The slice core's only output is the event stream (events.py). This module adds one more sink:
-it captures every SliceBuilt (the full [system, user] the model receives) plus what the model
-did with it (assistant text, tool calls, tokens, stop reason), and serves it to a tiny stdlib
-HTTP page. No new dependencies, no provider coupling, no touch to the loop — a sink failure is
-already contained by make_dispatcher, so the monitor can never break a run.
+it captures the once-per-turn SliceBuilt lifecycle snapshot, every physical ModelCallPrepared
+request (including retries and re-projections), plus what the model did with them (assistant text,
+tool calls, tokens, stop reason), and serves it to a tiny stdlib HTTP page. No new dependencies,
+no provider coupling, no touch to the loop — a sink failure is already contained by
+make_dispatcher, so the monitor can never break a run.
 
 Wire it in any host:
     from sliceagent.monitor import start_monitor
@@ -16,6 +17,7 @@ The store is task- and llm-agnostic: it shows whatever the slice is, for whateve
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -26,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 from .events import (
     AssistantText,
     Event,
+    ModelCallPrepared,
     SliceBuilt,
     StepEnd,
     ToolResult,
@@ -94,13 +97,22 @@ class SliceMonitor:
                     "i": self._steps_total - 1, "turn": self._turn, "step": self._step_in_turn,
                     "goal": ctx.get("goal", ""), "topic": ctx.get("topic", ""),
                     "system": system, "user": user, "assistant": "", "tools": [],
-                    "usage": {}, "stop_reason": "", "interrupted": "",
+                    "model_calls": [], "usage": {}, "stop_reason": "", "interrupted": "",
                 }
                 self._steps.append(self._cur)
                 # MON1: trim past the high-water mark — keep only the last `cap` steps. The live step
                 # is always the last element, so trimming the front never drops `self._cur`.
                 if len(self._steps) > self._cap:
                     del self._steps[:len(self._steps) - self._cap]
+            elif isinstance(e, ModelCallPrepared):
+                if self._cur is not None:
+                    # A provider attempt is physical observability, not a semantic step. Keep it nested under
+                    # the turn opened by SliceBuilt so retries never reset timers or fabricate monitor rows.
+                    self._cur.setdefault("model_calls", []).append({
+                        "step": e.step, "attempt": e.attempt, "pressure": e.pressure,
+                        "preflight_mode": e.preflight_mode,
+                        "messages": copy.deepcopy(e.messages),
+                    })
             elif isinstance(e, AssistantText):
                 if self._cur is not None:
                     self._cur["assistant"] += e.content
@@ -137,8 +149,12 @@ class SliceMonitor:
             # deep-copy nested MUTABLES (tools list, usage dict): json.dumps runs outside the lock,
             # and the loop thread mutates the live step's tools list in place — a shallow dict(s) would
             # share it and risk "list changed size during iteration" mid-poll.
-            steps = [{**s, "tools": [dict(t) for t in s["tools"]], "usage": dict(s["usage"])}
-                     for s in self._steps]
+            steps = [{
+                **s,
+                "tools": [dict(t) for t in s["tools"]],
+                "model_calls": copy.deepcopy(s.get("model_calls", [])),
+                "usage": dict(s["usage"]),
+            } for s in self._steps]
             return {"version": self._version, "turns": self._turn, "steps_total": self._steps_total,
                     "tokens": self._tokens, "steps": steps}
 
@@ -539,6 +555,17 @@ function renderDetail(s){
            renderSlice(s.user), s.user.length+" chars", false);
   h+=block("SYSTEM PROMPT (instructions + task)",
            `<div class="sys"><pre>${esc(s.system)}</pre></div>`, s.system.length+" chars", true);
+  const modelCalls=s.model_calls||[];
+  if(modelCalls.length){
+    const calls=modelCalls.map(c=>{
+      const meta=`step ${c.step} · attempt ${c.attempt} · pressure ${c.pressure||"unknown"}`+
+        (c.preflight_mode?` · ${c.preflight_mode}`:"");
+      return `<div class="tool"><div class="tool-h"><span class="tn">${esc(meta)}</span></div>`+
+        `<pre>${esc(JSON.stringify(c.messages||[],null,2))}</pre></div>`;
+    }).join("");
+    h+=block("PHYSICAL MODEL REQUESTS (exact prepared attempts)", calls,
+             modelCalls.length+" attempt(s)", true);
+  }
   let did="";
   if(s.assistant) did+=`<div class="asst"><div class="hint">assistant text</div><pre>${esc(s.assistant)}</pre></div>`;
   for(const t of (s.tools||[])){

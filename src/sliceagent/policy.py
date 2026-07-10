@@ -73,7 +73,7 @@ _DANGEROUS: list[tuple[re.Pattern, str]] = [(re.compile(p, re.IGNORECASE), why) 
 # plugin/MCP tools (and even known mutating builtins absent from the small WRITE/EXEC sets — terminal_*,
 # proc_*, world_set, update_plan, …) slip past these safety modes. Allow ONLY known-safe readers; treat
 # everything else (including any unknown tool) as a mutation. ask_user is interactive, not a mutation.
-_READERS = frozenset(READ_ONLY_TOOLS) | {"ask_user"}
+_READERS = frozenset(READ_ONLY_TOOLS) | {"ask_user", "reconcile_execution"}
 
 
 def read_only(name: str, args: dict) -> Optional[ToolDecision]:

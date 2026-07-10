@@ -44,8 +44,22 @@ def render_shows_prior_exchanges_excluding_the_in_progress_one():
     slice_sink(s)(AssistantText("first reply"))
     record_user(s, "second request")          # in-progress (its user msg is the current task)
     out = render_conversation(s)
-    assert "user: first request" in out and "first reply" in out, out
+    assert "user (verbatim):\nfirst request" in out and "first reply" in out, out
     assert "second request" not in out, "the in-progress exchange must be excluded"
+
+
+@check
+def ring_preserves_multiline_whitespace_and_code_verbatim():
+    s = Slice(); s.reset("t")
+    request = "apply exactly:\n```python\nif ready:\n    run()  # two  spaces\n```"
+    reply = "Use this exact replacement:\n\n    alpha  =  1\n\nKeep the blank line."
+    record_user(s, request)
+    slice_sink(s)(AssistantText(reply))
+    assert s.conversation[-1]["user"] == request
+    assert s.conversation[-1]["assistant"] == reply
+    record_user(s, "apply that exact snippet")
+    rendered = render_conversation(s)
+    assert request in rendered and reply in rendered
 
 
 @check

@@ -5,7 +5,8 @@ so eviction is always safe (a re-fault re-reads from the durable store). DUCK-TY
 self.retriever. SELF-TUNING (automatic, no model): a re-read of a file still in the recency ring (a REFAULT) proves
 the budget was momentarily too tight, so the kernel grants ITSELF a brief reclaim-protection (Linux mm/workingset
 refault detection, scaled down) AND widens its OWN read budget one notch (s.read_budget, bounded by s.read_ceiling)
-— so the working set grows to TASK need, not to a fixed ceiling. hit/miss/refault/evict are counted (s.io) so the
+— so the working set grows toward TASK need rather than staying at a fixed default; the disaster backstop remains
+explicit. hit/miss/refault/evict are counted (s.io) so the
 moat is MEASURED, not asserted."""
 from __future__ import annotations
 

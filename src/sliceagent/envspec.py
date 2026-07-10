@@ -44,11 +44,19 @@ REGISTRY: list[EnvVar] = [
     EnvVar("AGENT_THINKING", "agent", "Set to 'off' to disable reasoning (alias for AGENT_REASONING=fast).", ""),
     EnvVar("AGENT_MINE", "agent", "Lesson-mining mode for end-of-session consolidation.", "deterministic"),
     EnvVar("AGENT_SUBAGENT_DEPTH", "agent", "Max delegation depth for spawn_agent (0=off).", "1"),
+    EnvVar("AGENT_TOPIC_TOOLS", "agent", "Expose model-callable topic switching (off by default; host "
+           "routing and slash commands remain available).", ""),
+    EnvVar("AGENT_ADVANCED_AGENTS", "agent", "Enable writable/nested/named specialist delegation; default "
+           "core mode exposes one-shot read-only explorers only.", ""),
+    EnvVar("AGENT_ADVANCED_TOOLS", "agent", "Expose persistent process and interactive terminal tools; "
+           "off by default in the demo kernel.", ""),
     EnvVar("AGENT_EXPLORER_REASONING", "agent", "Reasoning effort for read-only explorer children.", "fast"),
     EnvVar("AGENT_AUTO_APPROVE", "agent", "Comma-separated globs of pre-approved safe commands (skip prompt).", ""),
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),
-    EnvVar("AGENT_MAX_TOKENS", "agent", "Per-session token budget (parks the turn when exhausted).", ""),
+    EnvVar("AGENT_MAX_TOKENS", "agent", "Per-turn task token budget, including delegated child usage (parks when exhausted).", ""),
     EnvVar("AGENT_COMPLETION_TOKENS", "agent", "Per-REQUEST completion cap (max output tokens); distinct from the AGENT_MAX_TOKENS turn budget.", "8192"),
+    EnvVar("AGENT_CONTEXT_WINDOW", "agent", "Provider context window used for strict per-call capacity "
+           "preflight when the model catalog cannot supply one (0/unset = explicit compatibility mode).", ""),
     EnvVar("AGENT_MAX_STEPS", "agent", "Per-turn step ceiling (runaway backstop); raise for deep analysis.", "60"),
     EnvVar("AGENT_SELFCHECK_MAX", "agent", "Max grounded done-gate verification rounds before accepting 'done'.", "3"),
     EnvVar("AGENT_TOOL_TIMEOUT", "agent", "Per-tool wall-clock deadline in seconds (0/unset = off).", ""),
@@ -75,13 +83,14 @@ REGISTRY: list[EnvVar] = [
            "on", choices=("on", "off"), aliases=("1", "true", "yes", "0", "false", "no")),
     EnvVar("SHOW_SLICE", "ui", "Set truthy to print the rebuilt slice each turn (debug view).", ""),
     # ── memory ────────────────────────────────────────────────────────────────────────────────
-    EnvVar("SLICEAGENT_VAULT", "memory", "sliceagent's STATE vault (episodic cache + task-state records).", ""),
+    EnvVar("SLICEAGENT_VAULT", "memory", "Optional semantic-memory and legacy task-state vault.", ""),
     EnvVar("MEMEM_VAULT", "memory", "memem's lesson vault (markdown long-term memories), if memem is installed.", ""),
     EnvVar("SLICEAGENT_SKILLS_DIR", "memory", "Extra directory to discover skills from.", ""),
     EnvVar("SLICEAGENT_BASH", "agent", "Windows only: bash.exe that runs shell commands (default: auto-detect Git Bash).", ""),
     EnvVar("AGENT_BACKGROUND_REVIEW", "agent", "Set truthy to run an off-thread reviewer that consolidates "
            "lessons after each turn.", ""),
-    EnvVar("SLICEAGENT_CACHE_DIR", "memory", "Directory for the episodic cache / durable log.", ""),
+    EnvVar("SLICEAGENT_CACHE_DIR", "memory", "sliceagent state root for always-on checkpoints, immutable "
+           "artifacts, recovery journals, and the optional episodic cache.", ""),
     EnvVar("AGENT_EXPERIMENTAL_ALL", "debug", "Master switch: set truthy to enable ALL experimental flags "
            "(per-flag AGENT_EXPERIMENTAL_<ID> overrides).", ""),
     # ── monitoring / debug ────────────────────────────────────────────────────────────────────

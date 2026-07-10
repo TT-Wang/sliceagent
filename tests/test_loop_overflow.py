@@ -4,7 +4,8 @@ Covers three deficiencies found by adversarial review of the collapsed accumulat
      2-window — else parallel tool calls leave orphaned `tool` messages (invalid → provider 400).
   B. if the SEED itself overflows (nothing left to compact), fail SOFT (TurnInterrupted 'overflow'),
      never raise uncaught and crash the session.
-  C. ctrl-C during the TOOL phase (a hung run_command) aborts cleanly, not just during llm.complete.
+  C. ctrl-C during the TOOL phase (a hung run_command) fails closed as indeterminate; an interrupt during
+     provider thinking still aborts cleanly because no tool has started.
 No model, no pytest. Run: PYTHONPATH=src python tests/test_loop_overflow.py
 """
 import os
@@ -13,8 +14,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.context_overflow import ContextOverflow                # noqa: E402
-from sliceagent.events import TurnInterrupted                          # noqa: E402
-from sliceagent.hooks import BudgetHook, Hooks, OracleHook             # noqa: E402
+from sliceagent.events import StepEnd, TurnInterrupted                 # noqa: E402
+from sliceagent.hooks import BudgetHook, CompositeHooks, Hooks, OracleHook  # noqa: E402
 from sliceagent.interfaces import Snippet                              # noqa: E402
 from sliceagent.loop import run_turn                                   # noqa: E402
 from sliceagent.pfc import Slice  # noqa: E402
@@ -89,6 +90,11 @@ def _build():
     return make_build_slice(s, _Tools(), _Retriever(), None, "t")
 
 
+def _plain_build():
+    """Legacy/static seed isolates trajectory compaction from SeedPlan fidelity tightening."""
+    return list(_build()())
+
+
 @check
 def overflow_compacts_whole_exchange_not_fixed_window():
     # step1: 3 PARALLEL tool calls; step2: 1 tool call; step3: overflow → must drop the WHOLE 3-call
@@ -123,13 +129,44 @@ def seed_overflow_fails_soft_not_crash():
 
 
 @check
-def ctrl_c_during_tool_aborts_gracefully():
+def overflow_keeps_compacting_while_trajectory_can_still_shrink():
+    exchanges = [
+        _Resp(tool_calls=[_TC("noop", {}, f"c{index}")]) for index in range(7)
+    ]
+    llm = _ScriptLLM([
+        *exchanges,
+        *("OVERFLOW" for _ in range(8)),
+        _Resp(content="done after full compaction", finish_reason="stop"),
+    ])
+    result = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                      dispatch=lambda _event: None, hooks=Hooks(), max_steps=20)
+    assert result.stop_reason == "end_turn", result.stop_reason
+    assert len(llm.seen) == 16, "the loop stopped at an arbitrary overflow retry count"
+
+
+@check
+def reset_hook_failure_is_parked_inside_the_turn_lifecycle():
+    class BrokenReset(Hooks):
+        def reset_for_turn(self):
+            raise RuntimeError("reset exploded")
+
+    events = []
+    result = run_turn(
+        build_slice=_build(), llm=_ScriptLLM([_Resp(content="unused", finish_reason="stop")]),
+        tools=_Tools(), dispatch=events.append, hooks=BrokenReset(), max_steps=2,
+    )
+    assert result.stop_reason == "error"
+    assert len([event for event in events if isinstance(event, TurnInterrupted)]) == 1
+
+
+@check
+def ctrl_c_during_tool_is_indeterminate():
     llm = _ScriptLLM([_Resp(tool_calls=[_TC("noop", {}, "c1")]), _Resp(content="done", finish_reason="stop")])
     events = []
     res = run_turn(build_slice=_build(), llm=llm, tools=_KbdTools(),
                    dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
-    assert res.stop_reason == "aborted", res.stop_reason
-    assert any(isinstance(e, TurnInterrupted) and e.reason == "aborted" for e in events)
+    assert res.stop_reason == "indeterminate", res.stop_reason
+    assert any(isinstance(e, TurnInterrupted) and e.reason == "indeterminate" for e in events)
 
 
 class _BudgetLLM:
@@ -171,6 +208,27 @@ def oracle_feedback_rides_the_message_channel():
         "Oracle failure detail never reached the model (verify-loop dead)"
 
 
+@check
+def indeterminate_oracle_parks_without_another_model_call():
+    from sliceagent.execution import ToolStatus
+    from sliceagent.oracle import OracleResult
+
+    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop")])
+    events = []
+    class ContinueFirst(Hooks):
+        def should_continue_after_stop(self, _stop_reason):
+            return {"continue": True, "feedback": "continue"}
+
+    hooks = CompositeHooks(ContinueFirst(), OracleHook(
+        _Oracle([OracleResult(ToolStatus.INDETERMINATE, "still running")]), lambda _out: None,
+    ))
+    result = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+                      dispatch=events.append, hooks=hooks, max_steps=10)
+    assert result.stop_reason == "indeterminate" and len(llm.seen) == 1
+    assert any(isinstance(event, TurnInterrupted) and event.reason == "indeterminate"
+               for event in events)
+
+
 class _CountLLM:
     def __init__(self):
         self.calls = 0
@@ -185,10 +243,14 @@ def closeout_tokens_are_accounted():
     # G: the closeout's extra completion must be counted in total (and fed to the budget). max_steps=2 →
     # 2 step calls + 1 closeout call = 3 × 10 prompt tokens = 30. Without the fix the closeout is invisible.
     llm = _CountLLM()
+    events = []
     res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
-                   dispatch=lambda e: None, hooks=Hooks(), max_steps=2)
+                   dispatch=events.append, hooks=Hooks(), max_steps=2)
     assert llm.calls == 3, f"expected 2 steps + 1 closeout call, got {llm.calls}"
     assert res.usage["prompt_tokens"] == 30, f"closeout tokens not accounted: {res.usage}"
+    closeout = [event for event in events
+                if isinstance(event, StepEnd) and event.stop_reason == "closeout"]
+    assert len(closeout) == 1 and closeout[0].usage["prompt_tokens"] == 10
 
 
 class _ErrLLM:
@@ -255,7 +317,7 @@ def micro_compaction_clears_old_tool_bodies_before_dropping():
     script = [_Resp(tool_calls=[_TC("noop", {}, f"c{i}")]) for i in range(6)]
     script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
     llm = _ScriptLLM(script)
-    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+    res = run_turn(build_slice=_plain_build, llm=llm, tools=_Tools(),
                    dispatch=lambda e: None, hooks=Hooks(), max_steps=20)
     assert res.stop_reason == "end_turn", res.stop_reason
     post = llm.seen[-1]
@@ -273,7 +335,7 @@ def overflow_breadcrumb_inserted_once_per_turn():
     script += ["OVERFLOW", _Resp(tool_calls=[_TC("noop", {}, "cx")])]
     script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
     llm = _ScriptLLM(script)
-    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
+    res = run_turn(build_slice=_plain_build, llm=llm, tools=_Tools(),
                    dispatch=lambda e: None, hooks=Hooks(), max_steps=30)
     assert res.stop_reason == "end_turn", res.stop_reason
     post = llm.seen[-1]
@@ -289,7 +351,7 @@ def overflow_breadcrumb_carries_the_checkpoint():
     script += ["OVERFLOW", _Resp(content="done", finish_reason="stop")]
     llm = _ScriptLLM(script)
     snap = "intent: build the widget\ndecisions:\n  - chose approach Q because it is idempotent"
-    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(), dispatch=lambda e: None,
+    res = run_turn(build_slice=_plain_build, llm=llm, tools=_Tools(), dispatch=lambda e: None,
                    hooks=Hooks(), max_steps=20, consolidate=lambda: snap)
     assert res.stop_reason == "end_turn", res.stop_reason
     post = llm.seen[-1]   # messages handed to the final (post-compaction) complete()

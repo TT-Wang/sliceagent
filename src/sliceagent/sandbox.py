@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 
-from .platform_compat import sh as _sh
+from .platform_compat import (SIG_KILL, kill_tree, popen_group_kwargs,
+                              sh as _sh)
 import sys
 import uuid
 from typing import Protocol, runtime_checkable
@@ -34,6 +36,10 @@ _SECRET_RE = re.compile(
 _OUTPUT_CAP = 1_000_000  # chars; head+tail kept, middle elided. Sized ABOVE realistic logs/diffs so the
 #                          page-out blob (the recall-on-demand promise) captures the FULL output for normal
 #                          large results; this is only the last-resort OOM/disk ceiling for pathological dumps.
+
+# Internal sentinel distinct from a command that legitimately exits 124. ToolHost projects this as typed
+# INDETERMINATE because a timeout cannot prove that a deliberately detached descendant stopped.
+SANDBOX_TIMEOUT = -124
 
 
 @runtime_checkable
@@ -75,16 +81,44 @@ class LocalSandbox(BaseSandbox):
     current (venv) interpreter for code-as-action so workspace imports resolve."""
     python_cmd = sys.executable
 
+    @staticmethod
+    def _stop_and_reap(process) -> tuple[str, str]:
+        """Best-effort process-group teardown used by both deadlines and interactive Ctrl-C."""
+        kill_tree(process, signal.SIGTERM)
+        try:
+            return process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            kill_tree(process, SIG_KILL)
+            try:
+                return process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                return "", ""
+
     def _exec(self, command: str, *, cwd: str, timeout: float) -> tuple[int, str]:
         env = _scrub_env() if self.scrub_secrets else None
+        process = None
         try:
-            r = subprocess.run(**_sh(command), cwd=cwd, env=env,
-                               capture_output=True, text=True, timeout=timeout)
+            process = subprocess.Popen(
+                **_sh(command), **popen_group_kwargs(), cwd=cwd, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            return 124, f"Command timed out after {timeout:g}s"
+            # Own and reap the shell's process group. This stops ordinary background descendants; the typed
+            # result remains conservative because a command can deliberately escape into another session.
+            stdout, stderr = self._stop_and_reap(process)
+            partial = ((stdout or "") + (stderr or "")).strip()
+            suffix = f"\n{partial}" if partial else ""
+            return SANDBOX_TIMEOUT, f"Command timed out after {timeout:g}s; process tree was reaped{suffix}"
+        except KeyboardInterrupt:
+            # Popen may be interrupted before it returns a handle. Once it has returned, however, SliceAgent
+            # owns the whole process group and must not leave it mutating after the turn is sealed.
+            if process is not None:
+                self._stop_and_reap(process)
+            raise
         except OSError as e:
             return 127, f"Could not run command: {e}"
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
+        return process.returncode, (stdout or "") + (stderr or "")
 
 
 class DockerSandbox(BaseSandbox):
@@ -127,7 +161,14 @@ class DockerSandbox(BaseSandbox):
                 subprocess.run([self.docker, "kill", name], capture_output=True, timeout=10)
             except Exception:  # noqa: BLE001 — best-effort reap; never mask the timeout result
                 pass
-            return 124, f"Command timed out after {timeout:g}s"
+            return SANDBOX_TIMEOUT, f"Command timed out after {timeout:g}s; container stop was requested"
+        except KeyboardInterrupt:
+            # Interrupting the local docker CLI does not prove the daemon-side container stopped.
+            try:
+                subprocess.run([self.docker, "kill", name], capture_output=True, timeout=10)
+            except Exception:  # noqa: BLE001 — preserve Ctrl-C while still making a bounded cleanup attempt
+                pass
+            raise
         except OSError as e:
             return 127, f"Could not run docker: {e}"
         return r.returncode, (r.stdout or "") + (r.stderr or "")

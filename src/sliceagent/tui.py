@@ -706,6 +706,11 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
                 run_one_turn(text, sink, sig)
             except Exception as exc:       # a turn crash must NOT kill the composer
                 console.print(Text(f"  ✗ turn error: {type(exc).__name__}: {exc}", style=TH["fail"]))
+                if getattr(exc, "stop_session", False):
+                    try:
+                        app.exit()
+                    except Exception:
+                        pass
             finally:
                 state["running"] = False; state["signal"] = None
                 set_status(None)
@@ -910,7 +915,7 @@ _SLASH = {
     "/config":  "add / update LLM providers (the setup wizard, in-session) — then /model to switch",
     "/model":   "switch model + reasoning — menu lists YOUR configured providers (switches endpoint too)",
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
-    "/cwd":     "switch workspace root (/cwd <path>) — re-roots repo map, file tools & commands",
+    "/cwd":     "show this process's workspace; with a path, show where to relaunch",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",

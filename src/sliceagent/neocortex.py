@@ -317,8 +317,11 @@ def render_skill_llm(proc: dict, llm, *, origin: str = AUTO) -> str:
     if _is_secret(material) or scan_for_threats(material, scope="strict"):
         return render_skill(proc, origin=origin)            # F1: tainted → deterministic, no LLM
     try:
-        resp = llm.complete([{"role": "system", "content": _GENERALIZE_SYS},
-                             {"role": "user", "content": material}], [])
+        from .model_runner import complete_model_call
+        resp = complete_model_call(
+            llm, [{"role": "system", "content": _GENERALIZE_SYS},
+                  {"role": "user", "content": material}], [],
+        )
         body = (resp.content or "").strip()
     except Exception:  # noqa: BLE001 — any LLM failure falls back, never breaks consolidation
         body = ""

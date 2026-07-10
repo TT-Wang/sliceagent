@@ -84,7 +84,10 @@ def banner_always_uses_the_big_block_wordmark():
     from sliceagent.tui import banner_panel, _WORDMARK
     def render(width):
         buf = io.StringIO()
-        c = Console(file=buf, width=width, force_terminal=True, color_system=None)
+        # Rich's TERM=dumb fallback reports a fixed 80×25 unless both dimensions and TERM are pinned,
+        # which would make this width-sensitive rendering test assert against the test runner environment.
+        c = Console(file=buf, width=width, height=25, force_terminal=True, color_system=None,
+                    _environ={"TERM": "xterm"})
         c.print(banner_panel(c, "info"))
         return buf.getvalue()
     wide = render(120)

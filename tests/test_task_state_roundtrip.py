@@ -24,11 +24,13 @@ def check(fn):
 
 def make_slice():
     s = Slice(); s.reset("fix the widget")
+    s.task.add_progress("edit", "a.py")
     s.findings = ["root cause: X", "ruled out: Y", "fix: Z"]
     s.active_files = ["a.py", "b.py"]
     s.edited_files = {"a.py"}
     s.edit_anchor = {"a.py": "foo :: bar :: baz"}        # anchor containing ' :: '
     s.last_error = "Traceback:\n  line 1\n  line 2\nValueError: bad"
+    s.reconciliation_required = "command call-7 may still be running"
     s.since_edit = 2
     return s
 
@@ -42,6 +44,7 @@ def _write(ts, tmp):
 @check
 def roundtrip():
     s = make_slice()
+    s.task.mark_objective_provisional()
     ts = slice_to_task_state(s, "t1", session_id="s1")
     ts2 = _parse_task_md(_write(ts, tempfile.mkdtemp()))
     assert ts2 is not None
@@ -51,16 +54,23 @@ def roundtrip():
     assert set(ts2.edited_files) == s.edited_files
     assert ts2.edit_anchor == s.edit_anchor              # ' :: ' survived (TAB delimiter)
     assert ts2.last_error == s.last_error                # multi-line verbatim
+    assert ts2.reconciliation_required == s.reconciliation_required
+    assert ts2.objective_status == "provisionally_satisfied"
     assert ts2.since_edit == 2                           # record preserved it
+    assert ts2.progress_signals == [{"kind": "edit", "detail": "a.py", "count": 1}]
 
 @check
 def resume_reconstructs_slice():
     s = make_slice()
+    s.task.mark_objective_provisional()
     r = task_state_to_slice(slice_to_task_state(s, "t1"))
     assert r.goal == s.goal and r.findings == s.findings and r.edited_files == s.edited_files
     assert r.edit_anchor == s.edit_anchor
+    assert r.reconciliation_required == s.reconciliation_required
+    assert r.task.objective_status == "provisionally_satisfied"
     assert r.since_edit == 0                             # resume = fresh action epoch
     assert r.action_log == {} and r.active_skills == []   # transient cleared
+    assert r.task.progress_signals and r.task.progress_signals[0].detail == "a.py"
 
 @check
 def empty_error_not_none_string():

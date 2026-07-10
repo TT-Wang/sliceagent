@@ -1,86 +1,153 @@
-"""Slice field-lifecycle enforcement (#1). Closes the silent carry-by-omission trap: the flat-peak moat
-and cross-topic isolation depend on reset()/seal() handling EVERY Slice field correctly, but that was kept
-in sync by hand. This suite fails the moment a field is added without a conscious lifecycle decision —
-(a) every field is classified in _SLICE_SEAL_POLICY, (b) reset() wipes all fields to default (a forgotten
-field leaks across tasks), (c) seal() RESETS every transient field and CARRIES every durable one (a forgotten
-transient field silently accumulates across turns → breaks the moat). No model, no network.
-Run: PYTHONPATH=src python tests/test_slice_lifecycle.py
-"""
+"""Nested Slice ownership and region-owned lifecycle. No model/network."""
 import os
 import sys
 from dataclasses import fields
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.pfc import Slice, _SLICE_SEAL_POLICY  # noqa: E402
+from sliceagent.events import ToolResult  # noqa: E402
+from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.slice_state import MAX_PROGRESS_SIGNALS, TurnRuntime  # noqa: E402
 
 CHECKS = []
+
+
 def check(fn):
     CHECKS.append(fn)
     return fn
 
 
-def _sentinel(default):
-    """A non-default value of the same shape — proves a lifecycle method actually touched the field."""
-    if isinstance(default, bool):   return not default          # bool BEFORE int (bool is an int subclass)
-    if isinstance(default, int):    return default + 12345
-    if isinstance(default, str):    return "SENTINEL"
-    if isinstance(default, set):    return {"SENTINEL"}
-    if isinstance(default, dict):   return {"SENTINEL": 1}
-    if isinstance(default, list):   return ["SENTINEL"]
-    return "SENTINEL"
-
-
-_FIELDS = [f.name for f in fields(Slice)]
+@check
+def slice_has_exactly_six_authoritative_regions():
+    assert [f.name for f in fields(Slice)] == [
+        "intent", "task", "evidence", "work", "continuity", "runtime",
+    ]
+    assert not hasattr(__import__("sliceagent.pfc", fromlist=["x"]), "_SLICE_SEAL_POLICY"), \
+        "lifecycle must live on regions, not in a parallel policy table"
 
 
 @check
-def every_field_is_classified_exactly_once():
-    classified, actual = set(_SLICE_SEAL_POLICY), set(_FIELDS)
-    missing, stale = actual - classified, classified - actual
-    assert not missing, f"unclassified Slice field(s) — add to _SLICE_SEAL_POLICY: {sorted(missing)}"
-    assert not stale, f"_SLICE_SEAL_POLICY names field(s) that no longer exist: {sorted(stale)}"
-    assert set(_SLICE_SEAL_POLICY.values()) <= {"carry", "reset", "custom"}, "unknown lifecycle policy value"
+def legacy_aliases_are_live_views_not_copies():
+    s = Slice(); s.reset("task")
+    assert s.plan is s.task.plan and s.findings is s.evidence.findings
+    assert s.active_files is s.work.active_files and s.conversation is s.continuity.conversation
+    s.plan.append({"step": "one", "status": "pending"})
+    s.active_files.append("a.py")
+    s.goal = "renamed"
+    assert s.task.plan[0]["step"] == "one"
+    assert s.work.active_files == ["a.py"] and s.task.goal == "renamed"
 
 
 @check
-def reset_wipes_every_field_to_default():
-    s = Slice()
-    for name in _FIELDS:                                        # dirty EVERY field
-        setattr(s, name, _sentinel(getattr(s, name)))
-    s.reset("newgoal")
-    fresh = Slice()
-    for name in _FIELDS:
-        expected = "newgoal" if name == "goal" else getattr(fresh, name)
-        assert getattr(s, name) == expected, f"reset() left field {name!r} dirty → leaks across tasks"
+def reset_delegates_to_every_region():
+    s = Slice(); s.reset("old")
+    s.intent.add_exact("constraint")
+    s.plan.append({"step": "x"}); s.world["k"] = "v"; s.task.add_progress("edit", "a.py")
+    s.findings.append("fact"); s.last_error = "boom"; s.open_report = "broken"
+    s.active_files.append("a.py"); s.active_skills.append({"name": "x", "body": "y"})
+    s.conversation.append({"user": "u", "assistant": "a"})
+    s.runtime.step = 9; s.turn_actions = 4; s.explore_mode = True
+    s.reset("new")
+    expected = Slice(); expected.reset("new")
+    assert s == expected
 
 
 @check
-def seal_resets_transient_and_carries_durable():
-    for name, policy in _SLICE_SEAL_POLICY.items():
-        if policy == "custom":
-            continue                                            # cap/filter logic has its own dedicated tests
-        default = getattr(Slice(), name)
-        s = Slice()
-        setattr(s, name, _sentinel(default))                    # isolate: dirty ONLY this field
-        s.seal()
-        if policy == "reset":
-            assert getattr(s, name) == default, \
-                f"seal() must RESET transient field {name!r} (else it accumulates across turns → moat break)"
-        else:  # carry
-            assert getattr(s, name) == _sentinel(default), \
-                f"seal() must CARRY durable field {name!r} (else it's lost across turns)"
+def seal_preserves_semantic_state_and_resets_runtime():
+    s = Slice(); s.reset("task")
+    s.intent.add_exact("keep API")
+    s.plan = [{"step": "ship", "status": "in_progress"}]
+    s.action_log = {"sig": {"count": 2}}
+    s.world = {"phase": "verify"}
+    s.task.add_progress("edit", "a.py")
+    s.findings = [f"finding {i}" for i in range(12)]
+    s.finding_source = {f: "observed" for f in s.findings}
+    s.last_error = "still failing"; s.open_report = "user says broken"
+    s.active_files = ["read.py", "edit.py"]
+    s.edited_files = {"edit.py"}; s.edit_anchor = {"edit.py": "anchor", "read.py": "x"}
+    s.active_skills = [{"name": "skill", "body": "body"}]
+    s.pre_defs = {"edit.py": {"old"}, "read.py": {"other"}}
+    s.ghosts = [{"kind": "file", "ref": "old.py"}]; s.hot = {"read.py": 2}
+    s.protected_deps = {"dep.py"}; s.stale_deps = {"dep.py"}
+    s.io["refault"] = 3; s.read_budget = 9
+    s.conversation = [{"user": "u", "assistant": "a"}]; s.turns = 1
+    s.runtime.step = 5; s.runtime.usage = {"prompt_tokens": 10}
+    s.runtime.recent_calls = [{"name": "read_file"}]; s.runtime.blocked_calls = 2
+    s.runtime.applied_effect_ids = {"effect-1"}
+    s.since_edit = 7; s.turn_actions = 8; s.explore_mode = True
+
+    s.seal()
+
+    assert s.intent.entries and s.plan and not s.action_log and s.world
+    assert s.task.progress_signals and s.task.progress_signals[0].detail == "a.py"
+    assert s.findings == [f"finding {i}" for i in range(12)]
+    assert set(s.finding_source) == set(s.findings)
+    assert s.last_error == "still failing" and s.open_report == "user says broken"
+    assert s.active_files == ["read.py", "edit.py"] and s.edited_files == {"edit.py"}
+    assert s.edit_anchor == {"edit.py": "anchor", "read.py": "x"}
+    assert s.pre_defs == {"edit.py": {"old"}, "read.py": {"other"}}
+    assert s.active_skills and s.ghosts and s.hot == {"read.py": 2}
+    assert s.protected_deps == set() and s.stale_deps == set()
+    assert s.io["refault"] == 3 and s.read_budget == 9
+    assert s.conversation and s.turns == 1
+    assert s.runtime == TurnRuntime(), "detailed turn state must not cross the seal"
+
+
+@check
+def progress_signal_ring_is_bounded_coalesced_and_task_scoped():
+    s = Slice(); s.reset("task")
+    for i in range(MAX_PROGRESS_SIGNALS + 4):
+        s.task.add_progress("evidence", f"fact {i}")
+    assert len(s.progress_signals) == MAX_PROGRESS_SIGNALS
+    latest = s.progress_signals[-1]
+    s.task.add_progress(latest.kind, latest.detail)
+    assert len(s.progress_signals) == MAX_PROGRESS_SIGNALS and s.progress_signals[-1].count == 2
+    s.seal()
+    assert s.progress_signals[-1].count == 2
+    s.reset("new task")
+    assert s.progress_signals == []
+
+
+@check
+def reducer_emits_semantic_progress_not_raw_output():
+    s = Slice(); s.reset("task")
+    slice_sink(s)(ToolResult(
+        "edit_file", {"path": "app.py", "note": "root cause confirmed"},
+        "very large raw output that must not become a progress record", False,
+    ))
+    records = s.task.progress_records()
+    assert {r["kind"] for r in records} == {"edit", "evidence"}
+    assert all("very large raw output" not in r["detail"] for r in records)
+    s.seal()
+    assert s.task.progress_records() == records
+
+
+@check
+def typed_effect_ids_make_reduction_idempotent():
+    from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus
+
+    s = Slice(); s.reset("task")
+    invocation = ToolInvocation("call-1", "world_set", {"key": "n", "value": "1"}, 0)
+    outcome = ToolOutcome(
+        invocation, ToolStatus.SUCCEEDED, "ok",
+        (ToolEffect("effect-1", "tool_outcome", {"name": "world_set"}),),
+    )
+    event = ToolResult("world_set", {"key": "n", "value": "1"}, "ok", False, outcome=outcome)
+    sink = slice_sink(s)
+    sink(event); first = (dict(s.world), dict(s.action_log), s.since_edit)
+    sink(event)
+    assert (dict(s.world), dict(s.action_log), s.since_edit) == first
 
 
 def main():
-    ok = 0
+    failed = 0
     for fn in CHECKS:
         try:
-            fn(); ok += 1
+            fn(); print(f"PASS {fn.__name__}")
         except Exception as e:  # noqa: BLE001
-            print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\n{ok}/{len(CHECKS)} passed")
-    sys.exit(0 if ok == len(CHECKS) else 1)
+            failed += 1; print(f"FAIL {fn.__name__}: {e!r}")
+    print(f"\n{len(CHECKS) - failed}/{len(CHECKS)} passed")
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

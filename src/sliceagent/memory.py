@@ -202,15 +202,22 @@ def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
     def _fm(v):
         return str(v).replace("\r", " ").replace("\n", " ")
     fm = [
-        "---", "type: task-state", "v: 1",
+        "---", "type: task-state", f"v: {getattr(task, 'schema_version', 2)}",
         f"session_id: {task.session_id}", f"task_id: {task.task_id}",
         f"title: {_fm(task.title)}", f"status: {_fm(task.status)}",
         f"created: {created}", f"updated: {updated}",
         f"since_edit: {task.since_edit}",
+        f"intent_next_id: {getattr(task, 'intent_next_id', 1)}",
+        f"objective_status: {_fm(getattr(task, 'objective_status', 'active'))}",
         f"links: {','.join(task.links)}", f"tags: {_fm(task.tags)}", "---",
     ]
     body = [
         "## Goal", _esc_body(task.goal),
+        "## Goal source", _esc_body(getattr(task, "goal_source", "")),
+        "## Current request", _esc_body(getattr(task, "current_request", "") or task.goal),
+        # v2 authoritative intent records. JSON bullets preserve exact clauses, status, provenance and ranges.
+        "## Intent", "\n".join(f"- {json.dumps(r, ensure_ascii=False)}"
+                                  for r in getattr(task, "intent_entries", [])),
         "## Findings", "\n".join(f"- {f}" for f in task.findings),
         # provenance per finding (JSON bullet, like World) — else cross-session resume drops it and a
         # 'claim'-tier finding silently reads back at the higher 'tool-note' trust tier.
@@ -219,9 +226,17 @@ def _render_task_md(task: TaskState, *, created: str, updated: str) -> str:
         # carried slice tiers — JSON-per-bullet so dict items round-trip EXACTLY (no markdown-escape
         # hazard). Without these, resuming a task silently dropped the standing contract / todo /
         # world model (data loss).
+        # Derived v1 view for one compatibility window. v2 readers always prefer Intent above.
         "## Requirements", "\n".join(f"- {json.dumps(r, ensure_ascii=False)}" for r in task.requirements),
         "## Plan", "\n".join(f"- {json.dumps(p, ensure_ascii=False)}" for p in task.plan),
+        "## Progress signals", "\n".join(f"- {json.dumps(p, ensure_ascii=False)}"
+                                           for p in getattr(task, "progress_signals", [])),
         "## Open report", _esc_body(getattr(task, "open_report", "")),
+        "## Reconciliation required", _esc_body(getattr(task, "reconciliation_required", "")),
+        "## Reconciliation targets", "\n".join(
+            f"- {json.dumps(target, ensure_ascii=False)}"
+            for target in getattr(task, "reconciliation_targets", [])
+        ),
         "## World", "\n".join(f"- {json.dumps([k, v], ensure_ascii=False)}" for k, v in task.world.items()),
         "## Working set", "\n".join(f"- {p}" for p in task.active_files),
         "## Edited", "\n".join(f"- {p}" for p in sorted(task.edited_files)),
@@ -259,15 +274,26 @@ def _parse_task_md(path: str) -> TaskState | None:
         if isinstance(kv, list) and len(kv) == 2 and isinstance(kv[0], str):   # non-str key is unhashable → skip the bullet, not the whole task
             world[kv[0]] = kv[1]
     return TaskState(
-        task_id=fm.get("task_id", ""), session_id=fm.get("session_id", ""),
+        task_id=fm.get("task_id", ""), schema_version=_safe_int(fm.get("v"), 1),
+        session_id=fm.get("session_id", ""),
         title=fm.get("title", ""), status=fm.get("status", "active"),
         goal=_unesc_body(sec.get("goal", "")),
+        goal_source=_unesc_body(sec.get("goal source", "")),
+        objective_status=fm.get("objective_status", "active"),
+        current_request=_unesc_body(sec.get("current request", "")),
+        intent_entries=[r for r in _json_bullets("intent") if isinstance(r, dict)],
+        intent_next_id=_safe_int(fm.get("intent_next_id"), 1),
         findings=_bullets(sec.get("findings", "")),
         finding_source={kv[0]: kv[1] for kv in _json_bullets("finding sources")
                         if isinstance(kv, list) and len(kv) == 2 and isinstance(kv[0], str)},
         requirements=[r for r in _json_bullets("requirements") if isinstance(r, dict)],
         plan=[p for p in _json_bullets("plan") if isinstance(p, dict)],
+        progress_signals=[p for p in _json_bullets("progress signals") if isinstance(p, dict)],
         open_report=_unesc_body(sec.get("open report", "")),
+        reconciliation_required=_unesc_body(sec.get("reconciliation required", "")),
+        reconciliation_targets=[
+            target for target in _json_bullets("reconciliation targets") if isinstance(target, str)
+        ],
         world=world,
         active_files=_bullets(sec.get("working set", "")),
         edited_files=_bullets(sec.get("edited", "")),

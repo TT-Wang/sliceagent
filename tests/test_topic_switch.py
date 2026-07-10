@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.memory import NullMemory   # noqa: E402
 from sliceagent.session import Session     # noqa: E402
+from sliceagent.cli import _RECONCILIATION_BLOCKED_SLASH  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -30,6 +31,28 @@ def new_topic_is_isolated():
     b = sess.active()
     assert b.goal == "task B" and sess.active_id == b_id
     assert b.findings == [] and b.active_files == [] and b.edited_files == set() and b.last_error == ""
+
+
+@check
+def indeterminate_task_cannot_be_abandoned_before_reconciliation():
+    sess = fresh()
+    active_id = sess.new_topic("task A")
+    sess.active().reconciliation_required = "late write may still land"
+    for operation in (lambda: sess.new_topic("task B"), lambda: sess.switch_topic("anything")):
+        try:
+            operation()
+            assert False, "task boundary must remain closed while effects are indeterminate"
+        except RuntimeError as exc:
+            assert "reconcile_execution" in str(exc)
+    assert sess.active_id == active_id
+
+
+@check
+def reconciliation_blocks_every_effectful_host_command():
+    assert {"/config", "/model", "/mode", "/reasoning", "/undo",
+            "/switch", "/resume", "/learn"} <= _RECONCILIATION_BLOCKED_SLASH
+    assert "/cwd" not in _RECONCILIATION_BLOCKED_SLASH, \
+        "the immutable-workspace /cwd query/relaunch guide has no side effects"
 
 
 @check
@@ -162,12 +185,49 @@ def continue_topic_preserves_context():
     s.action_log = {"sig": {"count": 3, "failing": True, "last": "boom"}}
     sess.continue_topic("now add a docstring")
     s2 = sess.active()
-    assert s2.goal == "now add a docstring"                # new directive
+    assert s2.goal == "implement add()"                     # stable objective; request is separate
+    assert s2.intent.current_request == "now add a docstring"
     assert s2.findings == ["added add()"] and s2.active_files == ["calc.py"] and s2.edited_files == {"calc.py"}
     assert s2.last_error == "" and s2.since_edit == 0     # fresh error/convergence epoch
     # I3 WS2 — the anti-loop epoch is DEMOTED, not cleared: counts survive (a genuinely repeated
     # command still trips REPEATED-with-no-progress) but the stale failing flag is dropped.
     assert s2.action_log == {"sig": {"count": 3, "failing": False, "last": "boom"}}
+
+
+@check
+def literal_continue_preserves_the_unresolved_failure_it_resumes():
+    from sliceagent.regions import render_action_history
+
+    sess = fresh(); sess.new_topic("repair parser")
+    state = sess.active()
+    state.last_error = "Traceback: parser still rejects escaped input"
+    state.action_log = {
+        "run_command `python -m tests`": {
+            "count": 1, "failing": True, "last": "parser still rejects escaped input",
+        },
+    }
+    sess.continue_topic("continue")
+    assert state.last_error == "Traceback: parser still rejects escaped input"
+    assert state.action_log["run_command `python -m tests`"]["failing"] is True
+    assert "parser still rejects escaped input" in render_action_history(state.action_log)
+
+
+@check
+def resume_keeps_topic_goal_but_renders_new_current_request():
+    from sliceagent.retriever import NullRetriever
+    from sliceagent.seed import make_build_slice
+    from sliceagent.tools import LocalToolHost
+    sess = fresh()
+    a_id = sess.new_topic("fix the parser")
+    sess.new_topic("write the docs")
+    sess.switch_topic(a_id)
+    sess.continue_topic("go back and run the parser tests", resume=True)
+    assert sess.active().goal == "fix the parser", "resume cue must not rename the parked topic"
+    user = make_build_slice(
+        sess, LocalToolHost(tempfile.mkdtemp()), NullRetriever(), NullMemory(),
+        "go back and run the parser tests",
+    )()[1]["content"]
+    assert user.count("go back and run the parser tests") >= 2, "resume request must drive primacy + recency"
 
 
 @check
