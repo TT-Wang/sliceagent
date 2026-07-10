@@ -5,6 +5,48 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-10
+
+A typed re-architecture of the core around a single canonical design (elastic slice, execution kernel,
+crash-safe persistence), plus a rebuilt Rich TUI. No change to the thesis — same history-bounded,
+task-elastic slice — but the invariants are now enforced by typed subsystems rather than convention.
+
+### Added
+- **Typed core kernel.** The active slice is split into typed semantic regions (intent, task, evidence,
+  working set, continuity, turn runtime), each owning its own seal/reset lifecycle, replacing the flat
+  field-classification table. A provenance-tagged **intent ledger** captures verbatim user directives with
+  their source handles, deterministically promotes explicit constraint language (`must`/`never`/`only`),
+  and records supersession/satisfaction as explicit transitions.
+- **Execution kernel.** Structured tool outcomes (succeeded/failed/cancelled/**indeterminate**), ordered
+  read/write waves (pure reads parallel, effects as barriers), reconciliation gates that block dependent
+  actions after an unprovable outcome, and one capacity-preflighted model-call path.
+- **Crash-safe persistence.** A pending-journal → immutable-artifact → checkpoint compare-and-swap commit
+  order with idempotent replay, a full error taxonomy, and an OS-backed workspace lease, so an interrupted
+  turn resumes without re-running side effects. Dependency-scoped workspace revisions stale only the claims
+  whose inputs actually changed.
+- **Rebuilt TUI.** A single `TurnProgress` event reducer folds loop events into an immutable snapshot;
+  the renderer projects that snapshot (semantic tool buckets, bounded plan/tally, width-responsive
+  diagnostics, one live-status owner) instead of interpreting events independently.
+
+### Changed
+- Elastic residency is centralized: a pressure controller chooses graded fidelity globally
+  (full → excerpt → digest → locator) so no region can consume the window unnoticed.
+- Per-turn cost framing corrected throughout the docs to **history-bounded, task-elastic** — bounded with
+  respect to session length, not a fixed size regardless of task breadth.
+
+### Fixed
+- **Intent ledger and progress signals no longer lost on resume.** Checkpoint state is deep-frozen on
+  write; the resume and crash-recovery paths now thaw it fully at the boundary (and the deserializers
+  accept any `Mapping`), so binding user directives and their provenance survive a restart instead of
+  being silently dropped.
+- **A completed first-turn objective no longer stays pinned as a mandatory, un-pageable block** — a clean
+  turn with no unresolved state marks it pageable background; unresolved state or explicit continuation
+  keeps it active.
+- Security/reliability hardening from external review: WAL/recovery redacts tool-call arguments; process
+  kill reaps the whole spawn-captured process group; `code_review` and the read-only git policy refuse
+  external-diff/textconv and config injection; subagent children charge their tokens to the parent budget,
+  stay isolated from the parent's private state, and write durable state 0600/0700.
+
 ## [0.1.18] — 2026-07-09
 
 ### Added
