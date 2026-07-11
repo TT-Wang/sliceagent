@@ -47,9 +47,7 @@ _BUDGET_CEILINGS = {
 # same wall instead of asking). Carried on a TurnInterrupted("stuck") event → shown to the user, who
 # regains control. The proactive path is ask_user; this is the backstop when the model won't self-stop.
 STUCK: str = (
-    "Stopped: this turn hit the loop guard repeatedly without making progress. When you are unsure "
-    "or blocked, call ask_user with a concise question instead of retrying — asking is better than "
-    "spinning. Control is back with the user; clarify or rephrase the task to continue."
+    "Stopped after repeated failed tool calls; further retries were blocked."
 )
 
 

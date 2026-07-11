@@ -92,7 +92,15 @@ def repeated_blocks_stop_the_turn_and_hand_back():
     assert res.stop_reason == "stuck", res.stop_reason          # NOT max_steps — the floor fired first
     assert res.steps < 40, f"floor must fire well before max_steps, got {res.steps}"
     ti = [e for e in events if isinstance(e, TurnInterrupted) and e.reason == "stuck"]
-    assert ti and "ask_user" in (ti[0].message or ""), "stuck message should point at ask_user"
+    assert len(ti) == 1, ti
+    message = ti[0].message or ""
+    lowered = message.lower()
+    # TurnInterrupted is terminal UI copy for the user, not a prompt to the model.  Keep implementation
+    # vocabulary out of it and explain the actual stopped operation instead.
+    assert "loop guard" not in lowered, message
+    assert "ask_user" not in lowered, message
+    assert "read_file" in lowered, message
+    assert any(cause in lowered for cause in ("failed", "failure", "blocked", "denied")), message
 
 
 @check

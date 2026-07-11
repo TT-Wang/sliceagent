@@ -1183,17 +1183,33 @@ class SealCoordinator:
                 # supply a checkpoint rebuilt from confirmed semantic transitions; storage itself never
                 # guesses how application state should reduce.
                 request = str(header.get("user_request") or "")
+                kind = "subagent" if snapshot.artifact_id.startswith("subagent-") else "turn"
+                recovered_refs = tuple(dict.fromkeys((*snapshot.artifact_refs, *discovered_refs)))
+                recovered_body = {
+                    "journal_events": [_thaw_json(event) for event in snapshot.events],
+                }
+                if kind == "turn":
+                    # Execution lifecycle is a pure journal projection, so crash recovery can preserve it
+                    # without replaying a tool or guessing application state. This gives later self-audit the
+                    # same canonical source as an ordinary seal; unresolved starts remain indeterminate.
+                    from .receipts import TurnReceipt
+                    recovered_body["turn_receipt"] = TurnReceipt.from_events(
+                        snapshot.events,
+                        turn_id=snapshot.artifact_id,
+                        turn_status="interrupted",
+                        artifact_refs=recovered_refs,
+                    ).to_dict()
                 artifact = Artifact(
                     id=snapshot.artifact_id,
-                    kind=("subagent" if snapshot.artifact_id.startswith("subagent-") else "turn"),
+                    kind=kind,
                     workspace_id=str(header.get("workspace_id") or "unknown-workspace"),
                     session_id=str(header.get("session_id") or "unknown-session"),
                     task_id=str(header.get("task_id") or "unknown-task"),
                     timestamp=str(header.get("created_at") or _now_iso()), status="interrupted",
                     title=request[:120], brief={"request": request},
                     summary="Recovered after process interruption; external tools were not replayed.",
-                    structured_body={"journal_events": [_thaw_json(event) for event in snapshot.events]},
-                    refs=tuple(dict.fromkeys((*snapshot.artifact_refs, *discovered_refs))),
+                    structured_body=recovered_body,
+                    refs=recovered_refs,
                     error="process interrupted before seal",
                 )
             try:

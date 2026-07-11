@@ -70,6 +70,20 @@ def result_hash_loop_spans_execute_code_and_run_command():
 
 
 @check
+def repeated_delegation_error_does_not_poison_unrelated_observation():
+    """One broken tool family may be stopped, but the agent must still be able to fall back to direct reads."""
+    g = ToolCallGuardrail()
+    error = "Error: core delegation is one-shot and does not expose names"
+    for index in range(7):
+        g.after_call("spawn_agent", {"task": f"area {index}", "name": f"agent-{index}"}, error)
+    assert g.before_call("spawn_agent", {"task": "another"}).block is True
+    assert g.before_call("read_file", {"path": "package.json"}).block is False
+    assert g.before_call("run_command", {
+        "command": "find . -type f -not -path './.git/*' | sort",
+    }).block is False, "a proven read-only shell fallback is not a failed mutation"
+
+
+@check
 def distinct_silent_successful_commands_are_not_a_loop():
     # R12: distinct successful commands that each produce the no-output sentinel must NOT be hard-blocked
     g = ToolCallGuardrail()

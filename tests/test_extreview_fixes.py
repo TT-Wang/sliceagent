@@ -60,12 +60,13 @@ def h06_policy_blocks_git_write_and_exec_options():
     assert not ro("git --exec-path=/tmp/evil diff")
     assert not ro("git diff --output=/tmp/pwned HEAD")
     assert not ro("git diff -o /tmp/pwned HEAD")
-    # genuinely read-only git stays auto-approved (grep -c = --count, NOT a git-main -c config)
-    assert ro("git diff HEAD")
+    # Diff/pager-capable commands prove helper suppression explicitly; bare repo config is executable state.
+    assert not ro("git diff HEAD")
+    assert ro("git --no-pager diff --no-ext-diff --no-textconv HEAD")
     assert ro("git status")
-    assert ro("git log --oneline -5")
-    assert ro("git grep -c needle")
-    assert ro("git show HEAD:file.py")
+    assert ro("git --no-pager log --oneline -5")
+    assert ro("git --no-pager grep -c needle")
+    assert ro("git --no-pager show --no-ext-diff --no-textconv HEAD:file.py")
 
 
 @check

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from .events import (
     ApiRetry,
@@ -23,11 +27,18 @@ from .events import (
     TurnStarted,
     make_dispatcher,
 )
-from .hooks import (BudgetHook, CompositeHooks, GuardrailHook, OracleHook,
-                    PermissionHook, ReconciliationHook)
+from .hooks import (BudgetHook, CompositeHooks, DelegatedClaimCompletionHook,
+                    DelegationCompletionHook, ExecutionEvidenceCompletionHook,
+                    FrozenEvidenceCutoffHook, GuardrailHook,
+                    Hooks, OracleHook, PermissionHook, QualityEvidenceCompletionHook,
+                    ReconciliationHook, ToolDecision, TurnAuthorityHook)
+from .receipts import (compact_receipt_projection, receipt_completion_label,
+                       receipt_summary_parts)
 
 
-def _load_env(path: str = ".env") -> None:
+def _load_env(path: str = ".env") -> dict[str, str]:
+    """Load unset values and return exactly the repository overlay introduced by this call."""
+    applied: dict[str, str] = {}
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -37,40 +48,436 @@ def _load_env(path: str = ".env") -> None:
                     v = v.strip()
                     if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                         v = v[1:-1]   # drop surrounding quotes (common .env convention) so the key isn't literal-quoted
-                    os.environ.setdefault(k.strip(), v)
+                    key = k.strip()
+                    if key not in os.environ:
+                        os.environ[key] = v
+                        applied[key] = v
     except FileNotFoundError:
         pass
+    return applied
 
 
 LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate the debug log past this (keep one prior)
 
 # Host commands that can write files/preferences, perform network setup, or abandon the owning task. They
-# remain closed while an earlier effect is indeterminate, just like model tools. `/cwd` is intentionally not
-# here: workspace identity is immutable for one process, so that command only reports the root/relaunch path.
+# remain closed while an earlier effect is indeterminate, just like model tools. `/cwd` is included because
+# its path form publishes a new workspace runtime; the no-argument query stays usable.
 _RECONCILIATION_BLOCKED_SLASH = frozenset({
-    "/config", "/model", "/mode", "/reasoning", "/undo", "/switch", "/resume", "/learn",
+    "/config", "/model", "/mode", "/reasoning", "/undo", "/switch", "/resume", "/learn", "/cwd",
 })
 
 
-def _cwd_message(workspace_root: str, path: str = "") -> str:
-    """Pure `/cwd` projection.
+def _slash_blocked_by_reconciliation(command: str, argument: str = "") -> bool:
+    """Queries remain available; any slash operation that changes state stays behind the gate."""
+    return command in _RECONCILIATION_BLOCKED_SLASH and not (
+        command == "/cwd" and not (argument or "").strip()
+    )
 
-    A process owns exactly one workspace lease, artifact store, plugin/MCP graph, retriever, subagent host,
-    and log identity. Rebuilding only some of those owners caused split-brain state, so changing workspace is
-    deliberately a process boundary. Keep `/cwd` as a discoverable query/relaunch guide without mutating any
-    live owner.
-    """
+
+def _resolve_workspace_target(workspace_root: str, path: str) -> tuple[str | None, str]:
+    """Resolve one requested workspace without mutating cwd or any live runtime owner."""
     root = os.path.realpath(workspace_root)
-    raw = os.path.expanduser((path or "").strip())
+    raw = (path or "").strip()
     if not raw:
-        return f"workspace: {root}"
-    target = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(root, raw))
-    if not os.path.isdir(target):
-        return f"not a directory: {path}"
+        return None, f"workspace: {root}"
+    if "\x00" in raw:
+        return None, "not a directory: path contains a NUL byte"
+    try:
+        expanded = os.path.expanduser(raw)
+        target = os.path.realpath(expanded if os.path.isabs(expanded) else os.path.join(root, expanded))
+        if not os.path.isdir(target):
+            return None, f"not a directory: {path}"
+    except (OSError, ValueError):
+        return None, f"not a directory: {path}"
     if target == root:
-        return f"workspace already active: {root}"
-    return ("workspace is fixed for this SliceAgent process; exit and relaunch SliceAgent from: "
-            f"{target}")
+        return None, f"workspace already active: {root}"
+    return target, ""
+
+
+def _cwd_message(workspace_root: str, path: str = "") -> str:
+    """Pure `/cwd` projection used before the host stages a workspace-runtime handoff."""
+    target, message = _resolve_workspace_target(workspace_root, path)
+    return message or f"workspace switch ready: {target}"
+
+
+def _fold_chitchat_continuity(state, user_text: str, assistant_text: str) -> None:
+    """Keep one bounded exact social adjacency while consuming stale action/evidence continuity."""
+    state.continuity.pending_proposal = None
+    state.continuity.previous_evidence_snapshot = None
+    state.conversation.append({
+        "user": str(user_text), "assistant": str(assistant_text), "artifact_id": "",
+    })
+    state.conversation = state.conversation[-4:]
+
+
+class _WorkspaceHandoffHook(Hooks):
+    """Once a handoff is pending, the model may only finish the current turn."""
+
+    def __init__(self, state: dict):
+        self.state = state
+
+    def authorize_tool(self, name, args):
+        if self.state.get("target"):
+            return ToolDecision(
+                False,
+                "workspace switch is already scheduled; finish this turn without more tool calls",
+                counts_as_stuck=False,
+            )
+        return ToolDecision(True)
+
+    def should_continue_after_stop(self, stop_reason):
+        # A workspace-navigation turn must not run the old workspace's Oracle/plugin completion hooks after
+        # the control tool succeeds. The host still requires an ordinary clean stop + durable seal below.
+        return {"exclusive": True} if self.state.get("target") else None
+
+
+@dataclass
+class WorkspaceResources:
+    """Everything whose truth is tied to one workspace.
+
+    The terminal surface and LLM deliberately do not live here: they are process-owned and survive a
+    workspace change.  Keeping workspace owners in one object makes the handoff an atomic pointer swap
+    instead of a collection of partially-rebound globals/closures.
+    """
+
+    root: str
+    config: Any
+    session: Any
+    store: Any
+    sandbox: Any
+    retriever: Any
+    base_tools: Any
+    tools: Any
+    skills: Any
+    plugin_hooks: tuple = ()
+    mcp_runtime: Any = None
+    reviewer: Any = None
+    episodic: Any = None
+    monitor_sink: Any = None
+    recovery_results: tuple = ()
+    mcp_tool_count: int = 0
+    plugin_tool_count: int = 0
+    mine_mode: str = "deterministic"
+    subagent_depth: int = 0
+    _closed: bool = field(default=False, init=False, repr=False)
+    _on_log: Callable[[str], None] = field(default=lambda _message: None, repr=False)
+
+    def close(self) -> None:
+        """Retire workspace-owned activity without touching the shared UI, LLM, or memory facade."""
+        if self._closed:
+            return
+        self._closed = True
+
+        def safe(label: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 — teardown is best-effort, but never silent
+                self._on_log(f"warning: {label} failed ({type(exc).__name__}: {exc})")
+
+        if self.reviewer is not None:
+            def _join_reviewer() -> None:
+                self.reviewer.join(timeout=10)
+                worker = getattr(self.reviewer, "_thread", None)
+                if worker is not None and worker.is_alive():
+                    raise TimeoutError("background review did not stop within 10 seconds")
+            safe("background-review join", _join_reviewer)
+        safe("tool cleanup", self.base_tools.cleanup)
+        if self.mcp_runtime is not None:
+            done = threading.Event()
+
+            def _shutdown_mcp() -> None:
+                try:
+                    safe("MCP shutdown", self.mcp_runtime.shutdown)
+                finally:
+                    done.set()
+
+            threading.Thread(target=_shutdown_mcp, daemon=True).start()
+            if not done.wait(8):
+                self._on_log("warning: MCP shutdown timed out after 8s")
+        writer = getattr(self.monitor_sink, "writer", None)
+        if writer is not None:
+            safe("monitor writer", writer.close)
+        safe("local state lease", self.store.close)
+
+
+class WorkspaceManager:
+    """Prepare-then-publish workspace resources while preserving process-owned identities.
+
+    Preparation failures leave ``current`` untouched.  ``activate`` is intentionally a tiny publication
+    callback (CLI variable delegates + TUI labels/completion); if it fails, the candidate is retired and
+    the old pointer remains current.  Old resources are closed only after successful publication.
+    """
+
+    def __init__(self, current, prepare: Callable[[str], Any]):
+        self.current = current
+        self._prepare = prepare
+        self._lock = threading.RLock()
+
+    def switch(self, target: str, activate: Callable[[Any], None] | None = None):
+        target = os.path.realpath(target)
+        if not os.path.isdir(target):
+            raise NotADirectoryError(target)
+        with self._lock:
+            old = self.current
+            candidate = self._prepare(target)
+            try:
+                self.current = candidate
+                if activate is not None:
+                    activate(candidate)
+            except BaseException:
+                self.current = old
+                try:
+                    candidate.close()
+                finally:
+                    raise
+            old.close()
+            return candidate
+
+
+def _workspace_paths(root: str, configured: list[str] | None, *defaults: str) -> list[str]:
+    """Resolve project-relative extension paths against an explicit workspace, never process cwd."""
+    paths = list(configured) if configured is not None else list(defaults)
+    resolved = []
+    for path in paths:
+        expanded = os.path.expanduser(path)
+        resolved.append(os.path.realpath(expanded if os.path.isabs(expanded)
+                                         else os.path.join(root, expanded)))
+    return list(dict.fromkeys(resolved))
+
+
+def _workspace_mcp_config(root: str, servers: dict) -> dict:
+    """Give every target MCP process an explicit target cwd without mutating global cwd."""
+    rooted = {}
+    for name, value in (servers or {}).items():
+        if not isinstance(value, dict):
+            rooted[name] = value
+            continue
+        conf = dict(value)
+        raw_cwd = conf.get("cwd")
+        if not raw_cwd:
+            conf["cwd"] = root
+        else:
+            expanded = os.path.expanduser(str(raw_cwd))
+            conf["cwd"] = os.path.realpath(expanded if os.path.isabs(expanded)
+                                             else os.path.join(root, expanded))
+        rooted[name] = conf
+    return rooted
+
+
+def _hydrate_workspace_tasks(store, session, on_log: Callable[[str], None]) -> None:
+    """Restore only the selected workspace's checkpoints into its fresh session."""
+    from .taskstate import task_state_from_checkpoint, task_state_to_slice
+
+    restored = []
+    for checkpoint in store.checkpoints():
+        try:
+            task_state = task_state_from_checkpoint(checkpoint)
+            session.tasks[checkpoint.task_id] = task_state_to_slice(task_state)
+            restored.append((checkpoint.updated_at, checkpoint.task_id, task_state.status))
+        except Exception as exc:  # noqa: BLE001 — one incompatible task must not hide the others
+            on_log(f"local task {checkpoint.task_id} could not be restored "
+                   f"({type(exc).__name__}: {exc})")
+    candidates = [row for row in restored if row[2] == "indeterminate"] or [
+        row for row in restored if row[2] in ("active", "parked")
+    ]
+    if candidates:
+        session.active_id = max(candidates)[1]
+
+
+def _prepare_workspace_resources(
+    root: str,
+    *,
+    cfg,
+    llm,
+    memory,
+    policy,
+    schedule_workspace,
+    notify_subagent,
+    ask_user=None,
+    on_log: Callable[[str], None] = lambda _message: None,
+) -> WorkspaceResources:
+    """Stage one complete workspace runtime before publishing it.
+
+    Lease acquisition, journal recovery, and checkpoint validation happen before plugin code or MCP
+    subprocesses.  Any failure retires the partial candidate and leaves the caller's current runtime intact.
+    """
+    from .background_review import make_background_reviewer
+    from .code_grep import make_glob_tool, make_grep_tool
+    from .code_index import make_code_index
+    from .config import load_config
+    from .hippocampus import make_episode_sink
+    from .mcp_client import connect_mcp_servers
+    from .memory import make_write_skill_tool
+    from .plugins import load_plugins
+    from .runtime_persistence import CoreArtifactFS, LocalTurnStore
+    from .sandbox import make_sandbox
+    from .session import Session, make_topic_tools
+    from .skills import make_skill_manager, make_skill_tool
+    from .subagent import SubagentHost
+    from .text_utils import one_line
+    from .tools import LocalToolHost
+
+    root = os.path.realpath(root)
+    cfg = cfg or load_config(root)
+    store = base_tools = mcp_runtime = reviewer = monitor_sink = None
+    try:
+        session = Session(memory)
+        # The lease/recovery boundary precedes every executable extension surface.
+        store = LocalTurnStore(root, session.session_id, exclusive=True)
+        recovery_results = tuple(store.recover_pending())
+        conflicts = tuple(result for result in recovery_results if result.status == "conflict")
+        if conflicts:
+            detail = "; ".join(f"{item.artifact_id}: {item.detail}" for item in conflicts)
+            raise RuntimeError(f"local recovery found an ambiguous journal ({detail})")
+        store.checkpoints()  # validate checkpoint bytes + artifact dependencies before startup effects
+
+        retriever = make_code_index(root)
+        sandbox = make_sandbox(
+            cfg.sandbox_backend, image=cfg.sandbox_image, network=cfg.sandbox_network,
+        )
+        base_tools = LocalToolHost(root, sandbox=sandbox)
+        base_tools.on_workspace_switch = schedule_workspace
+        if ask_user is not None:
+            base_tools.on_ask_user = ask_user
+        if os.environ.get("AGENT_ADVANCED_TOOLS", "").strip().lower() not in (
+            "1", "on", "true", "yes",
+        ):
+            for name in tuple(base_tools.registry._tools):
+                if name.startswith(("proc_", "terminal_")):
+                    base_tools.registry.deregister(name)
+        for extra in os.environ.get("AGENT_ROOT", "").split(os.pathsep):
+            if extra.strip():
+                expanded = os.path.expanduser(extra.strip())
+                base_tools.add_root(expanded if os.path.isabs(expanded)
+                                    else os.path.join(root, expanded))
+
+        skill_roots = _workspace_paths(
+            root, cfg.skills_roots,
+            os.path.join(root, ".sliceagent", "skills"),
+            os.path.join(os.path.expanduser("~"), ".sliceagent", "skills"),
+        )
+        skills = make_skill_manager(skill_roots)
+        plugin_dirs = _workspace_paths(root, cfg.plugin_dirs) if cfg.plugin_dirs else []
+        plugin_mcp, plugin_hooks = load_plugins(
+            base_tools.registry, skills, plugin_dirs, root=root, config=cfg, on_log=on_log,
+        )
+        skill_tool = make_skill_tool(skills)
+        if skill_tool is not None:
+            base_tools.registry.register(skill_tool)
+        base_tools.registry.register(make_grep_tool(base_tools))
+        base_tools.registry.register(make_glob_tool(base_tools))
+        if os.environ.get("AGENT_WEB", "1").strip().lower() not in ("0", "off", "false", "no"):
+            from .web import make_web_tools
+            for web_tool in make_web_tools(base_tools):
+                base_tools.registry.register(web_tool)
+        base_tools.registry.register(make_write_skill_tool())
+
+        all_mcp = {**cfg.mcp_servers, **plugin_mcp}
+        _connected, mcp_runtime = connect_mcp_servers(
+            base_tools.registry, _workspace_mcp_config(root, all_mcp), on_log=on_log,
+            page_out=base_tools._page_out,
+        )
+        mcp_tool_count = sum(
+            1 for entry in base_tools.registry._tools.values() if entry.source == "mcp"
+        )
+        plugin_tool_count = sum(
+            1 for entry in base_tools.registry._tools.values()
+            if entry.source.startswith("plugin:")
+        )
+
+        base_tools._artifacts = CoreArtifactFS(store.coordinator.artifacts)
+        _hydrate_workspace_tasks(store, session, on_log)
+        tools = base_tools
+        sub_depth = cfg.subagent_depth
+        if sub_depth > 0:
+            from .agents import BUILTIN_AGENTS, load_agents
+            advanced_agents = os.environ.get("AGENT_ADVANCED_AGENTS", "").strip().lower() in (
+                "1", "on", "true", "yes",
+            )
+            agent_roots = skill_roots + [root, os.path.join(root, ".sliceagent")]
+            agents = (load_agents(agent_roots) if advanced_agents
+                      else {"explorer": BUILTIN_AGENTS["explorer"]})
+            tools = SubagentHost(
+                base_tools, llm=llm, retriever=retriever, memory=memory, policy=policy,
+                max_depth=sub_depth if advanced_agents else 1, notify=notify_subagent,
+                agents=agents, session_id=session.session_id,
+                intent_provider=lambda _task, s=session: s.active().intent,
+                task_id_fn=lambda s=session: s.active_id or "t-none",
+                parent_id_fn=lambda st=store: (
+                    st.active.artifact_id if st.active is not None else ""
+                ),
+                workspace_id=store.workspace_id,
+                artifact_store=store.coordinator.artifacts,
+                artifact_ref_sink=lambda artifact_id, st=store: st.record_artifact_ref(artifact_id),
+                core_mode=not advanced_agents,
+            )
+        if os.environ.get("AGENT_TOPIC_TOOLS", "").strip().lower() in ("1", "on", "true", "yes"):
+            for topic_tool in make_topic_tools(session):
+                base_tools.registry.register(topic_tool)
+        if getattr(memory, "is_durable", False):
+            from .hippocampus import HistoryFS, RosterFS, SubagentFS, make_search_history_tool
+            base_tools._history = HistoryFS(memory, session.session_id)
+            base_tools._subagents = SubagentFS(memory, session.session_id)
+            base_tools._roster = RosterFS(memory)
+            base_tools.registry.register(make_search_history_tool(memory, session.session_id))
+
+        reviewer = make_background_reviewer(
+            memory, scope=os.path.basename(root) or "default", on_log=on_log,
+        )
+        episodic = make_episode_sink(
+            None,  # collect first; publish to optional semantic history only after the core seal commits
+            session_id=session.session_id,
+            task_id_fn=lambda s=session: s.active_id or "t-none",
+            title_fn=lambda s=session: one_line(s.active().goal, 80) if s.active_id else "",
+            outcome_fn=lambda s=session: {"requirements_open": sum(
+                1 for requirement in s.active().requirements
+                if isinstance(requirement, dict) and not requirement.get("done")
+            )} if s.active_id else {},
+            collect=True,
+        )
+        if os.environ.get("AGENT_MONITOR"):
+            from .monitor import make_file_monitor_sink
+            monitor_sink = make_file_monitor_sink(
+                session.session_id,
+                context_fn=lambda s=session: {
+                    "goal": s.active().goal if s.active_id else "",
+                    "topic": s.active_id or "",
+                },
+            )
+
+        return WorkspaceResources(
+            root=root, config=cfg, session=session, store=store, sandbox=sandbox,
+            retriever=retriever, base_tools=base_tools, tools=tools, skills=skills,
+            plugin_hooks=tuple(plugin_hooks), mcp_runtime=mcp_runtime, reviewer=reviewer,
+            episodic=episodic, monitor_sink=monitor_sink, recovery_results=recovery_results,
+            mcp_tool_count=mcp_tool_count, plugin_tool_count=plugin_tool_count,
+            mine_mode=cfg.mine, subagent_depth=sub_depth, _on_log=on_log,
+        )
+    except BaseException:
+        if reviewer is not None:
+            try:
+                reviewer.join(timeout=2)
+            except Exception:
+                pass
+        if base_tools is not None:
+            try:
+                base_tools.cleanup()
+            except Exception:
+                pass
+        if mcp_runtime is not None:
+            try:
+                mcp_runtime.shutdown()
+            except Exception:
+                pass
+        writer = getattr(monitor_sink, "writer", None)
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        if store is not None:
+            store.close()
+        raise
 
 
 def log_sink(root: str = ".", path: str | None = None):
@@ -155,7 +562,9 @@ def cli_sink(show_slice: bool = False):
             print(f"  💡 learned: {e.title}")
         elif isinstance(e, TurnCommitted):
             if e.ok:
-                print(f"  [turn saved: {e.stop_reason}]")
+                label = receipt_completion_label(e.receipt, e.stop_reason)
+                detail = receipt_summary_parts(e.receipt)
+                print(f"  [{label}" + (" · " + " · ".join(detail) if detail else "") + "]")
             else:
                 print(f"  [save failed: {e.detail or e.stop_reason}]")
     return sink
@@ -208,14 +617,16 @@ def _env_from_config(c, pid: str | None = None) -> None:
 
 
 def main() -> None:
-    # subcommands (onboarding / discovery) are handled BEFORE any key gate, so `sliceagent init` runs on a
-    # machine with nothing configured yet. A bare `sliceagent` (or one with non-subcommand args) falls through.
+    # Host subcommands are handled BEFORE .env, the key gate, workspace leases, plugins, or MCP. In particular,
+    # `sliceagent update` must never ingest repository configuration or accidentally boot an agent session.
     _argv = sys.argv[1:]
-    if _argv and _argv[0] in ("init", "config", "help", "--help", "-h", "version", "--version", "-V"):
+    if _argv and _argv[0] in (
+        "init", "config", "update", "upgrade", "help", "--help", "-h", "version", "--version", "-V",
+    ):
         from .onboarding import dispatch as _dispatch
         sys.exit(_dispatch(_argv))
 
-    _load_env()
+    _project_env_overlay = _load_env()
     # config-persisted key/endpoint (written by `sliceagent init`) populate the env BEFORE the gate, so a
     # configured user never has to export anything; ENV still wins for one-off overrides.
     from .config import load_config, load_prefs
@@ -257,27 +668,27 @@ def main() -> None:
     for _w in validate_env():
         print(f"  · config warning: {_w}")
 
-    from .code_index import make_code_index
-    from .hippocampus import make_episode_sink
     from .llm import OpenAILLM
-    from .mcp_client import connect_mcp_servers
     from .loop import run_turn
     from .memory import make_memory
     from .oracle import CommandOracle
-    from .plugins import load_plugins
     from .policy import CONFIRMS, legacy_warning, make_policy, policy_label, resolve_policy_mode
-    from .sandbox import make_sandbox
-    from .session import Session, make_topic_tools, route, route_topic_lexical
-    from .skills import make_skill_manager, make_skill_tool
+    from .session import route, route_topic_lexical
     from .pfc import consolidate_checkpoint, record_user, slice_sink
     from .seed import make_build_slice
-    from .runtime_persistence import CoreArtifactFS, LocalTurnStore
     from .text_utils import one_line
-    from .subagent import SubagentHost
-    from .tools import LocalToolHost
 
     # cfg already loaded above (for the config→env key population + the gate)
     root = os.getcwd()
+    _workspace_handoff = {"target": "", "ready": False}
+
+    def _schedule_workspace(target: str) -> str:
+        existing = str(_workspace_handoff.get("target") or "")
+        if existing and existing != target:
+            return f"workspace switch already scheduled for {existing}"
+        _workspace_handoff.update(target=target, ready=False)
+        return ""
+
     from .config import load_prefs, save_prefs
     _prefs = load_prefs()
     # mode resolution: explicit env wins, then the saved /mode choice, then config (default teenager).
@@ -304,183 +715,196 @@ def main() -> None:
     llm = OpenAILLM(model=_model)
     if _prefs.get("reasoning") and not (os.environ.get("AGENT_REASONING") or os.environ.get("AGENT_THINKING")):
         llm.reasoning = str(_prefs["reasoning"]).lower()   # apply the saved /reasoning choice
-    retriever = make_code_index(root)  # ripgrep CodeIndex (RELATED CODE tier); NullRetriever if no rg
     memory = make_memory()  # memem if available + a vault is configured, else NullMemory
-    session = Session(memory)
-    llm.set_cache_key(session.session_id)
-    # Acquire workspace ownership before loading plugins or starting MCP subprocesses. A rejected second
-    # process must have no opportunity to perform extension startup work before it learns it is not owner.
-    try:
-        local_store = LocalTurnStore(root, session.session_id, exclusive=True)
-    except Exception as exc:  # noqa: BLE001 — a second live process must never steal active journals
-        print(f"Workspace is already active or its state lease is unavailable: {type(exc).__name__}: {exc}")
-        sys.exit(2)
-    # Recover before plugin loading or MCP startup.  A conflict means the durable prefix cannot prove whether
-    # an operation ran, so continuing would let extension/startup effects cross an unknown workspace state.
-    try:
-        _startup_recovery = local_store.recover_pending()
-    except Exception as exc:  # noqa: BLE001 — durability failure is a startup boundary, not a soft warning
-        local_store.close()
-        print(f"Local recovery failed before startup: {type(exc).__name__}: {exc}")
-        sys.exit(2)
-    _startup_conflicts = tuple(result for result in _startup_recovery if result.status == "conflict")
-    if _startup_conflicts:
-        local_store.close()
-        print("Local recovery found an ambiguous journal; no tools or extensions were started:")
-        for _conflict in _startup_conflicts:
-            print(f"  · {_conflict.artifact_id}: {_conflict.detail}")
-        print("Repair or quarantine the reported journal, then restart SliceAgent.")
-        sys.exit(2)
-    try:
-        local_store.checkpoints()  # validates checkpoint bytes and every live artifact dependency
-    except Exception as exc:  # noqa: BLE001 — authoritative local state is a fail-closed startup boundary
-        local_store.close()
-        print("Local checkpoint validation failed before tools or extensions were started: "
-              f"{type(exc).__name__}: {exc}")
-        sys.exit(2)
-
-    sandbox = make_sandbox(cfg.sandbox_backend, image=cfg.sandbox_image, network=cfg.sandbox_network)
-    base_tools = LocalToolHost(root, sandbox=sandbox)  # file ops confined to launch dir; shell via sandbox
-    if os.environ.get("AGENT_ADVANCED_TOOLS", "").strip().lower() not in ("1", "on", "true", "yes"):
-        for _name in tuple(base_tools.registry._tools):
-            if _name.startswith(("proc_", "terminal_")):
-                base_tools.registry.deregister(_name)
-    for _r in os.environ.get("AGENT_ROOT", "").split(os.pathsep):  # I2: extra dirs the user puts in reach
-        if _r.strip():
-            base_tools.add_root(_r.strip())
-    skills = make_skill_manager(cfg.skills_roots)  # SKILL.md packs (config dirs or defaults)
-    # plugins: feed the SAME registry/skills, and contribute MCP servers + hooks (loaded first
-    # so plugin skills enter the catalog and plugin MCP servers get connected below)
-    plugin_mcp, plugin_hooks = load_plugins(
-        base_tools.registry, skills, cfg.plugin_dirs, root=root, config=cfg,
-        on_log=lambda m: print(f"  · {m}"))
-    skill_tool = make_skill_tool(skills)
-    if skill_tool is not None:        # register the `skill` tool into the shared registry
-        base_tools.registry.register(skill_tool)
-    from .code_grep import make_glob_tool, make_grep_tool  # ripgrep discovery: grep (contents) + glob (names)
-    base_tools.registry.register(make_grep_tool(base_tools))
-    base_tools.registry.register(make_glob_tool(base_tools))
-
-    # web tools (fetch_url + web_search, DuckDuckGo, no key) — network egress, so gated by AGENT_WEB
-    # (default ON). SSRF-guarded + results fenced UNTRUSTED + large pages paged (see web.py).
-    if os.environ.get("AGENT_WEB", "1").strip().lower() not in ("0", "off", "false", "no"):
-        from .web import make_web_tools
-        for _wt in make_web_tools(base_tools):
-            base_tools.registry.register(_wt)
-    # foreground SKILL writer — the agent-callable tool /learn drives to turn a transcript into a
-    # reusable USER-provenance skill (guarded write: validate + threat-scan + redact + atomic).
-    from .memory import make_write_skill_tool
-    base_tools.registry.register(make_write_skill_tool())
-    # MCP: connect config + plugin-declared servers; tools register into the SAME registry
-    mcp_servers, mcp_runtime = connect_mcp_servers(
-        base_tools.registry, {**cfg.mcp_servers, **plugin_mcp}, on_log=lambda m: print(f"  · {m}"),
-        page_out=base_tools._page_out)   # big MCP results → blob + head/tail view, not inlined whole
-    mcp_tool_count = sum(1 for e in base_tools.registry._tools.values() if e.source == "mcp")
-    plugin_tool_count = sum(1 for e in base_tools.registry._tools.values()
-                            if e.source.startswith("plugin:"))
-    # subagent activity → ONE dynamic line, not a line per child tool call. Late-bound: the
-    # renderer is set once the rich sink exists (below); plain/headless leaves it None (the spawn tool's
-    # result line carries the child's summary, so nothing is lost).
+    # Process-owned bridges stay stable while their workspace targets are replaced.
     _sub_render: dict = {"fn": None}
     def _notify_subagent(text):
         fn = _sub_render["fn"]
         if fn is not None:
             fn(text)
-    base_tools._artifacts = CoreArtifactFS(local_store.coordinator.artifacts)
-    for _recovered in _startup_recovery:
+    _ask_user_bridge: dict = {"fn": None}
+
+    def _stamp_navigation_authority() -> None:
+        """The user just answered the agent's own in-turn question — fresh, explicit consent. For the
+        reversible NAVIGATION tier that is enough to authorize a workspace switch this turn: a turn contract
+        frozen as `uncertain` from an ambiguous opening request ("loom app") would otherwise block
+        change_workspace even after the user clearly disambiguated. Only navigation is enabled — the grant's
+        tool list is change_workspace alone, so destructive effects still need their own grant."""
+        try:
+            from dataclasses import replace
+            from .intent import EffectGrant
+            intent = session.active().intent
+            admission = intent.turn_admission
+            if any(str(getattr(g, "operation", "")) == "workspace.navigate" for g in admission.effect_grants):
+                return
+            intent.turn_admission = replace(admission, effect_grants=(
+                *admission.effect_grants, EffectGrant("workspace.navigate", ("change_workspace",))))
+        except Exception:  # best-effort; never break the ask_user round-trip
+            pass
+
+    def _workspace_ask_user(question, options):
+        fn = _ask_user_bridge.get("fn")
+        if fn is None:
+            return "(no interactive answer; proceed with a stated assumption)"
+        answer = fn(question, options)
+        if answer and answer != "(no answer)":
+            _stamp_navigation_authority()
+        return answer
+
+    def _workspace_log(message: str) -> None:
+        print(f"  · {message}")
+
+    def _prepare_workspace(target: str, initial_cfg=None) -> WorkspaceResources:
+        from .config import load_config as _load_workspace_config
+        if initial_cfg is not None:
+            return _prepare_workspace_resources(
+                target, cfg=initial_cfg, llm=llm, memory=memory, policy=policy,
+                schedule_workspace=_schedule_workspace, notify_subagent=_notify_subagent,
+                ask_user=_workspace_ask_user, on_log=_workspace_log,
+            )
+        # Repository .env is a launch overlay, not process identity. Stage the target with A's injected values
+        # temporarily absent, then restore A until atomic publication. We intentionally do not auto-load B's
+        # .env during navigation; the live model binding stays process-owned and no new repo code/config gains
+        # ambient authority merely because the user moved the workspace frame.
+        saved_overlay = {
+            key: os.environ.pop(key) for key in tuple(_project_env_overlay) if key in os.environ
+        }
+        try:
+            target_cfg = _load_workspace_config(target)
+            return _prepare_workspace_resources(
+                target, cfg=target_cfg, llm=llm, memory=memory, policy=policy,
+                schedule_workspace=_schedule_workspace, notify_subagent=_notify_subagent,
+                ask_user=_workspace_ask_user, on_log=_workspace_log,
+            )
+        finally:
+            os.environ.update(saved_overlay)
+
+    try:
+        workspace = _prepare_workspace(root, cfg)
+    except Exception as exc:  # noqa: BLE001 — no partial workspace runtime may reach the prompt
+        print(f"Workspace could not start safely: {type(exc).__name__}: {exc}")
+        try:
+            memory.close()
+        except Exception:
+            pass
+        sys.exit(2)
+    workspace_manager = WorkspaceManager(workspace, _prepare_workspace)
+    session, local_store = workspace.session, workspace.store
+    sandbox, retriever = workspace.sandbox, workspace.retriever
+    base_tools, tools, skills = workspace.base_tools, workspace.tools, workspace.skills
+    plugin_hooks, mcp_runtime = list(workspace.plugin_hooks), workspace.mcp_runtime
+    reviewer, episodic, monitor_sink = workspace.reviewer, workspace.episodic, workspace.monitor_sink
+    mine_mode, sub_depth = workspace.mine_mode, workspace.subagent_depth
+    mcp_tool_count, plugin_tool_count = workspace.mcp_tool_count, workspace.plugin_tool_count
+    llm.set_cache_key(session.session_id)
+    for _recovered in workspace.recovery_results:
         print(f"  · recovered local artifact {_recovered.artifact_id} ({_recovered.status})")
+    _pending_seal_records: dict[str, tuple[int, dict]] = {}
 
-    def _hydrate_local_tasks(store: LocalTurnStore) -> None:
-        """Make local checkpoints resumable even when optional semantic memory is unavailable."""
-        from .taskstate import task_state_from_checkpoint, task_state_to_slice
-        restored = []
-        for checkpoint in store.checkpoints():
+    def _preview_turn_admission(text: str, state, task_id: str):
+        """Purely orient one request against the prospective task.
+
+        No focus, proposal, intent, or active-task field changes here.  The resulting AdmissionPreview is
+        journaled before it is installed, so every model/tool consumer observes the same immutable reading.
+        """
+        from .discourse import interpret_turn
+        from .intent import EntityRef
+
+        focus = list(state.continuity.discourse_focus)
+        # A new task that explicitly discusses this project needs a stable subject even before any numbered
+        # assistant output exists.  The workspace default is a source-linked candidate, not guessed user text.
+        if not any(isinstance(item, dict) and item.get("kind") == "subject_focus" for item in focus) \
+                and re.search(r"\b(?:this|the|current)\s+(?:project|repo(?:sitory)?|codebase|workspace)\b",
+                              text, re.IGNORECASE):
             try:
-                task_state = task_state_from_checkpoint(checkpoint)
-                session.tasks[checkpoint.task_id] = task_state_to_slice(task_state)
-                restored.append((checkpoint.updated_at, checkpoint.task_id, task_state.status))
-            except Exception as exc:  # noqa: BLE001 — one corrupt/incompatible task must not hide others
-                print(f"  · local task {checkpoint.task_id} could not be restored "
-                      f"({type(exc).__name__}: {exc})")
-        # Any unresolved execution owns the workspace boundary regardless of timestamp ordering. Prefer it
-        # over ordinary active/parked tasks so a clock anomaly cannot resume an unrelated task past the gate.
-        candidates = [row for row in restored if row[2] == "indeterminate"] or [
-            row for row in restored if row[2] in ("active", "parked")
-        ]
-        if candidates:
-            session.active_id = max(candidates)[1]
-
-    _hydrate_local_tasks(local_store)
-    tools = base_tools
-    if sub_depth > 0:  # wrap so the model can delegate sub-tasks (bounded artifact + recall handle)
-        from .agents import load_agents
-        from .agents import BUILTIN_AGENTS
-        # named-agent registry: built-ins (explorer, general) + user-defined <root>/agents/*.md
-        agent_roots = list(cfg.skills_roots or []) + [root, os.path.join(root, ".sliceagent")]
-        _advanced_agents = os.environ.get("AGENT_ADVANCED_AGENTS", "").strip().lower() in (
-            "1", "on", "true", "yes")
-        _agents = load_agents(agent_roots) if _advanced_agents else {"explorer": BUILTIN_AGENTS["explorer"]}
-        tools = SubagentHost(base_tools, llm=llm, retriever=retriever, memory=memory,
-                             policy=policy, max_depth=sub_depth if _advanced_agents else 1,
-                             notify=_notify_subagent, agents=_agents, session_id=session.session_id,
-                             # Brief-down carries exact active constraints, never the parent transcript.
-                             # Identity providers are late-bound because topic switches and turn IDs move.
-                             intent_provider=lambda _task: session.active().intent,
-                             task_id_fn=lambda: session.active_id or "t-none",
-                             parent_id_fn=lambda: (local_store.active.artifact_id
-                                                   if local_store.active is not None else ""),
-                             workspace_id=local_store.workspace_id,
-                             artifact_store=local_store.coordinator.artifacts,
-                             artifact_ref_sink=lambda artifact_id: local_store.record_artifact_ref(artifact_id),
-                             core_mode=not _advanced_agents)
-    # Multi-topic tools are an extension, not part of the minimal demo kernel. Host routing and slash
-    # commands still work; when explicitly exposed, their handlers reject mutation inside a running turn.
-    if os.environ.get("AGENT_TOPIC_TOOLS", "").strip().lower() in ("1", "on", "true", "yes"):
-        for t in make_topic_tools(session):
-            base_tools.registry.register(t)
-    # history/ + subagents/: this session's paged-out turns AND its children's sealed reports, exposed as
-    # read-only virtual files (read_file/list_files/grep) — the model reaches for files (a pretraining reflex)
-    # far more readily than a bespoke recall tool (measured 2026-07-06: evicted-fact confab 47%→0%). Nothing is
-    # written to disk here. search_history adds the one thing files can't: FTS5 over PAST sessions.
-    if getattr(memory, "is_durable", False):
-        from .hippocampus import HistoryFS, RosterFS, SubagentFS, make_search_history_tool
-        base_tools._history = HistoryFS(memory, session.session_id)
-        base_tools._subagents = SubagentFS(memory, session.session_id)
-        base_tools._roster = RosterFS(memory)   # the durable standing workforce (cross-session by design)
-        base_tools.registry.register(make_search_history_tool(memory, session.session_id))
-
-    # write side of the memory loop is CACHE-ONLY: distillation runs at session end in
-    # memory.consolidate (reads the episodic cache, never the slice). `mine_mode` (off|deterministic|llm)
-    # gates that consolidation — see the session-end call below. No per-turn slice-coupled miner.
-    # OPT-IN async background-review fork (item 16; OFF unless AGENT_BACKGROUND_REVIEW set).
-    # Reads the durable episodic cache off-thread and consolidates incrementally — never
-    # touches the slice/loop/prompt. None when disabled, so the default path is unchanged.
-    from .background_review import make_background_reviewer
-    reviewer = make_background_reviewer(memory, scope=os.path.basename(root) or "default",
-                                        on_log=lambda m: print(f"  · {m}"))
-    # One collector feeds both the REQUIRED always-on local seal and the optional legacy semantic-memory
-    # episode view. Local durability therefore works even when memem is unavailable.
-    episodic = make_episode_sink(memory, session_id=session.session_id,
-                                 task_id_fn=lambda: session.active_id or "t-none",
-                                 title_fn=lambda: one_line(session.active().goal, 80) if session.active_id else "",
-                                 # task-outcome signal for consolidation: how many STANDING REQUIREMENTS
-                                 # were still open at turn end (0 = none declared OR all met). promote_procedures
-                                 # won't mine a "successful workflow" skill from a task that left some unmet.
-                                 outcome_fn=lambda: {"requirements_open": sum(
-                                     1 for r in session.active().requirements
-                                     if isinstance(r, dict) and not r.get("done"))} if session.active_id else {},
-                                 collect=True)
-    _pending_seal_records: dict[str, dict] = {}
-
-    def _begin_local_turn(text: str) -> None:
-        """Allocate the recovery/artifact identity before the request enters active state."""
-        s = session.active()
-        logical_id = f"{session.active_id}:{s.turns + 1}"
-        active = local_store.begin(
-            task_id=session.active_id or "t-none", logical_id=logical_id, user_request=text,
+                project_label = os.path.basename(os.path.realpath(tools.root())) or "current project"
+            except Exception:
+                project_label = "current project"
+            focus.append({
+                "kind": "subject_focus",
+                "entity": EntityRef(
+                    project_label, kind="project", source="workspace_default",
+                ).to_dict(),
+            })
+        return interpret_turn(
+            text,
+            local_store.coordinator.artifacts.list_all(),
+            task_id=task_id,
+            session_id=session.session_id,
+            recent_assistant=(
+                str(exchange.get("assistant") or "")
+                for exchange in state.conversation if exchange.get("assistant")
+            ),
+            focus=focus,
+            pending_proposal=state.continuity.pending_proposal,
+            previous_evidence_snapshot=state.continuity.previous_evidence_snapshot,
+            current_generation=session.turn_generation,
         )
-        session.turn_task_id = session.active_id
-        record_user(s, text, source_artifact=active.artifact_id)
+
+    def _begin_local_turn(text: str, preview, *, action: str, task_id: str, state):
+        """Journal one admission, then publish its task/focus/intent changes exactly once."""
+        logical_id = f"{task_id}:{state.turns + 1}"
+        active = local_store.begin(
+            task_id=task_id or "t-none", logical_id=logical_id, user_request=text,
+        )
+        session.turn_generation += 1
+        from dataclasses import replace
+        admission = replace(preview.admission, request_source=active.artifact_id)
+        local_store.record_admission({
+            "action": action,
+            "task_id": task_id,
+            "admission": admission.to_dict(),
+            "focus": [dict(item) for item in preview.focus],
+            "consume_pending_proposal": bool(preview.consume_pending_proposal),
+        })
+        if action in ("new", "resume"):
+            session.activate_prepared_topic(task_id, state)
+        session.turn_task_id = task_id
+        if action != "new":
+            session.continue_topic(
+                text, resume=(action == "resume"), admission=admission, install_intent=False,
+            )
+        record_user(state, text, source_artifact=active.artifact_id, contract=admission)
+        # Focus and proposal consumption are part of this admitted turn, never preview-time side effects.
+        state.continuity.discourse_focus = list(preview.focus)
+        state.runtime.source_projections = tuple(dict(item) for item in preview.projections)
+        from .discourse import make_evidence_snapshot
+        state.continuity.previous_evidence_snapshot = make_evidence_snapshot(
+            admission, state.runtime.source_projections, active.artifact_id,
+            snapshot_basis=preview.snapshot_basis,
+            source_generation=session.turn_generation,
+        )
+        if preview.consume_pending_proposal:
+            state.continuity.pending_proposal = None
+        # A refaulted discourse item becomes a real immutable dependency of this turn/checkpoint. This keeps
+        # the exact source alive without copying it into the active slice or transcript.
+        referenced = list(preview.referenced_artifact_ids)
+        for referent in getattr(admission, "referents", ()):
+            artifact_id = str(
+                getattr(getattr(referent, "anchor", None), "artifact_id", "")
+                or (referent.get("artifact_id") if isinstance(referent, dict) else "")
+                or ""
+            )
+            if artifact_id:
+                referenced.append(artifact_id)
+        for artifact_id in dict.fromkeys(referenced):
+            if artifact_id and artifact_id != active.artifact_id \
+                    and local_store.coordinator.artifacts.exists(artifact_id):
+                local_store.record_artifact_ref(artifact_id)
+        return admission
+
+    def _admit_routed_turn(text: str, action: str, task_id: str = ""):
+        """Prepare a prospective task, preview intent, then cross the durable admission boundary."""
+        if action == "new" or session.active_id is None:
+            task_id, state = session.prepare_new_topic(text)
+            action = "new"
+        elif action == "resume":
+            task_id, state = session.prepare_switch_topic(task_id)
+        else:
+            task_id, state = session.active_id or "t-none", session.active()
+            action = "continue"
+        preview = _preview_turn_admission(text, state, task_id)
+        return _begin_local_turn(text, preview, action=action, task_id=task_id, state=state)
 
     def _seal_local_turn(stop_reason: str, event_dispatch=None) -> bool:
         """Required artifact-first seal; emit completion only after durable activation succeeds."""
@@ -503,8 +927,10 @@ def main() -> None:
             return _failed(f"starting task {active.task_id!r} no longer exists")
         closed = episodic.take_last_record() if episodic is not None else None
         if closed is not None:
-            _pending_seal_records[active.artifact_id] = closed[1]
-        record = _pending_seal_records.get(active.artifact_id) or {
+            _pending_seal_records[active.artifact_id] = closed
+        pending_record = _pending_seal_records.get(active.artifact_id)
+        history_turn = pending_record[0] if pending_record is not None else max(1, target.turns)
+        record = pending_record[1] if pending_record is not None else {
             "title": one_line(target.goal, 80), "steps": [], "note": "",
             "markdown": "", "meta": {"stop_reason": stop_reason, "files": []},
         }
@@ -558,7 +984,7 @@ def main() -> None:
         # The journal-completeness safeguard may strengthen an apparently ordinary stop to INDETERMINATE
         # while committing (for example, ToolStarted was durable but Ctrl-C prevented ToolResult). Merge the
         # committed safety gate back into the live copy, or this process could immediately bypass a gate that
-        # restart correctly enforces. Keep the live copy's richer within-session continuity/working-set fields,
+        # rehydration correctly enforces. Keep the live copy's richer within-session continuity/working-set fields,
         # which TaskState intentionally does not serialize; the optional mirror receives committed TaskState.
         try:
             committed = local_store.coordinator.checkpoints.load(local_store.workspace_id, active.task_id)
@@ -567,12 +993,23 @@ def main() -> None:
             task_state = task_state_from_checkpoint(committed)
             sealed_target.reconciliation_required = task_state.reconciliation_required
             sealed_target.reconciliation_targets = list(task_state.reconciliation_targets)
+            sealed_artifact = local_store.coordinator.artifacts.get(artifact_id)
+            sealed_body = sealed_artifact.to_dict().get("structured_body")
+            sealed_body = sealed_body if isinstance(sealed_body, dict) else {}
+            receipt_projection = compact_receipt_projection(sealed_body.get("turn_receipt"))
         except Exception as exc:  # noqa: BLE001 — do not continue from a state weaker than durable truth
             return _failed(f"committed local state could not be activated ({type(exc).__name__}: {exc})")
         session.tasks[active.task_id] = sealed_target
         session.turn_task_id = None
         _pending_seal_records.pop(active.artifact_id, None)
         if getattr(memory, "is_durable", False):
+            try:
+                memory.append_episode(
+                    session.session_id, active.task_id, history_turn,
+                    sealed_artifact.to_dict()["structured_body"],
+                )
+            except Exception as exc:  # noqa: BLE001 — optional history cannot invalidate the core seal
+                print(f"  · legacy history mirror failed ({type(exc).__name__}: {exc})")
             try:
                 memory.checkpoint_task(task_state)  # derived compatibility view, after core commit
             except Exception as exc:  # noqa: BLE001 — optional memory cannot invalidate the core seal
@@ -582,6 +1019,7 @@ def main() -> None:
             stop_reason=stop_reason,
             artifact_id=artifact_id,
             detail="checkpoint saved" if stop_reason == "end_turn" else f"{stop_reason} state saved",
+            receipt=receipt_projection,
         ))
         return True
 
@@ -630,14 +1068,14 @@ def main() -> None:
             if options and a.isdigit() and 1 <= int(a) <= len(options):
                 return options[int(a) - 1]
             return a or "(no answer)"
-        base_tools.on_ask_user = _ask_user
+        _ask_user_bridge["fn"] = _ask_user
 
     # sinks: update the active slice from tool results, cache the turn, persist, print (no per-turn
     # miner — distillation is cache-only at session end via memory.consolidate).
     reducer = slice_sink(session)
 
-    # Keep the store lookup behind tiny routers so required journaling and reduction share one obvious
-    # boundary. Workspace identity itself remains fixed for the lifetime of this process.
+    # Keep the store lookup behind tiny routers so required journaling and reduction always dereference the
+    # currently-published workspace. The delegates themselves stay stable across in-process handoffs.
     def _journal_event(event):
         local_store.observe_event(event)
 
@@ -657,10 +1095,6 @@ def main() -> None:
                 session.tasks[task_id] = before
             raise
 
-    sinks = []
-    if episodic is not None:
-        sinks.append(episodic)
-    sinks.append(log_sink(root))
     # optional: the moat-MEASURING cost sink (AGENT_METRICS=1). Accumulates the per-turn FRESH-input
     # curve (should stay flat as the conversation grows) + cache-hit rate + reliability counters; the
     # summary prints at session end. Pure observer — eval/default path untouched.
@@ -668,38 +1102,45 @@ def main() -> None:
     if os.environ.get("AGENT_METRICS"):
         from .metrics import make_metrics_sink
         metrics = make_metrics_sink()
-        sinks.append(metrics)
     # EXACTLY ONE renderer is wired: the rich+prompt_toolkit sink (TUI), OR the plain stdout sink
     # (headless/eval). Never two.
     if _tui:
         _rich = _tui.make_rich_sink(_console, _stats, await_commit=True)
-        sinks.append(_rich)
+        _presentation_sink = _rich
         llm.set_delta_sink(_rich.on_delta)   # STREAM completions live into the rich TUI spinner
         # child agent activity → one dynamic spinner line. NOT in live mode: a rich console Status would
         # fight the pinned prompt_toolkit Application for the screen (garbled output) — let the spawn tool's
         # result line carry the child summary instead, as the plain/headless path does.
         _sub_render["fn"] = None if use_live else _rich.subagent_notify
     else:
-        sinks.append(cli_sink(cfg.show_slice))
+        _presentation_sink = cli_sink(cfg.show_slice)
     # optional: feed the live web monitor (AGENT_MONITOR=1) — eval path untouched. Writes per-step
     # snapshots to the shared monitor dir; view them in the STANDING server (python -m sliceagent.monitor),
     # which stays up across sessions and goes idle when none is running.
-    monitor_sink = None
-    if os.environ.get("AGENT_MONITOR"):
-        from .monitor import _monitor_dir, make_file_monitor_sink
-        monitor_sink = make_file_monitor_sink(
-            session.session_id,
-            context_fn=lambda: {"goal": session.active().goal if session.active_id else "",
-                                "topic": session.active_id or ""})
-        sinks.append(monitor_sink)
+    if monitor_sink is not None:
+        from .monitor import _monitor_dir
         print(f"  · slice monitor: writing to {_monitor_dir()} — view at the persistent server "
               "(run: python -m sliceagent.monitor)")
-    # Execution truth is journaled before reduction; applied transition IDs are journaled only after the
-    # reducer succeeds. Presentation/metrics remain isolated observers.
-    dispatch = make_dispatcher(
-        *sinks,
-        required=(_journal_event, _reduce_event),
-    )
+
+    def _make_workspace_dispatch():
+        sinks = []
+        if episodic is not None:
+            sinks.append(episodic)
+        sinks.append(log_sink(root))
+        if metrics is not None:
+            sinks.append(metrics)
+        sinks.append(_presentation_sink)
+        if monitor_sink is not None:
+            sinks.append(monitor_sink)
+        # Execution truth is journaled before reduction; applied transition IDs are journaled only after the
+        # reducer succeeds. Presentation/metrics remain isolated observers.
+        return make_dispatcher(*sinks, required=(_journal_event, _reduce_event))
+
+    dispatch = _make_workspace_dispatch()
+    # Social fast-path messages are deliberately outside the task/turn lifecycle. Sending them through the
+    # required dispatcher would overwrite the previous conversation exchange and bleed into the next
+    # episode journal even though no local turn was opened.
+    chitchat_dispatch = make_dispatcher(_presentation_sink)
 
     # policy hooks (the seam is always wired; default 'guard' blocks catastrophic commands)
     def _ask(name, args, reason):  # interactive resolver for AGENT_POLICY=ask
@@ -730,15 +1171,16 @@ def main() -> None:
         parts = line.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1].strip() if len(parts) > 1 else "")
         if (session.active_id is not None and session.active().reconciliation_required
-                and cmd in _RECONCILIATION_BLOCKED_SLASH):
+                and _slash_blocked_by_reconciliation(cmd, arg)):
             _console.print(
                 f"  {cmd} blocked: reconcile the prior indeterminate operation first", markup=False,
             )
             return True
         if cmd == "/help":
-            _console.print("commands: /config · /model · /mode · /cwd · /learn · /plan · /cost · /threads · "
+            _console.print("commands: /config · /model · /mode · /cwd · /learn · /plan · /cost · /update · /threads · "
                            "/plugins · /mcp · /help · /exit\n  (type / for the menu · /config adds LLM "
-                           "providers · /cwd shows the root or a safe relaunch path · Esc = undo last turn · "
+                           "providers · /cwd shows the workspace; /cwd <path> switches it safely · "
+                           "Esc = undo last turn · "
                            "say \"review my changes\" for code_review · @path pins a file)")
         elif cmd == "/config":
             # THE clear user journey: providers are managed INSIDE sliceagent — same wizard as first-run
@@ -751,7 +1193,7 @@ def main() -> None:
                     rc = 1
                 if rc == 0:
                     from .config import load_config as _reload
-                    cfg = _reload()                      # hot-reload: /model now sees the new provider
+                    cfg = _reload(root)                  # hot-reload the currently selected workspace layer
                     provs = cfg.providers()
                     _console.print("  providers configured: "
                                    + (", ".join(f"[bold]{k}[/] ({v.get('model', '?')})"
@@ -783,6 +1225,8 @@ def main() -> None:
                 _console.print(f"  per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
                                f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']} "
                                f"out={s['output']} retries={s['retries']} overflows={s['overflows']}")
+        elif cmd == "/update":
+            _console.print("  Updating replaces the running environment. Exit, then run:  sliceagent update")
         elif cmd == "/threads":
             ts = session.open_threads(include_active=True)
             # markup=False: task_id/title are DATA — `[{t.task_id}]` renders as a Rich tag → MarkupError crash.
@@ -903,9 +1347,16 @@ def main() -> None:
                 note = _reasoning_note(llm)
                 _console.print(f"  ✓ reasoning → [bold]{llm.reasoning}[/] (saved)" + (f"\n  {note}" if note else ""))
         elif cmd == "/cwd":
-            # One process owns one workspace identity. This command intentionally never mutates a subset of
-            # the retriever/tool/plugin/MCP/store graph; with an argument it gives an explicit relaunch path.
-            _console.print("  " + _cwd_message(base_tools.root(), arg), markup=False)
+            target, message = _resolve_workspace_target(base_tools.root(), arg)
+            if target is None:
+                _console.print("  " + message, markup=False)
+            else:
+                problem = _schedule_workspace(target)
+                if problem:
+                    _console.print("  " + problem, markup=False)
+                else:
+                    _workspace_handoff["ready"] = True  # slash commands run between already-sealed turns
+                    _switch_workspace(target)
         else:
             _console.print(f"  unknown command {cmd} (/help)", markup=False)
         return True
@@ -958,25 +1409,136 @@ def main() -> None:
               f"running as '{policy_label(_eff_mode)}' (auto-run, still blocks catastrophic commands).")
     perm_hook = PermissionHook(make_policy(_eff_mode),
                                on_ask=_ask if CONFIRMS.get(_eff_mode) else None, auto_approve=_auto)
-    hook_list = [ReconciliationHook(lambda: session.active()), perm_hook]
-    hook_list.append(GuardrailHook())  # cross-step loop guard (per-turn counters, reset each task)
-    if cfg.verify_cmd:
-        oracle = CommandOracle(cfg.verify_cmd)
-        hook_list.append(OracleHook(oracle, lambda out: setattr(session.active(), "last_error", f"Verification failed:\n{out[:600]}")))
-    if cfg.max_tokens:
-        _budget = BudgetHook(cfg.max_tokens)
-        hook_list.append(_budget)
-    hook_list.extend(plugin_hooks)  # plugins compose into the same hook chain
-    hooks = CompositeHooks(*hook_list)
+    # The fail-closed turn-authority gate is OFF by default (cfg.intent_gate="essential"): it over-blocks
+    # ordinary local work — read-only git during a review, edits, a workspace switch — and its errors mislead.
+    # The ESSENTIAL protections are unaffected: perm_hook still blocks catastrophic commands and, in a confirm
+    # policy, asks before a command runs; GuardrailHook still stops runaway loops. AGENT_INTENT_GATE=strict
+    # (or [policy] intent_gate="strict") restores the full v2 gate.
+    _intent_gate_strict = cfg.intent_gate == "strict"
+    if not _intent_gate_strict:
+        print("  · intent gate: essential (catastrophic-command + confirm-mode protections only; "
+              "set AGENT_INTENT_GATE=strict for the full turn-authority gate)")
+    def _make_workspace_hooks():
+        hook_list = [
+            _WorkspaceHandoffHook(_workspace_handoff),
+            ReconciliationHook(lambda: session.active()),
+            FrozenEvidenceCutoffHook(
+                lambda: session.active(),
+                lambda name, args: tools.resolve_intent_effect(name, args),
+                lambda path: base_tools.resource_ref(path),
+            ),
+            DelegationCompletionHook(lambda: session.active()),
+            DelegatedClaimCompletionHook(lambda: session.active()),
+            ExecutionEvidenceCompletionHook(lambda: session.active()),
+            QualityEvidenceCompletionHook(lambda: session.active()),
+        ]
+        if _intent_gate_strict:
+            hook_list.append(TurnAuthorityHook(
+                lambda: session.active().intent.turn_contract,
+                lambda name, args: tools.resolve_intent_effect(name, args),
+            ))
+        hook_list += [
+            perm_hook,
+            GuardrailHook(),  # cross-step loop guard (per-turn counters, reset each task)
+        ]
+        if cfg.verify_cmd:
+            oracle = CommandOracle(cfg.verify_cmd, root=root)
+            hook_list.append(OracleHook(
+                oracle,
+                lambda out: setattr(
+                    session.active(), "last_error", f"Verification failed:\n{out[:600]}",
+                ),
+            ))
+        if cfg.max_tokens:
+            hook_list.append(BudgetHook(cfg.max_tokens))
+        hook_list.extend(plugin_hooks)
+        return CompositeHooks(*hook_list)
 
-    info = (f"model={llm.model} · net={getattr(llm, 'proxy_used', 'direct')} · "
-            f"policy={policy_label(_eff_mode)} · sandbox={cfg.sandbox_backend} · "
-            f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
-            f"episodic={'on' if episodic is not None else 'off'} · "
-            f"mine={mine_mode} · subagents={'on' if sub_depth > 0 else 'off'} · "
-            f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · plugin_tools={plugin_tool_count}")
+    hooks = _make_workspace_hooks()
+
+    def _workspace_info() -> str:
+        return (f"model={llm.model} · net={getattr(llm, 'proxy_used', 'direct')} · "
+                f"policy={policy_label(_eff_mode)} · sandbox={cfg.sandbox_backend} · "
+                f"code={type(retriever).__name__} · memory={type(memory).__name__} · "
+                f"episodic={'on' if episodic is not None else 'off'} · "
+                f"mine={mine_mode} · subagents={'on' if sub_depth > 0 else 'off'} · "
+                f"skills={len(skills.names())} · mcp_tools={mcp_tool_count} · "
+                f"plugin_tools={plugin_tool_count}")
+
+    info = _workspace_info()
     # ── choose UI: the always-pinned live composer (AGENT_TUI=live), else the rich+prompt_toolkit REPL ──
     _input = _tui.TuiInput(_stats, root=root) if _tui else None
+    _live_workspace_setter: dict[str, Any] = {"fn": None}
+    _retired_sessions: list[tuple[str, str]] = []
+
+    def _publish_workspace(candidate: WorkspaceResources) -> None:
+        """Atomically redirect every workspace-facing delegate; process-owned UI/LLM objects stay intact."""
+        nonlocal workspace, root, cfg, session, local_store, sandbox, retriever
+        nonlocal base_tools, tools, skills, plugin_hooks, mcp_runtime, reviewer, episodic, monitor_sink
+        nonlocal mine_mode, sub_depth, mcp_tool_count, plugin_tool_count, reducer, hooks, dispatch, info
+        nonlocal _project_env_overlay
+
+        previous_session = session.session_id
+        previous_mine_mode = mine_mode
+        for key in tuple(_project_env_overlay):
+            os.environ.pop(key, None)
+        _project_env_overlay = {}
+        workspace = candidate
+        root, cfg = candidate.root, candidate.config
+        session, local_store = candidate.session, candidate.store
+        sandbox, retriever = candidate.sandbox, candidate.retriever
+        base_tools, tools, skills = candidate.base_tools, candidate.tools, candidate.skills
+        plugin_hooks, mcp_runtime = list(candidate.plugin_hooks), candidate.mcp_runtime
+        reviewer, episodic, monitor_sink = candidate.reviewer, candidate.episodic, candidate.monitor_sink
+        mine_mode, sub_depth = candidate.mine_mode, candidate.subagent_depth
+        mcp_tool_count, plugin_tool_count = candidate.mcp_tool_count, candidate.plugin_tool_count
+        reducer = slice_sink(session)
+        hooks = _make_workspace_hooks()
+        dispatch = _make_workspace_dispatch()
+        info = _workspace_info()
+        _pending_seal_records.clear()
+        _retired_sessions.append((previous_session, previous_mine_mode))
+
+        # set_cache_key changes request/cache identity only; it does not reconstruct the provider client.
+        try:
+            llm.set_cache_key(session.session_id)
+        except Exception as exc:  # noqa: BLE001 — a cache hint cannot invalidate a valid workspace swap
+            _workspace_log(f"cache key refresh failed ({type(exc).__name__}: {exc})")
+        if hasattr(memory, "_scope"):
+            try:
+                memory._scope = os.path.basename(root) or "default"
+            except Exception:
+                pass
+        _stats["workspace"] = _ws_name(root)
+        _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
+        if _input is not None:
+            try:
+                _input.set_workspace(root)
+            except Exception as exc:  # noqa: BLE001 — completion refresh is cosmetic
+                _workspace_log(f"file completion refresh failed ({type(exc).__name__}: {exc})")
+        live_setter = _live_workspace_setter.get("fn")
+        if live_setter is not None:
+            try:
+                live_setter(root)
+            except Exception as exc:  # noqa: BLE001 — keep the running composer even if completion fails
+                _workspace_log(f"live completion refresh failed ({type(exc).__name__}: {exc})")
+        for recovered in candidate.recovery_results:
+            _workspace_log(f"recovered local artifact {recovered.artifact_id} ({recovered.status})")
+
+    def _switch_workspace(target: str) -> bool:
+        """Switch only workspace-owned state; never exit the app or reconnect the model client."""
+        target = os.path.realpath(target)
+        emit = (lambda message: _console.print(message, markup=False)) if _console is not None else print
+        emit(f"  ↪ switching workspace → {target}")
+        try:
+            workspace_manager.switch(target, activate=_publish_workspace)
+        except Exception as exc:  # noqa: BLE001 — staged failure rolls back to the still-live old workspace
+            emit(f"  ✗ workspace unchanged: {type(exc).__name__}: {exc}")
+            return False
+        finally:
+            _workspace_handoff.update(target="", ready=False)
+        emit(f"  ✓ workspace → {target} · interface and model connection kept")
+        return True
 
     from .text_utils import is_chitchat
 
@@ -985,12 +1547,35 @@ def main() -> None:
         per-turn token cost (the 12k system prompt + tool schemas + tiers) for a 'hi'/'thanks'. (item D)"""
         from .model_runner import complete_model_call
         from .text_utils import CHITCHAT_PROMPT
+        active_state = session.active() if session.active_id is not None else None
         msgs = [{"role": "system", "content": CHITCHAT_PROMPT}, {"role": "user", "content": text}]
         try:
             am = complete_model_call(llm, msgs, [])     # NO tools
-            _dispatch(AssistantText((am.content or "").strip() or "Hi! What would you like to work on?"))
+            if _tui is not None and am.usage:
+                _tui._record_usage(_stats, am.usage)
+            reply = (am.content or "").strip() or "Hi! What would you like to work on?"
         except Exception:  # noqa: BLE001 — a chitchat reply must never crash the session
-            _dispatch(AssistantText("Hi! What would you like to work on?"))
+            reply = "Hi! What would you like to work on?"
+        if active_state is not None:
+            # Keep exactly enough ephemeral adjacency for "what did you just say?" without opening a task
+            # artifact or turning social text into durable evidence. The next normal record_user call appends
+            # its in-progress row, so render_conversation naturally treats this pair as the immediate prior turn.
+            _fold_chitchat_continuity(active_state, text, reply)
+        _dispatch(AssistantText(reply))
+
+    def _activate_workspace_handoff(stop_reason: str) -> bool:
+        """Publish a requested workspace only after the old turn is clean, reconciled, and durable."""
+        target = str(_workspace_handoff.get("target") or "")
+        if not target:
+            return False
+        reconciled = not (session.active_id is not None and session.active().reconciliation_required)
+        if stop_reason == "end_turn" and reconciled:
+            _workspace_handoff["ready"] = True
+            return _switch_workspace(target)
+        _workspace_handoff.update(target="", ready=False)
+        message = f"  workspace switch cancelled because the turn stopped as {stop_reason!r}"
+        (_console.print(message, markup=False) if _console is not None else print(message))
+        return False
 
     def _run_one_turn(text, sink, signal):
         """One turn for the LIVE composer: route (lexical) → build slice → run_turn with a per-turn dispatch
@@ -999,7 +1584,7 @@ def main() -> None:
             _chitchat_reply(text, make_dispatcher(sink))
             return
         if session.active_id is None:
-            session.new_topic(text)
+            action, tid = "new", ""
         elif session.active().reconciliation_required:
             action, _tid = route_topic_lexical(text, session)
             if action in ("new", "resume"):
@@ -1008,15 +1593,10 @@ def main() -> None:
                     "task to re-observe live state and reconcile it first."
                 ))
                 return
-            session.continue_topic(text)
+            action, tid = "continue", ""
         else:
             action, tid = route(llm, text, session)
-            if action == "new":
-                session.new_topic(text)
-            elif action == "resume":
-                session.switch_topic(tid); session.continue_topic(text, resume=True)
-            else:
-                session.continue_topic(text)
+        _admit_routed_turn(text, action, tid)
         _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
         # Build the live-mode dispatcher before slice construction so the same shared progress state sees
         # the host lifecycle from its real beginning.  Required sinks are safe once _begin_local_turn runs.
@@ -1033,7 +1613,6 @@ def main() -> None:
             *_live_sinks,
             required=(_journal_event, _reduce_event),
         )
-        _begin_local_turn(text)
         live_dispatch(TurnStarted(
             request=text,
             task_title=_stats["topic"],
@@ -1076,15 +1655,18 @@ def main() -> None:
                 "required local seal could not complete; the recovery journal is retained. "
                 "Restart SliceAgent after fixing storage so recovery can finish before new work.")
         _stats["last_turn_s"] = _t.monotonic() - _t0
-        if reviewer is not None:
+        switched = _activate_workspace_handoff(result.stop_reason)
+        if not switched and reviewer is not None:
             reviewer.review(session.session_id)
+        return None
 
     def _try_live() -> bool:
         """Run the always-pinned live composer; return True if it ran (REPL below is then skipped), False to
         fall back to the REPL on any startup failure — input is never left broken."""
         try:
             _tui.run_live(console=_console, stats=_stats, banner_info=info, root=root,
-                          run_one_turn=_run_one_turn, handle_slash=_handle_slash)
+                          run_one_turn=_run_one_turn, handle_slash=_handle_slash,
+                          on_ready=lambda setter: _live_workspace_setter.__setitem__("fn", setter))
             return True
         except Exception as _e:  # noqa: BLE001
             print(f"\n  live UI failed ({type(_e).__name__}: {_e}); using the inline REPL instead.")
@@ -1115,8 +1697,7 @@ def main() -> None:
             print('type a task, or "exit" to quit\n')
         from .sensory_cortex import project_root as _project_root
         if _project_root(root) is None:        # launched outside a project → tell the user how to pick one
-            _hint = ("  · no project here — exit and relaunch SliceAgent from a project directory "
-                     "(or just chat / ask me to find one)")
+            _hint = ("  · no project here — use /cwd <path>, or ask me to find and switch to one")
             (_console.print(f"[grey50]{_hint}[/]") if _console is not None else print(_hint))
         while True:
             if _input is not None:
@@ -1145,17 +1726,16 @@ def main() -> None:
             if _tui:                              # anchor the user turn with spacing (fixes cramped layout)
                 _tui.user_echo(_console, line)
             if is_chitchat(line):                # 'hi'/'thanks' → cheap reply, skip routing/slice/run_turn (item D)
-                _chitchat_reply(line, dispatch)
+                _chitchat_reply(line, chitchat_dispatch)
                 continue
             if session.active_id is None:                      # first message bootstraps the first topic
-                session.new_topic(line)
+                action, tid = "new", ""
             elif session.active().reconciliation_required:
                 action, tid = route_topic_lexical(line, session)
                 if action in ("new", "resume"):
                     print("  · task change blocked: reconcile the prior indeterminate operation first")
                     continue
-                action = "reconcile"
-                session.continue_topic(line)
+                action, tid = "continue", ""
             else:                                              # route: continue / new / resume (no junk topic)
                 # route() is lexical by default (instant, zero round-trips); AGENT_ROUTER=llm restores the
                 # classifier (a provider round-trip). Cover it with a 'routing…' spinner; the shared turn
@@ -1165,17 +1745,10 @@ def main() -> None:
                         action, tid = route(llm, line, session)
                 else:
                     action, tid = route(llm, line, session)
-                if action == "new":
-                    session.new_topic(line)
-                elif action == "resume":
-                    session.switch_topic(tid)
-                    session.continue_topic(line, resume=True)
-                else:
-                    session.continue_topic(line)
                 if not _tui:                                   # TUI shows the topic in the status bar, not as noise
                     print(f"  · topic: {action}{(' ' + tid) if tid else ''}")
+            _admit_routed_turn(line, action, tid)
             _stats["topic"] = one_line(session.active().goal, 40) if session.active_id else ""
-            _begin_local_turn(line)              # journal + exact intent + short-range continuity
             dispatch(TurnStarted(
                 request=line,
                 task_title=_stats["topic"],
@@ -1238,12 +1811,12 @@ def main() -> None:
                 print("  · required local seal failed; stopping before accepting another request")
                 break
             _stats["last_turn_s"] = _time.monotonic() - _t0   # shown as ⏲ in the status bar
-            if reviewer is not None:                            # OPT-IN: critique the turn off-thread
+            switched = _activate_workspace_handoff(result.stop_reason)
+            if not switched and reviewer is not None:           # OPT-IN: critique the turn off-thread
                 reviewer.review(session.session_id)
 
-    # session end: tear down background procs / PTY sessions, MCP servers, and consolidate memory. Each
-    # step is GUARDED (a failure warns, never crashes the exit) and the MCP shutdown is BOUNDED by a
-    # timeout, so a stuck server or index write can never freeze the process on the way out.
+    # Session end: retire the current workspace once, consolidate every session visited by this long-lived
+    # process, then close the process-owned memory facade. A workspace change already retired its old bundle.
     def _safe(label, fn):
         try:
             return fn()
@@ -1251,41 +1824,42 @@ def main() -> None:
             print(f"  · warning: {label} failed ({type(_e).__name__}: {_e})")
             return None
 
-    def _bounded(label, fn, secs=8.0):
-        import threading as _th
-        t = _th.Thread(target=lambda: _safe(label, fn), daemon=True)
-        t.start(); t.join(secs)
-        if t.is_alive():
-            print(f"  · warning: {label} timed out after {secs:.0f}s — exiting anyway")
-
     # A ctrl-c during this shutdown sequence means "just quit" — _safe only catches Exception, but ctrl-c
     # raises KeyboardInterrupt (a BaseException), so without this outer guard a ctrl-c landing mid-step (esp.
     # the slow consolidation LLM call) would escape every _safe and dump a raw traceback. Catch it once here.
     try:
-        _safe("tool cleanup", base_tools.cleanup)
-        if reviewer is not None:           # let an in-flight background review finish (bounded) before consolidating
-            _safe("bg-review join", lambda: reviewer.join(timeout=10))
-        if mcp_runtime is not None:        # #61/#62: a stuck MCP server must not freeze exit → bounded shutdown
-            _bounded("MCP shutdown", mcp_runtime.shutdown)
+        _safe("workspace cleanup", workspace.close)
         # consolidate the episodic cache into long-term memory (the cache→memory loop). mine_mode gates it:
         # off → skip; deterministic → recorded skills; llm → render_skill_llm generalizes (scan-first).
-        if getattr(memory, "is_durable", False) and mine_mode not in ("0", "off", "none"):
-            st = _safe("memory consolidation",
-                       lambda: memory.consolidate(session.session_id, llm=llm, mode=mine_mode)) or {}
-            if st.get("lessons") or st.get("skills"):        # report the TRUTH, not a blind 'success'
-                print(f"  · consolidated: {st.get('lessons', 0)} lesson(s), {st.get('skills', 0)} skill(s)"
-                      + (f", {st['skills_rejected']} rejected" if st.get("skills_rejected") else "")
-                      + (f", {st['errors']} error(s)" if st.get("errors") else ""))
-            elif st.get("skills_rejected") or st.get("errors"):
-                print(f"  · consolidation: {st.get('skills_rejected', 0)} rejected, {st.get('errors', 0)} error(s)")
-        _safe("memory close", getattr(memory, "close", lambda: None))   # #33: close the FTS5 index (WAL checkpoint)
-        _safe("local state lease", local_store.close)
+        if getattr(memory, "is_durable", False):
+            sessions_to_consolidate = list(dict.fromkeys(
+                [*_retired_sessions, (session.session_id, mine_mode)]
+            ))
+            for session_id, mode in sessions_to_consolidate:
+                if mode in ("0", "off", "none"):
+                    continue
+                st = _safe(
+                    "memory consolidation",
+                    lambda sid=session_id, selected=mode: memory.consolidate(
+                        sid, llm=llm, mode=selected,
+                    ),
+                ) or {}
+                if st.get("lessons") or st.get("skills"):
+                    print(f"  · consolidated: {st.get('lessons', 0)} lesson(s), "
+                          f"{st.get('skills', 0)} skill(s)"
+                          + (f", {st['skills_rejected']} rejected" if st.get("skills_rejected") else "")
+                          + (f", {st['errors']} error(s)" if st.get("errors") else ""))
+                elif st.get("skills_rejected") or st.get("errors"):
+                    print(f"  · consolidation: {st.get('skills_rejected', 0)} rejected, "
+                          f"{st.get('errors', 0)} error(s)")
+        _safe("memory close", getattr(memory, "close", lambda: None))  # FTS5 WAL checkpoint
         if metrics is not None:                                 # the moat number: per-turn fresh-input curve
             s = metrics.summary()
             print(f"  · metrics: per_turn_fresh={s['per_turn_fresh']} avg={s['avg_turn_fresh']} "
                   f"cache_hit={s['cache_hit_rate']} tools={s['tool_calls']}({s['tool_failures']} fail) "
                   f"retries={s['retries']} overflows={s['overflows']} errors={s['errors']}")
     except KeyboardInterrupt:
+        _workspace_handoff["ready"] = False
         print("\n  · exiting (skipped remaining cleanup)")
 
 

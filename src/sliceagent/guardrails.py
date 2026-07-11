@@ -59,7 +59,11 @@ _RESULT_AXIS_ESCAPE = frozenset({"edit_file", "append_to_file", "str_replace", "
 # Known NON-mutating (read/search) tools. The no-progress streak treats a tool as a potential MUTATOR
 # unless it is in here — so unknown plugin/MCP tools AND mutating builtins missing from the static set
 # above (world_set, terminal_*, proc_*, update_plan, …) still drive loop detection (pessimistic).
-_NON_MUTATORS = IDEMPOTENT_TOOL_NAMES | frozenset({"grep", "glob", "ask_user"})
+_NON_MUTATORS = IDEMPOTENT_TOOL_NAMES | frozenset({
+    "grep", "glob", "code_review", "ask_user",
+    "proc_poll", "proc_tail", "proc_wait", "terminal_read", "terminal_wait",
+    "fetch_url", "web_search",
+})
 
 # Same-step exact-call dedup eligibility: pure read-only QUERY tools whose identical re-execution within
 # ONE LLM step yields a byte-identical, side-effect-free result, so a duplicate can reuse the first call's
@@ -103,7 +107,8 @@ class ToolCallGuardrailConfig:
     blocked across a 411k-token spin (GR1/2/3). The RESULT axis is tool-AGNOSTIC: it keys on the
     OUTPUT hash across ALL tools (incl. run_command/execute_code), so semantically-redundant calls
     with different text collapse to one progress signature. A repeated identical RESULT — even from
-    a 'mutating' tool — means the action is not changing observable state: a no-progress loop.
+    a 'mutating' tool — means the action is not changing observable state: a no-progress loop. Counts are
+    scoped to a coarse operation class, so repeated delegation errors cannot disable unrelated file reads.
     """
 
     exact_failure_block_after: int = 3      # same (tool,args) FAILED this many times → block
@@ -194,8 +199,9 @@ class ToolCallGuardrail:
         # last `trajectory_ring_cap` steps. NOT the transcript: fixed-length, op-class + hash only (no
         # args, no output text). Drives result-repeat detection across ANY tool (incl. shell).
         self._trajectory: list[tuple[str, str]] = []
-        # result_hash -> count, derived from the ring (also bounded by the ring's distinct entries).
-        self._result_counts: dict[str, int] = {}
+        # (operation class, result_hash) -> count, derived from the ring. A repeated spawn/delegation error
+        # must not poison unrelated reads or shell observation for the rest of the turn.
+        self._result_counts: dict[tuple[str, str], int] = {}
         # mutating-attempt streak with no successful edit (the "act or stop" no-progress floor for edits).
         self._mutations_since_edit: int = 0
         # total tool calls since the last successful change landed — the coarse per-turn budget floor.
@@ -205,6 +211,18 @@ class ToolCallGuardrail:
         if tool_name in self.config.mutating_tools:
             return False
         return tool_name in self.config.idempotent_tools
+
+    @staticmethod
+    def _is_mutating(tool_name: str, args: Mapping[str, Any]) -> bool:
+        if tool_name in _NON_MUTATORS:
+            return False
+        if tool_name == "run_command":
+            try:
+                from .policy import _is_readonly_command
+                return not _is_readonly_command(str(args.get("command") or ""))
+            except Exception:
+                return True
+        return True
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> GuardrailDecision:
         """Decide whether to BLOCK this call, based on counts from prior calls THIS turn.
@@ -252,7 +270,7 @@ class ToolCallGuardrail:
         # never penalized). Tool-agnostic over the mutating set; only fires on the next mutating attempt
         # so a read/answer is never blocked. Soft "act or stop": stop hammering, read OPEN FILES, change.
         if (self._mutations_since_edit >= self.config.no_edit_mutations_before_warn
-                and tool_name in self.config.mutating_tools):
+                and self._is_mutating(tool_name, _coerce_args(args))):
             return GuardrailDecision(
                 block=True,
                 code="no_edit_progress",
@@ -267,11 +285,11 @@ class ToolCallGuardrail:
                 count=self._mutations_since_edit,
             )
 
-        # I3 RESULT axis (tool-AGNOSTIC) — the same OUTPUT has recurred ≥K times this episode across
-        # ANY tools (incl. run_command/execute_code). The agent is re-observing state that isn't
+        # I3 RESULT axis (operation-class scoped) — the same OUTPUT has recurred ≥K times this episode across
+        # equivalent tools (e.g. run_command/execute_code). The agent is re-observing state that isn't
         # changing — a no-progress loop the exact-(tool,args) axis cannot see (different command text,
         # same result). Soft "you've seen this output N times — act or stop". Pure read of the ring.
-        top_hash, top_count = self._hottest_result()
+        _top_hash, top_count = self._hottest_result(op_kind(tool_name))
         # Block a re-observation repeat (incl. command loops with identical output — the real moat defense),
         # but NEVER the EDIT/ask escape the message itself tells the model to take. Without this exemption the
         # axis was an inescapable per-turn trap (blocked calls never advance the ring → permanent block →
@@ -352,7 +370,7 @@ class ToolCallGuardrail:
         # never edit, and must not be strangled at call_budget_warn_after. Only a re-read of the SAME output
         # or a FAILED call advances the floor — and genuine re-reads/repeats are already caught by the
         # result/idempotent axes. This makes the floor task-AGNOSTIC: it fires on flailing, not on reading.
-        if (not failed) and self._result_counts.get(result_hash, 0) <= 1:
+        if (not failed) and self._result_counts.get((kind, result_hash), 0) <= 1:
             self._calls_since_edit = 0          # new information landed → reset the floor
         else:
             self._calls_since_edit += 1
@@ -363,7 +381,7 @@ class ToolCallGuardrail:
         # never matches, an edit/run that errors) advances it. This targets the "trying to change the
         # world and nothing sticks" loop WITHOUT penalizing productive non-edit shell work (running a
         # build/test that passes is progress, not spinning). Tool-agnostic over the mutating set.
-        if tool_name not in _NON_MUTATORS:   # pessimistic: unknown/plugin tools count as mutators too
+        if self._is_mutating(tool_name, args):  # pessimistic: unknown/plugin tools count as mutators too
             if not failed:
                 self._mutations_since_edit = 0
                 self._calls_since_edit = 0  # a change landed → the budget floor resets
@@ -395,17 +413,22 @@ class ToolCallGuardrail:
         self._trajectory.append((kind, result_hash))
         if len(self._trajectory) > cap:
             del self._trajectory[:-cap]
-        counts: dict[str, int] = {}
-        for _, h in self._trajectory:
-            counts[h] = counts.get(h, 0) + 1
+        counts: dict[tuple[str, str], int] = {}
+        for operation, result in self._trajectory:
+            key = (operation, result)
+            counts[key] = counts.get(key, 0) + 1
         self._result_counts = counts
 
-    def _hottest_result(self) -> tuple[str, int]:
-        """The most-repeated result_hash in the current ring and its count (('', 0) when empty)."""
-        if not self._result_counts:
+    def _hottest_result(self, operation: str | None = None) -> tuple[str, int]:
+        """Most-repeated result for one operation class (or globally for diagnostics/tests)."""
+        candidates = {
+            result: count for (kind, result), count in self._result_counts.items()
+            if operation is None or kind == operation
+        }
+        if not candidates:
             return ("", 0)
-        h = max(self._result_counts, key=self._result_counts.get)
-        return (h, self._result_counts[h])
+        result = max(candidates, key=candidates.get)
+        return (result, candidates[result])
 
 
 def guardrail_blocked_result(decision: GuardrailDecision) -> str:

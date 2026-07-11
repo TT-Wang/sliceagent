@@ -26,8 +26,8 @@ def check(fn):
     return fn
 
 
-def _render(events):
-    c = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
+def _render(events, *, width=100):
+    c = Console(file=StringIO(), force_terminal=True, width=width, color_system=None)
     stats = {"model": "m", "policy": "allow", "topic": "", "tokens": 0}
     sink = tui.make_rich_sink(c, stats, await_commit=True)
     for e in events:
@@ -100,6 +100,56 @@ def turn_end_and_retry_render():
         TurnCommitted(True, "end_turn", detail="checkpoint saved"),
     ])
     assert "retry" in out and "turn saved" in out, out
+
+
+@check
+def committed_receipt_distinguishes_agent_rejection_from_execution_failure():
+    receipt = {
+        "disposition": "completed_with_warnings",
+        "counts": {
+            "requested": 1, "rejected_before_execution": 1, "execution_started": 0,
+            "settled": 1, "succeeded": 0, "failed": 0, "cancelled": 0,
+            "indeterminate": 0, "not_started": 0,
+        },
+        "agents": {
+            "requested": 1, "rejected_before_execution": 1, "execution_started": 0,
+            "settled": 1, "succeeded": 0, "failed": 0, "cancelled": 0,
+            "indeterminate": 0, "not_started": 0,
+        },
+    }
+    out, _ = _render([
+        TurnStarted("delegate"), TurnEnd("end_turn", 1, {}),
+        TurnCommitted(True, "end_turn", receipt=receipt),
+    ])
+    assert "turn saved with warnings" in out, out
+    assert "1 agent rejected before start" in out, out
+    assert "agent failed" not in out and "agent started" not in out, out
+
+
+@check
+def adverse_receipt_facts_survive_an_ordinary_width_completion():
+    receipt = {
+        "turn_status": "end_turn", "disposition": "completed_with_warnings",
+        "counts": {
+            "requested": 24, "rejected_before_execution": 13, "execution_started": 11,
+            "settled": 24, "succeeded": 10, "failed": 1, "cancelled": 0,
+            "indeterminate": 0, "not_started": 0,
+        },
+        "agents": {
+            "requested": 24, "rejected_before_execution": 13, "execution_started": 11,
+            "settled": 24, "succeeded": 10, "failed": 1, "cancelled": 0,
+            "indeterminate": 0, "not_started": 0,
+        },
+    }
+    out, _ = _render([
+        TurnStarted("delegate", plan=[{"step": "inspect", "status": "done"}]),
+        StepBegin(1), TurnEnd("end_turn", 1, {}),
+        TurnCommitted(True, "end_turn", receipt=receipt),
+    ], width=80)
+    assert "turn saved with warnings" in out, out
+    assert "13 rejected before start" in out and "1 failed" in out, out
+    assert "plan 1/1" not in out and "1 pass" not in out, \
+        "cosmetic progress must yield space to adverse lifecycle truth"
 
 
 @check
@@ -185,6 +235,8 @@ def step_end_accumulates_tokens():
 def interrupt_renders_warning():
     out, _ = _render([TurnInterrupted("aborted", "stopped by user")])
     assert "interrupted" in out, out
+    blocked, _ = _render([TurnInterrupted("stuck", "read_file failed repeatedly")])
+    assert "stopped" in blocked and "interrupted" not in blocked, blocked
 
 
 @check
@@ -193,6 +245,8 @@ def slash_completer_offers_navigation_commands():
     comp = tui._InputCompleter()   # no repo files wired → behaves slash-only here
     got = [c.text for c in comp.get_completions(Document("/mo", len("/mo")), None)]
     assert "/model" in got and "/mode" in got, got
+    update = [c.text for c in comp.get_completions(Document("/up", len("/up")), None)]
+    assert "/update" in update, update
     # /switch was removed from the palette in the menu redesign (parked-topic resume dropped)
     assert "/switch" not in [c.text for c in comp.get_completions(Document("/sw", len("/sw")), None)]
     # a non-slash line offers nothing when no repo files are wired

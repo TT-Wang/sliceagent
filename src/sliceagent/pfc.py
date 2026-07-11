@@ -18,14 +18,15 @@ reconstruction seam that READS durable stores to build a turn's SEED lives in se
 stable SYSTEM prompt text lives in prompt.py.
 
 PROVENANCE (Invariant 1): a finding is tagged by where it came from, and generic model prose is never
-promoted into evidence. Each explicit finding carries a `source` (observed > tool-note > claim): a tool
-result is "observed"; the `note` arg on a non-failing call is "tool-note"; an unsupported tool note is a
-"claim". Assistant replies remain verbatim only in bounded continuity and immutable turn artifacts.
+promoted into evidence. Each explicit finding carries a `source`: a direct tool result is "observed"; the
+`note` arg on a non-failing call is "tool-note"; child fan-in is "delegated" testimony; an unsupported tool
+note is a "claim". Assistant replies remain verbatim only in bounded continuity and immutable turn artifacts.
 Load-bearing conclusions therefore cross turns through typed evidence rather than a shadow transcript.
 """
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
 
@@ -42,6 +43,7 @@ from .regions import (
 )
 from .slice_state import (ContinuityState, EvidenceState, TaskProgress,
                           TurnRuntime, WorkingSet)
+from .subagent_contract import SubagentClaim
 from .swap import READ_BUDGET, READ_BUDGET_MAX, _DEFAULT_SWAP
 from .text_utils import one_line
 
@@ -160,7 +162,8 @@ def _active(state):
     return state.active() if hasattr(state, "active") else state
 
 
-def record_user(s: Slice, message: str, *, source_artifact: str | None = None) -> None:
+def record_user(s: Slice, message: str, *, source_artifact: str | None = None,
+                contract=None) -> None:
     """Append the user's message to the short-range CONVERSATION ring and count the turn. The host
     calls this once per user message; slice_sink fills the assistant side as the turn produces text.
     Bounded ring — older exchanges live in the durable cache, paged in on demand (not kept here)."""
@@ -169,7 +172,7 @@ def record_user(s: Slice, message: str, *, source_artifact: str | None = None) -
     s.turn_actions = 0   # new user turn → reset the per-turn exploration budget (drives the explore-nudge)
     # ONE authoritative verbatim request for the active turn. Persistent clauses are promoted separately
     # into intent.entries; the raw full message is archived by the turn sink rather than accumulated here.
-    s.intent.begin_turn(message, source_artifact=source_artifact)
+    s.intent.begin_turn(message, source_artifact=source_artifact, contract=contract)
     if first_task_request and source_artifact:
         s.task.goal_source = source_artifact
     # RECENT CONVERSATION ring — VERBATIM (including whitespace, NOT truncated): the last few turns are the
@@ -262,10 +265,18 @@ def slice_sink(state):
                 s.reconciliation_targets = ["workspace:*", "opaque:interrupted-turn"]
             return
         if isinstance(event, ToolStarted):
-            s.runtime.recent_calls.append({
-                "id": getattr(getattr(event, "invocation", None), "id", ""),
-                "name": event.name, "args": dict(event.args or {}), "status": "running",
-            })
+            call_id = getattr(getattr(event, "invocation", None), "id", "")
+            call = next((item for item in reversed(s.runtime.recent_calls)
+                         if call_id and item.get("id") == call_id), None)
+            if call is None:
+                s.runtime.recent_calls.append({
+                    "id": call_id, "name": event.name, "args": dict(event.args or {}),
+                    "status": "running", "step": s.runtime.step,
+                })
+            elif str(call.get("status") or "") == "running":
+                # A replayed start is the same lifecycle edge, not a second logical request. Never downgrade
+                # a terminal row if a recovery host delivers an old start after its settled outcome.
+                call.update(name=event.name, args=dict(event.args or {}), step=s.runtime.step)
             return
         # I1 PROVENANCE — generic assistant prose is continuity, not evidence. The bounded recent ring
         # resolves short-range references; the episode/artifact sink archives the full reply. Durable
@@ -280,32 +291,97 @@ def slice_sink(state):
                 # real conclusion — which usually sits at the TAIL, exactly what a head-gist used to sever. The
                 # bound is the turn COUNT, not bytes; older turns page out to history/ (recall pages them back).
                 s.conversation[-1]["assistant"] = str(full)
+                if event.final:
+                    # A terse next-turn assent ("yes" / "go ahead") gains action authority only from an
+                    # explicit, immediately preceding offer.  This small continuity object is not a transcript
+                    # and is replaced/cleared by every terminal assistant response.
+                    from .discourse import extract_pending_proposal
+                    s.continuity.pending_proposal = extract_pending_proposal(full)
             return
         if isinstance(event, ToolResult):
-            # Canonical typed outcomes may be delivered again by a replaying host. Stable effect IDs make
-            # reduction exactly-once within the active turn; legacy events without typed effects preserve
-            # their historical behavior. A partially repeated effect set is inconsistent and must fail the
-            # required reducer rather than applying an ambiguous subset.
+            # Reject an ambiguous partial effect replay before changing even the ephemeral runtime ledger.
+            # Complete effect replay is safe: semantic reduction is skipped below, while a distinct logical
+            # invocation ID still receives its own terminal accounting row.
             _effect_ids = tuple(
                 effect.id for effect in (getattr(getattr(event, "outcome", None), "effects", ()) or ())
                 if getattr(effect, "id", "")
             )
-            if _effect_ids:
-                _seen = s.runtime.applied_effect_ids.intersection(_effect_ids)
-                if len(_seen) == len(set(_effect_ids)):
-                    return
-                if _seen:
-                    raise RuntimeError("partially replayed tool outcome cannot be reduced safely")
-            call_id = event.invocation_id or getattr(getattr(event, "outcome", None), "invocation", None)
-            if not isinstance(call_id, str):
-                call_id = getattr(call_id, "id", "")
+            _seen_effect_ids = s.runtime.applied_effect_ids.intersection(_effect_ids)
+            if _seen_effect_ids and len(_seen_effect_ids) != len(set(_effect_ids)):
+                raise RuntimeError("partially replayed tool outcome cannot be reduced safely")
+            effects_replayed = bool(_effect_ids and len(_seen_effect_ids) == len(set(_effect_ids)))
+
+            # Account for the LOGICAL invocation before reducing its semantic effects. A provider may issue
+            # the same call twice and receive the same cached/idempotent effect for both invocation IDs. The
+            # world-state mutation must still apply exactly once, but completion invariants (for example,
+            # "spawn exactly 3 children") must see both requests and outcomes. Exact host replay of the same
+            # invocation ID remains one runtime row because the lookup below updates it in place.
+            outcome_invocation = getattr(getattr(event, "outcome", None), "invocation", None)
+            call_id = event.invocation_id or getattr(outcome_invocation, "id", "")
             call = next((item for item in reversed(s.runtime.recent_calls)
                          if call_id and item.get("id") == call_id), None)
+            prior_status = str(call.get("status") or "") if call is not None else ""
+            accept_terminal_metadata = not prior_status or prior_status == "running"
             if call is None:
-                call = {"id": call_id, "name": event.name, "args": dict(event.args or {})}
+                call = {
+                    "id": call_id,
+                    "name": event.name,
+                    "args": dict(event.args or {}),
+                    "step": s.runtime.step,
+                }
                 s.runtime.recent_calls.append(call)
             call["status"] = event.status or ("failed" if event.failing else "succeeded")
-            if call["status"] == "indeterminate":
+            newly_settled = not prior_status or prior_status == "running"
+
+            # Preserve the bounded child-claim ledger on the logical invocation that produced it. The effect says
+            # only what occurred verbatim in the sealed child report; it is runtime fan-in metadata, never a
+            # workspace observation. Normalize and cap defensively because effect payloads can also come from
+            # third-party tool hosts.
+            for effect in (() if not accept_terminal_metadata or event.name not in {
+                    "spawn_agent", "spawn_explore", "spawn_subagent",
+            } else
+                           (getattr(getattr(event, "outcome", None), "effects", ()) or ())):
+                if getattr(effect, "kind", "") != "child_artifact":
+                    continue
+                payload = getattr(effect, "payload", {}) or {}
+                artifact_id = str(payload.get("artifact_id") or "")
+                if artifact_id:
+                    call["child_artifact_id"] = artifact_id[:200]
+                target = payload.get("delegation_target")
+                if isinstance(target, str) and target.strip() and len(target.encode("utf-8")) <= 300:
+                    call["child_target"] = target.strip()
+                raw_scope = payload.get("scope") or ()
+                if isinstance(raw_scope, (list, tuple)) and len(raw_scope) <= 16 and all(
+                        isinstance(item, str) and item.strip() and len(item.encode("utf-8")) <= 300
+                        for item in raw_scope):
+                    call["child_scope"] = list(dict.fromkeys(item.strip() for item in raw_scope))
+                normalized_claims = []
+                raw_claims = payload.get("claims") or ()
+                valid_claims = isinstance(raw_claims, (list, tuple)) and len(raw_claims) <= 3
+                if valid_claims:
+                    for row in raw_claims:
+                        if (not isinstance(row, Mapping)
+                                or not isinstance(row.get("text"), str)
+                                or not isinstance(row.get("report_exact"), str)):
+                            valid_claims = False
+                            break
+                        try:
+                            normalized_claims.append(SubagentClaim.from_dict(row).to_dict())
+                        except (TypeError, ValueError):
+                            valid_claims = False
+                            break
+                if not valid_claims:
+                    normalized_claims = []
+                if normalized_claims:
+                    call["child_claims"] = normalized_claims
+                break
+
+            # Canonical typed outcomes may be delivered again by a replaying host. Stable effect IDs make
+            # reduction exactly-once within the active turn; legacy events without typed effects preserve
+            # their historical behavior. A partially repeated effect set is inconsistent and must fail the
+            # required reducer rather than applying an ambiguous subset. Logical accounting above is not an
+            # effect: it intentionally records distinct invocation IDs even when their effects are identical.
+            if newly_settled and call["status"] == "indeterminate":
                 detail = (
                     f"{event.name} ({call_id or 'unknown invocation'}) returned an indeterminate outcome; "
                     "re-observe the affected workspace/process state before any further side effect"
@@ -317,9 +393,9 @@ def slice_sink(state):
                 s.reconciliation_targets = list(dict.fromkeys((
                     *s.reconciliation_targets, *reconciliation_targets(event.name, event.args),
                 )))
-            if event.failing:
+            if newly_settled and event.failing:
                 s.runtime.blocked_calls += 1
-            if not event.apply_effects:
+            if effects_replayed or not event.apply_effects:
                 return
             # the model's distilled conclusion rides on the tool call (the note arg) — fold it into
             # the FINDINGS tier so a reasoning model reuses it instead of re-deriving next turn. A note
@@ -392,11 +468,13 @@ def slice_sink(state):
                     if _step:
                         _new.append({"step": _step, "status": _st})
                 s.plan = _new
-            # FAN-IN: a subagent/explorer reports its result as the tool OUTPUT (not the note arg). Fold that
-            # distilled summary into the carried FINDINGS tier (observed) so it survives the turn-boundary seal —
-            # the parent reconciles summaries, never the children's transcripts (the swarm's no-bloat guarantee).
+            # FAN-IN: this output deliberately mixes a child interpretation, a bounded primary excerpt, and an
+            # immutable handle.  A successful spawn proves that the testimony was returned and sealed; it does
+            # NOT make every sentence an observed workspace fact. Carry it under the delegated trust tag so it
+            # survives the turn-boundary seal without provenance laundering (the full report remains recallable
+            # through its handle; the parent still never receives the child transcript).
             if event.name in ("spawn_subagent", "spawn_explore", "spawn_agent") and not event.failing and event.output:
-                new_finding = record_note(s, event.output, source="observed") or new_finding
+                new_finding = record_note(s, event.output, source="delegated") or new_finding
             did_edit = False
             if event.name == "skill" and not event.failing:
                 # a loaded skill's body must enter the ACTIVE SKILL tier or it vanishes
@@ -406,11 +484,28 @@ def slice_sink(state):
             # build_artifacts read_text(dir) → IsADirectoryError → a bogus OPEN FILES entry every turn).
             if event.args.get("path") and event.name not in ("list_files", "grep", "glob"):
                 did_edit = event.name in ("edit_file", "append_to_file", "str_replace") and not event.failing
+                resource_effect = next((
+                    effect for effect in (
+                        getattr(getattr(event, "outcome", None), "effects", ()) or ()
+                    )
+                    if getattr(effect, "kind", "") == "resource_observed"
+                ), None)
+                resource_kind = str(
+                    getattr(resource_effect, "payload", {}).get("resource_kind", "")
+                    if resource_effect is not None else ""
+                )
+                virtual_read = (
+                    event.name == "read_file" and resource_kind in {
+                        "artifact", "history", "subagent", "roster",
+                    }
+                )
                 # WS1 — gate membership on SUCCESS. A read/edit that FAILED (e.g. _resolve raised
                 # "path escapes workspace") must NOT be pinned into the working set, or OPEN FILES
                 # re-renders the unreachable/missing path every rebuild and poisons the slice
-                # (the read-blindness loop). Successful reads and edits still join the set.
-                if not event.failing:
+                # (the read-blindness loop). Successful PHYSICAL reads and edits still join the set.
+                # Archive reads remain typed virtual observations in the canonical ToolOutcome; pinning
+                # their handles here would make seed.py physically re-read them and lie "not created yet".
+                if not event.failing and not virtual_read:
                     touch_file(s, event.args["path"], edited=did_edit)
                 # remember the agent's edit target so a HUGE file's region follows it (and a
                 # failed str_replace re-aims the region to where the agent meant to edit)

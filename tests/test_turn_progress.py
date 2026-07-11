@@ -92,6 +92,7 @@ def production_event_order_never_rewinds_the_turn():
     assert prepared.model_pass == 1 and prepared.provider_attempt == 1
     assert not prepared.turn_complete and not prepared.committed
     assert "thinking" in _status(prepared) and "waiting for model" in _status(prepared), _status(prepared)
+    assert "parser fix" not in _status(prepared), "status text must not pin the task's first prompt/title"
 
 
 @check
@@ -232,6 +233,28 @@ def assistant_and_loop_end_are_not_durable_completion():
     assert committed.phase is ProgressPhase.COMPLETE
     assert committed.turn_complete and committed.committed
     assert "saved" in _status(committed) or "complete" in _status(committed), _status(committed)
+
+
+@check
+def sealed_indeterminate_receipt_overrides_a_preseal_end_turn():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    machine.reduce(TurnEnd("end_turn", 1, {}))
+    event = TurnCommitted(
+        True, "end_turn", artifact_id="artifact-uncertain", detail="checkpoint saved",
+        receipt={
+            "turn_status": "indeterminate", "disposition": "indeterminate",
+            "counts": {"requested": 1, "execution_started": 1, "indeterminate": 1},
+            "agents": {},
+        },
+    )
+    assert event.stop_reason == "indeterminate"
+    assert event.detail == "indeterminate state saved"
+    committed = machine.reduce(event)
+    assert committed.phase is ProgressPhase.INTERRUPTED
+    assert committed.stop_reason == "indeterminate"
+    assert committed.committed and not committed.turn_complete
 
 
 @check

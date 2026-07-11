@@ -24,6 +24,7 @@ from .hooks import ToolDecision
 ALLOW = ToolDecision(True)
 
 WRITE_TOOLS = frozenset(("edit_file", "append_to_file", "str_replace"))
+NAVIGATION_TOOLS = frozenset(("change_workspace",))
 # every tool that runs a model-authored shell command/body — the catastrophic denylist must gate ALL of
 # them, not just run_command/execute_code (proc_start/terminal_open/terminal_send execute shell verbatim too).
 EXEC_TOOLS = frozenset(("run_command", "execute_code", "proc_start", "terminal_open", "terminal_send"))
@@ -40,9 +41,14 @@ EXEC_TOOLS = frozenset(("run_command", "execute_code", "proc_start", "terminal_o
 # losing arms race. The BINDING guards are the sandbox (network=none fail-closed, cwd-confine, secret-scrub)
 # and the permission modes (baby-sitter/teenager CONFIRM every command by default). Patterns here catch the
 # obvious/common forms so an unattended (let-it-go) run still has a floor.
+# TRIMMED to the machine-destruction + remote-code-execution core (block review, 2026-07-11). A trusted
+# LOCAL operator legitimately runs sudo, `git push --force` (own branch), chmod/chown, and edits /etc on their
+# OWN machine — mature peers (Claude Code's most-permissive mode, Codex, Cursor, Aider) do NOT hard-block those.
+# So this floor keeps ONLY the irreversible ones: wiping a disk, deleting the tree, or running remote code.
+# Credential-file READS were moved OFF this hard-deny to a confirm (see _SENSITIVE_READ below): not a
+# catastrophe, but — with web_search/MCP outbound — not silently auto-readable either.
 _DANGEROUS_SRC: list[tuple[str, str]] = [
     (r"(?s):\s*\(\s*\)\s*\{.*\|.*&",                       "fork bomb"),
-    (r"\bsudo\b",                                          "privilege escalation (sudo)"),
     (r"\b(shutdown|reboot|halt|poweroff)\b",              "system power control"),
     (r"\b(mkfs|wipefs)\b",                                 "filesystem format"),
     (r"\bdd\b[^\n]*\bof=/dev/",                            "raw write to a device"),
@@ -51,19 +57,16 @@ _DANGEROUS_SRC: list[tuple[str, str]] = [
     # and long-form --recursive — the recursive flag (short -...r... or --recursive) anywhere before the target.
     (r"\brm\b(?=[^|;&\n]*(?:\s-[a-z]*r|\s--recursive))"
      r"[^|;&\n]*\s(?:/|~|\$HOME|/\*|\.\.)(?=[\s/*'\"]|$)", "recursive delete of / ~ or parent"),
-    # chmod/chown on / — flags are OPTIONAL (plain `chmod 755 /` / `chown nobody /` are just as catastrophic
-    # as the -R forms), and long-form flags (--recursive) count too. The target must be the bare root.
-    (r"\bchmod\b\s+(?:-{1,2}[a-z]+\s+)*[0-7]{3,4}\s+/(?:[\s/*'\"]|$)", "chmod on /"),
-    (r"\bchown\b\s+[^\n]*\s/(?:[\s/*'\"]|$)",              "chown on /"),
-    # remote code piped straight into a shell
+    # remote code piped straight into a shell (RCE — kept even on a trusted machine: it runs UNKNOWN code)
     (r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python\d?)\b", "remote script piped to a shell"),
-    # writes to / reads of sensitive locations
-    (r">>?\s*/etc/",                                       "write to /etc"),
-    # credential files + their common glob/prefix forms (cat /etc/pass*, /etc/shadow, /etc/sudoers.d, …)
-    (r"/etc/(?:passwd|shadow|gshadow|sudoers|pass[\w*]*|shad[\w*]*|sudoer[\w*]*)", "access to system credential files"),
-    (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc)", "access to private keys/credentials"),
-    (r"\bgit\b[^\n]*\bpush\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b)", "force push"),
 ]
+# Credential/secret READS: downgraded from a hard catastrophic deny to "not provably read-only", so a bare
+# `cat ~/.aws/credentials` no longer auto-runs silently — it takes the ordinary confirm path (and a let-it-go
+# run still surfaces it). Prevents silent secret exfiltration via the model's web/MCP tools without blocking a
+# deliberate, confirmed read on your own machine.
+_SENSITIVE_READ = re.compile(
+    r"/etc/(?:passwd|shadow|gshadow|sudoers|pass[\w*]*|shad[\w*]*|sudoer[\w*]*)"
+    r"|(?:\.ssh/|id_rsa\b|id_ed25519\b|\.aws/credentials\b|\.netrc\b)", re.IGNORECASE)
 # Compile ALL case-insensitively in one place — uniform, so a future pattern can't silently reintroduce a
 # casing bypass (the round-3 bug: shutdown/mkfs/dd/etc had no IGNORECASE while rm/chmod/curl did).
 _DANGEROUS: list[tuple[re.Pattern, str]] = [(re.compile(p, re.IGNORECASE), why) for p, why in _DANGEROUS_SRC]
@@ -96,9 +99,11 @@ def ask_mutations(name: str, args: dict) -> Optional[ToolDecision]:
 # mode runs it without a confirm prompt. Deny-by-default: an unknown verb still asks. The catastrophic floor
 # (no_dangerous_commands) runs BEFORE this, so e.g. `cat /etc/passwd` is still denied.
 _RO_VERBS = frozenset((
-    "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "type", "printenv", "date",
+    # `cd` only re-points the shell's own cwd for the command that follows it (`cd repo && git status`); it
+    # mutates no user state and takes no write option, so it is read-only as a chain prefix.
+    "cd", "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "type", "printenv", "date",
     "whoami", "hostname", "uname", "id", "groups", "tree", "stat", "file", "du", "df", "realpath",
-    "dirname", "basename", "grep", "rg", "egrep", "fgrep", "sort", "nl", "cut", "column",
+    "dirname", "basename", "grep", "rg", "egrep", "fgrep", "sort", "nl", "cut", "column", "jq",
     "cksum", "md5", "md5sum", "sha1sum", "sha256sum", "true",
 ))
 # `env` and `uniq` were REMOVED from the allowlist: `env <program>` executes an arbitrary program, and
@@ -129,12 +134,35 @@ _RO_GIT_SUB = frozenset((
 # find ACTIONS that run/delete (anything else is a read-only traversal)
 _FIND_MUTATORS = frozenset(("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprintf", "-fprint", "-fls", "-fprint0"))
 _SHELL_META = re.compile(r"[;&|<>`\n]|\$\(|\$\{|\breturn\b")
+_NULL_REDIRECT = re.compile(r"(?<!\S)(?:[012]?>|[012]?>>|&>)\s*/dev/null(?=\s|$)")
 
 
 def _is_readonly_command(cmd: str) -> bool:
     """True only when `cmd` PROVABLY just reads/reports state — a tiny verb allowlist with no shell
-    metacharacters. Conservative by design: anything unrecognized returns False (→ still confirmed)."""
+    metacharacters. A narrow exception supports fallback discovery probes: ``reader 2>/dev/null || reader``
+    is observational only when every branch independently passes this same classifier. No other redirect or
+    compound shell syntax is promoted. Conservative by design: anything unrecognized returns False."""
     cmd = (cmd or "").strip()
+    if _SENSITIVE_READ.search(cmd):     # a credential/secret read is never "provably safe" auto-run → confirm
+        return False
+    if not cmd:
+        return False
+    if "&&" in cmd or "||" in cmd:
+        # && / || chain COMPLETE commands (looser than |). The whole chain only reads state when EVERY
+        # branch independently proves read-only — e.g. `ls dir | head && echo --- && cat file` is purely
+        # observational. A single `&` (backgrounding) is NOT this and still fails the metachar guard below.
+        branches = re.split(r"&&|\|\|", cmd)
+        return bool(branches) and all(
+            branch.strip() and _is_readonly_command(branch) for branch in branches
+        )
+    if "|" in cmd:
+        stages = cmd.split("|")
+        return bool(stages) and all(
+            stage.strip() and _is_readonly_command(stage) for stage in stages
+        )
+    # Discard-only redirection does not mutate user state. Strip it before the ordinary no-metachar proof;
+    # a redirect anywhere else (including a near-miss path) remains visible and therefore fails closed.
+    cmd = _NULL_REDIRECT.sub("", cmd).strip()
     if not cmd or _SHELL_META.search(cmd):
         return False
     try:
@@ -143,7 +171,11 @@ def _is_readonly_command(cmd: str) -> bool:
         return False
     if not toks:
         return False
-    verb = os.path.basename(toks[0])
+    # A lookalike executable from /tmp or ~/bin is not the allowlisted reader merely because its basename
+    # is ``rg``/``git``. PATH resolution remains the host's ordinary trust boundary; explicit paths do not.
+    if os.path.isabs(toks[0]) or toks[0].startswith("~") or "/" in toks[0] or "\\" in toks[0]:
+        return False
+    verb = toks[0]
     if verb == "git":
         # split MAIN options (before the subcommand) from SUBCOMMAND options (after it).
         isub = next((i for i, t in enumerate(toks[1:], 1) if not t.startswith("-")), len(toks))
@@ -153,7 +185,20 @@ def _is_readonly_command(cmd: str) -> bool:
         main_opts, sub_opts = toks[1:isub], toks[isub + 1:]
         # MAIN -c/--config/--exec-path inject git config (diff.external, *.textconv, pager, alias, exec-path)
         # that points at an ARBITRARY command → exec. Refuse auto-approval (external review H-06).
-        if any(t in ("-c", "--config", "--exec-path") or t.startswith(("--config=", "--exec-path=")) for t in main_opts):
+        if any(
+            t == "-c" or t.startswith("-c")
+            or t in ("--config", "--config-env", "--exec-path", "--paginate")
+            or t.startswith(("--config=", "--config-env=", "--exec-path="))
+            for t in main_opts
+        ):
+            return False
+        if any(t not in {"--no-pager", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs"}
+               for t in main_opts):
+            return False
+        pager_or_diff = {"log", "diff", "show", "blame", "shortlog", "whatchanged", "grep"}
+        if sub in pager_or_diff and "--no-pager" not in main_opts:
+            return False
+        if sub in {"diff", "show"} and not {"--no-ext-diff", "--no-textconv"}.issubset(set(sub_opts)):
             return False
         # SUBCOMMAND options that WRITE a file (-o/--output) or RUN a configured helper (--ext-diff/--textconv,
         # `grep --open-files-in-pager`/`-O<cmd>` runs a pager). Any of these makes the "read-only" verb unsafe.
@@ -164,6 +209,12 @@ def _is_readonly_command(cmd: str) -> bool:
         return True
     if verb == "find":
         return not any(t in _FIND_MUTATORS for t in toks)
+    if verb == "sed":
+        return len(toks) >= 4 and toks[1] == "-n" \
+            and re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", toks[2]) is not None \
+            and all(not token.startswith("-") for token in toks[3:])
+    if verb == "rg" and any(t == "--pre" or t.startswith("--pre=") for t in toks[1:]):
+        return False
     return verb in _RO_VERBS and not _has_unsafe_opt(verb, toks)
 
 
@@ -172,7 +223,7 @@ def ask_commands(name: str, args: dict) -> Optional[ToolDecision]:
     command (EXEC tools) or is an unknown tool that might. Edits flow; running code pauses for a yes —
     EXCEPT a provably read-only `run_command` (git status, ls, cat, …), which reports state without
     changing it and so runs without a prompt (kills the confirm-hang on 'which repo am I in')."""
-    if name in _READERS or name in WRITE_TOOLS:
+    if name in _READERS or name in WRITE_TOOLS or name in NAVIGATION_TOOLS:
         return None
     if name == "run_command" and _is_readonly_command(str(args.get("command") or "")):
         return None

@@ -38,14 +38,14 @@ def _user(goal):
 
 
 @check
-def request_leads_and_is_outside_the_fence():
+def request_is_once_and_outside_the_fence():
     out = _user("take a look at how config parsing works and tell me whether it handles bad input safely")
-    assert out.startswith("# CURRENT REQUEST"), "the live request leads the user message (primacy)"
+    assert not out.startswith("# CURRENT REQUEST"), "the live request is not duplicated at primacy"
     assert "handles bad input safely" in out
-    # both copies live OUTSIDE the reference fence
+    # The one exact request lives outside and after the reference fence.
     close = out.index("</context>")
-    assert out.index("# CURRENT REQUEST") < out.index("<context>"), "primacy before the fence"
-    assert out.rindex("# CURRENT REQUEST") > close, "recency after the fence"
+    assert out.count("# CURRENT REQUEST") == 1
+    assert out.index("# CURRENT REQUEST") > close, "recency after the fence"
 
 
 @check

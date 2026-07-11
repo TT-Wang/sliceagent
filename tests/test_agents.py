@@ -21,7 +21,7 @@ def check(fn):
 @check
 def builtins_explorer_readonly_general_writable():
     assert BUILTIN_AGENTS["explorer"].read_only is True
-    assert BUILTIN_AGENTS["explorer"].reasoning == "fast"
+    assert BUILTIN_AGENTS["explorer"].reasoning == "full"
     assert BUILTIN_AGENTS["general"].read_only is False   # tools=None → inherit full → writable
 
 

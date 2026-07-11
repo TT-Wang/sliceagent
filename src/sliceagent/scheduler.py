@@ -51,6 +51,10 @@ def _boundary_error(task: ScheduledTool, error: Exception) -> ToolOutcome:
 
 
 def _execute(task: ScheduledTool) -> ToolOutcome:
+    # ``on_start`` is the last durable boundary before the handler itself. Keeping it inside the worker is
+    # what lets a queued future that is successfully cancelled remain honestly "not started". Exceptions
+    # still propagate: an unavailable required journal must prevent the handler and the rest of the batch.
+    _announce(task)
     try:
         result = task.run()
     except Exception as error:  # interrupts still propagate
@@ -77,14 +81,12 @@ def _run_wave(tasks: list[ScheduledTool], *, max_workers: int, timeout: float | 
     if not tasks:
         return []
     if len(tasks) == 1 and timeout is None:
-        _announce(tasks[0])
         return [_execute(tasks[0])]
 
     pool = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(tasks))))
     futures = []
     try:
         for task in tasks:
-            _announce(task)
             futures.append(pool.submit(_execute, task))
         if timeout is None:
             return [future.result() for future in futures]

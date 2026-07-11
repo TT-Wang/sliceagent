@@ -123,7 +123,9 @@ def make_grep_tool(host) -> ToolEntry:
         # Virtual history/ namespace: no files on disk to ripgrep — scan the sealed turn docs in Python.
         hf = host._history_route(path) if hasattr(host, "_history_route") else None
         if hf is not None:
-            return hf.grep(pattern, path=path, output_mode=mode, context=context, offset=offset, limit=limit)
+            virtual_path = host._archive_handle(path) if hasattr(host, "_archive_handle") else path
+            return hf.grep(pattern, path=virtual_path, output_mode=mode, context=context,
+                           offset=offset, limit=limit)
 
         # Confine the search target under the workspace root (rejects escapes).
         try:

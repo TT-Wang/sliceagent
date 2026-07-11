@@ -34,6 +34,72 @@ class FreshnessClass(str, Enum):
     HISTORICAL = "historical"
 
 
+class EpistemicRole(str, Enum):
+    """What a block can establish; independent from freshness and instruction authority."""
+
+    DIRECTIVE = "directive"
+    OBSERVATION = "observation"
+    CLAIM = "claim"
+    PROCEDURE = "procedure"
+    CONTROL_STATE = "control_state"
+    LOCATOR = "locator"
+
+
+class ResourceKind(str, Enum):
+    """Host resource namespaces must not collapse into ordinary workspace paths."""
+
+    WORKSPACE_FILE = "workspace_file"
+    ARTIFACT = "artifact"
+    HISTORY = "history"
+    SUBAGENT = "subagent"
+    ROSTER = "roster"
+    SKILL = "skill"
+
+
+_VIRTUAL_MOUNTS = {
+    "artifacts": ResourceKind.ARTIFACT,
+    "history": ResourceKind.HISTORY,
+    "subagents": ResourceKind.SUBAGENT,
+    "roster": ResourceKind.ROSTER,
+}
+
+
+@dataclass(frozen=True)
+class ResourceRef:
+    kind: ResourceKind
+    handle: str
+
+    @property
+    def virtual(self) -> bool:
+        return self.kind is not ResourceKind.WORKSPACE_FILE
+
+
+@dataclass(frozen=True)
+class SourceRef:
+    """A compact provenance pointer. Content remains in its owning store."""
+
+    kind: str
+    handle: str
+    revision: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.kind or not self.handle:
+            raise ValueError("source reference kind and handle must be non-empty")
+
+
+def reserved_resource_ref(path: str) -> ResourceRef:
+    """Classify a model-visible handle without touching the filesystem.
+
+    The live host may override this classification when a real project path shadows a reserved mount.
+    """
+    normalized = str(path or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.rstrip("/")
+    mount = normalized.split("/", 1)[0] if normalized else ""
+    return ResourceRef(_VIRTUAL_MOUNTS.get(mount, ResourceKind.WORKSPACE_FILE), normalized or ".")
+
+
 class Fidelity(str, Enum):
     FULL = "full"
     EXCERPT = "excerpt"
@@ -87,6 +153,10 @@ class ContextBlock:
     reobservable: bool = False
     order: int = 0
     slot: int = 0
+    epistemic_role: EpistemicRole = EpistemicRole.CLAIM
+    scope: tuple[str, ...] = ()
+    source_refs: tuple[SourceRef, ...] = ()
+    resource_refs: tuple[ResourceRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.block_id or not self.item_id or not self.alternative_group:
@@ -97,6 +167,8 @@ class ContextBlock:
             )
         if self.mandatory and self.representation_loss is not RepresentationLoss.NONE:
             raise ValueError("mandatory meaning cannot be represented by a lossy alternative")
+        if any(not str(scope).strip() for scope in self.scope):
+            raise ValueError("context block scopes must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -240,15 +312,15 @@ class SeedPlan(list):
         self.media_parts = tuple(dict(part) for part in media_parts)
         self.controller = controller or ElasticityController()
         self.last_selection: ContextSelection | None = None
-        self.last_request_copies = 2
+        self.last_request_copies = 1
         list.__init__(self, self.project())
 
-    def _fixed_user_chars(self, copies: int = 2) -> int:
-        """Physical envelope cost for one or two exact request presentations.
+    def _fixed_user_chars(self, copies: int = 1) -> int:
+        """Physical envelope cost for the one exact recency request presentation.
 
-        Primacy+recency is a useful roomy presentation, not two independent pieces of mandatory meaning.
-        Under pressure the sandwich may therefore become one exact recency copy before any semantic context
-        item loses fidelity. The request itself is never shortened or summarized.
+        ``copies=2`` remains accepted for older/custom plans, but new projections deliberately use one copy.
+        Repeating a leading premise at both ends gives it accidental evidentiary weight. The request itself is
+        never shortened or summarized.
         """
         if copies not in (1, 2):
             raise ValueError("request copies must be one or two")
@@ -260,13 +332,8 @@ class SeedPlan(list):
         if capacity_chars is not None and capacity_chars < 0:
             raise ValueError("capacity_chars must be non-negative or None")
         body_capacity = None
-        copies = 2
+        copies = 1
         if capacity_chars is not None:
-            # Preserve full semantic fidelity before preserving a duplicated presentation. Only keep the
-            # primacy copy when the highest-fidelity body and both exact copies fit together.
-            full_body = self.controller.select(self.blocks).used_chars
-            if self._fixed_user_chars(2) + full_body > capacity_chars:
-                copies = 1
             fixed = self._fixed_user_chars(copies)
             if fixed > capacity_chars:
                 raise ContextUnfitError(
@@ -302,9 +369,6 @@ class SeedPlan(list):
         if self.last_selection is None:
             self.project()
         used = int(getattr(self.last_selection, "used_chars", 0) or 0)
-        if self.last_request_copies == 2:
-            # The next smaller physical representation first drops only the redundant primacy copy.
-            return self._fixed_user_chars(2) + used - 1
         return self._fixed_user_chars(1) + used - 1 if used > 0 else None
 
 

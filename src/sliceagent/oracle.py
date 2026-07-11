@@ -30,16 +30,17 @@ class OracleResult:
 class CommandOracle:
     """Runs a verification command (e.g. the project's test suite). Pass/fail by exit code."""
 
-    def __init__(self, cmd: str, timeout: int = 120):
+    def __init__(self, cmd: str, timeout: int = 120, *, root: str | None = None):
         self.cmd = cmd
         self.timeout = timeout
+        self.root = os.path.realpath(root or os.getcwd())
 
     def verify(self) -> OracleResult:
         # Verification inherits the caller environment for compatibility, but shares the same owned
         # process-group lifecycle as command tools. A timeout is still conservatively indeterminate:
         # ordinary descendants are reaped, yet a deliberately detached process cannot be disproved.
         code, output = LocalSandbox(scrub_secrets=False).run(
-            self.cmd, cwd=os.getcwd(), timeout=self.timeout,
+            self.cmd, cwd=self.root, timeout=self.timeout,
         )
         output = output.strip()
         if code == SANDBOX_TIMEOUT:

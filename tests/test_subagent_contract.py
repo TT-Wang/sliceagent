@@ -4,6 +4,7 @@ Run: PYTHONPATH=src python tests/test_subagent_contract.py
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -13,13 +14,19 @@ from types import SimpleNamespace as NS
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.hippocampus import HippocampusMixin  # noqa: E402
+from sliceagent.events import ToolResult  # noqa: E402
 from sliceagent.intent import IntentEntry  # noqa: E402
 from sliceagent.memory import NullMemory  # noqa: E402
 from sliceagent.retriever import NullRetriever  # noqa: E402
-from sliceagent.subagent import SubagentHost, run_subagent  # noqa: E402
+from sliceagent.subagent import (SubagentHost, _ObservationSink, _parent_observation_excerpt,
+                                 _extract_report_claims, _parent_report_excerpt,
+                                 _task_mentions_exact_target,
+                                 run_subagent)  # noqa: E402
 from sliceagent.subagent_contract import (  # noqa: E402
     SubagentArtifact,
     SubagentBrief,
+    SubagentClaim,
+    SubagentObservation,
 )
 
 
@@ -100,6 +107,265 @@ def _legacy_artifact(report, *, name=""):
 
 
 @check
+def observation_capsule_captures_only_successful_physical_read_views_with_hard_caps():
+    sink = _ObservationSink()
+    auth_view = (
+        "     1\tdef login(username, password):\n"
+        "     2\t    stored = get_password(username)\n"
+        "     3\t    return password == stored"
+    )
+    sink(ToolResult(
+        "read_file", {"path": "auth.py", "offset": 1, "note": "not retained"},
+        auth_view, False, status="succeeded",
+    ))
+    sink(ToolResult(
+        "read_file", {"path": "history/turn-1.md"}, "virtual bytes", False, status="succeeded",
+    ))
+    sink(ToolResult(
+        "read_file", {"path": "failed.py"}, "denied", True, status="failed",
+    ))
+    sink(ToolResult(
+        "grep", {"pattern": "needle", "path": "src"}, "x" * 20_000, False, status="succeeded",
+    ))
+
+    assert len(sink.observations) == 2
+    auth, large = sink.observations
+    assert auth.tool == "read_file" and dict(auth.args) == {"path": "auth.py", "offset": 1}
+    assert auth.view == auth_view and not auth.redacted and not auth.truncated
+    assert auth.raw_sha256 == hashlib.sha256(auth_view.encode()).hexdigest()
+    assert auth.view_sha256 == auth.raw_sha256
+    assert large.tool == "grep" and large.truncated and large.view_bytes <= 8 * 1024
+    assert "sealed observation view truncated" in large.view
+    assert sum(item.view_bytes for item in sink.observations) <= 16 * 1024
+
+
+@check
+def typed_observation_roundtrips_and_legacy_artifacts_default_to_none():
+    view = "     1\treturn password == stored"
+    body = view.encode("utf-8")
+    observation = SubagentObservation(
+        tool="read_file", args={"path": "auth.py"}, status="succeeded", view=view,
+        raw_sha256=hashlib.sha256(body).hexdigest(), view_sha256=hashlib.sha256(body).hexdigest(),
+        raw_bytes=len(body), view_bytes=len(body), redacted=False, truncated=False,
+    )
+    artifact = SubagentArtifact.create(
+        kind="explorer", name="", workspace_id="w", session_id="s", task_id="t",
+        parent_id="turn-1", brief=SubagentBrief.create("inspect auth.py"), status="ok",
+        coverage="auth.py inspected", report="claim", observations=(observation,),
+    )
+    restored = SubagentArtifact.from_record(artifact.to_record())
+    assert restored.observations == (observation,)
+    assert restored.to_record()["observations"] == [observation.to_dict()]
+    assert SubagentArtifact.from_record(_legacy_artifact("legacy")).observations == ()
+
+
+@check
+def typed_claims_are_exact_bounded_and_closed_over_their_artifact():
+    view = "     1\treturn query"
+    body = view.encode("utf-8")
+    observation = SubagentObservation(
+        tool="read_file", args={"path": "app.py"}, status="succeeded", view=view,
+        raw_sha256=hashlib.sha256(body).hexdigest(), view_sha256=hashlib.sha256(body).hexdigest(),
+        raw_bytes=len(body), view_bytes=len(body), redacted=False, truncated=False,
+    )
+    report = "Analysis\nTOP CLAIM: Query construction is risky if a downstream caller executes it."
+    claim = SubagentClaim(
+        text="TOP CLAIM: Query construction is risky if a downstream caller executes it.",
+        report_exact="TOP CLAIM: Query construction is risky if a downstream caller executes it.",
+        modality="conditional", observation_refs=(observation.view_sha256,),
+    )
+    artifact = SubagentArtifact.create(
+        kind="explorer", name="", workspace_id="w", session_id="s", task_id="t",
+        parent_id="turn-1", brief=SubagentBrief.create("inspect app.py"), status="ok",
+        coverage="app.py inspected", report=report, observations=(observation,), claims=(claim,),
+    )
+    restored = SubagentArtifact.from_record(artifact.to_record())
+    assert restored.claims == (claim,) and restored.claims[0].to_dict()["v"] == 1
+    assert SubagentArtifact.from_record(_legacy_artifact("legacy")).claims == ()
+    malformed = artifact.to_record()
+    malformed["claims"] = "not-an-array"
+    try:
+        SubagentArtifact.from_record(malformed)
+        assert False, "malformed persisted claim arrays must fail closed"
+    except ValueError:
+        pass
+
+    for bad in (
+        SubagentClaim(text="x", report_exact="not in report"),
+        SubagentClaim(text="x", report_exact="Analysis", observation_refs=("0" * 64,)),
+    ):
+        try:
+            SubagentArtifact.create(
+                kind="explorer", name="", workspace_id="w", session_id="s", task_id="t",
+                parent_id="turn-1", brief=SubagentBrief.create("inspect app.py"), status="ok",
+                coverage="app.py inspected", report=report, observations=(observation,), claims=(bad,),
+            )
+            assert False, "invalid claim closure must be rejected"
+        except ValueError:
+            pass
+
+
+@check
+def claim_extraction_prefers_the_explicit_marker_and_never_cuts_a_tail_qualifier():
+    brief = SubagentBrief.create("find the top bug", scope=("app.py",))
+    report = (
+        "**Bug:** categorical but secondary wording.\n"
+        "```\nTOP CLAIM: fenced example is not testimony\n```\n"
+        "### TOP CLAIM: SQL construction is only exploitable if an unseen caller executes the returned string."
+    )
+    claims = _extract_report_claims(report, (), brief)
+    assert len(claims) == 1
+    assert claims[0].report_exact == report.splitlines()[-1]
+    assert claims[0].report_exact.endswith("executes the returned string.")
+    assert claims[0].modality == "conditional"
+    assert _extract_report_claims("TOP CLAIM: " + ("x" * 1300), (), brief) == (), \
+        "oversize exact spans fall back instead of losing a tail qualifier"
+
+
+@check
+def target_binding_accepts_sentence_punctuation_without_basename_collisions():
+    assert _task_mentions_exact_target("Review app.py.", "app.py")
+    assert _task_mentions_exact_target("Review /workspace/app.py, then summarize it.", "app.py")
+    assert _task_mentions_exact_target("Review app.py (one file).", "app.py")
+
+    assert not _task_mentions_exact_target("Review data.py.", "a.py")
+    assert not _task_mentions_exact_target("Review /workspace/data.py.", "a.py")
+    assert not _task_mentions_exact_target("Review a.py.bak.", "a.py")
+    assert not _task_mentions_exact_target("Review a.py/child.", "a.py")
+
+
+@check
+def claim_extraction_accepts_standalone_top_claim_heading_variants():
+    brief = SubagentBrief.create("find the top bug", scope=("util.py",))
+    cases = (
+        ("**TOP CLAIM**\n`util.py:4` swallows shutdown exceptions.",
+         "`util.py:4` swallows shutdown exceptions."),
+        ("### TOP CLAIM:\n`util.py:4` swallows shutdown exceptions.",
+         "`util.py:4` swallows shutdown exceptions."),
+        ("**TOP CLAIM (one physical line):**\n"
+         "`util.py:4` swallows shutdown exceptions in one physical line.",
+         "`util.py:4` swallows shutdown exceptions in one physical line."),
+    )
+    for report, expected in cases:
+        claims = _extract_report_claims(report, (), brief)
+        assert len(claims) == 1, report
+        assert claims[0].report_exact == expected
+
+
+@check
+def claim_extraction_accepts_inline_backtick_top_claim_label():
+    brief = SubagentBrief.create("find the top bug", scope=("auth.py",))
+    report = "`TOP CLAIM`: `auth.py:2` calls an undefined dependency."
+    claims = _extract_report_claims(report, (), brief)
+    assert len(claims) == 1
+    assert claims[0].report_exact == report
+    assert "undefined dependency" in claims[0].text
+
+
+@check
+def parent_evidence_excerpts_preserve_lines_and_mark_every_presentation_cut():
+    view = "     1\tstart\n" + ("x" * 580) + "\n     3\tTAIL_QUALIFIER"
+    body = view.encode("utf-8")
+    observation = SubagentObservation(
+        tool="read_file", args={"path": "app.py"}, status="succeeded", view=view,
+        raw_sha256=hashlib.sha256(body).hexdigest(), view_sha256=hashlib.sha256(body).hexdigest(),
+        raw_bytes=len(body), view_bytes=len(body), redacted=False, truncated=False,
+    )
+    shown = _parent_observation_excerpt((observation,), SubagentBrief.create(
+        "inspect app.py", scope=("app.py",),
+    ))
+    assert "presentation-truncated retained view" in shown
+    assert "presentation chars=0:346" in shown
+    assert "1\tstart\n" in shown, "line structure must not be flattened"
+    assert "TAIL_QUALIFIER" in shown
+    assert "primary presentation omitted" in shown
+
+    report = ("claim\n" * 80) + "QUALIFIER_IN_OMITTED_TAIL"
+    report_shown = _parent_report_excerpt(report, limit=300)
+    assert "presentation-truncated" in report_shown
+    assert "chars=0:200" in report_shown
+    assert "presentation omitted" in report_shown
+    assert "QUALIFIER_IN_OMITTED_TAIL" in report_shown
+
+
+@check
+def successful_child_read_is_sealed_into_the_canonical_artifact():
+    from sliceagent.persistence import ArtifactStore
+    from sliceagent.intent import IntentState, analyze_turn
+
+    auth_view = (
+        "     1\tdef login(username, password):\n"
+        "     2\t    stored = get_password(username)\n"
+        "     3\t    return password == stored"
+    )
+
+    class ReadThenReportLLM:
+        reasoning = "fast"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, _messages, _schemas):
+            self.calls += 1
+            if self.calls == 1:
+                return NS(
+                    content="", finish_reason="tool_calls",
+                    tool_calls=[NS(name="read_file", args={"path": "auth.py"}, id="read-auth")],
+                    usage={"prompt_tokens": 1, "completion_tokens": 1},
+                )
+            return _Response(
+                "TOP CLAIM: password equality may be risky if the unseen storage and caller assumptions hold."
+            )
+
+    class AuthTools(_Tools):
+        def run(self, name, args):
+            return auth_view if name == "read_file" and args.get("path") == "auth.py" else ""
+
+    with tempfile.TemporaryDirectory() as root:
+        store = ArtifactStore(os.path.join(root, "core"))
+        request = (
+            "spawn exactly 3 parallel explorer subagents — one each for app.py, auth.py and util.py — "
+            "then give me a combined 3-line summary"
+        )
+        intent = IntentState()
+        intent.begin_turn(request, source_artifact="turn-parent", contract=analyze_turn(request))
+        host = SubagentHost(
+            AuthTools(root), llm=ReadThenReportLLM(), retriever=NullRetriever(),
+            memory=NullMemory(), policy=None, max_depth=1, session_id="session-1",
+            workspace_id="workspace-1", task_id_fn=lambda: "task-1",
+            parent_id_fn=lambda: "turn-parent", artifact_store=store,
+            intent_provider=lambda _task: intent,
+        )
+        result = host.run("spawn_agent", {"agent": "explorer", "task": "inspect auth.py"})
+        assert not result.startswith("Error:"), result
+        assert "child report (complete interpretation; preserve its qualifiers)" in result
+        assert "primary observation [obs:" in result
+        assert "complete retained view" in result
+        assert "stored = get_password(username)" in result
+        artifact = store.list_all()[0]
+        observations = artifact.structured_body["observations"]
+        assert len(observations) == 1
+        assert observations[0]["tool"] == "read_file"
+        assert observations[0]["args"] == {"path": "auth.py"}
+        assert observations[0]["view"] == auth_view
+        assert not observations[0]["redacted"] and not observations[0]["truncated"]
+        assert observations[0]["view_sha256"] == hashlib.sha256(
+            observations[0]["view"].encode("utf-8")
+        ).hexdigest()
+        claims = artifact.structured_body["claims"]
+        assert len(claims) == 1
+        assert claims[0]["report_exact"].startswith("TOP CLAIM:")
+        assert tuple(claims[0]["observation_refs"]) == (observations[0]["view_sha256"],)
+        child_effect = next(effect for effect in result.effects if effect.kind == "child_artifact")
+        assert child_effect.payload["scope"] == ["auth.py"]
+        assert child_effect.payload["delegation_target"] == "auth.py"
+        assert child_effect.payload["claims"][0]["report_exact"] == claims[0]["report_exact"]
+        assert tuple(child_effect.payload["claims"][0]["observation_refs"]) == tuple(
+            claims[0]["observation_refs"]
+        )
+
+
+@check
 def brief_preserves_exact_clauses_sources_and_only_explicit_context():
     clause = IntentEntry(id="intent-7", verbatim_clause="Preserve APIName exactly — including case.",
                          source_artifact="history/turn-2.md", source_range=(14, 54), authority="user")
@@ -112,6 +378,9 @@ def brief_preserves_exact_clauses_sources_and_only_explicit_context():
     assert "Audit only the parser." in rendered and "Do not edit files" in rendered
     assert 'read_file("subagents/sub-3.md")' in rendered
     assert "parent assistant transcript that was never selected" not in rendered
+    assert "EVIDENCE STANDARD (binding)" in rendered
+    assert "CONDITIONAL CONSEQUENCE" in rendered
+    assert "Constructing a command/query is not executing it" in rendered
     assert SubagentBrief.from_dict(brief.to_dict()) == brief
 
 
@@ -180,10 +449,39 @@ def host_threads_selected_intent_and_typed_identity_into_seal():
         assert record["brief"]["scope"] == ["src/parser.py"]
         assert record["evidence_refs"] == ["history/turn-1.md"]
         for required in ("status", "coverage", "gaps", "uncertainty", "conflicts", "error",
-                         "evidence_refs", "workspace_revision"):
+                         "evidence_refs", "observations", "workspace_revision"):
             assert required in record, required
         assert clause.verbatim_clause in llm.last_prompt[0]
         assert "history/turn-1.md" in llm.last_prompt[0]
+
+
+@check
+def parent_delegation_mechanism_does_not_replicate_into_each_child_brief():
+    from sliceagent.intent import IntentState, analyze_turn
+
+    request = (
+        "spawn exactly 3 parallel explorer subagents — one each for app.py, auth.py and util.py — "
+        "then give me a combined 3-line summary"
+    )
+    intent = IntentState()
+    intent.begin_turn(request, source_artifact="turn-parent", contract=analyze_turn(request))
+    intent.add_exact("Keep public APIs stable.", source_artifact="turn-standing", authority="user")
+    host = SubagentHost(
+        _Tools("."), llm=_LLM(), retriever=NullRetriever(), memory=NullMemory(), policy=None,
+        max_depth=1, intent_provider=lambda _task: intent,
+    )
+    brief = host._brief("Review only app.py and report its top bug.", {}, frozenset())
+    rendered = brief.render()
+    assert request not in rendered, "parent fan-out and reduce mechanics must stay at the parent boundary"
+    assert "Keep public APIs stable." in rendered, "independent standing constraints still bind the child"
+    assert brief.scope == ("app.py",)
+    assert brief.delegation_target == "app.py"
+    assert "PRIMARY DELEGATION TARGET (host-bound)\napp.py" in rendered
+    assert SubagentBrief.from_dict(brief.to_dict()) == brief
+
+    collision = host._brief("Review data.py; do not confuse it with a.py.", {}, frozenset())
+    assert collision.delegation_target == "" and collision.scope == (), \
+        "ambiguous/multiple exact targets must not be host-bound"
 
 
 @check
@@ -209,6 +507,10 @@ def null_semantic_memory_still_seals_to_canonical_local_artifact():
         assert len(usage_effects) == 1
         assert usage_effects[0].payload["prompt_tokens"] == 10
         assert usage_effects[0].payload["completion_tokens"] == 2
+        child_effects = [effect for effect in out.effects if effect.kind == "child_artifact"]
+        assert len(child_effects) == 1
+        assert child_effects[0].payload["artifact_id"] == artifacts[0].id
+        assert child_effects[0].payload["kind"] == "explorer"
         assert PendingTurnJournal.pending(store.root) == [], \
             "a successfully sealed child must not leave an in-flight journal"
 
@@ -261,7 +563,7 @@ def canonical_child_archive_and_pending_header_are_redacted():
                 return super().complete(messages, schemas)
 
         host = SubagentHost(
-            _Tools(root), llm=InspectLLM(f"report {secret}"), retriever=NullRetriever(),
+            _Tools(root), llm=InspectLLM(f"TOP CLAIM: report {secret}"), retriever=NullRetriever(),
             memory=NullMemory(), policy=None, max_depth=1, session_id="session-1",
             workspace_id="workspace-1", task_id_fn=lambda: "task-1",
             parent_id_fn=lambda: "turn-parent", artifact_store=store,
@@ -270,6 +572,11 @@ def canonical_child_archive_and_pending_header_are_redacted():
         artifact = store.list_all()[0]
         assert secret not in str(artifact.to_dict())
         assert secret not in str(seen_headers) and secret not in str(out)
+        assert len(artifact.structured_body["claims"]) == 1
+        effect = next(item for item in out.effects if item.kind == "child_artifact")
+        assert effect.payload["claims"][0]["report_exact"] == \
+            artifact.structured_body["claims"][0]["report_exact"]
+        assert secret not in str(effect.payload)
 
 
 @check

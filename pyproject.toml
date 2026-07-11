@@ -1,7 +1,7 @@
 [project]
 name = "sliceagent"
 dynamic = ["version"]   # single-sourced from src/sliceagent/__init__.py (see [tool.hatch.version])
-description = "A coding agent with a new context-engineering framework: bounded, deterministic, reconstructed context (slice architecture) — built for long-horizon work."
+description = "A coding agent with history-bounded, task-elastic reconstructed context — built for long-horizon work."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -56,10 +56,9 @@ packages = ["src/sliceagent"]
 
 [tool.hatch.build.targets.sdist]
 # sdist = source distribution; PyPI serves it to builders. Keep it lean: the wheel carries the
-# runnable package, the sdist carries enough to rebuild + run offline tests. Do NOT ship eval caches,
-# benchmark job artifacts, or brand assets — evals/ alone was >120 MB of untracked tbench/job state.
+# runnable package, the sdist carries enough to rebuild + run offline tests. Eval caches/job artifacts remain
+# VCS-ignored; only the small receipt A/B sources are versioned and therefore enter the sdist.
 exclude = [
-  "/evals",
   "/docs/brand",
   "/prototype",
   "/brain",
@@ -94,3 +93,8 @@ ignore = ["E402", "E701", "E702", "E731"]
 # tests + eval scripts (not the shippable package): allow bound-but-unused intermediates + terse loop vars.
 "tests/*" = ["F841", "E741"]
 "evals/*" = ["F841", "E741"]
+
+[tool.pytest.ini_options]
+# Local eval caches contain copied third-party task suites. Product pytest collection is intentionally scoped
+# to SliceAgent's own tests; benchmark runners execute their fixture tests inside isolated task environments.
+testpaths = ["tests"]

@@ -196,9 +196,13 @@ def _episode_pageref(h: dict) -> PageRef:
     """Map one cross-session episode hit dict to a PageRef (lossless for the listing's display:
     locator in `handle`, ts/title/note/match packed into `preview`)."""
     tid = str(h.get("task_id") or "")
-    what = (tid[len("subagent:"):] if tid.startswith("subagent:")   # a past session's delegated seal,
-            else f"turn {h.get('turn')}")                            # read-only context (not mounted here)
-    handle = f"{(h.get('session_id') or '')[:14]} · {what}"
+    sid = str(h.get("session_id") or "")
+    if tid.startswith("subagent:"):                                  # a past session's delegated seal,
+        handle = f"{sid[:14]} · {tid[len('subagent:'):]}"            # read-only context (not mounted here)
+    elif sid and h.get("turn") is not None:                          # a past turn — directly readable now via
+        handle = f"history/{sid}/turn-{h.get('turn')}.md"            # the cross-session history/ namespace
+    else:
+        handle = f"{sid[:14]} · turn {h.get('turn')}"
     return PageRef(handle=handle, kind="episode-xsession",
                    preview=_pack_episode_preview(h),
                    score=float(h.get("score") or 0.0), untrusted=True)
@@ -227,10 +231,16 @@ def _pack_thissession_preview(ln: dict) -> str:
     rec = rec if isinstance(rec, dict) else {}
     meta = rec.get("meta")
     meta = meta if isinstance(meta, dict) else {}
-    title = normalize_ws(rec.get("title") or "(untitled)")[:52]
+    def clipped(value: str, size: int) -> str:
+        value = normalize_ws(value)
+        return value if len(value) <= size else value[:max(0, size - 1)].rstrip() + "…"
+
+    request = clipped(rec.get("request"), 68)
+    title = clipped(rec.get("title") or "(untitled)", 52)
+    locator = f'user: "{request}"' if request else f'task: "{title}"'
     flag = " · FAIL" if meta.get("failing") else ""
     crumb = _thissession_breadcrumb(rec, meta)
-    return f"turn {ln.get('turn')} · \"{title}\"{flag}" + (f" · {crumb}" if crumb else "")
+    return f"turn {ln.get('turn')} · {locator}{flag}" + (f" · {crumb}" if crumb else "")
 
 
 def _thissession_breadcrumb(rec: dict, meta: dict) -> str:
@@ -240,9 +250,13 @@ def _thissession_breadcrumb(rec: dict, meta: dict) -> str:
     actions. All from data already in the record (no extra read, no LLM). `rec`/`meta` are already
     dict-guarded by the caller; `steps`/`action` entries are guarded here since they come from the
     same untrusted on-disk record."""
+    def clipped(value: str, size: int) -> str:
+        value = normalize_ws(value)
+        return value if len(value) <= size else value[:max(0, size - 1)].rstrip() + "…"
+
     note = normalize_ws(rec.get("note"))
     if note:
-        return ("note: " + note)[:60]
+        return clipped("assistant preview: " + note, 80)
     files = meta.get("files") or []
     files = files if isinstance(files, list) else []
     if files:

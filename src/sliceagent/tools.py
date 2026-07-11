@@ -11,12 +11,15 @@ Note: Python's str.replace is literal, so str_replace has no $-pattern footgun
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shlex
 import tempfile
 
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
+from .context import ResourceKind, ResourceRef, reserved_resource_ref
+from .execution import ToolEffect, ToolStatus
 from .fuzzy import fuzzy_find_unique
 from .platform_compat import (IS_WINDOWS, ProcessGroupTerminationError, is_win_abs,
                               msys_to_win, norm_rel, win_path_candidates)
@@ -256,6 +259,14 @@ TOOL_SCHEMAS = [
         "SEARCH text. Pass recursive=true to map a whole subtree in ONE call (flat file paths, capped at 600 — "
         "pass a subdir to narrow) — PREFER this over shell `find` for a clean cache-free map.",
         {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, []),
+    _fn("change_workspace",
+        "Switch SliceAgent to a DIFFERENT project/workspace when the user explicitly asks to go to, open, "
+        "or work in another directory. `path` must be an existing directory (discover it first if needed). "
+        "This schedules a safe process handoff after the current turn is durably saved; every tool, index, "
+        "plugin, MCP server, log, and workspace boundary is rebuilt from the new directory. Call this as the "
+        "FINAL tool action, then briefly say the switch is happening and finish the turn.",
+        {"path": {"type": "string", "description": "absolute path, ~ path, or current-workspace-relative directory"}},
+        ["path"]),
     _fn("edit_file",
         "Create a new file, or OVERWRITE an existing file's ENTIRE contents with `content` (the complete text); "
         "parent dirs are auto-created and a leading `#!` shebang makes it executable. To change PART of an "
@@ -373,8 +384,10 @@ TOOL_SCHEMAS = [
     _fn("require",
         "Record a STANDING REQUIREMENT that must HOLD when the task is done — an exact name/signature, an "
         "output format, a stated rule, or a constraint the user adds. It joins your STANDING REQUIREMENTS "
-        "contract (shown every turn from your next turn on, and the bar for 'done'). Record only DURABLE "
-        "constraints, never transient sub-steps or chit-chat; re-recording the same one is a no-op.",
+        "contract (shown every turn from your next turn on, and the bar for 'done'). The host already captures "
+        "clauses in CURRENT REQUEST / ACTIVE USER INTENT: DO NOT call this tool to mirror those clauses. Record "
+        "only a distinct durable agent-maintained constraint, never transient sub-steps or chit-chat; re-recording "
+        "the same one is a no-op.",
         {"text": {"type": "string"}}, ["text"]),
     _fn("requirement_done",
         "Mark a STANDING REQUIREMENT satisfied (after verifying it against the real end-state). It stays "
@@ -475,6 +488,9 @@ class LocalToolHost:
         # returns their answer. Defaults to a non-interactive fallback so headless/eval never hangs; the
         # CLI overrides it with a TUI/plain prompt. Injected (not a core dependency) — task/LLM-agnostic.
         self.on_ask_user = _default_ask_user
+        # Host control-plane callback. The tool only REQUESTS a workspace-runtime handoff; the CLI performs it
+        # after a successful durable turn seal. None in tests/embedded hosts = unsupported.
+        self.on_workspace_switch = None
         self._edit_journal: list = []   # (rel, full, prev_bytes|None) per write — powers /undo
         self.pending_images: list = []  # images @-attached for the NEXT seed build (vision models only)
         # The registry is the single source of tools; MCP/plugin/skill tools register
@@ -482,11 +498,23 @@ class LocalToolHost:
         self.registry = registry or ToolRegistry()
         self._register_builtins()
         import atexit
-        atexit.register(self.cleanup)   # leaked background procs / PTYs must not survive exit/abort/crash
+        self._closed = False
+        self._atexit_cleanup = self.cleanup
+        atexit.register(self._atexit_cleanup)  # leaked background procs / PTYs must not survive exit/abort/crash
 
     def cleanup(self) -> None:
         """Tear down background processes + PTY sessions (idempotent; never raises). Wired to atexit AND
         called by the CLI on exit/abort, so leaked servers/shells/PTYs don't outlive the agent (#5)."""
+        if self._closed:
+            return
+        self._closed = True
+        # In-process workspace switches create a replacement host. Retaining every retired host through its
+        # bound atexit callback would leak the full registry/session graph until process exit.
+        try:
+            import atexit
+            atexit.unregister(self._atexit_cleanup)
+        except Exception:
+            pass
         for _mgr in (getattr(self, "procs", None), getattr(self, "terminals", None)):
             try:
                 if _mgr is not None:
@@ -497,6 +525,7 @@ class LocalToolHost:
     def _register_builtins(self) -> None:
         handlers = {
             "read_file": self._t_read_file, "list_files": self._t_list_files,
+            "change_workspace": self._t_change_workspace,
             "edit_file": self._t_edit_file, "append_to_file": self._t_append,
             "str_replace": self._t_str_replace, "run_command": self._t_run_command,
             "execute_code": self._t_execute_code, "ask_user": self._t_ask_user,
@@ -519,6 +548,8 @@ class LocalToolHost:
                 name=name, schema=schema, handler=handlers[name],
                 accesses=(lambda args, n=name: self._builtin_accesses(n, args)),
                 source="builtin",
+                capabilities=(frozenset({"workspace_handoff"}) if name == "change_workspace" else frozenset()),
+                effect_factory=(self._read_resource_effects if name == "read_file" else None),
             ))
 
     def root(self) -> str:
@@ -653,16 +684,40 @@ class LocalToolHost:
         alt = self.locate(path)
         return alt if os.path.exists(alt) else full
 
+    def _archive_handle(self, path: str) -> str:
+        """Canonical model-visible handle for a reserved archive path.
+
+        The model may spell a virtual handle either as ``artifacts/x.md`` or as the equivalent absolute
+        path below an authorized root (for example ``/workspace/artifacts/x.md``).  Archive filesystems are
+        intentionally unaware of physical roots, so collapse the latter spelling back to the same relative
+        handle before dispatch.  Absolute paths outside every authorized root stay absolute and therefore
+        cannot acquire virtual-archive meaning.
+        """
+        raw = str(path or "").strip()
+        expanded = os.path.expanduser(raw)
+        if os.path.isabs(expanded):
+            full = os.path.realpath(expanded)
+            # Prefer the most-specific authorized root when roots are nested: the archive mount is relative
+            # to the root that directly owns it, not an ancestor that happens to contain that root.
+            roots = sorted((os.path.realpath(root) for root in self.allowed_roots()),
+                           key=len, reverse=True)
+            for root in roots:
+                if full == root or full.startswith(root + os.sep):
+                    raw = os.path.relpath(full, root)
+                    break
+            else:
+                raw = full
+        normalized = posixpath.normpath(raw.replace("\\", "/"))
+        return normalized.rstrip("/") or "."
+
     def _history_route(self, path):
         """Return the virtual FS (HistoryFS for `history/`, SubagentFS for `subagents/`) iff `path` targets that
         reserved namespace AND no real on-disk file shadows it — a real file/dir ALWAYS wins the name (I2: the
         virtual view never lies about disk). Else None. ponytail: these are reserved virtual namespaces; a
-        project with a real top-level history/ or subagents/ dir keeps its files (real wins). Used by
+        project with a real top-level history/ or subagents/ dir keeps its files (real wins). Absolute paths
+        under an authorized root are first collapsed to their model-visible archive handle. Used by
         read_file/list_files/grep to route reads, and by the write tools to reject (a virtual route ⇒ read-only)."""
-        p = (path or "").strip().replace("\\", "/")
-        while p.startswith("./"):
-            p = p[2:]
-        p = p.rstrip("/")
+        p = self._archive_handle(path)
         for mount, fs in (("artifacts", self._artifacts), ("history", self._history),
                           ("subagents", self._subagents),
                           ("roster", self._roster)):
@@ -674,6 +729,31 @@ class LocalToolHost:
                 real = None
             return None if (real and os.path.exists(real)) else fs
         return None
+
+    def resource_ref(self, path: str) -> ResourceRef:
+        """Return the actual resource addressed by ``path`` on this host.
+
+        Reserved archive mounts are virtual only when no real project path shadows them.  This is the
+        classification seam shared by execution effects and slice reconstruction, so an artifact can never
+        silently become an ``OPEN FILES`` workspace path (or vice versa).
+        """
+        original_ref = reserved_resource_ref(path)
+        ref = reserved_resource_ref(self._archive_handle(path))
+        if ref.kind is ResourceKind.WORKSPACE_FILE:
+            return original_ref
+        return (ref if self._history_route(path) is not None
+                else ResourceRef(ResourceKind.WORKSPACE_FILE, original_ref.handle))
+
+    def _read_resource_effects(self, invocation, status, _text) -> tuple[ToolEffect, ...]:
+        """Attach the read's resource kind to canonical execution truth."""
+        if status is not ToolStatus.SUCCEEDED:
+            return ()
+        ref = self.resource_ref(str(invocation.args.get("path") or ""))
+        return (ToolEffect(
+            id=f"resource:{invocation.provider_index}:{invocation.id}:0",
+            kind="resource_observed",
+            payload={"resource_kind": ref.kind.value, "handle": ref.handle},
+        ),)
 
     def _history_readonly_guard(self, path):
         """ToolText rejecting a WRITE to a virtual namespace (history/ or subagents/ — read-only views of the
@@ -740,6 +820,10 @@ class LocalToolHost:
     def accesses(self, name: str, args: dict) -> list:
         return self.registry.accesses(name, args)
 
+    def resolve_intent_effect(self, name: str, args: dict):
+        """Expose registry semantic metadata through the same host surface wrappers project."""
+        return self.registry.resolve_intent_effect(name, args)
+
     def run(self, name: str, args: dict) -> str:
         return self.registry.run(name, args)  # registry wraps the handler in try/except
 
@@ -781,6 +865,33 @@ class LocalToolHost:
         return [AllAccess()]
 
     # --- builtin tool handlers (args) -> str (the registry catches exceptions) ---
+    def _t_change_workspace(self, args: dict) -> str:
+        """Request an atomic workspace-resource handoff; never partially reroot this live host."""
+        raw = str(args.get("path") or "").strip()
+        if not raw or "\x00" in raw:
+            return ToolText("Error: change_workspace requires a valid directory path.", ok=False)
+        try:
+            expanded = os.path.expanduser(raw)
+            target = os.path.realpath(
+                expanded if os.path.isabs(expanded) else os.path.join(self.root(), expanded)
+            )
+        except (OSError, ValueError):
+            return ToolText(f"Error: not a directory: {raw}", ok=False)
+        if not os.path.isdir(target):
+            return ToolText(f"Error: not a directory: {raw}", ok=False)
+        if target == self.root():
+            return f"Workspace already active: {target}"
+        if self.on_workspace_switch is None:
+            return ToolText("Error: this host does not support workspace handoff.", ok=False)
+        problem = self.on_workspace_switch(target)
+        if problem:
+            return ToolText(f"Error: {problem}", ok=False)
+        return (
+            f"Workspace switch scheduled: {target}. The host will save this turn and atomically activate the "
+            "new workspace while keeping the interface and model connection alive. Do not call more tools; "
+            "finish this response now."
+        )
+
     def _page_out(self, text: str, *, label: str = "output") -> str:
         """Page a large tool output OUT to a blob and return a BOUNDED head+tail view + a read_file
         reference, instead of inlining the whole thing into the turn transcript. Moat-coherent: the FULL
@@ -820,7 +931,7 @@ class LocalToolHost:
         path = args["path"]
         hf = self._history_route(path)
         if hf is not None:               # read-only VIRTUAL history/ (this session's sealed turns as files)
-            return hf.read_file(path)
+            return hf.read_file(self._archive_handle(path))
         full = self.resolve_read(path)   # focus copy if present, else search all roots (paged-out blob recall)
         with open(full, "rb") as f:
             raw = f.read()
@@ -888,10 +999,11 @@ class LocalToolHost:
         return text.replace("\r\n", "\n").replace("\n", "\r\n") if crlf else text
 
     def _t_list_files(self, args: dict) -> str:
-        hf = self._history_route(args.get("path") or ".")
+        path = args.get("path") or "."
+        hf = self._history_route(path)
         if hf is not None:               # list the virtual history/ namespace (index.md + turn-N.md)
-            return hf.listing(args.get("path") or "history")
-        base = self._resolve(args.get("path") or ".")
+            return hf.listing(self._archive_handle(path))
+        base = self._resolve(path)
         if not args.get("recursive"):
             entries = sorted(os.listdir(base))
             shown = [e + "/" if os.path.isdir(os.path.join(base, e)) else e

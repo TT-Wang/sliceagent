@@ -8,12 +8,14 @@ from sliceagent.context import (  # noqa: E402
     ContextBlock,
     ContextUnfitError,
     ElasticityController,
+    EpistemicRole,
     Fidelity,
     FreshnessClass,
     InstructionClass,
     PressureLevel,
     RepresentationLoss,
     SeedPlan,
+    SourceRef,
 )
 
 CHECKS = []
@@ -110,6 +112,35 @@ def authority_freshness_priority_and_fidelity_are_independent():
     assert live_data.instruction_class is InstructionClass.DATA
     assert live_data.freshness is FreshnessClass.LIVE
     assert live_data.priority == 8 and live_data.fidelity is Fidelity.FULL
+
+
+@check
+def context_block_carries_source_scope_and_epistemic_role_compatibly():
+    legacy = _block("legacy", "content")
+    assert legacy.epistemic_role is EpistemicRole.CLAIM
+    grounded = ContextBlock(
+        block_id="workspace:full", item_id="workspace", alternative_group="workspace",
+        priority=8, instruction_class=InstructionClass.DATA, freshness=FreshnessClass.LIVE,
+        fidelity=Fidelity.FULL, representation_loss=RepresentationLoss.NONE, content="bytes",
+        epistemic_role=EpistemicRole.OBSERVATION, scope=("workspace", "turn"),
+        source_refs=(SourceRef("live_resource", "a.py", revision="sha256:abc"),),
+    )
+    assert grounded.source_refs[0].handle == "a.py" and grounded.scope == ("workspace", "turn")
+
+
+@check
+def legacy_execution_progress_is_not_projected_as_cross_turn_truth():
+    from sliceagent.regions import render_progress_signals
+    from sliceagent.slice_state import ProgressSignal
+
+    rendered = render_progress_signals([
+        ProgressSignal("blocked", "spawn_agent failed", 13),
+        ProgressSignal("edit", "a.py"),
+        ProgressSignal("evidence", "new evidence from spawn_agent", 11),
+        ProgressSignal("reconciliation", "workspace re-observed"),
+    ])
+    assert "spawn_agent" not in rendered and "a.py" not in rendered
+    assert rendered == "- reconciliation: workspace re-observed"
 
 
 @check
@@ -410,7 +441,7 @@ def fallback_model_reprojects_without_the_primary_models_reactive_hint():
     assert result.stop_reason == "end_turn"
     fallback_user = next(messages[1]["content"] for model, messages in llm.seen
                          if model == "fallback-large")
-    assert "FULL:" in fallback_user and fallback_user.count(request) == 2
+    assert "FULL:" in fallback_user and fallback_user.count(request) == 1
 
 
 @check

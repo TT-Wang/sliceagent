@@ -120,6 +120,17 @@ class LocalTurnStore:
         if value not in self._active_refs:
             self._active_refs.append(value)
 
+    def record_admission(self, admission: Mapping[str, Any]) -> None:
+        """Journal the immutable admission envelope installed for this turn.
+
+        The envelope carries route, focus/proposal deltas, and the canonical TurnAdmission. Recovery consumes
+        this record rather than re-interpreting header text without its original discourse sources. A bare
+        TurnAdmission mapping remains readable for journals created during the format transition.
+        """
+        self._turn().journal.append(
+            "turn-admission", _redact(dict(admission)), event_id="turn-admission",
+        )
+
     def _turn(self) -> ActiveTurn:
         self._ensure_open()
         if self.active is None:
@@ -131,14 +142,86 @@ class LocalTurnStore:
             str(invocation_id), name=str(name), args=_redact(dict(args)),
         )
 
+    def record_request(self, invocation) -> None:
+        """Record a logical provider request without claiming that its handler started."""
+        self._turn().journal.append("tool-requested", _redact({
+            "invocation_id": str(invocation.id),
+            "name": str(invocation.name),
+            "args": dict(invocation.args),
+            "provider_index": invocation.provider_index,
+        }), event_id=f"request:{invocation.id}")
+
+    def record_rejection(self, invocation, reason: str) -> None:
+        """Record a conclusive pre-handler rejection."""
+        self._turn().journal.append("tool-rejected", _redact({
+            "invocation_id": str(invocation.id),
+            "name": str(invocation.name),
+            "args": dict(invocation.args),
+            "provider_index": invocation.provider_index,
+            "reason": str(reason),
+        }), event_id=f"reject:{invocation.id}")
+
+    def record_execution_started(self, invocation) -> None:
+        """Record the last durable boundary before an authorized handler is entered.
+
+        The legacy invocation row is written first so even a crash while appending the richer lifecycle row
+        conservatively leaves an unresolved started call rather than permitting a clean checkpoint.
+        """
+        self.record_invocation(invocation.id, name=invocation.name, args=invocation.args)
+        self._turn().journal.append("tool-execution-started", _redact({
+            "invocation_id": str(invocation.id),
+            "name": str(invocation.name),
+            "args": dict(invocation.args),
+            "provider_index": invocation.provider_index,
+        }), event_id=f"start:{invocation.id}")
+
     def record_outcome(self, invocation_id: str, *, status: str, text: str,
                        effects: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = ()) -> None:
         self._turn().journal.record_outcome(str(invocation_id), _redact({
             "status": str(status), "text": str(text), "effects": list(effects),
         }))
 
+    @staticmethod
+    def _outcome_record(outcome) -> dict[str, Any]:
+        return {
+            "status": outcome.status.value,
+            "text": outcome.text,
+            "effects": [
+                {"id": effect.id, "kind": effect.kind, "payload": dict(effect.payload)}
+                for effect in outcome.effects
+            ],
+        }
+
+    def record_settlement(self, outcome) -> None:
+        """Record typed settlement separately from later reducer application."""
+        record = self._outcome_record(outcome)
+        # Preserve the old recovery protocol first; the canonical receipt row enriches the same fact.
+        self.record_outcome(
+            outcome.invocation.id, status=record["status"], text=record["text"], effects=record["effects"],
+        )
+        self._turn().journal.append("tool-settled", _redact({
+            "invocation_id": str(outcome.invocation.id),
+            "name": str(outcome.invocation.name),
+            "args": dict(outcome.invocation.args),
+            "provider_index": outcome.invocation.provider_index,
+            "outcome": record,
+        }), event_id=f"settle:{outcome.invocation.id}")
+
     def record_transition(self, transition_id: str, transition: Mapping[str, Any]) -> None:
         self._turn().journal.record_transition(str(transition_id), _redact(dict(transition)))
+
+    def record_effect_applied(self, invocation_id: str, effect) -> None:
+        """Record reducer acceptance; settlement alone never claims an effect was applied."""
+        transition = {
+            "kind": effect.kind, "payload": dict(effect.payload), "invocation_id": str(invocation_id),
+        }
+        self.record_transition(effect.id, transition)
+        self._turn().journal.append("tool-effect-applied", _redact({
+            "invocation_id": str(invocation_id),
+            "effect_id": str(effect.id),
+            "kind": str(effect.kind),
+            "payload": dict(effect.payload),
+        }), event_id=f"apply:{invocation_id}:{effect.id}")
 
     def observe_event(self, event) -> None:
         """Journal invocation/outcome truth before authoritative reduction.
@@ -150,24 +233,43 @@ class LocalTurnStore:
         if self.active is None:
             return
         # Import lazily so the durable store itself remains independent from the UI/event layer.
-        from .events import ToolResult, ToolStarted
+        from .events import (ToolEffectApplied, ToolExecutionStarted, ToolRejected, ToolRequested,
+                             ToolResult, ToolSettled, ToolStarted)
+        if isinstance(event, ToolRequested):
+            self.record_request(event.invocation)
+            return
+        if isinstance(event, ToolRejected):
+            self.record_rejection(event.invocation, event.reason)
+            return
+        if isinstance(event, ToolExecutionStarted):
+            self.record_execution_started(event.invocation)
+            return
         if isinstance(event, ToolStarted) and getattr(event, "invocation", None) is not None:
             inv = event.invocation
             self.record_invocation(inv.id, name=inv.name, args=inv.args)
             return
+        if isinstance(event, ToolSettled):
+            self.record_settlement(event.outcome)
+            return
+        if isinstance(event, ToolEffectApplied):
+            self.record_effect_applied(event.invocation_id, event.effect)
+            return
         if not isinstance(event, ToolResult) or getattr(event, "outcome", None) is None:
             return
         outcome = event.outcome
-        # A cancelled/not-started call may have no ToolStarted event. Record its invocation here so the
-        # journal still gives every provider call one logical outcome; executed calls idempotently match
-        # the pre-dispatch record.
-        self.record_invocation(
-            outcome.invocation.id, name=outcome.invocation.name, args=outcome.invocation.args,
+        snapshot = self._turn().journal.snapshot()
+        canonical_request = any(
+            row.get("type") == "tool-requested"
+            and row.get("payload", {}).get("invocation_id") == outcome.invocation.id
+            for row in snapshot.events
         )
-        effects = [
-            {"id": effect.id, "kind": effect.kind, "payload": dict(effect.payload)}
-            for effect in outcome.effects
-        ]
+        # Legacy callers may still publish only ToolResult. Preserve their old started+settled projection;
+        # the canonical loop always sent ToolRequested first, so rejected/deduplicated calls stay not-started.
+        if not canonical_request:
+            self.record_invocation(
+                outcome.invocation.id, name=outcome.invocation.name, args=outcome.invocation.args,
+            )
+        effects = self._outcome_record(outcome)["effects"]
         self.record_outcome(
             outcome.invocation.id, status=outcome.status.value, text=outcome.text, effects=effects,
         )
@@ -179,12 +281,11 @@ class LocalTurnStore:
         from .events import ToolResult
         if not isinstance(event, ToolResult) or getattr(event, "outcome", None) is None:
             return
+        if not getattr(event, "apply_effects", True):
+            return
         outcome = event.outcome
         for effect in outcome.effects:
-            self.record_transition(effect.id, {
-                "kind": effect.kind, "payload": dict(effect.payload),
-                "invocation_id": outcome.invocation.id,
-            })
+            self.record_effect_applied(outcome.invocation.id, effect)
 
     def seal(
         self,
@@ -243,6 +344,23 @@ class LocalTurnStore:
         refs = tuple(dict.fromkeys((
             *snapshot.artifact_refs, *self._active_refs, *tuple(str(ref) for ref in refs),
         )))
+        # The receipt is a pure, immutable journal projection embedded in this SAME turn artifact. It has no
+        # writer or lifecycle of its own, so execution truth cannot drift from the seal that carries it.
+        from .receipts import TurnReceipt
+
+        meta = safe_record.get("meta")
+        meta = meta if isinstance(meta, Mapping) else {}
+        receipt_usage = {
+            "prompt_tokens": meta.get("ptok", 0),
+            "completion_tokens": meta.get("ctok", 0),
+        }
+        safe_record["turn_receipt"] = TurnReceipt.from_events(
+            snapshot.events,
+            turn_id=snapshot.artifact_id,
+            turn_status=effective_status,
+            artifact_refs=refs,
+            usage=receipt_usage,
+        ).to_dict()
         artifact = Artifact(
             id=snapshot.artifact_id,
             kind="turn",
@@ -318,7 +436,9 @@ class LocalTurnStore:
         from .events import ToolResult
         from .execution import (ToolEffect, ToolInvocation, ToolOutcome, ToolStatus,
                                 coerce_tool_status, reconciliation_targets)
+        from .intent import TurnAdmission
         from .pfc import Slice, record_user, slice_sink
+        from .session import apply_turn_continuation
         from .taskstate import (slice_to_task_state, task_state_from_checkpoint,
                                 task_state_to_slice)
 
@@ -336,22 +456,46 @@ class LocalTurnStore:
             state = Slice()
             state.reset(str(header.get("user_request") or ""))
 
+        admission_event = snapshot.event("turn-admission")
+        envelope = admission_event.get("payload") if admission_event is not None else {}
+        envelope = envelope if isinstance(envelope, Mapping) else {}
+        raw_admission = envelope.get("admission")
+        raw_admission = raw_admission if isinstance(raw_admission, Mapping) else envelope
+        admission = TurnAdmission.from_dict(raw_admission) if admission_event is not None else None
+        if admission_event is not None and admission is None:
+            raise PersistenceError("journal contains an invalid turn admission")
+        request = str(header.get("user_request") or "")
+        if admission is not None and admission.request_text != request:
+            raise PersistenceError("journal admission request does not match the turn header")
+
         # An unsealed turn is unresolved by definition.  A previously provisional objective becomes active
         # again before replay so crash recovery cannot publish it as mere background.
         state.task.activate_objective()
         record_user(
-            state, str(header.get("user_request") or ""),
+            state, request,
             source_artifact=snapshot.artifact_id,
+            contract=admission,
         )
+        action = str(envelope.get("action") or "continue")
+        if action != "new":
+            apply_turn_continuation(
+                state, request, resume=(action == "resume"), admission=admission,
+            )
+        requests = {}
         invocations = {}
         outcomes = []
         applied = set()
         for event in snapshot.events:
             payload = event.get("payload", {})
-            if event.get("type") == "tool-invocation":
+            if event.get("type") == "tool-requested":
+                invocation_id = str(payload.get("invocation_id") or "")
+                if invocation_id:
+                    requests[invocation_id] = payload
+            elif event.get("type") == "tool-invocation":
                 invocation_id = str(payload.get("invocation_id") or "")
                 if invocation_id:
                     invocations[invocation_id] = payload
+                    requests.setdefault(invocation_id, payload)
             elif event.get("type") == "tool-outcome":
                 outcomes.append(payload)
             elif event.get("type") == "semantic-transition":
@@ -391,7 +535,7 @@ class LocalTurnStore:
                 "; ".join(details) + "; re-observe affected live state before further side effects"
             )
             for invocation_id in uncertain_ids:
-                invocation = invocations.get(invocation_id) or {}
+                invocation = invocations.get(invocation_id) or requests.get(invocation_id) or {}
                 args = invocation.get("args") if isinstance(invocation, Mapping) else {}
                 uncertainty_targets.extend(reconciliation_targets(
                     str(invocation.get("name") or "") if isinstance(invocation, Mapping) else "",
@@ -402,7 +546,7 @@ class LocalTurnStore:
         replayed = []
         for payload in outcomes:
             invocation_id = str(payload.get("invocation_id") or "")
-            invocation_record = invocations.get(invocation_id) or {}
+            invocation_record = invocations.get(invocation_id) or requests.get(invocation_id) or {}
             outcome_record = payload.get("outcome") or {}
             raw_status = outcome_record.get("status") if isinstance(outcome_record, Mapping) else None
             if (not _valid_status(raw_status)
@@ -506,16 +650,72 @@ class CoreArtifactFS:
         return artifact.id + ".md"
 
     @staticmethod
+    def _status(artifact) -> str:
+        body = dict(getattr(artifact, "structured_body", {}) or {})
+        receipt = body.get("turn_receipt")
+        if isinstance(receipt, Mapping) and receipt.get("disposition"):
+            return str(receipt.get("disposition"))
+        return str(getattr(artifact, "status", "unknown") or "unknown")
+
+    @staticmethod
     def _render(artifact) -> str:
         body = dict(artifact.structured_body)
         markdown = body.get("markdown")
+        request = str((dict(artifact.brief).get("request") if artifact.brief else "") or "")
+        assistant = str(body.get("assistant") or "")
         lines = [
             f"# {artifact.kind.upper()} ARTIFACT — {artifact.title or artifact.id}",
             f"- id: {artifact.id}", f"- task: {artifact.task_id}",
             f"- status: {artifact.status}", f"- timestamp: {artifact.timestamp or '(unknown)'}",
         ]
+        if request:
+            lines += ["", "## User request (verbatim)", request]
+        if assistant:
+            lines += ["", "## Assistant response (verbatim)", assistant]
         if artifact.summary:
             lines += ["", "## Summary", artifact.summary]
+        receipt = body.get("turn_receipt")
+        if isinstance(receipt, Mapping):
+            counts = receipt.get("counts")
+            counts = counts if isinstance(counts, Mapping) else {}
+            lines += [
+                "", "## Execution receipt (canonical)",
+                f"- turn disposition: {receipt.get('disposition') or '(unknown)'}",
+                (f"- requested: {counts.get('requested', 0)} · execution started: "
+                 f"{counts.get('execution_started', 0)} · rejected before execution: "
+                 f"{counts.get('rejected_before_execution', 0)} · settled: {counts.get('settled', 0)}"),
+                (f"- succeeded: {counts.get('succeeded', 0)} · failed: {counts.get('failed', 0)} · "
+                 f"cancelled: {counts.get('cancelled', 0)} · indeterminate: "
+                 f"{counts.get('indeterminate', 0)}"),
+            ]
+            warnings = receipt.get("warnings")
+            if isinstance(warnings, (list, tuple)) and warnings:
+                lines += ["- warnings:", *[f"  - {warning}" for warning in warnings]]
+            operations = receipt.get("operations")
+            by_tool: dict[str, dict[str, int]] = {}
+            for operation in operations if isinstance(operations, (list, tuple)) else ():
+                if not isinstance(operation, Mapping):
+                    continue
+                name = str(operation.get("name") or "(unknown tool)")
+                bucket = by_tool.setdefault(name, {
+                    "requested": 0, "rejected": 0, "started": 0,
+                    "succeeded": 0, "failed": 0, "cancelled": 0, "indeterminate": 0,
+                })
+                bucket["requested"] += int(bool(operation.get("requested")))
+                bucket["rejected"] += int(bool(operation.get("rejected_before_execution")))
+                bucket["started"] += int(bool(operation.get("execution_started")))
+                disposition = str(operation.get("disposition") or "")
+                if disposition in {"succeeded", "failed", "cancelled", "indeterminate"}:
+                    bucket[disposition] += 1
+            if by_tool:
+                lines.append("- by tool:")
+                for name, bucket in sorted(by_tool.items()):
+                    lines.append(
+                        f"  - {name} · requested {bucket['requested']} · started {bucket['started']} · "
+                        f"rejected {bucket['rejected']} · succeeded {bucket['succeeded']} · "
+                        f"failed {bucket['failed']} · cancelled {bucket['cancelled']} · "
+                        f"indeterminate {bucket['indeterminate']}"
+                    )
         if markdown:
             lines += ["", "## Record", str(markdown)]
         else:
@@ -523,13 +723,25 @@ class CoreArtifactFS:
                       json.dumps(body, ensure_ascii=False, indent=2, default=str), "```"]
         if artifact.refs:
             lines += ["", "## References", *[f'- read_file("artifacts/{ref}.md")' for ref in artifact.refs]]
+        anchors = body.get("anchors")
+        if isinstance(anchors, (list, tuple)) and anchors:
+            lines += ["", "## Addressable output anchors"]
+            for raw in anchors:
+                if not isinstance(raw, Mapping):
+                    continue
+                collection = str(raw.get("collection") or "numbered list")
+                ordinal = raw.get("ordinal")
+                label = str(raw.get("label") or raw.get("excerpt") or "")
+                if ordinal and label:
+                    lines.append(f"- {collection} #{ordinal}: {label}")
         return "\n".join(lines)
 
     def index(self) -> str:
         artifacts = self._artifacts()
         lines = ["# LOCAL ARTIFACTS — immutable turn and subagent records"]
         lines += [
-            f'- {self._name(item)} · {item.status} · {item.title or item.task_id} '
+            f'- {self._name(item)} · {self._status(item)} · '
+            f'{str((dict(item.brief).get("request") if item.brief else "") or item.title or item.task_id)[:100]} '
             f'→ read_file("artifacts/{self._name(item)}")'
             for item in artifacts
         ]

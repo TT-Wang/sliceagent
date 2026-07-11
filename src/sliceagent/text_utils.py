@@ -34,7 +34,9 @@ def format_ts(ts) -> str:
 _CHITCHAT = frozenset({
     "hi", "hii", "hiya", "hello", "hey", "heya", "hey there", "hi there", "hello there", "yo", "sup",
     "howdy", "good morning", "good afternoon", "good evening", "morning", "evening", "gm",
-    "how are you", "how are you?", "how's it going", "hows it going", "what's up", "whats up", "how's things",
+    "how are you", "how are you?", "hi how are you", "hi, how are you", "hello how are you",
+    "hello, how are you", "hey how are you", "hey, how are you", "how's it going", "hows it going",
+    "what's up", "whats up", "how's things",
     "thanks", "thank you", "thanks!", "thank you!", "thx", "ty", "tysm", "cheers", "much appreciated",
     "appreciate it", "thanks a lot", "thank you so much",
     "ok", "okay", "k", "kk", "cool", "nice", "great", "awesome", "perfect", "got it", "sounds good",

@@ -16,6 +16,7 @@ from sliceagent.memory import NullMemory  # noqa: E402
 from sliceagent.subagent import run_subagent, SubagentHost  # noqa: E402
 from sliceagent.agents import BUILTIN_AGENTS  # noqa: E402
 from sliceagent.retriever import NullRetriever  # noqa: E402
+from sliceagent.registry import ToolIntentEffect  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -65,6 +66,45 @@ def ids_are_race_safe_under_parallel_appends():
     ids = [a["id"] for a in m.read_subagent_artifacts("s1")]
     assert len(ids) == N, f"expected {N}, got {len(ids)}"
     assert sorted(ids) == sorted(f"sub-{i}" for i in range(1, N + 1)), f"non-unique/gapped ids: {sorted(ids)}"
+
+
+@check
+def launch_order_survives_reverse_completion_order():
+    """sub-N remains archive/completion ordered, while user ordinals retain spawn order."""
+    m = _mem()
+    host = SubagentHost(
+        _ToolsHost(), llm=_FakeLLM("unused"), retriever=NullRetriever(), memory=m,
+        policy=None, session_id="s1",
+    )
+    first_id, first = host._next_artifact_identity(task_id="task-1", parent_id="turn-1")
+    second_id, second = host._next_artifact_identity(task_id="task-1", parent_id="turn-1")
+    assert (first_id, second_id) == ("", "")
+    assert (first, second) == (1, 2)
+
+    later = _art("explorer", "second child completed first")
+    later["launch_ordinal"] = second
+    earlier = _art("explorer", "first child completed second")
+    earlier["launch_ordinal"] = first
+    assert m.append_subagent_artifact("s1", later) == "sub-1"
+    assert m.append_subagent_artifact("s1", earlier) == "sub-2"
+
+    fs = SubagentFS(m, "s1")
+    assert "launch-order: 2" in fs.read_file("subagents/sub-1.md")
+    assert "launch-order: 1" in fs.read_file("subagents/sub-2.md")
+
+
+@check
+def delegation_effect_metadata_distinguishes_readers_from_writers():
+    host = SubagentHost(
+        _ToolsHost(), llm=_FakeLLM("unused"), retriever=NullRetriever(), memory=NullMemory(),
+        policy=None, agents=BUILTIN_AGENTS,
+    )
+    assert host.resolve_intent_effect("spawn_agent", {"agent": "explorer"}) \
+        is ToolIntentEffect.OBSERVE
+    assert host.resolve_intent_effect("spawn_agent", {"agent": "general"}) \
+        is ToolIntentEffect.EXTERNAL
+    assert host.resolve_intent_effect("spawn_agent", {"agent": "not-real"}) \
+        is ToolIntentEffect.UNKNOWN
 
 
 @check
@@ -134,8 +174,14 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
 
     # (1) MOAT: the parent's tool result is a BOUNDED digest + a recall handle — NOT the full transcript.
     assert 'read_file("subagents/sub-1.md")' in out, out
-    assert len(out) < 500, f"parent return not bounded: {len(out)}"
-    assert "FINAL CONCLUSION" not in out, "the tail conclusion must be paged out of the bounded digest"
+    # The digest now carries two explicitly distinct layers: a bounded child-interpretation excerpt and one
+    # bounded primary observation (or an explicit unavailable marker). The larger ceiling buys provenance at
+    # synthesis time while remaining O(1) per child; the full report still stays behind the handle.
+    assert len(out) < 1400, f"parent return not bounded: {len(out)}"
+    assert "presentation-truncated" in out
+    assert "primary observation: unavailable" in out
+    assert "FINAL CONCLUSION" in out, "the bounded head+tail view must preserve the report's conclusion"
+    assert "presentation omitted" in out, "the missing middle must be explicit and refinable"
 
     # (2) NO DETAIL LOSS: the FULL report is archived and recallable — the tail survives the seal.
     arts = mem.read_subagent_artifacts("s1")

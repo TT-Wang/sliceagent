@@ -1,4 +1,4 @@
-"""First-run onboarding + config discovery — the `sliceagent init` / `config` / `help` / `version` subcommands.
+"""First-run setup, config discovery, and maintenance subcommands including `sliceagent update`.
 
 Turns the cold start from "copy .env.example, learn 28 env vars, hand-edit a TOML" into "run `sliceagent init`":
 pick a provider, paste a key, we test it, and write ~/.sliceagent/config.toml so the next bare `sliceagent`
@@ -450,6 +450,7 @@ def print_usage() -> int:
     sliceagent config          show resolved settings, providers, and config path
     sliceagent config --list   list every environment variable, default, and current value
     sliceagent config --use <id>   switch the default provider
+    sliceagent update          update a canonical install to the latest stable release
     sliceagent help            show this help
     sliceagent version         show the version
 
@@ -464,6 +465,12 @@ def dispatch(argv) -> int:
     cmd = argv[0] if argv else ""
     if cmd in ("--version", "-V", "version"):
         print(f"sliceagent {_version()}"); return 0
+    if cmd in ("update", "upgrade"):
+        if len(argv) != 1:
+            print("usage: sliceagent update")
+            return 2
+        from .updater import run_update
+        return run_update()
     if cmd in ("help", "--help", "-h"):
         return print_usage()
     if cmd == "init":

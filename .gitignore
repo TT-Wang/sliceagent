@@ -47,10 +47,18 @@ runs/
 *.pdf
 
 # ── internal-only: untracked 2026-07-02 for the public launch (files stay on disk locally) ──
-# evals/  = internal benchmark harness + ~127 MB of captured tbench/job run artifacts (deb/lz4/pt/logs)
+# evals/ contains ~127 MB of captured tbench/job artifacts. Keep those ignored, but version the small,
+# receipt-grounded prompt experiment needed to reproduce the mind-model claim and its offline tests.
 # prototype/ = superseded ~250-line JS proof-of-concept (its own README: "not the production codebase")
 # docs/STEP3-PLAN.md, docs/MEMEM-DIAGNOSIS.md = internal R&D planning notes, not user docs
-evals/
+evals/*
+!evals/__init__.py
+!evals/oldprompt_memory_model.txt
+!evals/receipt_claims.py
+!evals/receipt_prompt_ab.py
+!evals/selfnarrative_ab.py
+!evals/usersim.py
+!evals/usersim_pty.py
 prototype/
 docs/STEP3-PLAN.md
 docs/MEMEM-DIAGNOSIS.md

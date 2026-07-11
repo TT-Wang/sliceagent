@@ -42,6 +42,8 @@ from prompt_toolkit.utils import get_cwidth
 from .events import (AssistantText, ApiRetry, Event, LessonSaved, StepBegin, StepEnd,
                      ToolResult, TurnCommitted, TurnEnd, TurnInterrupted, TurnStarted)
 from .progress import ProgressPhase, TurnProgress
+from .receipts import (receipt_completion_label, receipt_has_adverse_lifecycle,
+                       receipt_summary_parts)
 
 # ── theme (semantic tokens; one place to retheme) ───────────────────────────────────────────
 TH = {
@@ -187,7 +189,7 @@ def _box_width(console: Console) -> int:
         w = int(console.width)
     except Exception:
         w = 100
-    return min(max(1, w - 2), 96)
+    return min(max(1, w - 2), 108)
 
 
 def _line_width(console: Console) -> int:
@@ -208,7 +210,7 @@ def _response_panel(content: str, console: Console, *, title: str = "assistant",
         title_align="left",
         border_style=border_style or TH["accent"],
         box=_box.HORIZONTALS,
-        padding=(0, 1),
+        padding=(1, 2),
         width=_box_width(console),
     )
 
@@ -459,8 +461,10 @@ def make_esc_sentinel() -> "_EscSentinel":
 
 
 def _fmt_tally(tally: dict) -> str:
-    """Compact 'N read · N edit · N cmd · N fail' — only non-zero buckets, in a stable order."""
-    return " · ".join(f"{tally[k]} {k}" for k in ("read", "edit", "cmd", "fail") if tally.get(k))
+    """Compact live activity tally — only non-zero buckets, in a stable order."""
+    return " · ".join(
+        f"{tally[k]} {k}" for k in ("read", "edit", "cmd", "agent", "fail") if tally.get(k)
+    )
 
 
 _PHASE_STYLE = {
@@ -509,12 +513,13 @@ def _fit_line(value: Text, width: int) -> Text:
 
 
 def _progress_focus(snap) -> str:
+    """Show only an actionable plan position; never repeat/pin the user's task prompt."""
     if snap.plan.total:
         if snap.plan.current:
             pos = snap.plan.current_index or min(snap.plan.done + 1, snap.plan.total)
             return f"{pos}/{snap.plan.total} {snap.plan.current}"
         return f"{snap.plan.done}/{snap.plan.total} plan complete"
-    return snap.task_title or ""
+    return ""
 
 
 def _render_progress(snap, width: int, *, now: float | None = None,
@@ -568,7 +573,7 @@ def _render_progress(snap, width: int, *, now: float | None = None,
     return _fit_line(rendered, width)
 
 
-def _render_completion(snap, event: TurnCommitted, width: int, *, now: float | None = None) -> Text:
+def _render_completion(snap, event: TurnCommitted, width: int, *, now: float | None = None) -> Text | Group:
     now = time.monotonic() if now is None else now
     stop_reason = event.stop_reason or snap.stop_reason or "turn"
     if not event.ok:
@@ -577,20 +582,50 @@ def _render_completion(snap, event: TurnCommitted, width: int, *, now: float | N
             Text(" · " + _shorten(event.detail or stop_reason, 120), style=TH["dim"]),
         ), width)
     started = snap.started_at if snap.started_at is not None else now
-    label = "turn saved" if stop_reason == "end_turn" else f"{stop_reason} state saved"
+    label = receipt_completion_label(event.receipt, stop_reason)
+    receipt_parts = receipt_summary_parts(event.receipt)
+    disposition = str((event.receipt or {}).get("disposition") or "")
+    attention = disposition in {"completed_with_warnings", "indeterminate"}
+    glyph, style = ("!", TH["warn"]) if attention else ("✓", TH["ok"])
+    if receipt_parts and receipt_has_adverse_lifecycle(event.receipt):
+        # Adverse lifecycle truth gets its own row. Plan/pass/time are intentionally omitted here: a
+        # one-line ellipsis must never hide "rejected before start", "failed", or "indeterminate".
+        heading = _fit_line(Text.assemble(
+            Text(glyph + " ", style=f"bold {style}"), Text(label),
+        ), width)
+        lifecycle = Text("  ", style=TH["dim"])
+        lifecycle.append(" · ".join(receipt_parts), style=TH["dim"])
+        return Group(heading, _fit_line(lifecycle, width))
     details = []
     if snap.plan.total:
         details.append(f"plan {snap.plan.done}/{snap.plan.total}")
     if snap.model_pass:
         details.append(f"{snap.model_pass} pass{'es' if snap.model_pass != 1 else ''}")
-    tally = _fmt_tally(snap.counts)
-    if tally:
-        details.append(tally)
+    if receipt_parts:
+        details.extend(receipt_parts)
+    elif event.receipt is None:
+        tally = _fmt_tally(snap.counts)
+        if tally:
+            details.append(tally)
     details.append(_duration(now - started))
     return _fit_line(Text.assemble(
-        Text("✓ ", style=f"bold {TH['ok']}"), Text(label),
+        Text(glyph + " ", style=f"bold {style}"), Text(label),
         Text(" · " + " · ".join(details), style=TH["dim"]),
     ), width)
+
+
+def _interruption_label(reason: str) -> str:
+    """Translate runtime stop taxonomy into user language instead of calling every stop an interruption."""
+    reason = str(reason or "").lower()
+    if reason in ("stuck", "blocked", "overflow"):
+        return "stopped"
+    if reason in ("max_steps", "max_tokens", "token_budget", "filtered"):
+        return "paused"
+    if reason == "error":
+        return "failed"
+    if reason == "indeterminate":
+        return "attention needed"
+    return "interrupted"
 
 
 class _LiveStatus:
@@ -723,10 +758,7 @@ class RichSink:
                 Text(f" · {_shorten(e.error, 60)}", style=TH["dim"]),
             ), _line_width(self.c)))
         elif isinstance(e, StepEnd):
-            u = e.usage or {}
-            self.stats["tokens"] = self.stats.get("tokens", 0) + u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
-            self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
-            _accrue_cost(self.stats, u)
+            _record_usage(self.stats, e.usage or {})
             if e.stop_reason == "tool_use":
                 self._flush_reads()                         # completed reads become visible before model wait
         elif isinstance(e, LessonSaved):
@@ -740,7 +772,8 @@ class RichSink:
             self._flush_reads()
             self._flush_answer(title="assistant · partial", border_style=TH["warn"])
             self.c.print(_fit_line(Text.assemble(
-                Text("! ", style=f"bold {TH['warn']}"), Text("interrupted", style=TH["warn"]),
+                Text("! ", style=f"bold {TH['warn']}"),
+                Text(_interruption_label(e.reason), style=TH["warn"]),
                 Text(f" · {e.message or e.reason}", style=TH["dim"]),
             ), _line_width(self.c)))
         elif isinstance(e, TurnEnd):
@@ -841,10 +874,7 @@ class LiveSink:
                 Text(f" · {_shorten(e.error, 60)}", style=TH["dim"]),
             ), _line_width(self.c)))
         elif isinstance(e, StepEnd):
-            u = e.usage or {}
-            self.stats["tokens"] = self.stats.get("tokens", 0) + u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
-            self.stats["fresh"] = self.stats.get("fresh", 0) + (u.get("input_other", 0) or 0)
-            _accrue_cost(self.stats, u)
+            _record_usage(self.stats, e.usage or {})
             if e.stop_reason == "tool_use":
                 self._flush_reads()
         elif isinstance(e, LessonSaved):
@@ -857,7 +887,8 @@ class LiveSink:
             self._flush_reads()
             self._flush_answer(title="assistant · partial", border_style=TH["warn"])
             self.c.print(_fit_line(Text.assemble(
-                Text("! ", style=f"bold {TH['warn']}"), Text("interrupted", style=TH["warn"]),
+                Text("! ", style=f"bold {TH['warn']}"),
+                Text(_interruption_label(e.reason), style=TH["warn"]),
                 Text(f" · {e.message or e.reason}", style=TH["dim"]),
             ), _line_width(self.c)))
         elif isinstance(e, TurnEnd):
@@ -925,6 +956,18 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
                   history=FileHistory(os.path.join(hist_dir, "history")),
                   completer=_InputCompleter(_repo_files(root) if root else None),
                   complete_while_typing=True)
+
+    def set_workspace(new_root: str | None) -> None:
+        """Refresh only workspace-derived completion; the live Application and model session stay alive."""
+        completer = _InputCompleter(_repo_files(new_root) if new_root else None)
+        ta.completer = completer
+        ta.buffer.completer = completer
+        try:
+            app.invalidate()
+        except Exception:
+            pass
+
+    state["set_workspace"] = set_workspace
     kb = KeyBindings()
 
     @kb.add("enter")
@@ -941,7 +984,8 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
             from .neocortex import build_learn_prompt
             text = build_learn_prompt(text[len("/learn"):].strip())
         elif text.startswith("/") and handle_slash is not None:
-            handle_slash(text); return
+            handle_slash(text)
+            return
         user_echo(console, text)           # echo ABOVE the box (instant), THEN run the turn
         state["last"] = text
         sink = LiveSink(console, stats, set_status, await_commit=True)
@@ -996,7 +1040,7 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
 
     app = Application(
         layout=Layout(FloatContainer(
-            content=HSplit([Frame(ta, title="message"),
+            content=HSplit([Frame(ta),
                             Window(FormattedTextControl(_status_line), height=1)]),
             floats=[Float(xcursor=True, ycursor=True,
                           content=MultiColumnCompletionsMenu(min_rows=3, show_meta=True))],
@@ -1006,16 +1050,22 @@ def build_live_app(*, console: Console, stats: dict, root: str | None, run_one_t
 
 
 def run_live(*, console: Console, stats: dict, banner_info: str, root: str | None,
-             run_one_turn, handle_slash=None) -> None:
+             run_one_turn, handle_slash=None, on_ready=None) -> None:
     """The LIVE composer (AGENT_TUI=live): a bordered input box stays pinned at the bottom EVEN WHILE the
     agent streams — output prints above it in the NORMAL terminal buffer (native copy/paste preserved), the
     Python analogue of Ink's <Static>+live-region. ctrl-c aborts a running turn; ctrl-c at idle / ctrl-d quits."""
     from prompt_toolkit.patch_stdout import patch_stdout
     app, _state = build_live_app(console=console, stats=stats, root=root,
                                  run_one_turn=run_one_turn, handle_slash=handle_slash)
+    if on_ready is not None:
+        on_ready(_state.get("set_workspace"))
     banner(console, banner_info)
-    with patch_stdout(raw=True):
-        app.run()
+    try:
+        with patch_stdout(raw=True):
+            app.run()
+    finally:
+        if on_ready is not None:
+            on_ready(None)
 
 
 # ── modal selectors (second-tier menus) ───────────────────────────────────────────
@@ -1165,10 +1215,11 @@ _SLASH = {
     "/config":  "add / update LLM providers (the setup wizard, in-session) — then /model to switch",
     "/model":   "switch model + reasoning — menu lists YOUR configured providers (switches endpoint too)",
     "/mode":    "permission mode — opens a menu (baby-sitter · teenager · let-it-go)",
-    "/cwd":     "show this process's workspace; with a path, show where to relaunch",
+    "/cwd":     "show the workspace; /cwd <path> switches with a clean runtime handoff",
     "/learn":   "turn what you just did into a reusable SKILL (/learn [name])",
     "/plan":    "show the agent's current PLAN",
     "/cost":    "show $ saved vs full-history + per-turn token metrics",
+    "/update":  "show how to update safely at the process boundary",
     "/threads": "list open/parked topics",
     "/plugins": "list loaded plugins + their tools",
     "/mcp":     "list configured MCP servers + connection status",
@@ -1263,6 +1314,19 @@ def _price(model: str):
     return pricing(model)
 
 
+def _record_usage(stats: dict, usage: dict) -> None:
+    """Single accounting seam shared by full turns and the chitchat fast path."""
+    if not usage:
+        return
+    stats["tokens"] = (
+        stats.get("tokens", 0)
+        + (usage.get("prompt_tokens", 0) or 0)
+        + (usage.get("completion_tokens", 0) or 0)
+    )
+    stats["fresh"] = stats.get("fresh", 0) + (usage.get("input_other", 0) or 0)
+    _accrue_cost(stats, usage)
+
+
 def _accrue_cost(stats: dict, usage: dict) -> None:
     """Per step: accrue actual $ spend (stats['cost']) AND the MOAT savings in TOKENS (model-independent, so
     a /model switch re-prices them for free — see _saved_dollars).
@@ -1298,10 +1362,30 @@ def _saved_dollars(stats: dict):
     return stats.get("saved_cached_tok", 0) * pr[1] / 1_000_000
 
 
+def _compact_count(value) -> str:
+    try:
+        number = max(0, int(value or 0))
+    except (TypeError, ValueError):
+        number = 0
+    if number >= 999_500:
+        return f"{number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}k"
+    return str(number)
+
+
+def _savings_label(stats: dict) -> str:
+    saved = _saved_dollars(stats)
+    if saved is None:
+        return f"{_compact_count(stats.get('saved_cached_tok', 0))} tok saved"
+    return f"${saved:.4f} saved" if saved < 1 else f"${saved:,.2f} saved"
+
+
 def _toolbar(stats: dict, width_fn=None):
-    """Responsive idle identity row; volatile cost detail stays in ``/cost``."""
+    """Responsive idle row: identity plus the two numbers users need between every turn."""
     width_fn = width_fn or (lambda: shutil.get_terminal_size((100, 24)).columns)
     dim, accent, value = "fg:ansibrightblack", "fg:ansibrightcyan bold", "fg:ansicyan"
+    good = "fg:ansigreen"
     separator = (dim, " · ")
 
     def render():
@@ -1312,28 +1396,31 @@ def _toolbar(stats: dict, width_fn=None):
         workspace = str(stats.get("workspace") or "—")
         model = str(stats.get("model") or "—")
         policy = str(stats.get("policy") or "—")
-        topic = str(stats.get("topic") or "no active task")
+        tokens = f"{_compact_count(stats.get('tokens', 0))} tok"
+        savings = _savings_label(stats)
 
         if width < 72:
             fields = [
                 (accent, " sliceagent"),
-                ("", _shorten_cells(workspace, 18)),
-                (value, _shorten_cells(model, max(8, width - 35))),
+                (value, tokens),
+                (good, savings),
             ]
         elif width < 110:
             fields = [
                 (accent, " sliceagent"),
-                ("", _shorten_cells(workspace, 18)),
-                (value, _shorten_cells(model, 24)),
-                (dim, _shorten_cells(policy, max(8, width - 62))),
+                ("", _shorten_cells(workspace, 14)),
+                (value, tokens),
+                (good, savings),
+                (value, _shorten_cells(model, 18)),
             ]
         else:
             fields = [
                 (accent, " sliceagent"),
                 ("", _shorten_cells(workspace, 18)),
-                (value, _shorten_cells(model, 26)),
-                (dim, _shorten_cells(policy, 18)),
-                ("", _shorten_cells(topic, max(12, width - 85))),
+                (value, _shorten_cells(model, 22)),
+                (value, tokens),
+                (good, savings),
+                (dim, _shorten_cells(policy, 16)),
             ]
 
         segments = []
@@ -1399,6 +1486,11 @@ class TuiInput:
         except Exception:               # any prompt_toolkit Application hiccup → robust plain prompt
             return self._simple_prompt()
 
+    def set_workspace(self, root: str | None) -> None:
+        """Refresh file completion in place after a workspace switch; do not recreate the terminal UI."""
+        self._completer = _InputCompleter(_repo_files(root) if root else None)
+        self.session.completer = self._completer
+
     def _build_composer(self, *, pt_input=None, pt_output=None):
         """Build the framed-composer Application + its TextArea. Split out from _pinned_prompt so a test can
         drive it with a pipe input + DummyOutput (verify Enter→submit / ctrl-c→quit without a real tty)."""
@@ -1439,7 +1531,7 @@ class TuiInput:
         # (and file completions) actually RENDER as a dropdown at the cursor — a bare custom Application
         # computes completions but, unlike PromptSession, has no built-in menu to draw them.
         body = FloatContainer(
-            content=HSplit([Frame(ta, title="message"), status]),
+            content=HSplit([Frame(ta), status]),
             floats=[Float(xcursor=True, ycursor=True,
                           content=MultiColumnCompletionsMenu(min_rows=3, show_meta=True))],
         )
@@ -1554,6 +1646,8 @@ def _arrow_select(options: list[str], default: int = 0) -> "int | None":
             if c in hot:
                 idx = hot[c]
                 draw()
+                if b"\r" in data[1:] or b"\n" in data[1:]:  # hotkey + Enter can share one raw read
+                    break
     except Exception:  # noqa: BLE001 — any I/O error → fall back to typed input, never corrupt the turn
         idx = None
     finally:

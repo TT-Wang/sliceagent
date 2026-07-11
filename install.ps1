@@ -8,6 +8,7 @@
 # a pinned, SHA256-verified PortableGit into %LOCALAPPDATA%\sliceagent\git if you have no Git for
 # Windows) -> drops a pinned, SHA256-verified ripgrep into uv's bin dir (already on PATH). Everything
 # is user-scoped; nothing needs UAC; no PATH registry rewrites.
+& {
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # WinPS 5.1: IWR is ~10x slower with the progress bar on
 $AppDir = Join-Path $env:LOCALAPPDATA "sliceagent"
@@ -32,29 +33,88 @@ function Get-Verified($url, $sha256, $outFile) {
 }
 
 # ── 1. uv (pinned installer) ─────────────────────────────────────────────────
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+# Prefer uv's canonical user install and reject an executable discovered inside the current repository.
+$UvExe = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+if (-not (Test-Path $UvExe)) {
+    $candidate = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue
+    if ($candidate) {
+        $cwdPrefix = [IO.Path]::GetFullPath((Get-Location).Path).TrimEnd("\") + "\"
+        $candidatePath = [IO.Path]::GetFullPath($candidate.Source)
+        if (-not $candidatePath.StartsWith($cwdPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $UvExe = $candidatePath
+        }
+    }
+}
+if (-not (Test-Path $UvExe)) {
     Step "Installing uv (Python tool manager, pinned 0.11.26)..."
     Invoke-Expression (Invoke-RestMethod -UseBasicParsing $UvInstall)
     $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"   # this session; the installer handles new shells
+    $UvExe = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
 }
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+if (-not (Test-Path $UvExe)) {
     Write-Host "uv installed but not on PATH in this session — open a NEW PowerShell and re-run this installer."
     exit 1
 }
 
+# Run uv without ambient resolver overrides or exported provider tokens. The README invokes this script
+# through `iex`, so every process environment variable is restored in `finally`, including empty values.
+function Test-UvCleanVariable([string]$Name) {
+    return (
+        $Name -like "UV_*" -or $Name -like "PIP_*" -or
+        $Name -in @("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "AWS_SECRET_ACCESS_KEY") -or
+        $Name -match "(_API_KEY|_TOKEN)$"
+    )
+}
+
+function Invoke-UvClean([string[]]$UvArgs) {
+    $saved = @{}
+    Get-ChildItem Env: | Where-Object { Test-UvCleanVariable $_.Name } | ForEach-Object {
+        $saved[$_.Name] = $_.Value
+    }
+    $exitCode = 1
+    try {
+        foreach ($name in @($saved.Keys)) {
+            [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        }
+        foreach ($toolLocation in @("UV_TOOL_DIR", "UV_TOOL_BIN_DIR")) {
+            if ($saved.ContainsKey($toolLocation)) {
+                [Environment]::SetEnvironmentVariable($toolLocation, $saved[$toolLocation], "Process")
+            }
+        }
+        # PowerShell 7 can otherwise turn a normal non-zero native exit into a terminating error.
+        $PSNativeCommandUseErrorActionPreference = $false
+        & $UvExe @UvArgs | Out-Host
+        $exitCode = $LASTEXITCODE
+    } finally {
+        Get-ChildItem Env: | Where-Object { Test-UvCleanVariable $_.Name } | ForEach-Object {
+            [Environment]::SetEnvironmentVariable($_.Name, $null, "Process")
+        }
+        foreach ($entry in $saved.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
+        }
+    }
+    return [int]$exitCode
+}
+
 # ── 2. sliceagent ────────────────────────────────────────────────────────────
 Step "Installing sliceagent (isolated env, its own Python 3.12)..."
-uv tool install --force --python 3.12 "sliceagent[tui]"
-if ($LASTEXITCODE -ne 0) {
+$InstallExitCode = Invoke-UvClean -UvArgs @(
+    "tool", "install", "--force", "--upgrade", "--python", "3.12", "--no-config",
+    "--default-index", "https://pypi.org/simple", "sliceagent[tui]"
+)
+if ($InstallExitCode -ne 0) {
     # Most common Windows failure: antivirus (Defender / 360 / 电脑管家) blocks uv's freshly
     # written .exe script shims — 'Failed to update Windows PE resources ... Access denied /
     # 拒绝访问'. Usually a transient scan race: clear the cache and retry once.
     Step "Install failed — clearing uv cache and retrying once (antivirus often blocks the first attempt)..."
-    try { uv cache clean | Out-Null } catch { }
+    try { $null = Invoke-UvClean -UvArgs @("cache", "clean") } catch { }
     Start-Sleep -Seconds 3
-    uv tool install --force --python 3.12 "sliceagent[tui]"
+    $InstallExitCode = Invoke-UvClean -UvArgs @(
+        "tool", "install", "--force", "--upgrade", "--python", "3.12", "--no-config",
+        "--default-index", "https://pypi.org/simple", "sliceagent[tui]"
+    )
 }
-if ($LASTEXITCODE -ne 0) {
+if ($InstallExitCode -ne 0) {
     Write-Host ""
     Write-Host "uv tool install failed twice. If the error above mentions 'Windows PE resources' /"
     Write-Host "'Access denied' / '拒绝访问', your antivirus is blocking uv's script shims. Fix:"
@@ -63,7 +123,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  2. Re-run this installer. (Re-enable the antivirus afterwards.)"
     exit 1
 }
-try { uv tool update-shell | Out-Null } catch { }   # best-effort PATH help; WinPS 5.1-safe (no 2>$null under EAP=Stop)
+try { $null = Invoke-UvClean -UvArgs @("tool", "update-shell") } catch { }   # best-effort PATH help
 
 # ── 3. Git Bash (runs the agent's shell commands — same strategy as Claude Code) ─
 $bashCandidates = @(
@@ -109,4 +169,6 @@ if (-not (Get-Command rg -ErrorAction SilentlyContinue) -and -not (Test-Path (Jo
 
 Write-Host ""
 Write-Host "Done. Open a NEW terminal (PowerShell or Windows Terminal) and run:  sliceagent"
+Write-Host "Update later: exit SliceAgent and re-run this one-line PowerShell installer."
 Write-Host "First run walks you through provider setup. Docs: https://github.com/TT-Wang/sliceagent"
+}

@@ -421,6 +421,61 @@ def unprepared_crash_recovery_preserves_base_intent_and_progress():
     assert restored.task.progress_signals[0].detail == "Inspected src/auth.py"
     assert restored.task.objective_status == "active"
     assert checkpoint.artifact_refs == (crash_turn.artifact_id, base_turn.artifact_id)
+    crash_artifact = recovered.coordinator.artifacts.get(crash_turn.artifact_id)
+    crash_receipt = crash_artifact.to_dict()["structured_body"]["turn_receipt"]
+    assert crash_receipt["turn_status"] == "interrupted"
+    assert crash_receipt["disposition"] == "interrupted"
+    assert crash_receipt["counts"]["requested"] == 0
+    recovered.close()
+
+
+@check
+def unprepared_recovery_replays_journaled_admission_without_manufacturing_authority():
+    """Quoted assistant prose must not become a user requirement when recovery lacks discourse context."""
+    from dataclasses import asdict, replace
+
+    from sliceagent.discourse import interpret_turn
+    from sliceagent.pfc import Slice, record_user
+    from sliceagent.taskstate import (slice_to_task_state, task_state_from_checkpoint,
+                                      task_state_to_slice)
+
+    workspace = tempfile.mkdtemp(prefix="workspace-")
+    store_root = tempfile.mkdtemp(prefix="core-store-")
+    store = LocalTurnStore(workspace, "session-1", store_root=store_root)
+    base = store.begin(task_id="task-admission", logical_id="turn-base", user_request="Review the API.")
+    state = Slice(); state.reset("Review the API")
+    record_user(state, "Review the API.", source_artifact=base.artifact_id)
+    store.seal(
+        state=asdict(slice_to_task_state(
+            state, "task-admission", session_id="session-1", status="active",
+        )),
+        record={}, status="end_turn",
+    )
+
+    copied = "Use API v2 and never edit config.py."
+    admission = interpret_turn(copied, (), recent_assistant=(copied,)).admission
+    assert admission.authority_spans == () and admission.attributed_spans == ((0, len(copied)),)
+    crash = store.begin(task_id="task-admission", logical_id="turn-crash", user_request=copied)
+    admission = replace(admission, request_source=crash.artifact_id)
+    envelope = {
+        "action": "continue", "task_id": "task-admission",
+        "admission": admission.to_dict(), "focus": [], "consume_pending_proposal": True,
+    }
+    store.record_admission(envelope)
+    recorded = crash.journal.snapshot().event("turn-admission")["payload"]
+    from sliceagent.intent import TurnAdmission
+    assert TurnAdmission.from_dict(recorded["admission"]) == admission, \
+        "the journaled and installed admission forms must be identical"
+    store.close()
+
+    recovered = LocalTurnStore(workspace, "session-2", store_root=store_root)
+    result = recovered.recover_pending()[0]
+    checkpoint = recovered.coordinator.checkpoints.load(recovered.workspace_id, "task-admission")
+    restored = task_state_to_slice(task_state_from_checkpoint(checkpoint))
+    assert result.status == "attached"
+    assert restored.intent.entries == [], \
+        "recovery must consume the recorded attribution spans instead of re-analyzing copied prose"
+    assert restored.intent.current_request == copied
     recovered.close()
 
 
@@ -440,6 +495,11 @@ def recovery_gates_invocations_without_a_conclusive_outcome():
     assert "call-uncertain" in checkpoint.state["reconciliation_required"]
     assert checkpoint.state["reconciliation_targets"] == ("workspace:*", "opaque:run_command")
     assert checkpoint.artifact_refs == (active.artifact_id,)
+    artifact = recovered.coordinator.artifacts.get(active.artifact_id)
+    receipt = artifact.to_dict()["structured_body"]["turn_receipt"]
+    assert receipt["disposition"] == "indeterminate"
+    assert receipt["operations"][0]["execution_started"] is True
+    assert receipt["operations"][0]["settled"] is False
 
 
 @check
@@ -606,11 +666,15 @@ def child_and_source_artifact_refs_are_retained_by_parent_checkpoint():
 @check
 def authoritative_artifacts_have_timestamp_and_readable_virtual_handle():
     from sliceagent.tools import LocalToolHost
+    from sliceagent.discourse import extract_addressable_anchors
 
     workspace = tempfile.mkdtemp(prefix="workspace-")
     store = LocalTurnStore(workspace, "session-1", store_root=tempfile.mkdtemp(prefix="core-store-"))
     active = store.begin(task_id="task-A", logical_id="turn-1", user_request="one")
-    store.seal(state={"task_id": "task-A"}, record={"markdown": "exact archived detail"},
+    assistant = "## Findings\n1. first\n2. exact archived detail"
+    anchors = [item.to_dict() for item in extract_addressable_anchors(assistant)]
+    store.seal(state={"task_id": "task-A"},
+               record={"markdown": "exact archived detail", "assistant": assistant, "anchors": anchors},
                status="end_turn", title="Turn one")
     artifact = store.coordinator.artifacts.get(active.artifact_id)
     assert artifact.timestamp
@@ -618,6 +682,8 @@ def authoritative_artifacts_have_timestamp_and_readable_virtual_handle():
     host._artifacts = CoreArtifactFS(store.coordinator.artifacts)
     rendered = host.run("read_file", {"path": f"artifacts/{artifact.id}.md"})
     assert "exact archived detail" in rendered and artifact.id in rendered
+    assert "## User request (verbatim)\none" in rendered
+    assert "Findings #2" in rendered, "artifact view exposes stable ordinal anchors"
     assert f"{artifact.id}.md" in host.run("list_files", {"path": "artifacts"})
 
 

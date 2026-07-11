@@ -89,6 +89,7 @@ class McpRuntime:
 
     def __init__(self):
         self.loop = asyncio.new_event_loop()
+        self._closed = False
         self._thread = threading.Thread(target=self._run, name="mcp-loop", daemon=True)
         self._thread.start()
 
@@ -111,6 +112,10 @@ class McpRuntime:
         # #61/#62: cancel every task on the loop BEFORE stopping it, so each _serve()'s
         # `async with stdio_client(...)`/`ClientSession` __aexit__ runs and its child PROCESS is
         # terminated. Stopping the loop with tasks still pending would orphan those subprocesses.
+        if self._closed:
+            return
+        self._closed = True
+
         async def _cancel_all():
             tasks = [t for t in asyncio.all_tasks(self.loop) if t is not asyncio.current_task()]
             for t in tasks:
@@ -122,7 +127,17 @@ class McpRuntime:
             asyncio.run_coroutine_threadsafe(_cancel_all(), self.loop).result(timeout=5)
         except BaseException:  # noqa: BLE001 — best-effort teardown
             pass
-        self.loop.call_soon_threadsafe(self.loop.stop)
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except RuntimeError:
+            return
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=2)
+        if not self._thread.is_alive() and not self.loop.is_closed():
+            try:
+                self.loop.close()
+            except RuntimeError:
+                pass
 
 
 class McpServer:

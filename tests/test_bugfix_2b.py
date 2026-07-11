@@ -1,7 +1,7 @@
 """2B / SOTA within-turn transcript construction. Validates the three shipped changes at the BUILD level
 (make_build_slice → [system, user]):
   (a) goal/# TASK removed from the system message → system is byte-stable regardless of goal (cache stays warm)
-  (b) the verbatim request anchors the user message at BOTH primacy (opening) and recency (tail)
+  (b) the verbatim request anchors the user message exactly once at recency (tail)
   (c) the slice is fenced in a <context> envelope
 No model, no pytest. Run: PYTHONPATH=src python tests/test_bugfix_2b.py
 """
@@ -57,17 +57,17 @@ def system_is_byte_stable_across_goals():  # (a) — the cache-leak fix, the who
 
 
 @check
-def request_anchors_primacy_and_recency():  # (b)
+def request_anchors_once_at_recency():  # (b)
     user = _build("add a --json flag")[1]["content"]
-    assert user.startswith("# CURRENT REQUEST"), "user message must OPEN with the request (primacy)"
-    assert user.count("add a --json flag") >= 2, "request must appear at BOTH primacy and recency (sandwich)"
+    assert not user.startswith("# CURRENT REQUEST"), "request must not be duplicated at primacy"
+    assert user.count("add a --json flag") == 1, "request must appear exactly once"
 
 
 @check
 def slice_fenced_in_context():  # (c)
     user = _build("do the thing")[1]["content"]
     assert "<context>" in user and "</context>" in user, "slice must be fenced"
-    assert user.index("# CURRENT REQUEST") < user.index("<context>"), "primacy request precedes the fence"
+    assert user.index("# CURRENT REQUEST") > user.index("</context>"), "request follows the fence"
 
 
 @check
@@ -75,16 +75,16 @@ def request_and_now_render_OUTSIDE_the_fence():  # review fix A/C — instructio
     user = _build("do the thing")[1]["content"]
     close = user.index("</context>")
     # the RECENCY request + the NOW footer come AFTER the fence closes (not inside the reference envelope)
-    assert user.rindex("# CURRENT REQUEST") > close, "recency request must be OUTSIDE the fence"
+    assert user.index("# CURRENT REQUEST") > close, "recency request must be OUTSIDE the fence"
     assert user.index("# NOW") > close, "the NOW instruction must be OUTSIDE the fence"
     assert user.rstrip().endswith("make NO tool call."), "NOW is the OUTERMOST tail"
 
 
 @check
-def empty_goal_suppresses_primacy():  # safety: a fresh slice with no goal shouldn't emit an empty header
+def empty_goal_suppresses_request():  # safety: a fresh slice with no goal shouldn't emit an empty header
     s = Slice()  # no reset → goal == ""
     user = make_build_slice(s, _Tools(), NullRetriever(), NullMemory(), "")()[1]["content"]
-    assert not user.startswith("# CURRENT REQUEST"), "no goal → no primacy header"
+    assert "# CURRENT REQUEST" not in user, "no goal → no request header"
     assert user.startswith("<context>"), "envelope still wraps the slice"
 
 

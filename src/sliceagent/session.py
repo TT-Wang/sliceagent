@@ -20,8 +20,8 @@ import uuid
 
 from .interfaces import TaskRef
 from .pfc import Slice
-from .regions import capture_user_report
-from .text_utils import one_line
+from .regions import capture_user_report, report_retracted
+from .text_utils import is_chitchat, one_line
 from .taskstate import slice_to_task_state, task_state_to_slice
 
 
@@ -44,6 +44,9 @@ class Session:
         self.tasks: dict[str, Slice] = {}     # task_id -> live bounded slice (in-session)
         self.active_id: str | None = None
         self.turn_task_id: str | None = None  # immutable task binding while one model/tool turn runs
+        # Monotonic only within this live session. Evidence snapshots use it to prove conversational adjacency
+        # across task switches; it is intentionally not durable because snapshots are not durable either.
+        self.turn_generation: int = 0
 
     def active(self) -> Slice:
         return self.tasks[self.active_id]
@@ -71,29 +74,47 @@ class Session:
                 self.tasks[self.active_id], self.active_id,
                 session_id=self.session_id, status=status))
 
-    def new_topic(self, goal: str) -> str:
-        """Park the current topic and start a fresh one. Returns the new task_id."""
+    def prepare_new_topic(self, goal: str) -> tuple[str, Slice]:
+        """Prepare a fresh topic without publishing it as active.
+
+        Routing/orientation can inspect the returned Slice, the host can begin its durable turn journal,
+        and only then call :meth:`activate_prepared_topic`. Preparation itself does not park or publish
+        anything; the admission journal must exist before durable/session state changes.
+        """
         self._require_reconciled_boundary()
-        self._park()
         tid = _mint_task_id()
         s = Slice()
         s.reset(goal)
-        self.tasks[tid] = s
-        self.active_id = tid
+        return tid, s
+
+    def prepare_switch_topic(self, task_id: str) -> tuple[str, Slice]:
+        """Load a topic for admission without changing ``active_id``."""
+        self._require_reconciled_boundary()
+        if task_id in self.tasks:
+            return task_id, self.tasks[task_id]
+        ts = self.memory.load_task(task_id)
+        if ts is None:
+            raise KeyError(f"unknown topic {task_id}")
+        return task_id, task_state_to_slice(ts)
+
+    def activate_prepared_topic(self, task_id: str, state: Slice) -> Slice:
+        """Publish a prevalidated topic after the turn journal exists."""
+        self._park()
+        self.tasks[str(task_id)] = state
+        self.active_id = str(task_id)
+        return state
+
+    def new_topic(self, goal: str) -> str:
+        """Park the current topic and start a fresh one. Returns the new task_id."""
+        tid, s = self.prepare_new_topic(goal)
+        self.activate_prepared_topic(tid, s)
         return tid
 
     def switch_topic(self, task_id: str) -> Slice:
         """Park the current topic and activate another — from the live set if present, else resumed
         from the durable vault (distilled). Raises KeyError if neither has it."""
-        self._require_reconciled_boundary()
-        self._park()
-        if task_id not in self.tasks:
-            ts = self.memory.load_task(task_id)
-            if ts is None:
-                raise KeyError(f"unknown topic {task_id}")
-            self.tasks[task_id] = task_state_to_slice(ts)   # cross-session: distilled + since_edit=0
-        self.active_id = task_id
-        return self.tasks[task_id]
+        task_id, state = self.prepare_switch_topic(task_id)
+        return self.activate_prepared_topic(task_id, state)
 
     def open_threads(self, *, include_active: bool = False) -> list[TaskRef]:
         """The OTHER OPEN THREADS source: live topics (parked by default; the active one optional)."""
@@ -105,7 +126,10 @@ class Session:
                                status="active" if tid == self.active_id else "parked"))
         return out
 
-    def continue_topic(self, message: str, *, resume: bool = False) -> Slice:
+    def continue_topic(
+        self, message: str, *, resume: bool = False, admission=None, contract=None,
+        install_intent: bool = True,
+    ) -> Slice:
         """Continue the active topic with a NEW directive: set the goal, start a fresh action epoch
         but KEEP the durable context — findings and the working set — so the follow-up builds on
         what's already done.
@@ -127,26 +151,54 @@ class Session:
         # only current_request; otherwise "yes, do that" destroys the objective in the next checkpoint.
         # The topic label/objective and the CURRENT REQUEST are distinct. A resume cue should not rename the
         # parked task, but it is still the user's authoritative request for this turn and must be rendered.
-        # record_user() repeats this assignment after routing (and adds the conversation entry); keeping it here
-        # preserves direct Session callers/tests that build a seed immediately after continue_topic().
-        s.intent.begin_turn(message)
-        resuming_unresolved_work = bool(resume or _CONTINUATION_ONLY.fullmatch(str(message or "")))
-        if not resuming_unresolved_work:
-            # A substantive new directive starts a fresh blocker focus. A bare resume cue does not: the
-            # unresolved error and its failing action row are the state the user asked us to continue from.
-            s.last_error = ""
-            # demote (don't clear): keep counts, drop the failing flag — see WS2 above
-            for _sig, action in s.action_log.items():
-                action["failing"] = False
-        s.since_edit = 0
-        failure_report = capture_user_report(
-            s, message,
-        )  # a failure report rides forward as an OPEN USER REPORT blocker
-        if resuming_unresolved_work or failure_report:
-            # Topic identity and execution authority are separate: a completed objective normally becomes
-            # background, but an explicit resume or user push-back makes the exact original outstanding again.
-            s.task.activate_objective()
-        return s
+        # Direct Session callers may still request the historical eager installation.  The production host
+        # passes ``install_intent=False``: it journals the immutable TurnAdmission first, then record_user()
+        # installs it exactly once together with the verbatim conversation entry.
+        if admission is not None and contract is not None and admission != contract:
+            raise ValueError("pass one TurnAdmission, not competing admission/contract values")
+        if install_intent:
+            s.intent.begin_turn(message, admission=admission or contract)
+        return apply_turn_continuation(s, message, resume=resume, admission=admission or contract)
+
+
+def apply_turn_continuation(
+    s: Slice, message: str, *, resume: bool = False, admission=None,
+) -> Slice:
+    """Apply the non-intent continuation reducer in live admission and crash recovery."""
+    resuming_unresolved_work = bool(resume or _CONTINUATION_ONLY.fullmatch(str(message or "")))
+    if not resuming_unresolved_work:
+        # A substantive new directive starts a fresh blocker focus. A bare resume cue does not: the
+        # unresolved error and its failing action row are the state the user asked us to continue from.
+        s.last_error = ""
+        # demote (don't clear): keep counts, drop the failing flag — see WS2 above
+        for _sig, action in s.action_log.items():
+            action["failing"] = False
+    s.since_edit = 0
+    # A sealed-history question or self-audit may contain words such as "failed" or "went wrong" without
+    # asserting that anything is broken. The typed admission distinguishes that inquiry from a live user
+    # report; lexical capture remains the conservative fallback for legacy/direct callers.
+    evidence_query = getattr(admission, "evidence_query", None)
+    sealed_inquiry = bool(
+        admission is not None
+        and getattr(admission, "grounding", "none") == "sealed_past"
+        and (
+            "audit" in (getattr(admission, "requested_modes", ()) or ())
+            or evidence_query is not None
+        )
+    )
+    failure_report = False if sealed_inquiry else capture_user_report(s, message)
+    # A stale OPEN USER REPORT is a blocker on the PRIOR concern. An explicit move-on cue ("anyways do X",
+    # "forget that", "new topic") abandons it — clear it so it can't hijack the fresh directive (the design
+    # clears the blocker on a real topic change; the LLM router, biased to 'continue', may miss the switch).
+    # Only when THIS turn is not itself a fresh report and is not a bare resume of the reported work.
+    if s.open_report and not failure_report and not resuming_unresolved_work and report_retracted(message):
+        s.open_report = ""
+    # A true failure report rides forward as an OPEN USER REPORT blocker.
+    if resuming_unresolved_work or failure_report:
+        # Topic identity and execution authority are separate: a completed objective normally becomes
+        # background, but an explicit resume or user push-back makes the exact original outstanding again.
+        s.task.activate_objective()
+    return s
 
 
 def route_topic(llm, message: str, session: "Session") -> tuple[str, str]:
@@ -155,6 +207,8 @@ def route_topic(llm, message: str, session: "Session") -> tuple[str, str]:
     here — the host applies the result — so there are no junk topics. (Provider-agnostic: uses the
     LLMClient contract.)"""
     if session.active_id is None:
+        return ("new", "")
+    if is_chitchat(session.active().goal) and not is_chitchat(message):
         return ("new", "")
     threads = session.open_threads(include_active=False)
     parked = "\n".join(f"- {t.task_id}: {t.title}" for t in threads) or "(none)"
@@ -199,6 +253,8 @@ def route_topic_lexical(message: str, session: "Session") -> tuple[str, str]:
     ``New task: ...`` prefix, a parked task id, or a resume cue plus title-keyword match. Everything else
     continues. Same signature/return contract as route_topic, so it is a drop-in."""
     if session.active_id is None:
+        return ("new", "")
+    if is_chitchat(session.active().goal) and not is_chitchat(message):
         return ("new", "")
     if _EXPLICIT_NEW_TASK.search(message):
         return ("new", "")

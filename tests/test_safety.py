@@ -104,6 +104,20 @@ def redact_masks_env_assignment():
 
 
 @check
+def redact_does_not_mistake_comparisons_for_secret_assignments():
+    snippets = (
+        "return password == stored",
+        "return password === stored",
+        "return password != stored",
+        "return password <= stored",
+        "return password >= stored",
+        "const verify = password => check(password)",
+    )
+    for source in snippets:
+        assert redact_text(source) == source, (source, redact_text(source))
+
+
+@check
 def redact_masks_jwt():
     jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ."

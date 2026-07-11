@@ -33,6 +33,13 @@ uv sync --all-extras         # or: pip install -e ".[tui]"
 The interactive UI (rich + prompt_toolkit) ships in the `tui` extra — the curl installer and the PyPI
 commands above include it; everything still works without it (plain stdout).
 
+Update a one-line-installer release later with `sliceagent update`. For versions older than that command,
+re-run the one-line installer; it upgrades the isolated tool in place.
+
+If you installed with uv/pipx/pip or from source, keep using that manager (`uv tool upgrade sliceagent`,
+`pipx upgrade sliceagent`, `python -m pip install --upgrade "sliceagent[tui]"`, or pull +
+`uv sync --all-extras`).
+
 ## 2. Set up your provider
 
 ```bash

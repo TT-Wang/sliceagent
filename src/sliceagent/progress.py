@@ -191,8 +191,6 @@ class ProgressSnapshot:
                 pos = self.plan.current_index or min(self.plan.done + 1, self.plan.total)
                 return f"{pos}/{self.plan.total} · {self.plan.current} — {activity}"
             return f"{self.plan.done}/{self.plan.total} · plan complete — {activity}"
-        if self.task_title:
-            return f"{self.task_title} — {activity}"
         return activity
 
 
@@ -422,19 +420,24 @@ class TurnProgress:
             elif isinstance(event, TurnCommitted):
                 self._ensure_started(now)
                 self._active_tools.clear()
+                receipt = event.receipt if isinstance(event.receipt, Mapping) else {}
+                disposition = str(receipt.get("disposition") or "")
+                sealed_stop = str(receipt.get("turn_status") or "")
+                effective_stop = (
+                    "indeterminate" if disposition == "indeterminate" else
+                    sealed_stop or event.stop_reason or self._state.stop_reason
+                )
                 self._replace(
-                    stop_reason=event.stop_reason or self._state.stop_reason,
+                    stop_reason=effective_stop,
                     committed=bool(event.ok),
-                    turn_complete=bool(
-                        event.ok and (event.stop_reason or self._state.stop_reason) == "end_turn"
-                    ),
+                    turn_complete=bool(event.ok and effective_stop == "end_turn"),
                 )
                 if not event.ok:
                     self._transition(ProgressPhase.FAILED, event.detail or "checkpoint was not saved", now=now)
-                elif (event.stop_reason or self._state.stop_reason) == "end_turn":
+                elif effective_stop == "end_turn":
                     self._transition(ProgressPhase.COMPLETE, event.detail, now=now)
                 else:
-                    detail = event.detail or f"{event.stop_reason or self._state.stop_reason} state saved"
+                    detail = event.detail or f"{effective_stop} state saved"
                     self._transition(ProgressPhase.INTERRUPTED, detail, now=now)
 
             return self._snapshot()

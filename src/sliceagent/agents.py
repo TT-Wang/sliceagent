@@ -22,7 +22,7 @@ _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against th
 # Tools NO subagent may use, regardless of its allowlist. A
 # subagent must not stop to ask the END-USER — ambiguity is the parent's job; a child that blocks on input
 # is a stall (and racy/meaningless when several run in parallel). It returns its summary instead.
-SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user"})
+SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user", "change_workspace"})
 
 # Mutating tools — an agent whose allowlist includes ANY of these is "writable" (globally serialized vs
 # other writers); an allowlist with none of them is read-only (parallelizes as a swarm).
@@ -61,10 +61,24 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
         name="explorer",
         description="Read-only investigation — find files, trace usages, understand code; returns a summary. "
                     "Fan out several in one turn for breadth.",
-        tools=READ_ONLY_TOOLS, reasoning="fast",
-        system_prompt="You are a read-only EXPLORER subagent: investigate the task by reading/grepping and "
-                      "return a concise summary of what you found (files, locations, conclusions). You cannot "
-                      "modify anything — do not attempt edits or commands.",
+        tools=READ_ONLY_TOOLS, reasoning="full",
+        system_prompt=(
+            "You are a read-only EXPLORER subagent: investigate the task by reading/grepping and return a "
+            "concise summary of what you found (files, locations, conclusions). You cannot modify anything — "
+            "do not attempt edits or commands.\n"
+            "Evidence discipline: separate exact observation from inference. A categorical workspace claim must "
+            "be entailed by the tool output you actually saw; quote the load-bearing line and preserve uncertainty. "
+            "Names such as 'stored', 'safe', or 'validated' do not establish how a value was produced, stored, or "
+            "checked. Missing definitions, callers, or execution paths make downstream behavior conditional, not "
+            "proven. Code that constructs a command/query does not prove it is executed or that a claimed impact "
+            "occurs. Do not promote a possible side channel into a measured exploit, or a locally swallowed "
+            "interrupt into a global 'unkillable' claim. State the precise condition under which a risk would "
+            "materialize. Choose the most certain concrete failure first: an observed unresolved dependency, "
+            "ignored input, masked exception, or wrong return outranks a more dramatic security story whose "
+            "caller/sink/threat path was not observed. If the evidence cannot establish the stronger claim, "
+            "report the narrower observed bug. In the final report label the load-bearing line as Observed, the "
+            "interpretation as Inference, and every unobserved prerequisite as Conditional."
+        ),
     ),
     "general": AgentSpec(
         name="general",

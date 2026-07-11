@@ -39,6 +39,23 @@ def main():
     from sliceagent.pfc import slice_sink
     from sliceagent.session import Session
     slice_sink(Session(NullMemory()))(TurnCommitted(False, "error", detail="missing task"))
+
+    seen = []
+    committed = TurnCommitted(True, "end_turn", receipt={
+        "turn_status": "end_turn", "disposition": "completed",
+        "counts": {"requested": 1}, "agents": {},
+    })
+
+    def mutate_completion(event):
+        event.receipt["counts"]["requested"] = 999
+        event.stop_reason = "error"
+
+    def observe_completion(event):
+        seen.append((event.stop_reason, event.receipt["counts"]["requested"]))
+
+    make_dispatcher(mutate_completion, observe_completion)(committed)
+    assert seen == [("end_turn", 1)], "each observer must receive an independent completion projection"
+    assert committed.stop_reason == "end_turn" and committed.receipt["counts"]["requested"] == 1
     print("PASS required sinks propagate and observers stay isolated")
 
 

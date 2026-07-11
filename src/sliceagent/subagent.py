@@ -26,10 +26,12 @@ import threading
 
 from .access import AllAccess, ReadAllAccess
 from .agents import BUILTIN_AGENTS, READ_ONLY_TOOLS, SUBAGENT_EXCLUDED_TOOLS, AgentSpec  # named-agent registry
+from .context import ResourceKind, ResourceRef, reserved_resource_ref
 from .events import AssistantText, ToolResult, ToolStarted
 from .execution import CHILD_TOKEN_BUDGET_ARG
 from .safety import redact_text
-from .subagent_contract import SubagentArtifact, SubagentBrief
+from .subagent_contract import (SubagentArtifact, SubagentBrief, SubagentClaim, SubagentObservation,
+                                exact_intent_clauses)
 from .text_utils import one_line
 
 # INSTANCE identity — an optional short name the parent gives ONE delegation ("auth-explorer"). Distinct
@@ -98,6 +100,22 @@ def _norm_vpath(path) -> str:
     return "" if p == "." else p.rstrip("/")
 
 
+def _task_mentions_exact_target(task: str, target: str) -> bool:
+    """Match a typed target in free task prose without basename-substring or sentence-punctuation errors."""
+    surface = str(task or "").replace("\\", "/")
+    needle = str(target or "").strip().replace("\\", "/")
+    if not needle:
+        return False
+    # Left boundary rejects `a.py` inside `data.py` while still allowing an absolute `/workspace/a.py` suffix.
+    # The right boundary accepts ordinary punctuation, including a sentence-final extra period (`app.py.`), but
+    # rejects path continuations such as `app.py.bak`, `app.py/child`, and identifier suffixes.
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_.-])" + re.escape(needle)
+        + r"(?=$|[^A-Za-z0-9_./-]|\.(?=$|[^A-Za-z0-9_./-]))"
+    )
+    return pattern.search(surface) is not None
+
+
 # NOTE: the former spawn_explore / spawn_subagent tool schemas are GONE — spawn_agent (built per-host in
 # SubagentHost._agent_schema) subsumes both (they were just agent="explorer" / agent="general"); measured
 # parity on parallel fan-out (evals/eval_spawn_breadth_ab.py). run() still RECOGNISES those two names for
@@ -116,12 +134,12 @@ _READ_ONLY_TOOLS = frozenset(READ_ONLY_TOOLS)   # the explorer allowlist — sin
 # summary, so this never reaches the parent slice — the moat is unaffected.)
 EXPLORER_READ_BUDGET = 64
 
-# EXPLORER PROFILE — reasoning intent for read-only explorer children. They NAVIGATE/READ (find files,
-# trace usages, summarize), which the model does well at low reasoning effort; running them at the parent's
-# (often "full") setting just burns wall-clock. Default "fast"; override for an A/B (set to "full" to match
-# the parent). A per-PROFILE subagent reasoning setting, applied via a per-child llm VIEW so the
-# shared parent llm is never mutated and parallel siblings never race on it.
-EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "fast").lower()
+# EXPLORER PROFILE — explorers navigate/read, but they also make evidence-sensitive judgments. Those
+# judgments are exactly where cheap/minimal reasoning amplified a child's speculation into the parent's
+# asserted fact, so the truthful default is the provider's full profile. Latency-sensitive users can still
+# opt into "fast" explicitly. A per-profile setting is applied via a per-child LLM view so parallel siblings
+# never mutate the shared parent client.
+EXPLORER_REASONING = (os.environ.get("AGENT_EXPLORER_REASONING") or "full").lower()
 
 
 def _redact_archive_value(value):
@@ -167,6 +185,21 @@ class _CaptureLast:
 
 _TRACE_MAX_LINES = 200   # bounded action trace per seal (a line is tiny; 200 covers any real child turn)
 
+# Evidence capsule v1: returned observation VIEWS, never a child transcript or full journal.  The caps are
+# deliberately small because several children may be grounded in one parent audit.  A large/read-windowed result
+# remains useful for its retained bytes but is explicitly marked truncated, so it cannot prove omitted content.
+_OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "grep", "glob"})
+_OBSERVATION_ARGS = {
+    "read_file": ("path", "offset", "limit"),
+    "list_files": ("path",),
+    "grep": ("pattern", "path", "glob", "type", "output_mode", "context", "offset", "limit"),
+    "glob": ("pattern", "path", "limit"),
+}
+_OBSERVATION_PER_VIEW_BYTES = 8 * 1024
+_OBSERVATION_TOTAL_BYTES = 16 * 1024
+_OBSERVATION_MAX_COUNT = 8
+_OBSERVATION_TRUNCATION_MARKER = "\n…[sealed observation view truncated by capsule budget]…\n"
+
 
 class _TraceSink:
     """W6': the child's ACTION TRACE, sealed into the artifact — one bounded line per tool result. This is
@@ -192,6 +225,309 @@ class _TraceSink:
         return t
 
 
+def _bounded_observation_view(text: str, budget: int) -> tuple[str, bool]:
+    """Return a UTF-8-safe head/tail view whose encoded size never exceeds ``budget``."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= budget:
+        return text, False
+    marker = _OBSERVATION_TRUNCATION_MARKER.encode("utf-8")
+    if budget <= len(marker):
+        return "", True
+    remaining = budget - len(marker)
+    head_n = remaining // 2
+    tail_n = remaining - head_n
+    head = encoded[:head_n].decode("utf-8", "ignore")
+    tail = encoded[-tail_n:].decode("utf-8", "ignore")
+    view = head + _OBSERVATION_TRUNCATION_MARKER + tail
+    return view, True
+
+
+def _tool_view_is_truncated(tool: str, view: str) -> bool:
+    """Recognize the built-in tools' own explicit paging/truncation markers."""
+    lowered = view.casefold()
+    return bool(
+        "[truncated;" in lowered
+        or "paged out" in lowered
+        or (tool == "read_file" and re.search(r"\+\d+\s+more", lowered))
+    )
+
+
+class _ObservationSink:
+    """Seal a bounded typed capsule of successful workspace observations made by a child."""
+
+    def __init__(self, resource_ref=None, canonicalize=None):
+        self.items: list[SubagentObservation] = []
+        self.used_bytes = 0
+        self.dropped = 0
+        self._seen: set[tuple] = set()
+        # The default host knows whether a reserved-looking path is a virtual archive view or a real
+        # workspace shadow.  Preserve that routing decision here instead of reclassifying by spelling.
+        self._resource_ref = resource_ref
+        self._canonicalize = canonicalize
+
+    @staticmethod
+    def _selected_args(tool: str, args: object) -> dict:
+        args = args if isinstance(args, dict) else {}
+        selected = {}
+        for key in _OBSERVATION_ARGS.get(tool, ()):
+            value = args.get(key)
+            if value is None or isinstance(value, (int, float, bool)):
+                if value is not None:
+                    selected[key] = value
+            elif isinstance(value, str):
+                selected[key] = redact_text(value)
+        return selected
+
+    def __call__(self, event):
+        if not isinstance(event, ToolResult) or event.name not in _OBSERVATION_TOOLS or event.failing:
+            return
+        status = str(
+            event.status
+            or getattr(getattr(getattr(event, "outcome", None), "status", None), "value", "")
+            or "succeeded"
+        ).casefold()
+        ref, _, private = _classified_read_target(
+            event.args, self._resource_ref, canonicalize=self._canonicalize, event=event,
+        )
+        if status != "succeeded" or ref.virtual or private:
+            return
+        raw = str(event.output or "")
+        raw_bytes = raw.encode("utf-8")
+        raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        args = self._selected_args(event.name, event.args)
+        key = (event.name, tuple(args.items()), raw_sha256)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        if len(self.items) >= _OBSERVATION_MAX_COUNT:
+            self.dropped += 1
+            return
+        remaining = _OBSERVATION_TOTAL_BYTES - self.used_bytes
+        budget = min(_OBSERVATION_PER_VIEW_BYTES, remaining)
+        if budget <= len(_OBSERVATION_TRUNCATION_MARKER.encode("utf-8")):
+            self.dropped += 1
+            return
+        redacted_view = redact_text(raw)
+        view, capsule_truncated = _bounded_observation_view(redacted_view, budget)
+        view_bytes = view.encode("utf-8")
+        observation = SubagentObservation(
+            tool=event.name,
+            args=args,
+            status="succeeded",
+            view=view,
+            raw_sha256=raw_sha256,
+            view_sha256=hashlib.sha256(view_bytes).hexdigest(),
+            raw_bytes=len(raw_bytes),
+            view_bytes=len(view_bytes),
+            redacted=redacted_view != raw,
+            truncated=capsule_truncated or _tool_view_is_truncated(event.name, raw),
+        )
+        self.items.append(observation)
+        self.used_bytes += observation.view_bytes
+
+    @property
+    def observations(self) -> tuple[SubagentObservation, ...]:
+        return tuple(self.items)
+
+    @property
+    def gaps(self) -> tuple[str, ...]:
+        if not self.dropped:
+            return ()
+        return (f"{self.dropped} read-only child observation(s) omitted by the sealed capsule budget",)
+
+
+def _primary_observation(
+    observations: tuple[SubagentObservation, ...], brief: SubagentBrief,
+) -> SubagentObservation | None:
+    """Choose the child's best scoped primary view without treating its report as evidence."""
+    if not observations:
+        return None
+    scoped = {str(item).replace("\\", "/").rstrip("/") for item in brief.scope}
+
+    def rank(observation: SubagentObservation) -> tuple[int, int]:
+        path = str(observation.args.get("path") or "").replace("\\", "/").rstrip("/")
+        exact_scope = bool(path and any(path == item or path.endswith("/" + item) for item in scoped))
+        return (0 if observation.tool == "read_file" and exact_scope else
+                1 if observation.tool == "read_file" else 2,
+                1 if observation.truncated else 0)
+
+    return min(observations, key=rank)
+
+
+def _parent_observation_excerpt(
+    observations: tuple[SubagentObservation, ...], brief: SubagentBrief, *, limit: int = 520,
+) -> str:
+    """Return one bounded primary-source view beside the child's interpretive digest.
+
+    The immutable artifact remains the refinement map. This tiny excerpt closes the immediate provenance gap:
+    without it the parent sees only child prose at synthesis time, so a later observation capsule can diagnose
+    laundering but cannot prevent it. Prefer a scoped file read, and keep redaction/truncation explicit.
+    """
+    chosen = _primary_observation(observations, brief)
+    if chosen is None:
+        return "primary observation: unavailable — treat the child report as unverified inference"
+    path = str(chosen.args.get("path") or "(workspace)")
+    flags = []
+    if chosen.redacted:
+        flags.append("redacted")
+    if chosen.truncated:
+        flags.append("truncated")
+    suffix = f"; {', '.join(flags)}" if flags else ""
+    shown = chosen.view
+    presentation_cut = len(shown) > limit
+    if presentation_cut:
+        head = max(1, (limit * 2) // 3)
+        tail = max(1, limit - head)
+        omitted = len(shown) - head - tail
+        shown = (
+            shown[:head]
+            + f"\n…[primary presentation omitted {omitted} chars; open sealed report for the middle]…\n"
+            + shown[-tail:]
+        )
+        suffix += (
+            f"; presentation chars=0:{head} and {len(chosen.view) - tail}:{len(chosen.view)}"
+        )
+    coverage = "complete retained view" if not presentation_cut else "presentation-truncated retained view"
+    return (
+        f"primary observation [obs:{chosen.view_sha256[:12]}; {coverage}{suffix}] {path}:\n"
+        f"{shown}"
+    )
+
+
+def _parent_report_excerpt(report: str, *, limit: int = 800) -> str:
+    """Bound presentation without pretending a cut child interpretation is complete."""
+    value = redact_text(report or "")
+    if len(value) <= limit:
+        return "child report (complete interpretation; preserve its qualifiers):\n" + (value or "(empty)")
+    head = max(1, (limit * 2) // 3)
+    tail = max(1, limit - head)
+    omitted = len(value) - head - tail
+    return (
+        f"child report excerpt (interpretation; chars=0:{head} and {len(value) - tail}:{len(value)}; "
+        f"presentation-truncated; omitted={omitted} — do not infer omitted claims):\n"
+        + value[:head]
+        + f"\n…[presentation omitted {omitted} chars; open sealed report for the middle]…\n"
+        + value[-tail:]
+    )
+
+
+_CLAIM_SECTION = re.compile(
+    r"^(?:#{1,6}\s*)?(?:\*\*|__)?(?:top\s+bug|single\s+most\s+impactful|"
+    r"findings?(?:\s+with\s+evidence)?|observed\s+issue)(?:\*\*|__)?\s*:?[\s-]*$",
+    re.IGNORECASE,
+)
+_CLAIM_LABEL = re.compile(
+    r"^(?:#{1,6}\s*)?(?:[-*+]\s*)?(?:\*\*|__|`{1,3})?"
+    r"(?P<label>top\s+claim(?:\s*\([^)]*\))?|"
+    r"bug(?:\s*\([^)]*\)|\s*#[^:]*)?|"
+    r"observed\s+issue|finding|inference|conditional\s+consequence)(?:\*\*|__|`{1,3})?\s*:\s*",
+    re.IGNORECASE,
+)
+_CLAIM_SKIP = re.compile(
+    r"^(?:#{1,6}\s*)?(?:\*\*|__)?(?:status|scope(?:\s+covered)?|files?\s+examined|"
+    r"gaps?(?:\s*/\s*uncertainty)?|uncertainty|conflicts?)(?:\*\*|__)?\s*:",
+    re.IGNORECASE,
+)
+_CLAIM_CONDITIONAL = re.compile(r"\b(?:if|unless|when|could|may|might|conditional)\b", re.IGNORECASE)
+
+
+def _claim_section_priority(exact: str) -> int:
+    """Recognize standalone report headings whose following line carries the actual claim."""
+    value = re.sub(r"^#{1,6}\s*", "", str(exact or "").strip())
+    # Markdown often puts the colon inside the closing emphasis: `**Top claim:**`.
+    value = value.strip(" \t*_`")
+    value = value.rstrip(":").strip(" \t*_`")
+    if re.fullmatch(r"top\s+claim(?:\s*\([^)]*\))?", value, re.IGNORECASE):
+        return 240
+    if re.fullmatch(
+            r"(?:top\s+bug(?:\s*\([^)]*\))?|single\s+most\s+impactful(?:\s+bug)?|"
+            r"findings?(?:\s+with\s+evidence)?|observed\s+issue)", value, re.IGNORECASE):
+        return 80
+    return 0
+
+
+def _claim_text(exact: str, *, table_issue: str = "") -> str:
+    """Produce a one-line display from an exact report span without adding semantics."""
+    value = table_issue or exact
+    value = re.sub(r"^\s*(?:[-*+]\s+|#{1,6}\s+)", "", value.strip())
+    value = value.replace("**", "").replace("__", "")
+    value = re.sub(r"\s+", " ", value).strip(" |")
+    return value if len(value) <= 520 else value[:519].rstrip() + "…"
+
+
+def _extract_report_claims(
+    report: str, observations: tuple[SubagentObservation, ...], brief: SubagentBrief,
+) -> tuple[SubagentClaim, ...]:
+    """Index one bounded, exact child-report claim for deterministic fan-in.
+
+    This deliberately does *not* decide whether the claim follows from source bytes. ``report_exact`` binds the
+    ledger entry to the sealed report; the parent may attribute it as testimony or independently verify it. The
+    extraction only identifies the report's own top-finding line, so it cannot promote child prose to observation.
+    """
+    candidates: list[tuple[int, int, str, str]] = []
+    claim_section_score = 0
+    fenced = False
+    for index, raw in enumerate(str(report or "").splitlines()):
+        exact = raw.strip()
+        if exact.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not exact or exact in {"---", "***"}:
+            continue
+        section_priority = _claim_section_priority(exact)
+        if section_priority or _CLAIM_SECTION.match(exact):
+            claim_section_score = section_priority or 80
+            continue
+        if _CLAIM_SKIP.match(exact):
+            claim_section_score = 0
+            continue
+
+        table_issue = ""
+        score = 0
+        if exact.startswith("|") and exact.endswith("|"):
+            cells = [cell.strip().replace("**", "").replace("__", "")
+                     for cell in exact.strip("|").split("|")]
+            if cells and all(re.fullmatch(r":?-{3,}:?", cell or "-") for cell in cells):
+                continue
+            if len(cells) >= 3 and (cells[0].isdigit() or re.search(r"\b(?:critical|high|medium|low)\b",
+                                                                    exact, re.IGNORECASE)):
+                table_issue = cells[-1]
+                score = 125
+
+        label = _CLAIM_LABEL.match(exact)
+        if label:
+            kind = label.group("label").casefold()
+            score = max(score, 200 if kind == "top claim"
+                        else 130 if kind.startswith("bug") or kind in {"finding", "observed issue"}
+                        else 115 if kind == "inference" else 105)
+        elif claim_section_score:
+            score = max(score, claim_section_score)
+        if re.search(r"\b(?:bug|vulnerab|failure|incorrect|undefined|unhandled|swallow|mask|break|leak)\b",
+                     exact, re.IGNORECASE):
+            score += 12
+        if score:
+            # Preserve the entire physical report line as the source span. Display cleanup is a separate field;
+            # deterministic publication uses this exact value, never the cleaned derivative.
+            candidates.append((score, -index, raw, table_issue))
+            claim_section_score = 0
+
+    if not candidates:
+        return ()
+    _, _, report_exact, table_issue = max(candidates)
+    if len(report_exact.encode("utf-8")) > 1200:
+        # Never cut an exact claim span: a qualifier may live in the omitted tail. Fall back to source review.
+        return ()
+    text = _claim_text(report_exact, table_issue=table_issue)
+    if not text:
+        return ()
+    primary = _primary_observation(observations, brief)
+    refs = (primary.view_sha256,) if primary is not None else ()
+    modality = "conditional" if _CLAIM_CONDITIONAL.search(report_exact) else "inference"
+    return (SubagentClaim(
+        text=text, report_exact=report_exact, modality=modality, observation_refs=refs,
+    ),)
+
+
 def _primary_arg(args) -> str:
     """The one informative arg for a compact activity line (path/command/pattern/…), whitespace-collapsed."""
     if not isinstance(args, dict):
@@ -203,18 +539,61 @@ def _primary_arg(args) -> str:
     return ""
 
 
-def _targets_reserved_ns(args) -> bool:
-    """True if a read tool's path targets the PARENT-only virtual namespaces (subagents/, history/ or
-    roster/) — a child shares the base host, so without this it could page the parent's trajectory, a
-    sibling's sealed artifact, or another specialist's career (a third channel the design forbids:
-    children couple ONLY through the two seals — or an EXPLICIT grant / their OWN roster files, both
-    checked by the caller: a grant is a pointer to a seal and self-memory is not a channel)."""
-    p = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
-    # `.sliceagent/` is the host's PRIVATE dir — paged-out blobs (.sliceagent/blobs/, the L1→L2 store for big
-    # tool results), config, agents. A child shares the base host, so without blocking it a child could
-    # read_file/list a parent-created blob = an undocumented parent→child output channel (external review S8).
-    return (p in ("artifacts", "subagents", "history", "roster", ".sliceagent")
-            or p.startswith(("artifacts/", "subagents/", "history/", "roster/", ".sliceagent/")))
+_CHILD_PRIVATE_RESOURCE_KINDS = frozenset({
+    ResourceKind.ARTIFACT, ResourceKind.HISTORY, ResourceKind.SUBAGENT, ResourceKind.ROSTER,
+})
+
+
+def _classified_read_target(
+    args, resource_ref=None, *, canonicalize=None, event=None,
+) -> tuple[ResourceRef, str, bool]:
+    """Return the host-routed resource, its canonical handle, and private-host-dir status.
+
+    Namespace spelling alone is not authoritative: ``/workspace/history/turn-1.md`` can be the same virtual
+    handle as ``history/turn-1.md``, while a real ``history/`` or ``artifacts/`` project path shadows that
+    mount and must remain readable.  Prefer the typed effect captured at execution time, then the host's
+    canonical ``resource_ref`` seam.  The lexical fallback exists only for minimal legacy/test hosts.
+    """
+    path = args.get("path") if isinstance(args, dict) else ""
+    ref = None
+    if event is not None:
+        for effect in (getattr(getattr(event, "outcome", None), "effects", ()) or ()):
+            if getattr(effect, "kind", "") != "resource_observed":
+                continue
+            payload = getattr(effect, "payload", {}) or {}
+            try:
+                ref = ResourceRef(ResourceKind(str(payload.get("resource_kind") or "")),
+                                  str(payload.get("handle") or "."))
+            except (TypeError, ValueError):
+                continue
+            break
+
+    if ref is None and callable(resource_ref):
+        try:
+            candidate = resource_ref(str(path or ""))
+            if isinstance(candidate, ResourceRef):
+                ref = candidate
+        except Exception:  # noqa: BLE001 — a classifier failure must fail closed via the lexical fallback
+            ref = None
+    if ref is None:
+        ref = reserved_resource_ref(_norm_vpath(path))
+    canonical_source = ref.handle if ref.virtual else path
+    if not ref.virtual and callable(canonicalize):
+        try:
+            canonical_source = canonicalize(str(path or ""))
+        except Exception:  # noqa: BLE001 — lexical fallback still protects the ordinary relative spelling
+            pass
+    canonical = _norm_vpath(canonical_source)
+    # `.sliceagent/` is a physical host-private store, not a virtual archive kind. Keep the existing
+    # default-deny for both its relative spelling and the absolute spelling canonicalized by the host.
+    private = canonical == ".sliceagent" or canonical.startswith(".sliceagent/")
+    return ref, canonical, private
+
+
+def _targets_reserved_ns(args, resource_ref=None) -> bool:
+    """True only for the resource the host actually routes as a parent-private view."""
+    ref, _, private = _classified_read_target(args, resource_ref)
+    return ref.kind in _CHILD_PRIVATE_RESOURCE_KINDS or private
 
 
 # NO hire cap — a dormant specialist is just files on disk and a wake reads only its own files (flat in
@@ -274,7 +653,8 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
                  name: str = "", grants: tuple = (), identity_block: str = "",
                  brief: SubagentBrief | None = None, workspace_id: str = "", task_id: str = "",
                  parent_id: str = "", artifact_store=None, artifact_id: str = "",
-                 artifact_ref_sink=None, token_budget: int | None = None) -> str:
+                 artifact_ref_sink=None, token_budget: int | None = None,
+                 launch_ordinal: int = 0) -> str:
     """Run a child agent of a given KIND (`spec`) on `task` with a fresh slice; return a bounded summary.
     The child's events stay on its OWN dispatcher — they never touch the parent's slice (the bounded-
     context guarantee); only the summary crosses back.
@@ -364,8 +744,11 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
 
     cap = _CaptureLast()
     trace = _TraceSink()
+    observation_sink = _ObservationSink(
+        getattr(tools, "resource_ref", None), getattr(tools, "_archive_handle", None),
+    )
     reducer = slice_sink(child_state)
-    sinks = [cap, trace]
+    sinks = [cap, trace, observation_sink]
     if notify is not None:
         sinks.append(_nested_sink(notify, depth))
     required = (journal_sink, reducer) if child_journal is not None else (reducer,)
@@ -387,6 +770,10 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     # Child usage is sealed into the artifact and returned as a typed ToolEffect. The parent loop consumes
     # that effect exactly once into TurnOutcome, StepEnd metrics, and the same task budget.
     _child_usage = dict(getattr(result, "usage", None) or {})
+    core_handle = ""
+    claim_projection: list[dict] = []
+    scope_projection: list[str] = []
+    target_projection = ""
 
     def child_result(text: str, *, ok: bool, outcome_status: str | None = None):
         from .execution import ToolEffect, Usage
@@ -395,9 +782,25 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         identity = artifact_id or ("ephemeral-" + hashlib.sha256(
             f"{workspace_id}|{task_id}|{parent_id}|{depth}|{name}|{task}".encode("utf-8", "replace")
         ).hexdigest()[:24])
+        effects = [ToolEffect(f"{identity}:model-usage", "model_usage", usage.as_dict())]
+        if core_handle:
+            # The bounded prose result is presentation; this typed relationship is the exact refinement
+            # map from the parent invocation to the immutable child report that actually sealed.
+            effects.append(ToolEffect(
+                f"{identity}:child-artifact", "child_artifact", {
+                    "artifact_id": core_handle,
+                    "kind": spec.name,
+                    "name": name,
+                    "launch_ordinal": launch_ordinal,
+                    "status": status,
+                    "scope": scope_projection,
+                    "delegation_target": target_projection,
+                    "claims": claim_projection,
+                },
+            ))
         return ToolText(
             text, ok=ok, status=outcome_status,
-            effects=(ToolEffect(f"{identity}:model-usage", "model_usage", usage.as_dict()),),
+            effects=tuple(effects),
         )
 
     _af = list(child_state.active_files)   # BOUND the resident head: a child that read 100 files must not
@@ -430,15 +833,20 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
     evidence_refs = tuple(dict.fromkeys([
         *grants, *(clause.source_artifact for clause in brief.intent_clauses if clause.source_artifact),
     ]))
-    gaps = (() if success else (child_state.last_error or f"child stopped with {result.stop_reason}",))
+    gaps = (
+        (() if success else (child_state.last_error or f"child stopped with {result.stop_reason}",))
+        + observation_sink.gaps
+    )
     uncertainty = (() if cap.text else ("child produced no final report text",))
+    claims = _extract_report_claims(cap.text or "", observation_sink.observations, brief)
     typed_artifact = SubagentArtifact.create(
         kind=spec.name, name=name, workspace_id=workspace_id or os.path.realpath(workspace_root),
         session_id=session_id or "session-ephemeral", task_id=task_id or "task-unknown",
-        parent_id=parent_id, brief=brief, status=status,
+        parent_id=parent_id, launch_ordinal=launch_ordinal, brief=brief, status=status,
         coverage=f"{len(child_files)} file(s) examined or changed; stop={result.stop_reason}",
         report=cap.text or "", findings=tuple(child_state.findings),
-        evidence_refs=evidence_refs, files=child_files, workspace_root=workspace_root,
+        evidence_refs=evidence_refs, observations=observation_sink.observations, claims=claims,
+        files=child_files, workspace_root=workspace_root,
         change_set=tuple(sorted(child_state.edited_files)), gaps=gaps, uncertainty=uncertainty,
         error=(child_state.last_error or ("" if success else str(result.stop_reason))),
         steps=result.steps, usage=_child_usage,
@@ -446,12 +854,18 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
         lesson=one_line(_lm[-1], 200) if _lm else "",
     )
     artifact = typed_artifact.to_record()
-    core_handle, core_archive_error = "", ""
+    core_archive_error = ""
     if artifact_store is not None and artifact_id:
         try:
             from datetime import datetime, timezone
             from .persistence import Artifact
             safe_artifact = _redact_archive_value(artifact)
+            # Redaction transforms both report and indexed spans. Re-parse the exact bytes that will be stored so
+            # report membership, reference closure, schema bounds, and hashes cannot diverge at this last seam.
+            safe_typed_artifact = SubagentArtifact.from_record(safe_artifact)
+            claim_projection = [claim.to_dict() for claim in safe_typed_artifact.claims]
+            scope_projection = list(safe_typed_artifact.brief.scope)
+            target_projection = safe_typed_artifact.brief.delegation_target
             core = Artifact(
                 id=artifact_id, kind="subagent", workspace_id=typed_artifact.workspace_id,
                 session_id=typed_artifact.session_id, task_id=typed_artifact.task_id,
@@ -514,15 +928,22 @@ def run_subagent(task: str, *, tools, llm, retriever, memory, policy,
             f"({why}). No child finding was accepted; rerun or repair the local artifact store.",
             ok=False, outcome_status="indeterminate")
     if durable_handle:   # archived → bounded digest + recall handle (the refinable seal)
-        body = one_line(redact_text(cap.text), 300) if cap.text else "(no summary produced)"
+        body = _parent_report_excerpt(cap.text)
         # ALWAYS hand back the CANONICAL immutable id (sub-N.md), never the subagents/<name>.md alias: the
         # alias retargets to the LATEST job for that name, so a later same-name job would silently make an
         # earlier tool result / grant open a DIFFERENT report (external review S11). The <name>.md alias
         # stays resolvable in SubagentFS as a convenience; the sealed handle the parent stores is immutable.
         target = f"artifacts/{core_handle}.md" if core_handle else f"subagents/{handle}.md"
-        summary = f'{head} {body} → full report: read_file("{target}")'
+        primary = _parent_observation_excerpt(observation_sink.observations, brief)
+        summary = (
+            f"{head}\n{body}\n"
+            f"{primary}\n→ full report: read_file(\"{target}\")"
+        )
     else:        # no durable archive (eval/headless) → inline, back-compat with the pre-artifact behavior
-        summary = head + (" " + one_line(cap.text, 400) if cap.text else "")
+        summary = (
+            f"{head}\n{_parent_report_excerpt(cap.text)}\n"
+            f"{_parent_observation_excerpt(observation_sink.observations, brief)}"
+        )
     if not success:
         if child_state.last_error:
             summary += " | unresolved: " + one_line(child_state.last_error, 160)
@@ -573,21 +994,29 @@ class SubagentHost:
         self.artifact_store = artifact_store
         self.artifact_ref_sink = artifact_ref_sink
         self.core_mode = bool(core_mode)
-        self._artifact_seq = 0
+        self._artifact_seq: dict[tuple[str, str], int] = {}
         self._artifact_lock = threading.Lock()
 
-    def _next_artifact_id(self, *, task_id: str, parent_id: str) -> str:
-        if self.artifact_store is None:
-            return ""
-        from .persistence import deterministic_artifact_id
+    def _next_artifact_identity(self, *, task_id: str, parent_id: str) -> tuple[str, int]:
+        """Allocate launch identity before child work starts.
+
+        The ordinal is meaningful even in legacy/non-core mode.  The old ``sub-N`` handle is assigned only
+        when a report finishes archiving, so concurrent completion order must never be mistaken for launch
+        order in later discourse resolution.
+        """
+        key = (task_id, parent_id)
         with self._artifact_lock:
-            self._artifact_seq += 1
-            sequence = self._artifact_seq
-        return deterministic_artifact_id(
+            sequence = self._artifact_seq.get(key, 0) + 1
+            self._artifact_seq[key] = sequence
+        if self.artifact_store is None:
+            return "", sequence
+        from .persistence import deterministic_artifact_id
+        artifact_id = deterministic_artifact_id(
             kind="subagent", workspace_id=self.workspace_id or "workspace-unknown",
             session_id=self.session_id or "session-ephemeral", task_id=task_id,
             logical_id=f"{parent_id or 'parent-none'}:{sequence}",
         )
+        return artifact_id, sequence
 
     def __getattr__(self, name):
         # FAITHFUL ToolHost projection: any host attribute NOT explicitly overridden above
@@ -614,7 +1043,10 @@ class SubagentHost:
                 if self.depth < self.max_depth and {"spawn_agent", "spawn_explore", "spawn_subagent"} & allow:
                     s.append(self._agent_schema())
                 return s
-        if self.depth < self.max_depth:  # parent (or a general child) — offer delegation while depth remains
+        if (self.depth < self.max_depth
+                and (not self.core_mode or "explorer" in self.agents)):
+            # parent (or a general child) — offer delegation while depth remains. Core mode has exactly one
+            # truthful capability; if that spec is absent, advertise no spawn tool rather than an empty lie.
             s.append(self._agent_schema())
         return s
 
@@ -623,9 +1055,12 @@ class SubagentHost:
         (each was just this with agent='explorer' / 'general'); measured parity on parallel fan-out, so the
         breadth nudge lives here in the description, not in a dedicated verb. The two orthogonal dials —
         KIND (agent=) and IDENTITY (name=) — are spelled out so the model has the right mental model."""
-        kinds = "; ".join(f"{n} ({sp.description})" for n, sp in self.agents.items())
+        available = ({"explorer": self.agents["explorer"]}
+                     if self.core_mode and "explorer" in self.agents else dict(self.agents))
+        kinds = "; ".join(f"{n} ({sp.description})" for n, sp in available.items())
         properties = {
-            "agent": {"type": "string", "description": "the KIND to run (a name from the list above)"},
+            "agent": {"type": "string", "enum": list(available),
+                      "description": "the KIND to run (one of the live values in this schema)"},
             "task": {"type": "string", "description": "the self-contained sub-task for that agent"},
             "scope": _SCOPE_PARAM, "exclusions": _EXCLUSIONS_PARAM,
             "report_shape": _REPORT_SHAPE_PARAM, "drift_policy": _DRIFT_POLICY_PARAM,
@@ -652,14 +1087,45 @@ class SubagentHost:
 
     def _brief(self, task: str, args: dict, canonical_refs: frozenset) -> SubagentBrief:
         intent_entries = ()
+        scope = tuple(args.get("scope") or ())
+        delegation_target = ""
         if self.intent_provider is not None:
             # A configured provenance seam failing must block delegation; silently dropping binding
             # constraints would create a deceptively successful but under-scoped child report.
-            intent_entries = (self.intent_provider(task) if callable(self.intent_provider)
-                              else self.intent_provider)
+            intent_state = (self.intent_provider(task) if callable(self.intent_provider)
+                            else self.intent_provider)
+            intent_entries = exact_intent_clauses(intent_state)
+            contract = getattr(intent_state, "turn_contract", None)
+            requirement = getattr(contract, "delegation_requirement", None)
+            if requirement is not None:
+                # Fan-out count/targets/reduce shape are PARENT orchestration invariants. Replicating the whole
+                # current request into each scoped child tells every explorer to perform the parent fan-out and
+                # conflicts with its one-file objective. Keep independent standing constraints; remove only the
+                # current request owned by the typed delegation requirement.
+                current_request = str(getattr(intent_state, "current_request", "") or "")
+                intent_entries = tuple(
+                    clause for clause in intent_entries if clause.verbatim_clause != current_request
+                )
+                raw_targets = (requirement.get("targets", ()) if isinstance(requirement, dict)
+                               else getattr(requirement, "targets", ())) or ()
+                scope_keys = {_norm_vpath(item) for item in scope if isinstance(item, str)}
+                task_surface = str(task or "").replace("\\", "/")
+                matches = []
+                for raw_target in raw_targets:
+                    target = str(raw_target or "").strip()
+                    if not target:
+                        continue
+                    if _task_mentions_exact_target(task_surface, target) \
+                            or _norm_vpath(target) in scope_keys:
+                        matches.append(target)
+                if len(matches) == 1:
+                    delegation_target = matches[0]
+                    if not scope:
+                        scope = (delegation_target,)
         return SubagentBrief.create(
             task, intent_entries=intent_entries,
-            scope=args.get("scope") or (), exclusions=args.get("exclusions") or (),
+            scope=scope, delegation_target=delegation_target,
+            exclusions=args.get("exclusions") or (),
             report_shape=(args.get("report_shape") or None),
             canonical_refs=tuple(sorted(canonical_refs)),
             drift_policy=args.get("drift_policy") or "report",
@@ -728,6 +1194,31 @@ class SubagentHost:
             return [ReadAllAccess()] if (sp is not None and sp.read_only) else [AllAccess()]
         return self.inner.accesses(name, args)
 
+    def resolve_intent_effect(self, name: str, args: dict):
+        """Resolve wrapper-owned delegation tools for the per-turn authority gate.
+
+        Delegation schemas are projected by this wrapper rather than registered on the inner host. A
+        read-only child is observational fan-out; a writable child can change the workspace and therefore
+        requires explicit effect authority.
+        """
+        from .registry import ToolIntentEffect
+        if name == "spawn_explore":
+            return ToolIntentEffect.OBSERVE
+        if name == "spawn_subagent":
+            return ToolIntentEffect.EXTERNAL
+        if name == "spawn_agent":
+            spec = self.agents.get(str((args or {}).get("agent") or ""))
+            if spec is None:
+                return ToolIntentEffect.UNKNOWN
+            return ToolIntentEffect.OBSERVE if spec.read_only else ToolIntentEffect.EXTERNAL
+        resolver = getattr(self.inner, "resolve_intent_effect", None)
+        if callable(resolver):
+            return resolver(name, args or {})
+        registry = getattr(self.inner, "registry", None)
+        if registry is None:
+            return ToolIntentEffect.UNKNOWN
+        return registry.resolve_intent_effect(name, args or {})
+
     def read_text(self, path: str) -> str:
         return self.inner.read_text(path)
 
@@ -754,13 +1245,20 @@ class SubagentHost:
         # search_history is bound to the PARENT session (its FTS5 this-session mode returns previews of the
         # parent's own turns) → same trajectory leak as reading history/. A child works from its brief, not the
         # parent's memory, so block it too (and it's dropped from the child's schemas below).
-        if self.spec is not None and (name == "search_history"
-                                      or (name in ("read_file", "list_files", "grep") and _targets_reserved_ns(args))):
+        canonical_path = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
+        private_read = False
+        if name in ("read_file", "list_files", "grep", "glob"):
+            read_ref, canonical_path, private_path = _classified_read_target(
+                args, getattr(self.inner, "resource_ref", None),
+                canonicalize=getattr(self.inner, "_archive_handle", None),
+            )
+            private_read = read_ref.kind in _CHILD_PRIVATE_RESOURCE_KINDS or private_path
+        if self.spec is not None and (name == "search_history" or private_read):
             # W2 carve-out: an EXACT granted handle passes through (read_file/grep on that one file only —
             # never list_files, never a directory, never index.md; those can't be granted). W4' carve-out:
             # a standing specialist may read ITS OWN roster/<name>/ files (career, lessons, profile) —
             # self-memory, not a channel. Everything else in the reserved namespaces stays default-deny.
-            p = _norm_vpath(args.get("path") if isinstance(args, dict) else "")
+            p = canonical_path
             if name in ("read_file", "grep") and p in self.grants:
                 return self.inner.run(name, args)
             if self.instance_name and (p == f"roster/{self.instance_name}"
@@ -770,7 +1268,7 @@ class SubagentHost:
                     if self.grants else "")
             own = (f" Your own past work is under roster/{self.instance_name}/."
                    if self.instance_name else "")
-            return ("Error: history/, subagents/ and roster/ (and search_history over them) are the "
+            return ("Error: artifacts/, history/, subagents/ and roster/ (and search_history over them) are the "
                     "parent's private namespaces — a subagent works only from its own task/brief."
                     + hint + own + " If you lack context, say so in your report.")
         if name not in ("spawn_subagent", "spawn_explore", "spawn_agent"):
@@ -796,7 +1294,7 @@ class SubagentHost:
                         % (args.get("agent", ""), ", ".join(self.agents)))
         else:   # back-compat built-in tools → their specs
             spec = BUILTIN_AGENTS["explorer" if name == "spawn_explore" else "general"]
-        if self.core_mode and (name != "spawn_agent" or not spec.read_only):
+        if self.core_mode and (name != "spawn_agent" or spec.name != "explorer"):
             return ("Error: core delegation exposes only spawn_agent(agent='explorer'); enable "
                     "AGENT_ADVANCED_AGENTS for writable or legacy delegation")
         try:
@@ -836,7 +1334,9 @@ class SubagentHost:
             _root = os.getcwd()
         _task_id = self._context_id(self.task_id_fn, "task-unknown")
         _parent_id = self._context_id(self.parent_id_fn, "")
-        _artifact_id = self._next_artifact_id(task_id=_task_id, parent_id=_parent_id)
+        _artifact_id, _launch_ordinal = self._next_artifact_identity(
+            task_id=_task_id, parent_id=_parent_id,
+        )
 
         child_tools = SubagentHost(
             self.inner, llm=self.llm, retriever=self.retriever, memory=self.memory,
@@ -866,6 +1366,7 @@ class SubagentHost:
                 artifact_id=_artifact_id,
                 artifact_ref_sink=self.artifact_ref_sink,
                 token_budget=(max(0, int(token_budget)) if token_budget is not None else None),
+                launch_ordinal=_launch_ordinal,
             )
             # announce the lifecycle event (visibility: an unadvertised wake channel stays dead) — but NOT
             # onto a failed child's "Error: ..." return, where it would garble the parent's error tier (the

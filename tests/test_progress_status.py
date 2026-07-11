@@ -54,7 +54,7 @@ def live_status_ticks_and_a_text_body_would_freeze():
 
 
 @check
-def render_is_markup_safe_and_shows_task_pass_and_elapsed():
+def render_shows_activity_without_repeating_the_user_prompt():
     s = RichSink(Console(file=io.StringIO(), force_terminal=True, width=124, height=25,
                          _environ={"TERM": "xterm"}), {})
     try:
@@ -63,7 +63,9 @@ def render_is_markup_safe_and_shows_task_pass_and_elapsed():
         rendered = _LiveStatus(s).__rich__()
         out = rendered.plain
         assert "pass 7" in out, out
-        assert "[id]" in out and "[/learn]" in out, f"brackets must survive literally: {out!r}"
+        assert "[id]" not in out and "[/learn]" not in out, \
+            f"the submitted prompt must stay in conversation scrollback, not status chrome: {out!r}"
+        assert "Thinking" in out
         assert ":" in out, "elapsed time must be present"
         assert rendered.no_wrap and rendered.overflow == "ellipsis", \
             "the transient status must stay one line"

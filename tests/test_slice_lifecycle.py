@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.events import ToolResult  # noqa: E402
 from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.session import apply_turn_continuation  # noqa: E402
 from sliceagent.slice_state import MAX_PROGRESS_SIGNALS, TurnRuntime  # noqa: E402
 
 CHECKS = []
@@ -15,6 +16,24 @@ CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
+
+
+@check
+def a_move_on_directive_clears_a_stale_open_user_report_but_a_follow_up_keeps_it():
+    # The bug: a stale OPEN USER REPORT from a prior concern was answered first on an unrelated request.
+    # A move-on cue ("anyways do a bug hunt") abandons it → cleared; a benign follow-up must KEEP a real
+    # "it's broken" report so it survives the debugging thread.
+    s = Slice(); s.reset("prior task"); s.open_report = "the 12-vs-11 explorer self-correction gap"
+    apply_turn_continuation(s, "anyways do a bug hunting for this project")
+    assert s.open_report == "", s.open_report
+
+    s2 = Slice(); s2.reset("build task"); s2.open_report = "the build is red"
+    apply_turn_continuation(s2, "also add a logging line")     # a follow-up, not a move-on → report survives
+    assert s2.open_report == "the build is red", s2.open_report
+
+    s3 = Slice(); s3.reset("t"); s3.open_report = "still broken"   # a move-on that IS a fresh report keeps one
+    apply_turn_continuation(s3, "never mind — it still doesn't work")
+    assert s3.open_report, "a fresh report in the same turn must not be cleared"
 
 
 @check

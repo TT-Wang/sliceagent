@@ -15,7 +15,7 @@ import re
 import shlex
 from dataclasses import dataclass
 
-from .registry import ToolEntry, ToolText
+from .registry import ToolEntry, ToolIntentEffect, ToolText
 from .text_utils import one_line
 
 _MAX_SCAN_DEPTH = 8   # bound skill-root walk depth — defensive vs deep trees
@@ -202,7 +202,8 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
         return expand_skill_args(body, args.get("arguments") or "")
 
     return ToolEntry(name="skill", schema=schema, handler=handler,
-                     accesses=lambda _a: [], source="skill")
+                     accesses=lambda _a: [], source="skill",
+                     intent_effect=ToolIntentEffect.OBSERVE)
 
 
 def make_skill_manager(roots: list[str] | None = None) -> SkillManager:

@@ -63,6 +63,36 @@ def historyfs_over_durable_memem_roundtrip():
 
 
 @check
+def historyfs_reads_a_past_session_turn_by_session_scoped_path():
+    """A PAST session's full turn is readable at history/<sid>/turn-N.md (no raw filesystem path, no
+    boundary hit); this session's bare paths are unchanged; an unsafe session id can't traverse."""
+    try:
+        m = _memem()
+    except Exception:
+        print("  (skip: memem not importable)"); return
+    from sliceagent.hippocampus import HistoryFS
+    m.append_episode("s-past01", "t1", 2, _rec("bug hunt", "2 explorers failed on timeout",
+                     [{"slice": "", "action": [{"name": "spawn_agent", "args": {}, "failing": False}],
+                       "observation": ["explorer report"]}]))
+    m.append_episode("s-cur", "t1", 1, _rec("explore repo", "read-only", [{"slice": "", "action": [], "observation": []}]))
+    fs = HistoryFS(m, "s-cur")
+    # cross-session read + index + listing
+    past = fs.read_file("history/s-past01/turn-2.md")
+    assert "2 explorers failed on timeout" in past and "spawn_agent" in past
+    assert "PAST session" in fs.read_file("history/s-past01/index.md")
+    assert "s-past01/turn-2.md" in fs.listing("history/s-past01")
+    # this session unchanged; a missing past turn reports cleanly
+    assert "read-only" in fs.read_file("history/turn-1.md")
+    assert "no such turn in session s-past01" in fs.read_file("history/s-past01/turn-99.md")
+    # traversal guard: a dirty id never reaches the reader as a real turn (graceful miss, no escape)
+    seen = []
+    m.read_episodes = lambda sid, **k: (seen.append(sid) or [])   # capture every sid the reader receives
+    fs.read_file("history/../../etc/passwd")
+    fs.read_file("history/a.b/turn-1.md")
+    assert all("/" not in s and ".." not in s for s in seen), seen
+
+
+@check
 def trace_has_no_read_cap_but_bounds_per_obs_at_the_seal():
     # NO read-side total cap: every requested turn comes back (a cap dropped whole turns / cut conclusions).
     # The bound is the SEAL — a legacy record's raw obs is tailed per-observation (OBS_TAIL), nothing dropped.
@@ -129,6 +159,33 @@ def historyfs_index_lists_turns_as_files():
     assert "fix the parser" in idx and "provision box" in idx  # titles
     assert 'read_file("history/turn-<N>.md")' in idx           # tells the model how to read one
     assert fs.read_file("history") == idx and fs.read_file("history/") == idx   # dir/root ⇒ index
+
+
+@check
+def history_prefers_the_post_commit_receipt_over_legacy_tool_failure_labels():
+    from sliceagent.hippocampus import HistoryFS
+
+    record = _rec("run explorers", "done with one rejected request", [], failing=True)
+    record["turn_receipt"] = {
+        "disposition": "completed_with_warnings",
+        "counts": {
+            "requested": 2, "execution_started": 1, "rejected_before_execution": 1,
+            "succeeded": 1, "failed": 0, "indeterminate": 0,
+        },
+        "operations": [
+            {"name": "spawn_agent", "requested": True, "execution_started": False,
+             "rejected_before_execution": True, "disposition": "rejected"},
+            {"name": "spawn_agent", "requested": True, "execution_started": True,
+             "rejected_before_execution": False, "disposition": "succeeded"},
+        ],
+    }
+    line = {"task_id": "t1", "turn": 3, "ts": "2026-07-06T12:50:00", "record": record}
+    fs = HistoryFS(_FakeMem([line]), "s")
+    index = fs.read_file("history/index.md")
+    assert "WARN" in index and " FAIL" not in index
+    rendered = fs.read_file("history/turn-3.md")
+    assert "canonical execution receipt" in rendered
+    assert "spawn_agent: requested 2 · started 1 · rejected 1 · succeeded 1" in rendered
 
 
 @check

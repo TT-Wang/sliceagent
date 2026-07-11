@@ -6,7 +6,7 @@ from types import MappingProxyType
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.events import ToolResult  # noqa: E402
+from sliceagent.events import ToolResult, TurnEnd  # noqa: E402
 from sliceagent.intent import IntentEntry, IntentState  # noqa: E402
 from sliceagent.memory import NullMemory, _now_iso, _parse_task_md, _render_task_md  # noqa: E402
 from sliceagent.pfc import Slice, record_user, slice_sink  # noqa: E402
@@ -51,10 +51,10 @@ def paraphrase_is_task_state_not_forged_user_text():
 @check
 def current_request_and_stable_objective_have_distinct_render_authority():
     s = Slice(); s.reset("old task label")
-    record_user(s, "the request that must render")
+    record_user(s, "the live request to render")
     host = LocalToolHost(tempfile.mkdtemp(prefix="intent-seed-"))
     user = make_build_slice(s, host, None, NullMemory(), "fallback task")()[1]["content"]
-    assert user.count("the request that must render") >= 2, "primacy + recency copies derive from intent"
+    assert user.count("the live request to render") == 1, "the live request renders exactly once"
     assert "# STABLE TASK OBJECTIVE" in user and "old task label" in user
 
 
@@ -159,6 +159,65 @@ def modal_question_is_not_promoted_but_a_polite_directive_is():
     record_user(s, directive, source_artifact="turn-polite-directive")
     entry = s.intent.find(directive)
     assert entry is not None and entry.authority == "user"
+
+
+@check
+def one_shot_actions_stay_current_without_becoming_standing_constraints():
+    cases = (
+        "Review this project.",
+        ("Review this project: spawn exactly 3 parallel explorer subagents — one each for app.py, "
+         "auth.py and util.py — each reporting its top bug. Then give me a combined 3-line summary."),
+        "Fix auth.py.",
+        "Spawn exactly 3 explorer subagents.",
+        "Run the test suite.",
+        "Switch to the Hunter workspace.",
+        "Implement the receipt upgrade.",
+        "Refactor parser.py.",
+        "Write me a summary.",
+    )
+    for index, request in enumerate(cases):
+        s = Slice(); s.reset("task")
+        record_user(s, request, source_artifact=f"turn-one-shot-{index}")
+        assert s.intent.current_request == request
+        assert not s.intent.resident_entries(), (request, s.intent.resident_entries())
+
+    completed = Slice(); completed.reset("Review the project")
+    record_user(completed, cases[1], source_artifact="turn-completed-one-shot")
+    slice_sink(completed)(TurnEnd("end_turn", 1, {}))
+    assert completed.task.objective_status == "provisionally_satisfied", \
+        "a clean one-shot turn must not be kept active by a phantom standing constraint"
+
+    constrained = Slice(); constrained.reset("Repair authentication")
+    record_user(constrained, "Only modify auth.py.", source_artifact="turn-open-constraint")
+    slice_sink(constrained)(TurnEnd("end_turn", 1, {}))
+    assert constrained.task.objective_status == "active", \
+        "a real still-binding constraint must continue to hold the task open"
+
+
+@check
+def format_configuration_and_explicit_corrections_remain_durable():
+    durable = (
+        "Use Python 3.12.",
+        "Target PostgreSQL 15.",
+        "Return exactly JSON.",
+        "Output YAML.",
+        "Format the response as a table.",
+        "Keep the public API stable.",
+        "Only modify auth.py.",
+    )
+    for index, request in enumerate(durable):
+        s = Slice(); s.reset("task")
+        record_user(s, request, source_artifact=f"turn-durable-{index}")
+        entry = s.intent.find(request)
+        assert entry is not None and entry.authority == "user", request
+
+    s = Slice(); s.reset("Fix app.py.")
+    record_user(s, "Fix app.py.", source_artifact="turn-action-old")
+    assert not s.intent.resident_entries()
+    correction = "Fix auth.py."
+    record_user(s, f"Correction:\n{correction}", source_artifact="turn-action-correction")
+    entry = s.intent.find(correction)
+    assert entry is not None and entry.kind == "correction"
 
 
 @check

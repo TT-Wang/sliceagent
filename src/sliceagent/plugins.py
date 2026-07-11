@@ -20,9 +20,9 @@ from .access import AllAccess
 from .registry import ToolEntry
 
 
-def _default_dirs() -> list[str]:
+def _default_dirs(root: str | None = None) -> list[str]:
     return [
-        os.path.join(os.getcwd(), ".sliceagent", "plugins"),
+        os.path.join(os.path.realpath(root or os.getcwd()), ".sliceagent", "plugins"),
         os.path.join(os.path.expanduser("~"), ".sliceagent", "plugins"),
     ]
 
@@ -42,14 +42,16 @@ class PluginContext:
         self.counts = {"tools": 0, "skills": 0, "mcp": 0, "hooks": 0}
 
     def register_tool(self, name: str, description: str, handler, *, parameters: dict | None = None,
-                      accesses=None, check=None, override: bool = False) -> None:
+                      accesses=None, check=None, intent_effect=None, override: bool = False) -> None:
+        """Register a plugin tool; undeclared turn semantics deliberately remain fail-closed UNKNOWN."""
         schema = {"type": "function", "function": {
             "name": name, "description": description,
             "parameters": parameters or {"type": "object", "properties": {}}}}
+        semantic = {"intent_effect": intent_effect} if intent_effect is not None else {}
         self.registry.register(ToolEntry(
             name=name, schema=schema, handler=handler,
             accesses=accesses or (lambda _a: [AllAccess()]), check=check,
-            source=f"plugin:{self.name}"), override=override)
+            source=f"plugin:{self.name}", **semantic), override=override)
         self.counts["tools"] += 1
 
     def register_skill(self, name: str, body: str, description: str = "") -> None:
@@ -98,7 +100,7 @@ def load_plugins(registry, skills, dirs: list[str] | None = None, *, root: str, 
                  on_log=lambda m: None) -> tuple[dict, list]:
     """Discover + load plugins from (provided dirs + defaults). Each contributes to the shared
     registry/skills; returns aggregated (mcp_servers, hooks) for the host to connect/compose."""
-    search = list(dict.fromkeys((dirs or []) + _default_dirs()))
+    search = list(dict.fromkeys((dirs or []) + _default_dirs(root)))
     mcp_servers: dict = {}
     hooks: list = []
     def _ls(r):

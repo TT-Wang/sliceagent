@@ -50,9 +50,10 @@ def indeterminate_task_cannot_be_abandoned_before_reconciliation():
 @check
 def reconciliation_blocks_every_effectful_host_command():
     assert {"/config", "/model", "/mode", "/reasoning", "/undo",
-            "/switch", "/resume", "/learn"} <= _RECONCILIATION_BLOCKED_SLASH
-    assert "/cwd" not in _RECONCILIATION_BLOCKED_SLASH, \
-        "the immutable-workspace /cwd query/relaunch guide has no side effects"
+            "/switch", "/resume", "/learn", "/cwd"} <= _RECONCILIATION_BLOCKED_SLASH
+    from sliceagent.cli import _slash_blocked_by_reconciliation
+    assert not _slash_blocked_by_reconciliation("/cwd"), "the no-argument workspace query stays readable"
+    assert _slash_blocked_by_reconciliation("/cwd", "/tmp/next"), "switching must stay behind the gate"
 
 
 @check
@@ -227,7 +228,7 @@ def resume_keeps_topic_goal_but_renders_new_current_request():
         sess, LocalToolHost(tempfile.mkdtemp()), NullRetriever(), NullMemory(),
         "go back and run the parser tests",
     )()[1]["content"]
-    assert user.count("go back and run the parser tests") >= 2, "resume request must drive primacy + recency"
+    assert user.count("go back and run the parser tests") == 1, "resume request renders once at recency"
 
 
 @check

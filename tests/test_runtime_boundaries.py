@@ -67,12 +67,12 @@ def _pid_is_gone(pid: int, timeout: float = 3.0) -> bool:
 
 
 @check
-def cwd_is_a_process_boundary_not_a_partial_reroot():
+def cwd_switch_resolves_an_in_process_target_without_partial_mutation():
     current = tempfile.mkdtemp(prefix="cwd-current-")
     target = tempfile.mkdtemp(prefix="cwd-target-")
     assert _cwd_message(current) == f"workspace: {os.path.realpath(current)}"
     msg = _cwd_message(current, target)
-    assert "fixed for this SliceAgent process" in msg and os.path.realpath(target) in msg, msg
+    assert "workspace switch ready" in msg and os.path.realpath(target) in msg, msg
     assert os.path.realpath(current) != os.path.realpath(target), "test premise broken"
 
 

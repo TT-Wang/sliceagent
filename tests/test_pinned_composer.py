@@ -12,6 +12,7 @@ if _sys.platform == "win32":
     _sys.exit(0)
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -62,13 +63,45 @@ def composer_layout_builds_with_frame_and_status():
     # the Application must construct with the bordered Frame + status window (catches a bad layout import)
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.input.defaults import create_pipe_input
-    from sliceagent.tui import TuiInput
+    import inspect
+    from sliceagent.tui import TuiInput, build_live_app
     ti = TuiInput({"model": "test-model"}, root=None)
     with create_pipe_input() as pinp:
         app, ta = ti._build_composer(pt_input=pinp, pt_output=DummyOutput())
         assert app is not None and ta is not None
         assert app.full_screen is False, "must stay in the normal buffer (native copy/paste)"
         assert ta.completer is ti._completer, "file/slash completion must be wired into the composer"
+    assert 'Frame(ta, title="message")' not in inspect.getsource(TuiInput._build_composer)
+    assert 'Frame(ta, title="message")' not in inspect.getsource(build_live_app), \
+        "the input border needs no redundant title competing with the footer"
+
+
+@check
+def workspace_refresh_keeps_the_same_input_session_and_replaces_file_completions():
+    from prompt_toolkit.document import Document
+    from sliceagent.tui import TuiInput
+
+    current = tempfile.mkdtemp(prefix="composer-current-")
+    target = tempfile.mkdtemp(prefix="composer-target-")
+    with open(os.path.join(current, "current_only.py"), "w", encoding="utf-8") as f:
+        f.write("CURRENT = True\n")
+    with open(os.path.join(target, "target_only.py"), "w", encoding="utf-8") as f:
+        f.write("TARGET = True\n")
+
+    ti = TuiInput({"model": "test-model", "workspace": "current"}, root=current)
+    input_id, session_id = id(ti), id(ti.session)
+
+    def complete(prefix):
+        return {item.text for item in ti._completer.get_completions(Document(prefix), None)}
+
+    assert "current_only.py" in complete("@current")
+    ti.set_workspace(target)
+    assert id(ti) == input_id and id(ti.session) == session_id, \
+        "switching workspaces must refresh the existing composer, not reconnect it"
+    assert "target_only.py" in complete("@target")
+    assert "current_only.py" not in complete("@current"), \
+        "completion must not retain files from the abandoned workspace"
+    assert ti.session.completer is ti._completer
 
 
 @check

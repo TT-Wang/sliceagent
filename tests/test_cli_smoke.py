@@ -151,6 +151,45 @@ def aborted_wizard_falls_back_to_the_gate():
     assert "No API key found" in text, "aborted wizard must fall back to the gate message:\n" + text
 
 
+def update_routes_before_env_or_api_key_startup():
+    """Updating is a host subcommand: it must not load a repo .env or enter provider/session startup."""
+    from unittest import mock
+
+    from sliceagent import cli as cli_mod
+    from sliceagent import onboarding as ob
+
+    seen = []
+    with mock.patch.object(sys, "argv", ["sliceagent", "update"]), \
+         mock.patch.object(ob, "dispatch", side_effect=lambda argv: seen.append(argv) or 23), \
+         mock.patch.object(cli_mod, "_load_env", side_effect=AssertionError("repo .env must not load")):
+        try:
+            cli_mod.main()
+            raise AssertionError("the update subcommand must exit through onboarding dispatch")
+        except SystemExit as exc:
+            assert exc.code == 23
+    assert seen == [["update"]]
+
+
+def chitchat_consumes_stale_continuity_but_remains_exactly_adjacent():
+    from sliceagent.cli import _fold_chitchat_continuity
+    from sliceagent.pfc import Slice
+
+    state = Slice(); state.reset("task")
+    state.continuity.pending_proposal = {"action": {"tool": "edit_file", "args": {"path": "a.py"}}}
+    state.continuity.previous_evidence_snapshot = {
+        "v": 1, "source_turn_id": "turn-before", "execution_query": {
+            "source": "execution_receipt", "family": "delegation", "predicate": "failure_detail",
+            "scope": "task",
+        },
+    }
+    _fold_chitchat_continuity(state, "thanks", "You're welcome.")
+    assert state.continuity.pending_proposal is None
+    assert state.continuity.previous_evidence_snapshot is None
+    assert state.conversation[-1] == {
+        "user": "thanks", "assistant": "You're welcome.", "artifact_id": "",
+    }
+
+
 if __name__ == "__main__":
     main_reaches_prompt_without_crashing()
     print("PASS main_reaches_prompt_without_crashing")
@@ -160,3 +199,7 @@ if __name__ == "__main__":
     print("PASS interactive_first_run_auto_starts_the_wizard")
     aborted_wizard_falls_back_to_the_gate()
     print("PASS aborted_wizard_falls_back_to_the_gate")
+    update_routes_before_env_or_api_key_startup()
+    print("PASS update_routes_before_env_or_api_key_startup")
+    chitchat_consumes_stale_continuity_but_remains_exactly_adjacent()
+    print("PASS chitchat_consumes_stale_continuity_but_remains_exactly_adjacent")

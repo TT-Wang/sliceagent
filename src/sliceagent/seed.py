@@ -49,7 +49,8 @@ from .sensory_cortex import (
 from .subdir_hints import SubdirHints
 from .swap import READ_BUDGET, SwapManager
 from .text_utils import one_line
-from .prompt import DELEGATION_BLOCK, MEMORY_ACCUMULATE, SYSTEM_PROMPT
+from .prompt import (MEMORY_ACCUMULATE, SYSTEM_PROMPT, memory_model_for_eval,
+                     render_delegation_guidance)
 
 MAX_ARTIFACT_CHARS = 1500  # cap for INCIDENTAL output only (discovery snippets) — never for the working set
 DISCOVERY_CHARS = 4000     # cap for the RELATED CODE map (signatures are compact; bounded like every tier)
@@ -89,6 +90,20 @@ def _numbered(lines: list[str], start: int = 1) -> str:
     return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, start))
 
 
+def physical_active_files(s: Slice, tools) -> list[str]:
+    """Live-classify the working set, preserving real files that shadow reserved archive mounts."""
+    classify = getattr(tools, "resource_ref", None)
+    physical = []
+    for path in s.active_files:
+        try:
+            ref = classify(path) if callable(classify) else None
+        except Exception:  # a classification failure must not hide a legitimate workspace file
+            ref = None
+        if ref is None or not getattr(ref, "virtual", False):
+            physical.append(path)
+    return physical
+
+
 def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
                     read_budget: int = READ_BUDGET) -> str:
     """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap (bound ≠ size).
@@ -102,6 +117,13 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     is pure presentation — s.active_files is untouched."""
     if not s.active_files:
         return "(no files opened yet)"
+    # Old checkpoints may contain archive handles that a previous reducer misclassified as workspace files.
+    # Classify through the LIVE host so a real project file shadowing `history/` still wins. Virtual archive
+    # content is available through read_file in the within-turn trajectory; it is never physically re-read or
+    # presented as OPEN FILES on the next turn.
+    physical_files = physical_active_files(s, tools)
+    if not physical_files:
+        return "(no workspace files opened yet)"
     # Render-time view cap: SHOW the most-recent read_budget exploratory reads; the change set (edited
     # files) is ALWAYS shown. At level 0 read_budget IS the live budget SwapManager.evict already enforces,
     # so this keeps every resident read (a no-op); an overflow tighten passes a smaller read_budget to
@@ -112,10 +134,10 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     # SwapManager.evict keeps RESIDENT both the dep-closure AND refault-promoted (hot) files; the renderer's
     # keep-set must match, else a kept file silently vanishes from OPEN FILES (no ghost/refault/manifest
     # signal) once >read_budget exploratory reads push it out of keep_reads — defeating the refault soft-pin.
-    protected = (set(getattr(s, "protected_deps", set())) | set(getattr(s, "hot", {}))) & set(s.active_files)
-    reads = [p for p in s.active_files if p not in s.edited_files and p not in protected]
+    protected = (set(getattr(s, "protected_deps", set())) | set(getattr(s, "hot", {}))) & set(physical_files)
+    reads = [p for p in physical_files if p not in s.edited_files and p not in protected]
     keep_reads = set(reads[-read_budget:]) if read_budget > 0 else set()
-    shown = [p for p in s.active_files if p in s.edited_files or p in protected or p in keep_reads]
+    shown = [p for p in physical_files if p in s.edited_files or p in protected or p in keep_reads]
     # STABLE render order (edited files first, then reads; each sorted by path) so an UNCHANGED
     # working set renders byte-identically across steps → the prompt-cache prefix stays warm (a
     # re-read used to reorder active_files and bust the cache). Recency still governs EVICTION
@@ -231,7 +253,8 @@ def render_slice(s: Slice, artifacts: str, discovery: str = "", memory: str = ""
 
 def _slice_context(s: Slice, artifacts: str, discovery: str = "", memory: str = "", threads: str = "",
                    worktree: str = "", repo_map: str = "", cache_manifest: str = "",
-                   focus: str = "", roster: str = "", *, max_findings: int = MAX_FINDINGS) -> dict:
+                   focus: str = "", roster: str = "", open_file_paths=None,
+                   *, max_findings: int = MAX_FINDINGS) -> dict:
     """Build the single renderer context consumed by both legacy rendering and the elastic seed plan."""
     return {
         "s": s,
@@ -244,6 +267,9 @@ def _slice_context(s: Slice, artifacts: str, discovery: str = "", memory: str = 
         "cache_manifest": cache_manifest,
         "focus": focus,
         "roster": roster,
+        # Production passes the live host classification. Legacy/direct render callers have no host seam,
+        # so preserving their supplied paths is the only truthful fallback.
+        "open_file_paths": tuple(s.active_files if open_file_paths is None else open_file_paths),
         "max_findings": max_findings,
     }
 
@@ -287,9 +313,11 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         f"\n\n# PROJECT ROOT & BOUNDARY\nYou start in: {cwd} — reference files here by their RELATIVE path "
         "(e.g. 'pkg/mod.py', 'test_x.py'); run_command already starts here.\n"
         "Your file tools are confined to your authorized directories — this is the BOUNDARY. To act outside "
-        "it, use run_command/execute_code (the shell is unconfined). Workspace identity is a host boundary: "
-        "it is fixed for this SliceAgent process, so do not claim you changed it. To work from a different "
-        "workspace, ask the user to exit and relaunch SliceAgent from that directory. "
+        "it, use run_command/execute_code (the shell is unconfined). Workspace identity moves only through the "
+        "host control plane. When the user explicitly asks to go to another project, locate its exact directory, "
+        "then call change_workspace(path) as your FINAL tool action; the host durably saves this turn, tears "
+        "down every old-workspace owner, and activates the target without reconnecting the interface or model. "
+        "Never claim a shell `cd` changed the workspace. "
         "You can work on any file "
         "inside your authorized dirs by its path. If you move into another authorized project it appears under "
         "CURRENT PROJECT in the context, and bare relative paths resolve THERE — not pinned to the start dir."
@@ -391,12 +419,16 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # read-only child). Computed ONCE: schemas are stable per session, so the system message stays byte-stable
     # (prompt-cache warm). Without spawn tools the block is empty (we never advertise a tool the model lacks).
     try:
-        _names = {sc.get("function", {}).get("name") for sc in tools.schemas()} if hasattr(tools, "schemas") else set()
+        _schemas = list(tools.schemas()) if hasattr(tools, "schemas") else []
     except Exception:
-        _names = set()
-    delegation_block = DELEGATION_BLOCK if "spawn_agent" in _names else ""   # the ONE delegation tool now
+        _schemas = []
+    delegation_block = render_delegation_guidance(_schemas)
+    _spawn = next((schema.get("function", {}) for schema in _schemas
+                   if schema.get("function", {}).get("name") == "spawn_agent"), {})
+    _spawn_properties = ((_spawn.get("parameters") or {}).get("properties") or {})
+    standing_agents_supported = "name" in _spawn_properties
     # Splice the memory-model explanation into the system prompt (computed once → byte-stable per session).
-    mem_block = MEMORY_ACCUMULATE
+    mem_block = memory_model_for_eval(MEMORY_ACCUMULATE)
 
     # The system message is BYTE-STABLE per session (prompt-cache warm); the ONLY per-turn variation is
     # the active topic's goal. Encode that invariant structurally: everything constant is concatenated
@@ -423,7 +455,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # The live request used to be appended here ("# TASK\n" + goal), which (a) put the one per-turn-varying
         # byte INSIDE the cacheable prefix (busting the system-tier cache on every goal change) and (b) leaked
         # the parent's goal into the prefix SHARED with subagents. The request now lives ONLY in the user slice,
-        # at both primacy and recency (see build()). Cache breakpoint now sits cleanly at the end of this prefix.
+        # once at recency (see build()). Cache breakpoint now sits cleanly at the end of this prefix.
         return system_prefix
 
     # Brain-analogy tags below (legend at the top of pfc.py / in pagetable.py): PFC = carried working
@@ -451,6 +483,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # SwapManager); OPEN FILES/RECENT/findings are otherwise UNCAPPED (bound = relevance, not size).
         read_budget = s.read_budget                                    # PFC: carried adaptive budget
         artifacts = build_artifacts(s, tools, full_file_lines=FULL_FILE_LINES, read_budget=read_budget)
+        open_file_paths = physical_active_files(s, tools)
         # ^ SENSORY CORTEX: fresh re-read of OPEN FILES from disk (depends on swap.prefetch above)
         # PageTable.lookup is the single read path. discovery_query builds the code focus (Markov:
         # latest finding + current error + task).
@@ -475,7 +508,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # without a roster just yields "". Cross-session by design: NOT gated on is_session.
         roster_manifest = ""
         _roster_recent = getattr(memory, "roster_recent", None)
-        if callable(_roster_recent):
+        if standing_agents_supported and callable(_roster_recent):
             _profs, _total = _roster_recent(ROSTER_MANIFEST_K)
             roster_manifest = render_roster(_profs, _total)
         # ACTIVE FOCUS — surface the file-tool reach beyond the workspace (auto-granted when the shell
@@ -488,12 +521,11 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         ctx = _slice_context(
             s, artifacts, discovery, lessons_memo[goal], threads,
             worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
-            roster=roster_manifest, max_findings=_NO_CAP,
+            roster=roster_manifest, open_file_paths=open_file_paths, max_findings=_NO_CAP,
         )
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
-        # it from OUTSIDE at BOTH ends — PRIMACY (above) + RECENCY (below the fence), from ONE `goal` source so
-        # the two copies never diverge — and the intent-aware NOW footer is the OUTERMOST tail, so the final
-        # instruction reads as an instruction, not as fenced context. (Primacy+recency U-curve / sandwich.)
+        # it once from OUTSIDE at RECENCY (below the fence), and the intent-aware NOW footer is the OUTERMOST
+        # tail. One exact request avoids turning a user's premise into duplicated pseudo-evidence.
         reqblock = render_current_request(goal)
         nowblock = render_now(render_subdir_hints(hint_text))
         attached = _attach_images("", tools)

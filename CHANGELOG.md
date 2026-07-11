@@ -5,6 +5,51 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Intent Fidelity v2.** One shared, ephemeral turn contract now separates user-authorized action spans
+  from quoted/reported prior output, grounds historical references in sealed responses, resolves numbered
+  items and launch-ordered subagents, and gates every task-state/external/unknown tool call at the host.
+  Questions and confirmations may still inspect or ask; terse assent acts only on one immediately pending
+  proposal or an explicitly selected numbered option.
+- **Safe update path.** `sliceagent update` now updates a positively identified canonical `uv tool`
+  install before any API-key, workspace, plugin, or MCP startup. Editable/direct installs are preserved,
+  alternative package managers receive exact guidance, and `/update` points active sessions to the safe
+  process boundary.
+- **Seamless workspace handoff.** `/cwd <path>` and the model-facing `change_workspace` control tool now
+  stage and validate the target runtime, durably seal the current turn, and atomically replace only
+  workspace-owned resources. The terminal application, model client, token/cost counters, and connection stay
+  alive; target preparation failures roll back to the untouched current workspace.
+- **Canonical execution receipts.** Every tool lifecycle now records requested, rejected-before-start,
+  physically started, settled, and effect-applied states under one invocation identity. Sealed receipts flow
+  into turns, recovered crashes, child-artifact references, terminal completion, and receipt-grounded recall;
+  large-task aggregates remain exact without replaying thousands of operation rows into the prompt.
+- **Receipt-aware mind-model evaluation.** The paired old-autobiography/operating-contract harness now proves
+  the substituted system-prompt diff on one Git revision and workspace, retains full replies, rejects
+  screen-derived ground truth, and scores lifecycle claims, abstentions, corrections, and required coverage
+  directly against sealed receipts.
+
+### Changed
+- **Calmer, informative Rich TUI.** The footer no longer pins task text; it restores total-token and
+  dollar-savings meters. The live reasoning/progress row also shows only current activity (or the active plan
+  step), never the task's first prompt. Assistant replies have more breathing room, and the composer drops its
+  redundant title. Combined greetings such as “hi how are you” stay on the cheap chitchat path instead of
+  becoming a durable task title.
+- **Natural workspace intent.** “Go/open/work in the hunter workspace” now authorizes navigation without
+  requiring implementation-shaped wording. Safe fallback path probes remain observational, an assistant's
+  exact workspace-path clarification becomes a one-turn action scoped to that target, and a second identical
+  authority denial stops immediately instead of entering a retry argument with the user.
+- **Elastic observation authority.** Pipelines and fallback branches composed entirely of proven read-only
+  commands (for example `find … | sort` and `ls … 2>/dev/null || ls …`) remain observation, so inspection does
+  not require mutation authority. Repeated errors now stop only their own operation class instead of poisoning
+  unrelated reads, and terminal stop messages name the failed action without exposing internal guard jargon.
+- **Capability-shaped turn authority.** Effects are matched by governing action, concrete target, and command
+  family rather than by tool name or stray keywords. Coordinated directives retain each capability; quoted
+  filenames, exact commands, dotfiles, file sets, requirements, VCS/package operations, and adjacent “go” or
+  “continue” confirmations remain scoped without making reviews or answer-format requests effectful.
+- **Typed evidence selection.** One `EvidenceQuery` now owns execution-recall family, predicate, and scope.
+  Receipt projections distinguish exact aggregates from failure details and latest-turn from task-wide recall,
+  while the slice remains elastic for active complexity and history-bounded with respect to transcript age.
+
 ## [0.2.0] — 2026-07-10
 
 A typed re-architecture of the core around a single canonical design (elastic slice, execution kernel,

@@ -32,6 +32,12 @@ sliceagent's memory is organized like a brain: fast, lossy **perception** of the
 | **Hippocampus** — episodic memory | Seals each turn or child report into the always-on local artifact store; pages a specific record back in on demand. |
 | **Neocortex** — long-term memory | Optionally derives and retrieves provenance-tagged cross-session lessons; it is not required for task recovery. |
 
+Before an effect runs, a typed turn contract binds the current user directive to concrete operations and
+targets; ordinary observation remains available without pretending that “run tests” authorizes every shell
+action. After execution, the sealed turn carries a canonical receipt distinguishing requested, rejected,
+started, settled, and applied work. When asked what it did, SliceAgent selects that evidence instead of
+constructing an autobiography from conversational residue.
+
 ```text
 ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
 │        PFC        │ │  Sensory Cortex   │ │    Hippocampus    │ │     Neocortex     │
@@ -228,6 +234,23 @@ pip install "sliceagent[tui]"                       # plain pip (use a venv)
 If `pip` refuses with `Requires-Python >=3.11`: `conda create -n sliceagent python=3.12 -y && conda activate sliceagent`, then pip install. Prefer env vars over the wizard? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints). `ripgrep` is recommended (code search degrades gracefully without it).
 </details>
 
+### Updating
+
+For installs created by the one-line installer:
+
+```bash
+sliceagent update
+```
+
+The command updates only when it can positively identify SliceAgent's isolated `uv` tool environment;
+it never replaces an editable checkout or guesses at a manager-owned environment. On Windows, exit
+SliceAgent and follow the external process guidance it prints. If your installed version predates
+`sliceagent update`, re-run the one-line installer; the installer is deliberately safe to re-run.
+
+Self-managed installs stay self-managed: `uv tool upgrade sliceagent`, `pipx upgrade sliceagent`, or
+`python -m pip install --upgrade "sliceagent[tui]"`. Source checkouts should pull first, then run
+`uv sync --all-extras`.
+
 Footprint is light (no torch). `pip install -e .` works for a clone. Homebrew / Docker arrive in v0.2. → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)**.
 
 ## Usage
@@ -261,12 +284,13 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/config` · `/model` · `/reasoning` | add/switch providers · switch model / reasoning effort (persists) |
 | `/mode` | permission mode: **baby-sitter** (confirm each edit + command) · **teenager** (default; confirm risky ones) · **let-it-go** (auto-run all but catastrophic) |
 | `/undo` | revert the last edit(s) |
-| `/cwd [path]` | show the fixed workspace root; with a path, show where to relaunch |
+| `/cwd [path]` | show the workspace; with a path, atomically switch it without restarting the UI or model client |
 | `/cost` | tokens and estimated $ spent this session |
 | `/skills` · `/tools` · `/mcp` · `/plugins` · `/agents` | list what's available to the agent |
 | `/threads` · `/resume` | switch between, or resume, parked topics |
 | `/learn <note>` | save a durable lesson yourself |
 | `/plan` | show the current task plan |
+| `/update` | show the safe process-boundary update command |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
 Prefix an unrelated request with `New task:` to start it with fresh task state while parking the current task

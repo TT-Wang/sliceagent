@@ -50,8 +50,10 @@ REGISTRY: list[EnvVar] = [
            "core mode exposes one-shot read-only explorers only.", ""),
     EnvVar("AGENT_ADVANCED_TOOLS", "agent", "Expose persistent process and interactive terminal tools; "
            "off by default in the demo kernel.", ""),
-    EnvVar("AGENT_EXPLORER_REASONING", "agent", "Reasoning effort for read-only explorer children.", "fast"),
+    EnvVar("AGENT_EXPLORER_REASONING", "agent", "Reasoning effort for read-only explorer children.", "full"),
     EnvVar("AGENT_AUTO_APPROVE", "agent", "Comma-separated globs of pre-approved safe commands (skip prompt).", ""),
+    EnvVar("AGENT_INTENT_GATE", "agent", "'essential' (default) — lift the fail-closed turn-authority gate, "
+           "keeping catastrophic-command + confirm-mode protections; 'strict' — restore the full v2 gate.", "essential"),
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),
     EnvVar("AGENT_MAX_TOKENS", "agent", "Per-turn task token budget, including delegated child usage (parks when exhausted).", ""),
     EnvVar("AGENT_COMPLETION_TOKENS", "agent", "Per-REQUEST completion cap (max output tokens); distinct from the AGENT_MAX_TOKENS turn budget.", "8192"),
@@ -104,6 +106,9 @@ REGISTRY: list[EnvVar] = [
     EnvVar("SLICEAGENT_PROMPT_FILE", "debug", "A/B experiment seam: path to a full SYSTEM_PROMPT template "
            "(must keep the {{MEMORY_MODEL}} marker) to override the prompt for a measurement run "
            "(evals/prompt_ab). Unset → the production prompt.", ""),
+    EnvVar("SLICEAGENT_MEMORY_MODEL_FILE", "debug", "A/B experiment seam: path to content replacing only "
+           "the {{MEMORY_MODEL}} operating-contract splice. An empty file is a valid no-contract arm; "
+           "unset uses the production contract.", ""),
 ]
 
 BY_NAME: dict[str, EnvVar] = {e.name: e for e in REGISTRY}

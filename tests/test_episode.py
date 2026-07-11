@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.hippocampus import EpisodeSink, make_episode_sink   # noqa: E402
 from sliceagent.events import (AssistantText, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult,  # noqa: E402
-                               TurnEnd, TurnInterrupted)
+                               TurnEnd, TurnInterrupted, TurnStarted)
 from sliceagent.memory import NullMemory   # noqa: E402
 
 CHECKS = []
@@ -48,6 +48,23 @@ def local_collector_works_without_semantic_memory():
     turn, record = sink.take_last_record()
     assert turn == 1 and record["note"] == "done"
     assert sink.take_last_record() is None, "the required seal path consumes each record exactly once"
+
+
+@check
+def sealed_discourse_pair_is_exact_and_addressable():
+    sink = make_episode_sink(
+        NullMemory(), session_id="s", task_id_fn=lambda: "t", collect=True,
+    )
+    request = "which one was number 2?"
+    assistant = "## Findings\n1. First issue\n2. Second issue\n"
+    sink(TurnStarted(request, "review", "t"))
+    sink(SliceBuilt("seed")); sink(AssistantText(assistant)); sink(TurnEnd("end_turn", 1, {}))
+    _turn, record = sink.take_last_record()
+    assert record["request"] == request and record["assistant"] == assistant
+    assert record["assistant_provenance"] == "final_response"
+    assert "## user request (verbatim)" in record["markdown"] and request in record["markdown"]
+    assert record["anchors"][1]["ordinal"] == 2
+    assert "Second issue" in record["anchors"][1]["excerpt"]
 
 @check
 def one_turn_one_record():
@@ -122,6 +139,17 @@ def aborted_turn_flushes():
     assert d.records[0][3]["meta"]["ptok"] == 7 and d.records[0][3]["meta"]["ctok"] == 3
     s(SliceBuilt("B")); s(tr("edit_file", out="y", path="b.py")); s(TurnEnd("end_turn", 1, {}))
     assert len(d.records) == 2 and d.records[1][3]["meta"]["files"] == ["b.py"]
+
+
+@check
+def interrupted_visible_update_is_labeled_partial_instead_of_final():
+    d = DurableDouble(); sink = _sink(d)
+    sink(TurnStarted("Explain it", "task", "t1"))
+    sink(SliceBuilt("A")); sink(AssistantText("Visible progress update", final=False))
+    sink(TurnInterrupted("aborted"))
+    record = d.records[0][3]
+    assert record["assistant"] == "Visible progress update"
+    assert record["assistant_provenance"] == "partial_or_note"
 
 @check
 def max_steps_double_flush_guard():

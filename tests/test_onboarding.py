@@ -263,10 +263,17 @@ def config_use_switches_default_provider():
 
 @check
 def dispatch_routes_known_subcommands():
+    from unittest import mock
+
     assert onboarding.dispatch(["version"]) == 0
     assert onboarding.dispatch(["help"]) == 0
     assert onboarding.dispatch(["config", "--list"]) == 0
     assert onboarding.dispatch(["config", "--path"]) == 0
+    with mock.patch("sliceagent.updater.run_update", return_value=0) as update:
+        assert onboarding.dispatch(["update"]) == 0
+        assert onboarding.dispatch(["upgrade"]) == 0
+        assert update.call_count == 2
+    assert onboarding.dispatch(["update", "--mystery"]) == 2
     assert onboarding.dispatch(["bogus"]) == 1   # unknown → usage + non-zero exit (shell-correct)
 
 

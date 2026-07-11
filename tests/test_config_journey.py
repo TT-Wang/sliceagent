@@ -230,8 +230,9 @@ def readonly_allowlist_rejects_exec_and_write_affordances():
                    "uniq /dev/null important.py", "git grep --open-files-in-pager=/tmp/e.sh x",
                    "git grep -Oless foo"]:
         assert not ro(bypass), f"must NOT auto-run (execs/writes): {bypass!r}"
-    for ok in ["ls -la", "cat f", "du -s .", "grep -o pat file", "sort a.txt", "git grep foo",
-               "git log --oneline", "printenv PATH", "date", "tree -L 2", "wc -l f"]:
+    for ok in ["ls -la", "cat f", "du -s .", "grep -o pat file", "sort a.txt",
+               "git --no-pager grep foo", "git --no-pager log --oneline",
+               "printenv PATH", "date", "tree -L 2", "wc -l f"]:
         assert ro(ok), f"read-only command must still auto-run: {ok!r}"
 
 

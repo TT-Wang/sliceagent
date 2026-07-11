@@ -250,6 +250,17 @@ def synthesiser_is_a_readonly_kind_not_machinery():
 
 
 @check
+def explorer_prompt_separates_primary_observation_from_inference():
+    sp = BUILTIN_AGENTS["explorer"]
+    assert sp.read_only
+    assert sp.reasoning == "full"
+    assert "separate exact observation from inference" in sp.system_prompt
+    assert "does not prove it is executed" in sp.system_prompt
+    assert "global 'unkillable' claim" in sp.system_prompt
+    assert "most certain concrete failure first" in sp.system_prompt
+
+
+@check
 def synthesis_seal_ships_its_refinement_map():
     mem = _mem()
     mem.append_subagent_artifact("s1", _art("explorer", "auth findings", name="auth-explorer"))
@@ -760,8 +771,8 @@ def real_profile_json_name_resolves_through_the_virtual_fs():
 
 @check
 def delegation_guidance_is_spliced_when_spawn_agent_is_offered():
-    # the gate that includes DELEGATION_BLOCK keyed on "spawn_explore" — which was removed — so the whole
-    # rewritten mental model silently vanished from the prompt. Pin it: block present iff spawn_agent offered.
+    # Guidance is compiled from the live spawn_agent schema, so it is present iff the capability is offered
+    # and cannot advertise advanced fields/kinds in core mode.
     from sliceagent.pfc import Slice
     from sliceagent.seed import make_build_slice
 
@@ -776,7 +787,8 @@ def delegation_guidance_is_spliced_when_spawn_agent_is_offered():
                           max_depth=1, depth=0)
     sysp = _sys(parent)
     assert "<delegation>" in sysp, "delegation block missing from the system prompt"
-    assert "spawn_agent(agent=" in sysp and "HIRE a STANDING specialist" in sysp   # the kind×name model
+    assert "LIVE DELEGATION CAPABILITY" in sysp and "standing specialist" in sysp
+    assert "Available agent kinds:" in sysp and "general" in sysp
     assert "spawn_explore" not in sysp, "stale spawn_explore leaked into the guidance"
 
     # a host at the depth floor offers NO spawn tool → no delegation block (don't advertise a tool it lacks)

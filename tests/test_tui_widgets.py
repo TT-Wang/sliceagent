@@ -97,6 +97,11 @@ def hotkey_n_then_enter_selects_no():
 
 
 @check
+def combined_hotkey_and_enter_one_read_selects_no():
+    assert _drive([b"n\r"]) == 1, "hotkey+Enter delivered in one read should choose No=1"
+
+
+@check
 def combined_arrow_and_enter_one_read_selects_no():
     assert _drive([b"\x1b[C\r"]) == 1, "arrow+Enter delivered in one read should still choose No=1"
 

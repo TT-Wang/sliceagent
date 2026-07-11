@@ -244,9 +244,10 @@ def truncated_finding_advertises_recall_instead_of_silently_dropping_content():
 
     # bug #2's specifics (past the cut) must NOT silently appear as if part of the visible fragment
     assert "archetypeCounts" not in stored, "test premise broken: bug #2 should be past the cut"
-    # the stored finding must clearly mark itself as partial and point at BOTH real recall paths
+    # the stored finding must clearly mark DISPLAY loss only and point at BOTH real recall paths
     assert "PARTIAL" in stored, "a truncated finding must say it is partial, not silently drop the rest"
-    assert "PAGED-OUT HISTORY" in stored and "search_history(" in stored, stored
+    assert "history/" in stored and "search_history(" in stored, stored
+    assert "NOT execution failure" in stored, stored
     assert "don't guess" in stored, "must explicitly warn against re-deriving instead of recalling"
     # a SHORT note that fits within the cap must be stored VERBATIM, with no marker (no false positives)
     s2 = Slice(); record_note(s2, "a short claim under the cap", source="claim")

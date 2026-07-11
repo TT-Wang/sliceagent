@@ -17,6 +17,11 @@ info() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
 warn() { printf '\033[33m! %s\033[0m\n' "$1" >&2; }
 err()  { printf '\033[31m✗ %s\033[0m\n' "$1" >&2; }
 
+# Do not discover installer executables from the repository (for example PATH=.:...). These are the
+# standard user/system package-manager locations used by uv, Homebrew, Nix, macOS, and Linux.
+PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.nix-profile/bin:/opt/homebrew/bin:/opt/local/bin:/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin"
+export PATH
+
 if [ "${1:-}" = "--uninstall" ]; then
   if command -v uv >/dev/null 2>&1; then uv tool uninstall sliceagent 2>/dev/null || true; fi
   info "sliceagent uninstalled."
@@ -42,16 +47,32 @@ if ! command -v uv >/dev/null 2>&1; then
   err "uv still not on PATH. Open a new terminal and re-run this installer."
   exit 1
 fi
+UV_BIN="$(command -v uv)"
+
+# Run package resolution without ambient uv/pip overrides or exported provider tokens. Keep only explicit
+# custom tool locations; this installer always resolves SliceAgent itself from the public PyPI index below.
+run_uv_clean() (
+  for _name in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+    case "$_name" in
+      UV_TOOL_DIR|UV_TOOL_BIN_DIR) ;;
+      UV_*|PIP_*|PYTHONPATH|PYTHONHOME|VIRTUAL_ENV|AWS_SECRET_ACCESS_KEY|*_API_KEY|*_TOKEN)
+        unset "$_name"
+        ;;
+    esac
+  done
+  "$UV_BIN" "$@"
+)
 
 # 2. install (or upgrade) sliceagent as an isolated uv tool
 # --python 3.12: don't inherit whatever python happens to be on PATH (conda base = 3.10,
 # Ubuntu 22.04 = 3.10, macOS system = 3.9 — all below the >=3.11 floor). uv fetches a managed
 # CPython 3.12 automatically when none is installed, so the installer has zero prerequisites.
 info "Installing sliceagent …"
-uv tool install --force --python 3.12 "$PKG"
+run_uv_clean tool install --force --upgrade --python 3.12 --no-config \
+  --default-index https://pypi.org/simple "$PKG"
 
 # 3. make sure uv's tool bin is on PATH for future shells
-uv tool update-shell >/dev/null 2>&1 || warn "Could not auto-update PATH — you may need to add uv's tool bin (see 'uv tool dir') to your PATH."
+run_uv_clean tool update-shell >/dev/null 2>&1 || warn "Could not auto-update PATH — you may need to add uv's tool bin (see 'uv tool dir') to your PATH."
 
 # 4. ripgrep powers the code index — install it too (brew when available, else a ~2 MB static
 # binary from GitHub into uv's tool bin: no sudo, isolated, removable with the rest).
@@ -70,7 +91,7 @@ if ! command -v rg >/dev/null 2>&1; then
     Linux-aarch64|Linux-arm64) RG_TARGET="aarch64-unknown-linux-gnu" ;;
     *)                         RG_TARGET="" ;;
   esac
-  BIN_DIR="$(uv tool dir --bin 2>/dev/null || true)"
+  BIN_DIR="$(run_uv_clean tool dir --bin 2>/dev/null || true)"
   [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"
   if [ -n "$RG_TARGET" ]; then
     RG_TMP="$(mktemp -d)"
@@ -98,6 +119,9 @@ cat <<'EOF'
 
   Next — just one command:
     sliceagent          # first run walks you through setup (provider, API key), then you're chatting
+
+  Update later:
+    sliceagent update
 
   If 'sliceagent' isn't found, open a NEW terminal (PATH was just updated).
   Docs: https://github.com/TT-Wang/sliceagent

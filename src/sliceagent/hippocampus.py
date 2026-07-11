@@ -40,7 +40,7 @@ import time
 from collections import deque
 
 from .events import (AssistantText, Event, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult,
-                     TurnEnd, TurnInterrupted)
+                     TurnEnd, TurnInterrupted, TurnStarted)
 from .pfc import edited_paths_in_code, paths_in_code  # noqa: F401  (paths_in_code kept for back-compat callers)
 from .safety import redact_text
 from .text_utils import format_ts, now_iso, one_line
@@ -118,7 +118,8 @@ def _obs_excerpt(obs: str) -> str:
     return "  " + body.replace("\n", "\n  ")   # indent the excerpt under its "- " trace bullet
 
 
-def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
+def turn_markdown(title: str, steps: list[dict], note: str, meta: dict, *,
+                  request: str = "", assistant: str = "") -> str:
     """Render a SEALED turn as a clean, self-contained MARKDOWN snapshot — the readable artifact the
     cache holds and the next loop pages back via recall_history (the slice saved into the cache as
     markdown). Distilled, not a raw dump: heading, changed files, outcome, the action→result trace WITH
@@ -127,6 +128,8 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
     from .tool_summary import summarize_tool_result
     files = meta.get("files") or []
     out = [f"# {title or '(turn)'}"]
+    if request:
+        out.append(f"\n## user request (verbatim)\n{request}")
     if files:
         out.append(f"**changed files:** {', '.join(files)}")
     if meta.get("stop_reason"):
@@ -141,8 +144,9 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict) -> str:
                 trace.append(ex)
     if trace:
         out.append("\n## what happened\n" + "\n".join(trace))
-    if note:
-        out.append(f"\n## conclusion\n{note}")
+    conclusion = assistant or note
+    if conclusion:
+        out.append(f"\n## conclusion\n{conclusion}")
     return "\n".join(out)
 
 
@@ -173,6 +177,8 @@ class EpisodeSink:
     def _reset(self) -> None:
         self._steps: list[dict] = []
         self._note = ""
+        self._request = ""
+        self._assistant = ""
         self._meta = {"failing": False, "files": []}
         self._task_id: str | None = None
         self._title: str | None = None
@@ -184,7 +190,15 @@ class EpisodeSink:
         return self._steps[-1]
 
     def __call__(self, event: Event) -> None:
-        if isinstance(event, SliceBuilt):
+        if isinstance(event, TurnStarted):
+            # Unlike the bounded slice, the sealed turn is the exact discourse record.  Keeping the request
+            # here makes "what did I ask?" and copied-span attribution genuinely recoverable after paging.
+            self._request = str(event.request or "")
+            if self._task_id is None:
+                self._task_id = str(event.task_id or self.task_id_fn())
+            if self._title is None:
+                self._title = str(event.task_title or "")
+        elif isinstance(event, SliceBuilt):
             # the loop dispatches SliceBuilt for the seed → opens a new step segment
             if self._task_id is None:
                 self._task_id = self.task_id_fn()  # stable identity even if a topic tool switches mid-turn
@@ -206,6 +220,8 @@ class EpisodeSink:
         elif isinstance(event, AssistantText):
             if event.content and event.content.strip():   # content-emitting models' note
                 self._note = event.content.strip()
+                if event.final:
+                    self._assistant = str(event.content)
         elif isinstance(event, ToolResult):
             st = self._cur()
             args = event.args if isinstance(event.args, dict) else {}   # coerce: persist a dict so downstream
@@ -246,13 +262,28 @@ class EpisodeSink:
                     **outcome}
             record = {
                 "title": title,            # human breadcrumb for cheap trace-back (topic is task_id)
+                "request": self._request,  # exact discourse pair; archive-only until explicitly refaulted
+                "assistant": self._assistant or self._note,
+                "assistant_provenance": (
+                    "final_response" if self._assistant else
+                    "partial_or_note" if self._note else
+                    "absent"
+                ),
                 "steps": self._steps,      # lossless raw events (full=true / step recall)
                 "note": self._note,
                 # the SEAL artifact: the turn's slice as a clean MARKDOWN snapshot — what history/turn-N.md
                 # serves, so paging a past turn back reads like opening a readable doc.
-                "markdown": turn_markdown(title, self._steps, self._note, meta),
+                "markdown": turn_markdown(
+                    title, self._steps, self._note, meta,
+                    request=self._request, assistant=self._assistant,
+                ),
                 "meta": meta,
             }
+            from .discourse import extract_addressable_anchors
+            record["anchors"] = [
+                anchor.to_dict()
+                for anchor in extract_addressable_anchors(record["assistant"])
+            ]
             self._last_record = (self._turn, record)
             if self.memory is not None:
                 self.memory.append_episode(self.session_id, self._task_id or self.task_id_fn(), self._turn, record)
@@ -735,6 +766,42 @@ def _tail(s: str, n: int) -> str:
     return s if len(s) <= n else "…" + s[-n:]
 
 
+def _receipt_markdown(rec: dict) -> str:
+    receipt = rec.get("turn_receipt")
+    if not isinstance(receipt, dict):
+        return ""
+    counts = receipt.get("counts") if isinstance(receipt.get("counts"), dict) else {}
+    lines = [
+        "## canonical execution receipt",
+        f"- disposition: {receipt.get('disposition') or 'unknown'}",
+        (f"- requested {counts.get('requested', 0)} · started {counts.get('execution_started', 0)} · "
+         f"rejected before execution {counts.get('rejected_before_execution', 0)} · "
+         f"succeeded {counts.get('succeeded', 0)} · failed {counts.get('failed', 0)} · "
+         f"indeterminate {counts.get('indeterminate', 0)}"),
+    ]
+    by_tool = {}
+    operations = receipt.get("operations")
+    for operation in operations if isinstance(operations, list) else ():
+        if not isinstance(operation, dict):
+            continue
+        name = str(operation.get("name") or "(unknown tool)")
+        bucket = by_tool.setdefault(name, {"requested": 0, "started": 0, "rejected": 0, "succeeded": 0,
+                                           "failed": 0, "cancelled": 0, "indeterminate": 0})
+        bucket["requested"] += int(bool(operation.get("requested")))
+        bucket["started"] += int(bool(operation.get("execution_started")))
+        bucket["rejected"] += int(bool(operation.get("rejected_before_execution")))
+        disposition = str(operation.get("disposition") or "")
+        if disposition in {"succeeded", "failed", "cancelled", "indeterminate"}:
+            bucket[disposition] += 1
+    for name, bucket in sorted(by_tool.items()):
+        lines.append(
+            f"- {name}: requested {bucket['requested']} · started {bucket['started']} · "
+            f"rejected {bucket['rejected']} · succeeded {bucket['succeeded']} · failed {bucket['failed']} · "
+            f"cancelled {bucket['cancelled']} · indeterminate {bucket['indeterminate']}"
+        )
+    return "\n".join(lines)
+
+
 def render_trace(lines: list[dict]) -> str:
     """Page sealed turns back as their clean MARKDOWN snapshot (the seal artifact) — returned IN FULL, no
     read-side size cap (see the constants note: the bound is the seal + transience, not a second read cut;
@@ -747,10 +814,13 @@ def render_trace(lines: list[dict]) -> str:
         rec = ln.get("record", {})
         head = f"\n── turn {ln.get('turn')} · {_short_ts(ln.get('ts',''))} · {rec.get('title') or ''}"
         md = rec.get("markdown")
+        receipt = _receipt_markdown(rec)
         if md:                                   # the SEAL artifact — return it directly, in full
-            out.append(head + "\n" + md)
+            out.append(head + "\n" + (receipt + "\n\n" if receipt else "") + md)
         else:                                    # older record without a stored markdown → compute a trace
             block = [head]
+            if receipt:
+                block.append(receipt)
             for st in rec.get("steps", []):
                 for a, o in zip(st.get("action", []), st.get("observation", [])):
                     summary = summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
@@ -776,9 +846,12 @@ def render_search(mine, cross) -> str:
             else:   # W6': a DELEGATED-WORK hit — the seal lives under subagents/, not the turn timeline
                 out.append(f'- delegated {r.handle}: {r.preview}  → read_file("subagents/{r.handle}.md")')
     if cross:
-        out.append("# CROSS-SESSION RECALL (past sessions — FTS5 over the durable episode index)")
+        out.append("# CROSS-SESSION RECALL (past sessions — read the full turn with the call shown)")
         for r in cross:
-            out.append(f"- [{r.handle}] {r.preview}")
+            if str(r.handle).startswith("history/"):   # a past turn is now directly readable
+                out.append(f'- {r.preview}  → read_file("{r.handle}")')
+            else:                                        # a past session's delegated seal — context only
+                out.append(f"- [{r.handle}] {r.preview}")
     return "\n".join(out) if out else "No content matches found."
 
 
@@ -791,6 +864,10 @@ def render_search(mine, cross) -> str:
 # real on-disk file always wins the name (host._history_route), so the virtual view never lies about disk.
 HISTORY_MOUNT = "history"
 _TURN_FILE = re.compile(r"^turn-(\d+)\.md$")
+# A history path may carry a leading `<session-id>/` segment to read a PAST session's turns
+# (history/<sid>/turn-N.md), backed by the same read_episodes reader. The id is the sole traversal guard
+# before it reaches read_episodes' `f"{sid}.jsonl"` join — so it must be a strict slug (no separators/dots).
+_SAFE_SID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$")
 
 
 def _history_leaf(path: str) -> str:
@@ -818,65 +895,107 @@ class HistoryFS:
         self._memory = memory
         self._session_id = session_id
 
+    def _lines_for(self, session_id: str) -> list:
+        return self._memory.read_episodes(session_id)
+
     def _lines(self) -> list:
-        return self._memory.read_episodes(self._session_id)
+        return self._lines_for(self._session_id)
+
+    def _target(self, leaf: str):
+        """Resolve a leaf to (session_id, inner_leaf, scope). A leading `<sid>/` segment selects a PAST
+        session; a bare `<sid>` (id-shaped, no file) selects that session's index; anything else is THIS
+        session. `scope` is the read_file prefix ('' for this session, '<sid>/' for a past one). ok=False
+        only for a `<sid>/…` whose id fails the traversal guard."""
+        if "/" in leaf:
+            sid, _, rest = leaf.partition("/")
+            if _SAFE_SID.match(sid):
+                return sid, rest, f"{sid}/", True
+            return self._session_id, leaf, "", False
+        if leaf and _SAFE_SID.match(leaf) and not _TURN_FILE.match(leaf) and leaf != "index.md":
+            return leaf, "index.md", f"{leaf}/", True   # a bare past-session id → its index
+        return self._session_id, leaf, "", True
 
     @staticmethod
-    def _turn_names(lines) -> list:
-        return [f"turn-{ln.get('turn')}.md" for ln in lines if ln.get("turn") is not None]
+    def _turn_names(lines, scope: str = "") -> list:
+        return [f"{scope}turn-{ln.get('turn')}.md" for ln in lines if ln.get("turn") is not None]
 
-    def index(self, lines=None) -> str:
+    def index(self, lines=None, *, scope: str = "") -> str:
         if lines is None:
             lines = self._lines()
+        where = f"session {scope.rstrip('/')} (a PAST session)" if scope else "this session"
         if not lines:
-            return "# HISTORY (this session)\n(no earlier turns yet — this is an early turn.)"
-        out = ["# HISTORY — your own record of what you did this session "
-               "(read a turn: read_file(\"history/turn-<N>.md\"); find by content: search_history(\"keywords\"))"]
+            return (f"# HISTORY ({where})\n(no turns recorded for that session.)" if scope
+                    else "# HISTORY (this session)\n(no earlier turns yet — this is an early turn.)")
+        out = [f"# HISTORY — your own record of what you did in {where} "
+               f"(read a turn: read_file(\"history/{scope}turn-<N>.md\"); find by content: search_history(\"keywords\"))"]
         for ln in lines:
             rec = ln.get("record", {})
-            title = (rec.get("title") or "(no title)")[:70]
+            title = one_line(rec.get("request") or rec.get("title") or "(no title)", 70)
             note = rec.get("note") or ""
-            fail = " FAIL" if (rec.get("meta") or {}).get("failing") else ""
-            out.append(f"- turn-{ln.get('turn')}.md · {_short_ts(ln.get('ts', ''))} · {title}{fail}"
+            receipt = rec.get("turn_receipt") if isinstance(rec.get("turn_receipt"), dict) else {}
+            disposition = str(receipt.get("disposition") or "")
+            marker = (
+                " ATTENTION" if disposition in {"blocked", "interrupted", "indeterminate"} else
+                " WARN" if disposition == "completed_with_warnings" else
+                " FAIL" if not disposition and (rec.get("meta") or {}).get("failing") else ""
+            )
+            out.append(f"- {scope}turn-{ln.get('turn')}.md · {_short_ts(ln.get('ts', ''))} · {title}{marker}"
                        + (f" — {note[:90]}" if note else ""))
         return "\n".join(out)
 
     def read_file(self, path: str) -> str:
-        lines = self._lines()
         leaf = _history_leaf(path)
-        if leaf in ("", "index.md"):
-            return self.index(lines)
-        m = _TURN_FILE.match(leaf)
+        sid, inner, scope, ok = self._target(leaf)
+        if not ok:
+            return (f'history/{leaf}: invalid path. Read a turn with read_file("history/turn-<N>.md") '
+                    'or a past session with read_file("history/<session-id>/turn-<N>.md").')
+        lines = self._lines_for(sid)
+        if inner in ("", "index.md"):
+            return self.index(lines, scope=scope)
+        m = _TURN_FILE.match(inner)
         if m:
             n = int(m.group(1))
             sel = [ln for ln in lines if ln.get("turn") == n]
             if sel:
                 return render_trace(sel)   # the seal snapshot for that turn, in full (same as recall's compact)
-            return (f'history/{leaf}: no such turn this session. '
-                    f'read_file("history/index.md") for the list of turns.')
-        return (f'history/{leaf}: not a history file. Available: index.md, '
-                f'{", ".join(self._turn_names(lines)) or "(no turns yet)"}.')
+            return (f'history/{scope}{inner}: no such turn'
+                    + (f' in session {sid}' if scope else ' this session')
+                    + f'. read_file("history/{scope}index.md") for the list of turns.')
+        return (f'history/{scope}{inner}: not a history file. Available: index.md, '
+                f'{", ".join(self._turn_names(lines, scope)) or "(no turns)"}.')
 
     def listing(self, path: str = HISTORY_MOUNT) -> str:
-        names = ["index.md"] + self._turn_names(self._lines())
+        leaf = _history_leaf(path)
+        # A bare id-shaped leaf lists THAT past session; otherwise this session.
+        if leaf and "/" not in leaf and _SAFE_SID.match(leaf) and not _TURN_FILE.match(leaf) and leaf != "index.md":
+            sid, scope = leaf, f"{leaf}/"
+        else:
+            sid, scope = self._session_id, ""
+        names = [f"{scope}index.md"] + self._turn_names(self._lines_for(sid), scope)
         return ("\n".join(names)
                 + '\n(read index.md for turn titles, or search_history("keywords") to find a turn by content)')
 
     def _docs_for(self, path, lines) -> list:
         """The (name, text) docs a grep over `path` should scan — SCOPED like ripgrep: the whole namespace
-        for the history/ dir, or a single file when `path` targets index.md / a specific turn-N.md."""
+        for the history/ dir, or a single file when `path` targets index.md / a specific turn-N.md. A
+        `<sid>/…` path greps that PAST session instead of the current one."""
         leaf = _history_leaf(path)
-        if leaf == "":                     # the history/ dir → the whole namespace
-            return [("index.md", self.index(lines))] + [
-                (f"turn-{ln.get('turn')}.md", render_trace([ln])) for ln in lines if ln.get("turn") is not None]
-        if leaf == "index.md":
-            return [("index.md", self.index(lines))]
-        m = _TURN_FILE.match(leaf)
+        sid, inner, scope, ok = self._target(leaf)
+        if not ok:
+            return []
+        if sid != self._session_id:
+            lines = self._lines_for(sid)   # grep a past session's turns
+        if inner == "":                    # the history/ (or history/<sid>/) dir → the whole namespace
+            return [(f"{scope}index.md", self.index(lines, scope=scope))] + [
+                (f"{scope}turn-{ln.get('turn')}.md", render_trace([ln])) for ln in lines if ln.get("turn") is not None]
+        if inner == "index.md":
+            return [(f"{scope}index.md", self.index(lines, scope=scope))]
+        m = _TURN_FILE.match(inner)
         if not m:
             return []                      # a specific non-existent history file → nothing to search
         n = int(m.group(1))
         sel = [ln for ln in lines if ln.get("turn") == n]
-        return [(leaf, render_trace(sel))] if sel else []
+        return [(f"{scope}{inner}", render_trace(sel))] if sel else []
 
     def grep(self, pattern: str, *, path: str = HISTORY_MOUNT, output_mode: str = "content",
              context: int = 0, offset: int = 0, limit: int = 50) -> str:
@@ -940,9 +1059,10 @@ def make_search_history_tool(memory, session_id: str):
         "description": (
             "Find an earlier turn by CONTENT (FTS5 keyword search) across THIS session AND your PAST sessions "
             "— use it when you don't know a turn's number, or to recall how something was solved in an earlier "
-            "session. This-session matches come with the read_file(\"history/turn-N.md\") call to open them; "
-            "for THIS session you can also read_file(\"history/index.md\") to browse every turn, or grep the "
-            "history/ files. Query supports AND/OR, \"quoted phrases\", and prefix*."),
+            "session. EVERY match comes with the read_file(...) call to open the full turn: this session as "
+            "read_file(\"history/turn-N.md\"), a past session as read_file(\"history/<session-id>/turn-N.md\") "
+            "— never guess a raw filesystem path. For THIS session you can also read_file(\"history/index.md\") "
+            "to browse every turn, or grep the history/ files. Query supports AND/OR, \"quoted\", and prefix*."),
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "FTS5 keywords to search episode content for."},
         }, "required": ["query"]}}}
@@ -980,6 +1100,8 @@ def render_artifact(rec: dict) -> str:
     a = rec.get("artifact") or {}
     who = f"{a['name']} · {a.get('kind', 'subagent')}" if a.get("name") else a.get("kind", "subagent")
     out = [f"# {rec.get('id', 'sub-?')} — {who} · {a.get('status', '?')} · {a.get('steps', '?')} steps"]
+    if a.get("launch_ordinal"):
+        out.append(f"launch-order: {a['launch_ordinal']} (among siblings under the same parent)")
     if a.get("coverage"):
         out.append(f"coverage: {a['coverage']}")
     if a.get("change_set"):
@@ -1039,7 +1161,8 @@ class SubagentFS:
         for r in arts:
             a = r.get("artifact") or {}
             who = f" · {a['name']}" if a.get("name") else ""
-            out.append(f"- {r.get('id')}.md{who} · {a.get('kind', 'subagent')} · {a.get('status', '?')} · "
+            launched = f" · launched #{a['launch_ordinal']}" if a.get("launch_ordinal") else ""
+            out.append(f"- {r.get('id')}.md{who} · {a.get('kind', 'subagent')}{launched} · {a.get('status', '?')} · "
                        f"{a.get('steps', '?')} steps — {_artifact_excerpt(r)}")
         return "\n".join(out)
 

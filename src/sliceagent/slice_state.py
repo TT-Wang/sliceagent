@@ -184,13 +184,27 @@ class ContinuityState:
 
     conversation: list[dict] = field(default_factory=list)
     turns: int = 0
+    # Typed discourse owners populate these lightweight anchors. They are task-scoped continuity, not a
+    # transcript: reset on a genuine task boundary, survive ordinary turn seals, and are intentionally absent
+    # from cross-session TaskState serialization.
+    discourse_focus: list[dict] = field(default_factory=list)
+    pending_proposal: dict | None = None
+    # The immediately preceding evidence projection, used only for a generic adjacent verification such as
+    # "verify that against your records". It freezes both selector and derived sources at the prior response's
+    # cutoff, so a newly sealed answer cannot retroactively change its own evidence. Never cross-session state.
+    previous_evidence_snapshot: dict | None = None
 
     def reset(self) -> None:
         self.conversation = []
         self.turns = 0
+        self.discourse_focus = []
+        self.pending_proposal = None
+        self.previous_evidence_snapshot = None
 
     def seal(self) -> None:
         # The conversation ring is bounded when written; raw requests belong to immutable turn artifacts.
+        # Discourse focus and a pending proposal carry across adjacent turns so a bare ordinal/assent can be
+        # resolved against an exact anchor. Their owner replaces/clears them explicitly.
         return None
 
 
@@ -206,6 +220,9 @@ class TurnRuntime:
     since_edit: int = 0
     turn_actions: int = 0
     explore_mode: bool = False
+    # Exact source projections selected for this turn (for example paired sealed request/response evidence).
+    # They are elastic slice material, not durable transcript state, and disappear at the turn seal.
+    source_projections: tuple[dict, ...] = ()
 
     def reset(self) -> None:
         self.step = 0
@@ -216,6 +233,7 @@ class TurnRuntime:
         self.since_edit = 0
         self.turn_actions = 0
         self.explore_mode = False
+        self.source_projections = ()
 
     def seal(self) -> None:
         self.reset()

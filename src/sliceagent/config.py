@@ -22,10 +22,10 @@ def _read_toml(path: str) -> dict:
         return {}   # a corrupt / non-UTF-8 config must degrade to defaults, not crash startup
 
 
-def _config_files() -> list[str]:
+def _config_files(root: str | None = None) -> list[str]:
     # user first, then project (project overrides user)
     home = os.path.expanduser("~")
-    cwd = os.getcwd()
+    cwd = os.path.realpath(root or os.getcwd())
     return [
         os.path.join(home, ".sliceagent", "config.toml"),
         os.path.join(cwd, "sliceagent.toml"),
@@ -92,9 +92,9 @@ class Config:
         self.data = data or {}
 
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls, root: str | None = None) -> "Config":
         merged: dict = {}
-        for f in _config_files():
+        for f in _config_files(root):
             if os.path.isfile(f):
                 merged = _deep_merge(merged, _read_toml(f))
         return cls(merged)
@@ -186,6 +186,15 @@ class Config:
     def sandbox_network(self) -> str:
         return self._get("sandbox", "network", None, "none")
 
+    @property
+    def intent_gate(self) -> str:
+        """"essential" (default) lifts the fail-closed turn-authority gate — it over-blocks ordinary local
+        work and its errors mislead. The ESSENTIAL protections stay regardless (catastrophic-command blocking
+        + confirm-mode prompts via the policy, plus the loop guard). "strict" restores the full v2 gate that
+        denies task-state/external effects unless the exact turn authorizes them. Env: AGENT_INTENT_GATE."""
+        return str(self._get("policy", "intent_gate", "AGENT_INTENT_GATE", "essential")
+                   or "essential").strip().lower()
+
     # --- oracle / budget ---
     @property
     def verify_cmd(self) -> str | None:
@@ -241,5 +250,6 @@ class Config:
         return [os.path.expanduser(d) for d in dirs if isinstance(d, str)]   # skip non-str entries (don't crash startup)
 
 
-def load_config() -> Config:
-    return Config.load()
+def load_config(root: str | None = None) -> Config:
+    """Load user config plus the selected workspace's config without changing process cwd."""
+    return Config.load(root)

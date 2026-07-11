@@ -12,7 +12,7 @@ try:
     from rich.cells import cell_len  # noqa: E402
     from rich.console import Console  # noqa: E402
     from sliceagent.tui import (RichSink, _box_width, _render_plan, _render_read_summary,  # noqa: E402
-                                _render_tool_result, _response_panel, _toolbar)
+                                _record_usage, _render_tool_result, _response_panel, _toolbar)
     from sliceagent.events import StepEnd, ToolResult   # noqa: E402
 except Exception as _e:  # noqa: BLE001 — tui extra (rich) not installed → skip, don't fail the suite
     print(f"SKIP test_tui_render (tui extra not available: {_e})")
@@ -51,6 +51,12 @@ def fresh_tokens_tracked_for_toolbar():
     assert sink.stats["fresh"] == 250, sink.stats
     assert sink.stats["tokens"] == 2030, sink.stats
 
+    chitchat_stats = {"model": "deepseek-reasoner"}
+    _record_usage(chitchat_stats, {
+        "prompt_tokens": 12, "completion_tokens": 4, "input_other": 12, "output": 4,
+    })
+    assert chitchat_stats["tokens"] == 16 and chitchat_stats["cost"] > 0, chitchat_stats
+
 
 @check
 def render_plan_handles_empty_and_bad_input():
@@ -82,22 +88,27 @@ def settled_rows_never_wrap_at_common_terminal_widths():
 @check
 def response_panel_and_footer_are_responsive_at_60_80_and_120():
     stats = {
-        "workspace": "demo", "model": "model-x", "policy": "ask-before-write",
+        "workspace": "demo", "model": "deepseek-reasoner", "policy": "ask-before-write",
         "topic": "fix retry handling", "tokens": 999_999, "saved_cached_tok": 42_000,
     }
-    for width, expected_box in ((60, 58), (80, 78), (120, 96)):
+    for width, expected_box in ((60, 58), (80, 78), (120, 108)):
         buf = io.StringIO()
         console = Console(file=buf, width=width, force_terminal=False, color_system=None, soft_wrap=False)
         assert _box_width(console) == expected_box
         console.print(_response_panel("A response with `code` and enough prose to wrap cleanly.", console))
-        assert all(cell_len(line) <= width for line in buf.getvalue().splitlines()), buf.getvalue()
+        response_lines = buf.getvalue().splitlines()
+        assert all(cell_len(line) <= width for line in response_lines), buf.getvalue()
+        assert not response_lines[1].strip() and not response_lines[-2].strip(), \
+            "assistant prose needs one blank row above and below"
 
         footer = _toolbar(stats, lambda width=width: width)()
         plain = "".join(fragment[1] for fragment in footer)
-        assert cell_len(plain) <= width and "sliceagent" in plain and "demo" in plain and "model-x" in plain
-        assert ("ask-before-write" in plain) is (width >= 80)
-        assert ("fix retry handling" in plain) is (width >= 120)
-        assert "999" not in plain and "saved" not in plain, "volatile cost detail belongs in /cost"
+        assert cell_len(plain) <= width and "sliceagent" in plain
+        assert ("demo" in plain) is (width >= 72)
+        assert ("deepseek-reasoner" in plain) is (width >= 72)
+        assert ("ask-before-write" in plain) is (width >= 110)
+        assert "1.0M tok" in plain and "$0.0029 saved" in plain, plain
+        assert "fix retry handling" not in plain, "task prompts must never become pinned footer chrome"
 
         unicode_stats = dict(stats, workspace="切片代理工作区非常长", topic="修复重试逻辑并验证")
         unicode_footer = _toolbar(unicode_stats, lambda width=width: width)()

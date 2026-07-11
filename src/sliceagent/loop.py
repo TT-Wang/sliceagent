@@ -26,15 +26,19 @@ from .events import (
     SliceTightened,
     StepBegin,
     StepEnd,
+    ToolExecutionStarted,
+    ToolRejected,
+    ToolRequested,
     ToolResult,
+    ToolSettled,
     ToolStarted,
     TurnEnd,
     TurnInterrupted,
     TurnPhaseChanged,
 )
 from .guardrails import DEDUP_SAFE_TOOL_NAMES, canonical_tool_args
-from .guidance import BUDGET_EXHAUSTED, STUCK
-from .hooks import Hooks
+from .guidance import BUDGET_EXHAUSTED
+from .hooks import Hooks, ToolDecision
 from .model_runner import complete_model_call
 from .execution import (CHILD_TOKEN_BUDGET_ARG, ToolInvocation, ToolOutcome, ToolPurity,
                         PreflightOverflow, ToolStatus, TurnOutcome, Usage,
@@ -61,6 +65,30 @@ def _dedup_key(name: str, args):
         return name + "\x00" + canonical_tool_args(args or {})
     except Exception:  # noqa: BLE001
         return None
+
+
+def _action_display(name: str, args: dict) -> str:
+    """Bounded, redacted user-facing identity for one stopped tool call."""
+    from .safety import redact_text
+    from .text_utils import one_line
+
+    primary = ""
+    for key in ("path", "command", "pattern", "name", "ref", "goal", "task"):
+        value = (args or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            primary = value
+            break
+    return one_line(redact_text(f"{name} {primary}".strip()), 120)
+
+
+def _failure_display(output: str) -> str:
+    from .safety import redact_text
+    from .text_utils import one_line
+
+    text = str(output or "").strip()
+    if text.lower().startswith("error:"):
+        text = text[6:].strip()
+    return one_line(redact_text(text), 160)
 
 
 def _tool_timeout() -> float | None:
@@ -420,8 +448,9 @@ def _hook_debug(where: str, e: Exception) -> None:
 
 def _safe_advisory(where: str, fn, default=None):
     """Run an ADVISORY hook (budget/oracle/plugin: before/after_step, record_step_usage, prepare_messages,
-    transform_tool_result, should_continue_after_stop). A misbehaving plugin hook must DEGRADE the turn, not
-    end it — on any exception we log (opt-in) and return `default` (= 'no opinion'), so the loop continues."""
+    transform_tool_result, validate_completion, should_continue_after_stop). A misbehaving plugin hook must
+    DEGRADE the turn, not end it — on any exception we log (opt-in) and return `default` (= 'no opinion'), so
+    the loop continues."""
     try:
         return fn()
     except Exception as e:  # noqa: BLE001
@@ -488,10 +517,36 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks, *, ste
     # The metadata is host-private: authorization, events, journals, and provider-visible args retain
     # only the model's original call. Nested child loops apply the same rule recursively.
     spawn_names = frozenset({"spawn_agent", "spawn_explore", "spawn_subagent"})
+    invocations = []
+    for provider_index, tc in enumerate(tool_calls):
+        raw_args = tc.args if isinstance(getattr(tc, "args", None), dict) else {}
+        invocation = ToolInvocation(
+            _tool_call_id(tc, provider_index, step), getattr(tc, "name", "") or "",
+            raw_args, provider_index,
+        )
+        invocations.append(invocation)
+        # The logical request exists whether it is authorized, deduplicated, cancelled, or physically run.
+        # Required journal sinks see it before authorization or scheduling can admit any handler.
+        dispatch(ToolRequested(invocation))
     decisions = []
     for tc in tool_calls:
         raw_args = tc.args if isinstance(getattr(tc, "args", None), dict) else {}
         decisions.append(_safe_authorize(hooks, getattr(tc, "name", "") or "", raw_args))
+    # A control-plane handoff is an ordered terminal barrier for this provider batch. Reads before it may
+    # finish, but no later call may start against the workspace that is about to be torn down.
+    handoff_index = next((
+        index for index, tc in enumerate(tool_calls)
+        if decisions[index].allow
+        and "workspace_handoff" in (getattr(_entry_for(tools, getattr(tc, "name", "") or ""),
+                                             "capabilities", frozenset()) or frozenset())
+    ), None)
+    if handoff_index is not None:
+        for index in range(handoff_index + 1, len(decisions)):
+            decisions[index] = ToolDecision(
+                False,
+                "blocked because an earlier tool in this batch scheduled a workspace switch",
+                counts_as_stuck=False,
+            )
     spawn_indices = [index for index, tc in enumerate(tool_calls)
                      if (getattr(tc, "name", "") or "") in spawn_names
                      and decisions[index].allow]
@@ -514,8 +569,7 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks, *, ste
                      if k not in ("note", CHILD_TOKEN_BUDGET_ARG)}
         if provider_index in child_shares:
             call_args[CHILD_TOKEN_BUDGET_ARG] = child_shares[provider_index]
-        invocation = ToolInvocation(
-            _tool_call_id(tc, provider_index, step), name, raw_args, provider_index)
+        invocation = invocations[provider_index]
         decision = decisions[provider_index]
         entry = _entry_for(tools, name)
         purity = _purity_for(tools, name, call_args, entry)
@@ -562,13 +616,14 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks, *, ste
             )
 
         def announce(inv=invocation, a=raw_args):
-            # Record durable execution truth before admitting the handler into the started set. If required
-            # journaling itself fails, the handler never runs and must not be described as indeterminate.
-            dispatch(ToolStarted(inv.name, a, inv))
+            # Record durable execution truth immediately before admitting an AUTHORIZED handler. Policy
+            # rejections have no on_start callback and therefore can never masquerade as physical starts.
+            dispatch(ToolExecutionStarted(inv))
             started_ids.add(inv.id)
+            dispatch(ToolStarted(inv.name, a, inv))
 
         scheduled.append(ScheduledTool(
-            invocation, purity, execute, on_start=announce,
+            invocation, purity, execute, on_start=(announce if decision.allow else None),
             # Read-only children may overlap, but they finish by sealing artifacts and handing references to
             # the parent. A generic thread deadline must not abandon those lifecycle callbacks into a later
             # turn; the parent waits for settlement while still allowing sibling explorers to run in parallel.
@@ -590,6 +645,11 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks, *, ste
             )
             out = raw.with_text(transformed) if transformed is not None else raw
             outcomes[index] = out
+            if not desc["decision"].allow:
+                dispatch(ToolRejected(
+                    out.invocation, str(desc["decision"].reason or "denied"), out,
+                ))
+            dispatch(ToolSettled(out))
             dispatch(ToolResult(
                 out.invocation.name, dict(out.invocation.args), out.text, out.failing,
                 status=out.status.value, invocation_id=out.invocation.id, outcome=out,
@@ -623,6 +683,7 @@ def run_tool_batch(tool_calls, tools, dispatch: Dispatcher, hooks: Hooks, *, ste
         outcomes[index] = ToolOutcome(inv, src.status, src.text, ())
         # Every provider invocation gets one durable logical outcome. The source call already applied the
         # semantic effects, so this compatibility reply is explicitly non-reducing.
+        dispatch(ToolSettled(outcomes[index], apply_effects=False))
         dispatch(ToolResult(
             inv.name, dict(inv.args), src.text, src.failing,
             status=src.status.value, invocation_id=inv.id, outcome=outcomes[index], apply_effects=False,
@@ -693,6 +754,10 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     seed_plan = None
     slice_built_dispatched = False
     model_attempts: dict[int, int] = {}
+    denied_call_counts: dict[str, int] = {}
+    last_failures: dict[str, str] = {}
+    latest_failure: tuple[str, str] | None = None
+    last_hard_block: tuple[str, dict] | None = None
 
     def _model_attempt_observer(step: int):
         """Build one observer shared by retries/re-projections for this semantic step."""
@@ -741,9 +806,15 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
         hooks.reset_for_turn()  # clear per-turn guards ONCE; failures route through the honest park below
         schemas = tools.schemas() if hasattr(tools, "schemas") else []  # stable per session → hoist once
         built_seed = build_slice()       # logical SEED PLAN — built ONCE
+        prepared_schemas = _safe_advisory(
+            "prepare_tool_schemas", lambda: hooks.prepare_tool_schemas(list(schemas)),
+        )
+        if prepared_schemas is not None:
+            schemas = list(prepared_schemas)
         seed_plan = built_seed if isinstance(built_seed, SeedPlan) else None
         messages = list(built_seed)
         seed_len = len(messages)         # never compact below the seed
+        prose_only_completion = False    # a completion validator may request one tool-free revision pass
 
         reactive_seed_capacity = None  # unknown-window pressure learned from a real provider overflow
         while True:
@@ -765,6 +836,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             # run_tool_batch (a hung run_command) — aborts the turn cleanly instead of crashing it.
             tool_phase = False
             try:
+                active_schemas = [] if prose_only_completion else schemas
                 # overflow → compact the OLDEST WHOLE exchange (assistant + ALL its tool replies; a fixed
                 # 2-window would orphan tool messages on parallel calls → invalid sequence → provider 400).
                 # If the SEED itself overflows (nothing left to compact), fail SOFT — no tighten ladder.
@@ -775,7 +847,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         if seed_plan is not None:
                             projected, provider_messages = _prepare_model_messages(
                                 seed_plan=seed_plan, trajectory=messages[seed_len:], messages=messages,
-                                llm=llm, schemas=schemas,
+                                llm=llm, schemas=active_schemas,
                                 prepare=lambda candidate: _prepared(hooks, candidate),
                                 capacity_hint=reactive_seed_capacity,
                             )
@@ -783,7 +855,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         else:
                             _, provider_messages = _prepare_model_messages(
                                 seed_plan=None, trajectory=[], messages=messages, llm=llm,
-                                schemas=schemas, prepare=lambda candidate: _prepared(hooks, candidate),
+                                schemas=active_schemas, prepare=lambda candidate: _prepared(hooks, candidate),
                             )
                         if not slice_built_dispatched:
                             # Once-per-turn lifecycle/initial-slice event. ModelCallPrepared separately records
@@ -798,7 +870,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                             slice_built_dispatched = True
                         provider_call_started = True
                         resp = complete_model_call(
-                            llm, provider_messages, schemas, dispatch=dispatch,
+                            llm, provider_messages, active_schemas, dispatch=dispatch,
                             on_attempt=_model_attempt_observer(steps),
                         )
                         break
@@ -821,7 +893,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                                 )
                                 try:
                                     projected = _project_request_seed(
-                                        seed_plan, messages[seed_len:], llm, schemas,
+                                        seed_plan, messages[seed_len:], llm, active_schemas,
                                         capacity_hint=tighter,
                                     )
                                 except ContextOverflow:
@@ -910,6 +982,31 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         messages.append({"role": "assistant", "content": candidate})
                     dispatch(StepEnd(steps, step_usage.as_dict(), stop))
                     dispatch(TurnPhaseChanged("checking_completion", "checking whether the turn can finish"))
+                    validation = _safe_advisory(
+                        "validate_completion", lambda: hooks.validate_completion(candidate, stop),
+                    )
+                    if validation and validation.get("park"):
+                        return _park("indeterminate", validation.get("reason") or
+                                     "completion evidence was indeterminate", closeout=False)
+                    if validation and validation.get("continue"):
+                        if validation.get("prose_only"):
+                            # A publication critic needs only the already-visible trajectory/evidence. Removing
+                            # schemas on its revision call prevents a hidden prose correction from spawning new
+                            # effects, polluting receipts, or trying to "edit" its own answer through file tools.
+                            prose_only_completion = True
+                        feedback_role = str(validation.get("feedback_role") or "user").casefold()
+                        if feedback_role not in {"system", "user"}:
+                            feedback_role = "user"
+                        messages.append({"role": feedback_role,
+                                         "content": validation.get("feedback") or
+                                         "Revise the unpublished answer against the supplied evidence."})
+                        continue
+                    if validation and "replacement" in validation:
+                        candidate = str(validation.get("replacement") or "")
+                        if messages and messages[-1].get("role") == "assistant":
+                            messages[-1]["content"] = candidate
+                        elif candidate:
+                            messages.append({"role": "assistant", "content": candidate})
                     cont = _safe_advisory("should_continue_after_stop", lambda: hooks.should_continue_after_stop(stop))
                     if cont and cont.get("park"):
                         return _park("indeterminate", cont.get("reason") or
@@ -939,8 +1036,29 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 )
                 tool_phase = False
                 total_blocked += blocked
+                repeated_denial = ""
                 for r in results:
                     messages.append({"role": "tool", "tool_call_id": r["id"], "content": r["output"]})
+                    output = str(r.get("output") or "")
+                    name = str(r.get("name") or "tool")
+                    args = r.get("args") if isinstance(r.get("args"), dict) else {}
+                    signature = _dedup_key(name, args) or name
+                    if output.startswith("Error: blocked by policy: Loop blocked:"):
+                        if ("has already failed" in output or "mutating attempts" in output):
+                            last_hard_block = (name, args)
+                    elif r.get("failing") and not output.startswith("Error: blocked by policy:"):
+                        cause = _failure_display(output)
+                        last_failures[signature] = cause
+                        latest_failure = (_action_display(name, args), cause)
+                    # Turn-authority denials are deterministic for the exact request: retrying the identical
+                    # call cannot become authorized within this frozen turn contract. Other policy/guardrail
+                    # blocks retain their existing STUCK budget because their state may legitimately change.
+                    if (output.startswith("Error: blocked by policy:")
+                            and "turn_authority_" in output):
+                        denial_signature = signature + "\x00" + output
+                        denied_call_counts[denial_signature] = denied_call_counts.get(denial_signature, 0) + 1
+                        if denied_call_counts[denial_signature] >= 2:
+                            repeated_denial = name
                 child_usage = _model_usage_from_tool_results(results)
                 combined_usage = step_usage + child_usage
                 child_budget_stop = False
@@ -964,6 +1082,13 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
                 usage = combined_usage.as_dict()
                 dispatch(StepEnd(steps, usage, "tool_use"))
+                if repeated_denial:
+                    return _park(
+                        "blocked",
+                        f"Stopped: {repeated_denial} was denied twice because the current request does not "
+                        "authorize that effect. Nothing was executed.",
+                        closeout=False,
+                    )
             except KeyboardInterrupt:
                 if tool_phase:
                     # ToolStarted is durably emitted before a handler runs, but Ctrl-C can arrive before a
@@ -982,7 +1107,23 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
             if after and after.get("stop_turn"):
                 return _park("token_budget", BUDGET_EXHAUSTED("token_budget"), closeout=False)
             if total_blocked >= STUCK_BLOCK_BUDGET:
-                return _park("stuck", STUCK)
+                if last_hard_block is not None:
+                    name, args = last_hard_block
+                    signature = _dedup_key(name, args) or name
+                    action = _action_display(name, args)
+                    cause = last_failures.get(signature)
+                    if cause:
+                        detail = (f"Stopped: {action} failed repeatedly: {cause}. "
+                                  "Further identical attempts were blocked.")
+                    elif latest_failure is not None:
+                        failed_action, failed_cause = latest_failure
+                        detail = (f"Stopped after repeated failed actions. Latest: {failed_action} — "
+                                  f"{failed_cause}. Further retries were blocked.")
+                    else:
+                        detail = f"Stopped: repeated failed attempts to {action} were blocked."
+                else:
+                    detail = "Stopped after repeated failed tool calls; further retries were blocked."
+                return _park("stuck", detail)
     except KeyboardInterrupt:
         # ctrl-C during SETUP (build_slice/schemas), before the step's own interrupt guard is in scope.
         return _park("aborted", None, closeout=False)

@@ -9,6 +9,7 @@ loop already drives.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable, Optional
 
 from .access import AllAccess
@@ -17,6 +18,35 @@ from .execution import (ToolEffect, ToolInvocation, ToolOutcome, ToolPurity,
 
 Handler = Callable[[dict], str]      # (args) -> result string
 AccessFn = Callable[[dict], list]    # (args) -> list[Access] for the scheduler/permissions
+
+
+class ToolIntentEffect(str, Enum):
+    """Semantic effect of *invoking* a tool for turn-authority decisions.
+
+    This is intentionally separate from :class:`ToolPurity`. Purity answers a scheduler question
+    (can calls overlap / be deduplicated?); intent effect answers an authorization question (did the
+    user authorize this class of action?). A network read can therefore be OBSERVE while still being
+    scheduler-UNKNOWN, and a task-ledger update is TASK_STATE even though it does not touch the workspace.
+    """
+
+    OBSERVE = "OBSERVE"
+    DIALOGUE = "DIALOGUE"
+    TASK_STATE = "TASK_STATE"
+    EXTERNAL = "EXTERNAL"
+    UNKNOWN = "UNKNOWN"
+
+
+IntentEffectFn = Callable[[dict], ToolIntentEffect]
+
+
+def coerce_intent_effect(value) -> ToolIntentEffect:
+    """Conservatively normalize extension-provided intent-effect metadata."""
+    if isinstance(value, ToolIntentEffect):
+        return value
+    try:
+        return ToolIntentEffect(str(value or "").strip().upper())
+    except (TypeError, ValueError):
+        return ToolIntentEffect.UNKNOWN
 
 
 class ToolText(str):
@@ -74,6 +104,10 @@ class ToolEntry:
     effect_factory: Optional[
         Callable[[ToolInvocation, ToolStatus, str], tuple[ToolEffect, ...]]
     ] = None
+    # Turn-level semantic authorization metadata. A callable supports argument-sensitive tools such as
+    # run_command (a plain `ls` observes; an arbitrary command may change external state). UNKNOWN is the
+    # extension-safe default and is blocked when a turn has no explicit action authority.
+    intent_effect: ToolIntentEffect | IntentEffectFn = ToolIntentEffect.UNKNOWN
 
 
 def tool_result_text(value) -> str:
@@ -136,6 +170,49 @@ _PURE_READ_BUILTINS = frozenset({
 })
 _DEDUPLICABLE_BUILTINS = frozenset({"read_file", "list_files", "grep", "glob", "search_history"})
 
+# Central semantic metadata for built-ins registered across tools.py, code_grep.py, web.py, memory.py,
+# hippocampus.py, and session.py. This deliberately does NOT infer from ToolPurity: task-state mutations and
+# externally-observing network reads need different intent semantics despite having similar scheduler purity.
+_OBSERVE_BUILTINS = frozenset({
+    "read_file", "list_files", "grep", "glob", "search_history", "code_review",
+    "proc_poll", "proc_tail", "proc_wait", "terminal_read", "terminal_wait",
+    "fetch_url", "web_search",
+})
+_DIALOGUE_BUILTINS = frozenset({"ask_user"})
+_TASK_STATE_BUILTINS = frozenset({
+    "world_set", "world_clear", "reconcile_execution",
+    "require", "requirement_done", "supersede_requirement", "drop_requirement", "update_plan",
+    "new_topic", "switch_topic",
+})
+_EXTERNAL_BUILTINS = frozenset({
+    "change_workspace", "edit_file", "append_to_file", "str_replace", "execute_code",
+    "proc_start", "proc_kill", "terminal_open", "terminal_send", "terminal_close", "write_skill",
+})
+
+
+def _builtin_intent_effect(name: str) -> ToolIntentEffect | IntentEffectFn:
+    if name == "run_command":
+        def command_effect(args: dict) -> ToolIntentEffect:
+            # Reuse the permission layer's existing deny-by-default parser rather than growing a second shell
+            # classifier. The deferred import avoids registry -> policy -> hooks -> registry import cycles.
+            try:
+                from .policy import _is_readonly_command
+                command = str((args or {}).get("command") or "")
+                return (ToolIntentEffect.OBSERVE if _is_readonly_command(command)
+                        else ToolIntentEffect.EXTERNAL)
+            except Exception:  # classifier unavailable/errored means the command is not proven observational
+                return ToolIntentEffect.UNKNOWN
+        return command_effect
+    if name in _OBSERVE_BUILTINS:
+        return ToolIntentEffect.OBSERVE
+    if name in _DIALOGUE_BUILTINS:
+        return ToolIntentEffect.DIALOGUE
+    if name in _TASK_STATE_BUILTINS:
+        return ToolIntentEffect.TASK_STATE
+    if name in _EXTERNAL_BUILTINS:
+        return ToolIntentEffect.EXTERNAL
+    return ToolIntentEffect.UNKNOWN
+
 
 class ToolRegistry:
     """A name->ToolEntry map with a generation counter (for downstream schema caching)
@@ -152,6 +229,10 @@ class ToolRegistry:
         if entry.source == "builtin" and entry.purity is ToolPurity.UNKNOWN:
             entry.purity = (ToolPurity.PURE_READ if entry.name in _PURE_READ_BUILTINS
                             else ToolPurity.EFFECTFUL)
+        if (entry.source == "builtin"
+                and coerce_intent_effect(entry.intent_effect) is ToolIntentEffect.UNKNOWN
+                and not callable(entry.intent_effect)):
+            entry.intent_effect = _builtin_intent_effect(entry.name)
         if entry.source == "builtin" and entry.name in _DEDUPLICABLE_BUILTINS:
             entry.deduplicable = True
         self._tools[entry.name] = entry
@@ -192,6 +273,24 @@ class ToolRegistry:
             return e.accesses(args)
         except Exception:
             return [AllAccess()]
+
+    def resolve_intent_effect(self, name: str, args: dict) -> ToolIntentEffect:
+        """Resolve semantic turn-authority metadata for one exact call.
+
+        Unknown names, missing declarations, invalid extension values, and resolver failures all remain
+        UNKNOWN. Callers may therefore fail closed without conflating this semantic contract with scheduler
+        purity or filesystem access inference.
+        """
+        entry = self._tools.get(name)
+        if entry is None:
+            return ToolIntentEffect.UNKNOWN
+        effect = entry.intent_effect
+        if callable(effect):
+            try:
+                effect = effect(args or {})
+            except Exception:
+                return ToolIntentEffect.UNKNOWN
+        return coerce_intent_effect(effect)
 
     def run(self, name: str, args: dict) -> ToolText:
         """The single tool choke point. Returns ToolText (a str carrying .ok) so the loop reads an

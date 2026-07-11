@@ -123,6 +123,26 @@ def render_findings_frames_by_source_no_re_derive():
     assert "verify against OPEN FILES" in out          # tool-note framing
     assert "UNVERIFIED" in out                          # claim framing
     assert "do not re-derive" not in out.lower()        # the dangerous framing is GONE
+    assert "UNVERIFIED" in render_findings(["legacy"], {"legacy": "unknown-source"}), \
+        "unknown persisted provenance must fail closed rather than render as observed"
+
+
+@check
+def delegated_fan_in_remains_recallable_without_becoming_observed_workspace_truth():
+    s = Slice(); s.reset("review the project")
+    sink = slice_sink(s)
+    mixed = (
+        "child report: review completed; parser.py is unsafe | primary observation [obs:abc123]: return value | "
+        'full report: read_file("subagents/sub-1.md")'
+    )
+    sink(ToolResult(
+        "spawn_agent", {"agent": "explorer", "task": "inspect parser.py"}, mixed, False,
+    ))
+    assert mixed in s.findings, "bounded child fan-in must remain available for cross-turn recall"
+    assert s.finding_source[mixed] == "delegated"
+    rendered = render_findings(s.findings, s.finding_source)
+    assert "delegated testimony" in rendered and "UNVERIFIED" in rendered
+    assert 'read_file("subagents/sub-1.md")' in rendered, "the refinement handle must survive"
 
 
 @check
