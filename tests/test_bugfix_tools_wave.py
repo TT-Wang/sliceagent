@@ -1,4 +1,4 @@
-"""Regression tests for the tools/sandbox/exec wave: #27/#28 factory validation, #31 secret-dir reach
+"""Regression tests for the tools/sandbox/exec wave: #27 factory validation, #31 secret-dir reach
 exclusion, #19 terminal-open clean failure (no fd leak), #20 wait-pattern bounds. No model, no pytest.
 Run: PYTHONPATH=src python tests/test_bugfix_tools_wave.py
 """
@@ -10,7 +10,6 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.sandbox import make_sandbox  # noqa: E402
-from sliceagent.policy import make_policy  # noqa: E402
 from sliceagent.tools import LocalToolHost  # noqa: E402
 from sliceagent.terminal import SessionManager  # noqa: E402
 
@@ -21,17 +20,18 @@ def check(fn):
 
 
 @check
-def factories_reject_unknown_values():  # #27 / #28
-    make_sandbox("local"); make_sandbox("docker")          # valid → no raise
-    make_policy("guard"); make_policy("readonly"); make_policy("ask"); make_policy("allow")
+def sandbox_factory_rejects_unknown_values():  # #27
+    make_sandbox("local")
+    if sys.platform == "win32":                           # native-Windows Docker is explicitly unsupported
+        try:
+            make_sandbox("docker"); assert False, "native Windows must reject the POSIX same-path backend"
+        except ValueError as exc:
+            assert "WSL2" in str(exc) and "local" in str(exc)
+    else:
+        make_sandbox("docker")                            # POSIX/WSL2 → valid
     for bad in ("dokcer", "host", "none"):
         try:
             make_sandbox(bad); assert False, f"unknown backend {bad} must raise"
-        except ValueError:
-            pass
-    for bad in ("redonly", "permissive", "off"):
-        try:
-            make_policy(bad); assert False, f"unknown policy {bad} must raise"
         except ValueError:
             pass
 

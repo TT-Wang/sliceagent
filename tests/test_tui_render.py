@@ -5,15 +5,22 @@ Run: PYTHONPATH=src python tests/test_tui_render.py
 import io
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from rich.cells import cell_len  # noqa: E402
     from rich.console import Console  # noqa: E402
-    from sliceagent.tui import (RichSink, _box_width, _render_plan, _render_read_summary,  # noqa: E402
-                                _record_usage, _render_tool_result, _response_panel, _toolbar)
-    from sliceagent.events import StepEnd, ToolResult   # noqa: E402
+    from sliceagent.tui import (RichSink, _ToolTiming, _agent_matrix_plain_lines, _box_width,  # noqa: E402
+                                _live_status_line, _render_agent_batch, _render_plan, _render_read_summary,
+                                _private_prompt_history, _record_usage, _render_tool_result,
+                                _response_panel, _toolbar)
+    from sliceagent.tui_projection import AgentResultView, output_preview  # noqa: E402
+    from sliceagent.events import (StepBegin, StepEnd, SubagentProgress, ToolResult, ToolStarted,
+                                   TurnStarted)  # noqa: E402
+    from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus  # noqa: E402
+    from sliceagent.progress import TurnProgress  # noqa: E402
 except Exception as _e:  # noqa: BLE001 — tui extra (rich) not installed → skip, don't fail the suite
     print(f"SKIP test_tui_render (tui extra not available: {_e})")
     sys.exit(0)
@@ -46,9 +53,10 @@ def plan_renders_as_one_settled_summary():
 @check
 def fresh_tokens_tracked_for_toolbar():
     sink, _ = _sink_capture()
-    sink(StepEnd(1, {"prompt_tokens": 1000, "completion_tokens": 20, "input_other": 200}, "tool_use"))
+    sink(StepEnd(1, {"prompt_tokens": 1000, "completion_tokens": 20,
+                          "input_other": 200, "input_cache_creation": 30}, "tool_use"))
     sink(StepEnd(2, {"prompt_tokens": 1000, "completion_tokens": 10, "input_other": 50}, "stop"))
-    assert sink.stats["fresh"] == 250, sink.stats
+    assert sink.stats["fresh"] == 280, sink.stats
     assert sink.stats["tokens"] == 2030, sink.stats
 
     chitchat_stats = {"model": "deepseek-reasoner"}
@@ -56,6 +64,34 @@ def fresh_tokens_tracked_for_toolbar():
         "prompt_tokens": 12, "completion_tokens": 4, "input_other": 12, "output": 4,
     })
     assert chitchat_stats["tokens"] == 16 and chitchat_stats["cost"] > 0, chitchat_stats
+
+
+@check
+def prompt_history_is_created_and_repaired_private():
+    import stat
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="tui-private-history-")
+    old_home = os.environ.get("HOME")
+    old_umask = os.umask(0o022)
+    try:
+        os.environ["HOME"] = home
+        state = os.path.join(home, ".sliceagent")
+        os.makedirs(state)
+        path = os.path.join(state, "history")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("legacy\n")
+        os.chmod(path, 0o644)
+        history = _private_prompt_history()
+        history.append_string("private request")
+        assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    finally:
+        os.umask(old_umask)
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
 
 
 @check
@@ -86,10 +122,161 @@ def settled_rows_never_wrap_at_common_terminal_widths():
 
 
 @check
+def agent_groups_and_busy_meter_are_width_safe_with_wide_text():
+    agents = [AgentResultView(
+        invocation_id=f"agent-{index}", launch_ordinal=index, kind="explorer",
+        name=f"审查员-{index}", task="检查渲染器并验证并发状态不会回退" * 3,
+        status="failed" if index == 2 else "succeeded",
+        stop_cause="provider_timeout" if index == 2 else "complete",
+        recovered_from=(), artifact_id=f"child-{index}", detail="详细错误" * 30,
+        duration_s=12.4,
+    ) for index in range(1, 5)]
+    for width in (60, 80, 120):
+        buf = io.StringIO()
+        console = Console(file=buf, width=width, force_terminal=False, color_system=None, soft_wrap=False)
+        console.print(_render_agent_batch(agents, width))
+        assert all(cell_len(line) <= width for line in buf.getvalue().splitlines()), buf.getvalue()
+        status = "".join(fragment[1] for fragment in _live_status_line(
+            "◌ Delegating — 4 agents running · 审查员-4 · grep renderer",
+            {"model": "unknown", "tokens": 987_654, "saved_cached_tok": 123_456}, width,
+        ))
+        assert cell_len(status) <= width, (width, status)
+
+
+@check
+def live_agent_matrix_keeps_operational_seal_separate_from_source_partial():
+    machine = TurnProgress(await_commit=True)
+    machine.reduce(TurnStarted("merge reports", turn_id="turn-source"))
+    machine.reduce(StepBegin(1))
+    invocation = ToolInvocation(
+        "synth-1", "spawn_agent", {"agent": "synthesiser", "task": "merge reports"}, 0,
+    )
+    machine.reduce(ToolStarted(invocation.name, dict(invocation.args), invocation))
+    effect = ToolEffect("child-source", "child_artifact", {
+        "artifact_id": "child-source", "kind": "synthesiser", "status": "ok",
+        "source_coverage_status": "source_partial",
+    })
+    outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "report", (effect,))
+    machine.reduce(ToolResult(
+        invocation.name, dict(invocation.args), outcome.text, False,
+        status="succeeded", invocation_id=invocation.id, outcome=outcome,
+    ))
+
+    rendered = "\n".join(line for _, line in _agent_matrix_plain_lines(machine.snapshot(), 120))
+    assert "1 sealed" in rendered and "1 source partial" in rendered, rendered
+    assert "✓ sealed" in rendered and "source partial" in rendered, rendered
+    assert "ground" not in rendered and "verified" not in rendered, rendered
+
+
+@check
+def live_agent_matrix_is_stable_bounded_and_cell_safe():
+    machine = TurnProgress(await_commit=True)
+    machine.reduce(TurnStarted("review", turn_id="turn-matrix"))
+    machine.reduce(StepBegin(1))
+    # Reverse callback order and wide text exercise stable physical request order and cell cropping.
+    calls = []
+    for index in range(1, 16):
+        invocation = ToolInvocation(
+            f"spawn-{index}", "spawn_agent",
+            {"agent": "explorer", "name": f"审查员-{index}", "task": f"检查区域 {index}"},
+            index - 1,
+        )
+        calls.append(invocation)
+        machine.reduce(ToolStarted(invocation.name, dict(invocation.args), invocation))
+    for index in reversed(range(1, 16)):
+        phase = "failed" if index in {3, 14} else ("report_ready" if index % 3 == 0 else "running")
+        machine.subagent_activity(SubagentProgress(
+            f"child-{index}", "turn-matrix", index, "explorer", f"审查员-{index}", 1,
+            phase, "检查渲染器并验证并发状态" * 4, index, index,
+            invocation_id=f"spawn-{index}", request_ordinal=index, objective=f"检查区域 {index}",
+        ))
+    snap = machine.snapshot()
+    for width in (40, 60, 80, 120):
+        lines = _agent_matrix_plain_lines(snap, width, now=time.monotonic() + 2)
+        assert len(lines) <= 12, "summary + header + 8 rows/overflow must stay bounded"
+        assert all(cell_len(line) <= width for _, line in lines), (width, lines)
+        joined = "\n".join(line for _, line in lines)
+        assert "15" in joined and "failed" in joined and "hidden" in joined, joined
+        visible_ids = [line.split()[0] for _, line in lines if line.strip()[:1].isdigit()]
+        assert visible_ids == sorted(visible_ids, key=int), visible_ids
+
+
+@check
+def nested_matrix_ids_follow_request_order_not_callback_order():
+    machine = TurnProgress(await_commit=True)
+    machine.reduce(TurnStarted("review", turn_id="turn-tree"))
+    machine.reduce(StepBegin(1))
+    root = ToolInvocation(
+        "spawn-root", "spawn_agent", {"agent": "explorer", "task": "root"}, 0,
+    )
+    machine.reduce(ToolStarted(root.name, dict(root.args), root))
+    machine.subagent_activity(SubagentProgress(
+        "child-root", "turn-tree", 1, "explorer", "root", 1,
+        "running", "root work", 1, 1,
+        invocation_id=root.id, request_ordinal=1,
+    ))
+    for ordinal in (2, 1):
+        machine.subagent_activity(SubagentProgress(
+            f"nested-{ordinal}", "turn-tree", ordinal, "explorer", f"nested-{ordinal}", 2,
+            "running", "nested work", 1, 1,
+            parent_agent_id="child-root", invocation_id=f"child-root/call_1_{ordinal}",
+            request_ordinal=ordinal,
+        ))
+    joined = "\n".join(
+        line for _, line in _agent_matrix_plain_lines(machine.snapshot(), 100)
+    )
+    first, second = joined.index("1.1"), joined.index("1.2")
+    assert first < second and "nested-1" in joined and "nested-2" in joined, joined
+
+
+@check
+def typed_timing_never_falls_back_to_a_same_name_sibling():
+    now = [0.0]
+    timing = _ToolTiming(clock=lambda: now[0])
+    real = ToolInvocation("real", "spawn_agent", {"task": "real"}, 0)
+    timing.start(ToolStarted(real.name, dict(real.args), real))
+    now[0] = 5.0
+    assert timing.settle(ToolResult(
+        "spawn_agent", {"task": "rejected"}, "not started", True,
+        invocation_id="other",
+    )) is None
+    now[0] = 10.0
+    assert timing.settle(ToolResult(
+        "spawn_agent", dict(real.args), "done", False, invocation_id="real",
+    ), ended_at=2.5) == 2.5
+
+
+@check
+def output_preview_scans_large_results_with_constant_retained_rows():
+    result = output_preview(("frame\n" * 100_000) + "root cause", max_rows=3)
+    assert result.lines == ("frame", "frame", "root cause")
+    assert result.hidden_lines == 99_998 and result.tail_retained
+    started = time.monotonic()
+    blank_heavy = output_preview(("\n" * 100_000) + "tail", max_rows=3)
+    assert time.monotonic() - started < 2.0, "newline-heavy preview regressed to superlinear scanning"
+    assert blank_heavy.lines[-1:] == ("tail",)
+
+
+@check
+def narrow_single_agent_uses_a_complete_manifest_handle():
+    view = AgentResultView(
+        invocation_id="agent-1", launch_ordinal=1, kind="explorer", name="", task="audit",
+        status="succeeded", stop_cause="complete", recovered_from=(),
+        artifact_id="subagent-" + ("a" * 32), detail="report", request_ordinal=1,
+    )
+    buf = io.StringIO()
+    console = Console(file=buf, width=58, force_terminal=False, color_system=None, soft_wrap=False)
+    console.print(_render_agent_batch([view], 58))
+    rendered = buf.getvalue()
+    assert "artifact · artifacts/index.md" in rendered and "…" not in rendered, rendered
+
+
+@check
 def response_panel_and_footer_are_responsive_at_60_80_and_120():
     stats = {
-        "workspace": "demo", "model": "deepseek-reasoner", "policy": "ask-before-write",
-        "topic": "fix retry handling", "tokens": 999_999, "saved_cached_tok": 42_000,
+        "workspace": "demo", "model": "deepseek-reasoner",
+        "topic": "fix retry handling", "tokens": 999_999, "fresh": 1_234,
+        "saved_cached_tok": 42_000, "last_turn_s": 65,
     }
     for width, expected_box in ((60, 58), (80, 78), (120, 108)):
         buf = io.StringIO()
@@ -106,8 +293,10 @@ def response_panel_and_footer_are_responsive_at_60_80_and_120():
         assert cell_len(plain) <= width and "sliceagent" in plain
         assert ("demo" in plain) is (width >= 72)
         assert ("deepseek-reasoner" in plain) is (width >= 72)
-        assert ("ask-before-write" in plain) is (width >= 110)
-        assert "1.0M tok" in plain and "$0.0029 saved" in plain, plain
+        # The legacy DeepSeek alias is priced as its current V4 Flash target until retirement.
+        assert "1.0M tok" in plain and "$0.0001 saved" in plain, plain
+        assert ("1.2k fresh" in plain) is (width >= 72), plain
+        assert ("⏲ 01:05" in plain) is (width >= 110), plain
         assert "fix retry handling" not in plain, "task prompts must never become pinned footer chrome"
 
         unicode_stats = dict(stats, workspace="切片代理工作区非常长", topic="修复重试逻辑并验证")
@@ -120,7 +309,8 @@ def response_panel_and_footer_are_responsive_at_60_80_and_120():
 def completer_does_slash_and_files():
     from prompt_toolkit.document import Document
     from sliceagent.tui import _InputCompleter
-    comp = _InputCompleter(files=["src/sliceagent/util.py", "tests/test_util.py", "README.md"])
+    comp = _InputCompleter(files=["src/sliceagent/util.py", "tests/test_util.py", "README.md",
+                                  "app/jobs/[id]/page.tsx", "docs/my guide.md", "bad\nname.py"])
     # slash palette at line start
     slash = [c.text for c in comp.get_completions(Document("/pl"), None)]
     assert "/plan" in slash, slash
@@ -128,11 +318,49 @@ def completer_does_slash_and_files():
     # the @path syntax cli.py's message parser already recognizes for pinning/attaching a file.
     files = [c.text for c in comp.get_completions(Document("please edit @util"), None)]
     assert "src/sliceagent/util.py" in files and "tests/test_util.py" in files, files
+    bracketed = [c.text for c in comp.get_completions(Document("inspect @[id]"), None)]
+    assert "app/jobs/[id]/page.tsx" in bracketed, bracketed
+    spaced = [c.text for c in comp.get_completions(Document("read @guide"), None)]
+    assert '"docs/my guide.md"' in spaced, spaced
+    assert list(comp.get_completions(Document("read @bad"), None)) == [], \
+        "control-character filenames must never be inserted into the prompt"
     # plain prose (no @) must NOT pop a completion menu, even on a word that matches a real file —
     # this is the exact annoyance the @-gating fixes.
     assert list(comp.get_completions(Document("please edit util"), None)) == []
     # short words / mid-prose don't spam
     assert list(comp.get_completions(Document("a"), None)) == []
+
+
+@check
+def mention_parser_accepts_completion_syntax_and_confines_resolution():
+    import tempfile
+    from sliceagent.mentions import parse_mentions, workspace_mentions
+
+    with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+        os.makedirs(os.path.join(root, "app", "jobs", "[id]"))
+        os.makedirs(os.path.join(root, "docs"))
+        bracketed = os.path.join(root, "app", "jobs", "[id]", "page.tsx")
+        spaced = os.path.join(root, "docs", "my guide.md")
+        comma = os.path.join(root, "literal,")
+        for path in (bracketed, spaced, comma):
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("x")
+        secret = os.path.join(outside, "secret.txt")
+        with open(secret, "w", encoding="utf-8") as stream:
+            stream.write("secret")
+        os.symlink(secret, os.path.join(root, "escape.txt"))
+
+        text = ('inspect @app/jobs/[id]/page.tsx and @"docs/my guide.md", '
+                'then @app/jobs/[id]/page.tsx; ignore user@example.com')
+        assert parse_mentions(text) == ["app/jobs/[id]/page.tsx", "docs/my guide.md",
+                                          "app/jobs/[id]/page.tsx;"]
+        assert workspace_mentions(text, root) == ["app/jobs/[id]/page.tsx", "docs/my guide.md"]
+        # Exact filename wins over punctuation fallback; traversal and symlink escapes never resolve.
+        assert workspace_mentions("@literal, @../secret.txt @escape.txt", root) == ["literal,"]
+        assert workspace_mentions("please inspect (@app/jobs/[id]/page.tsx)", root) == [
+            "app/jobs/[id]/page.tsx",
+        ]
+        assert parse_mentions('@"bad\nname.py"') == [], "quoted controls must not enter mention paths"
 
 
 @check

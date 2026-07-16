@@ -1,35 +1,24 @@
-"""Guarded `grep` tool — ripgrep pagination + a consecutive-search guard.
+"""Project/focus-root `grep` tool with bounded ripgrep pagination.
 
 The single discovery-on-demand seam (W7 deleted `code_index.snippets`; the model now
-greps for content instead). Two mechanisms:
+greps for content instead). It runs ripgrep, slices result lines by offset/limit, and
+appends an explicit continuation hint when more results remain. Repeating a search is
+an ordinary live observation; the host never turns repetition into a refusal.
 
-- Grep pagination: run ripgrep, then slice the result lines by offset/limit and
-  append an explicit "[truncated; use offset=N to see more]" notice when more
-  remain.
-- Consecutive-search guard (the `{last_key, consecutive}` tracker): the 4th
-  identical-in-a-row call returns a BLOCKED message instead of re-running
-  the same search forever. The key INCLUDES offset, so paging through truncated results
-  (a *different* offset each call) never trips the guard.
-
-Moat note: GREP_GUARD is keyed by host identity (not a transcript). Every call sources
-live from the workspace via ripgrep; no growing message history is assumed.
+Every call sources live from the current project or a grounded absolute focus root; no transcript or
+cross-call admission state is involved.
 """
 from __future__ import annotations
 
 from .platform_compat import IS_WINDOWS, norm_rel
 import shutil
 import subprocess
-import threading
 
 from .access import FileAccess
+from .execution import ToolStatus
+from .reach import ReachSteer
 from .registry import ToolEntry, ToolText
 
-# {host_id: {"last_key": tuple | None, "consecutive": int}} — module-level, per-host.
-# A per-task tracker shape. Not a transcript: a tiny durable counter.
-GREP_GUARD: dict = {}
-_GREP_LOCK = threading.Lock()   # parallel explorers share GREP_GUARD; serialize the check-then-update
-
-_BLOCK_AFTER = 4          # 4th identical-in-a-row call is blocked (count>=4)
 _DEFAULT_LIMIT = 50
 _RG_MAX_FILESIZE = "300K"
 _RG_MAX_COLUMNS = "400"
@@ -40,7 +29,8 @@ _GREP_SCHEMA = {
     "function": {
         "name": "grep",
         "description": (
-            "Search file CONTENTS for a regex pattern (ripgrep) under the workspace. `output_mode` shapes the "
+            "Search file CONTENTS for a regex pattern (ripgrep) in the current project or a grounded absolute "
+            "focus root. `output_mode` shapes the "
             "result: 'content' (default — line-numbered file:line:text matches), 'files_with_matches' (just the "
             "matching file paths, newest-modified first), or 'count' (per-file match counts) — use the latter "
             "two to locate code cheaply before reading. Results paginate via offset/limit. Prefer this over "
@@ -50,7 +40,9 @@ _GREP_SCHEMA = {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Regex pattern to search for."},
-                "path": {"type": "string", "description": "Subdirectory to search under (default: workspace root)."},
+                "path": {"type": "string", "description": (
+                    "Project-relative subdirectory or grounded absolute focus root (default: project root)."
+                )},
                 "glob": {"type": "string", "description": "Optional file glob filter, e.g. '*.py' or '*.{ts,tsx}'."},
                 "type": {"type": "string", "description": "Optional ripgrep file type, e.g. 'py', 'js', 'rust'."},
                 "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"],
@@ -74,25 +66,8 @@ def _norm_int(value, default: int) -> int:
     return n if n >= 0 else default
 
 
-def _bump_guard(host_id, key) -> int:
-    """Update the consecutive-identical counter for this host; return the run length. Locked: parallel
-    explorers share GREP_GUARD, so the check-then-clear and the counter update must be atomic (else a
-    concurrent clear() blows away another thread's run length)."""
-    with _GREP_LOCK:
-        if host_id not in GREP_GUARD and len(GREP_GUARD) > 256:
-            GREP_GUARD.clear()   # bound the per-host map (no host-teardown hook + id() reuse) — resetting the
-            #                      consecutive counter is harmless (worst case: one missed back-to-back warning)
-        data = GREP_GUARD.setdefault(host_id, {"last_key": None, "consecutive": 0})
-        if data["last_key"] == key:
-            data["consecutive"] += 1
-        else:
-            data["last_key"] = key
-            data["consecutive"] = 1
-        return data["consecutive"]
-
-
 def make_grep_tool(host) -> ToolEntry:
-    """Build the guarded grep ToolEntry bound to a host (LocalToolHost-like: root()/_resolve)."""
+    """Build the paginated grep ToolEntry bound to a LocalToolHost-like object."""
 
     def handler(args: dict) -> str:
         pattern = args.get("pattern") or ""
@@ -110,16 +85,6 @@ def make_grep_tool(host) -> ToolEntry:
         if limit <= 0:
             limit = _DEFAULT_LIMIT
 
-        # Consecutive-identical guard. Key includes offset so paging never trips it.
-        key = (pattern, path, glob, ftype, mode, context, limit, offset)
-        count = _bump_guard((id(host), threading.get_ident()), key)   # per-THREAD: parallel explorers share the host but must not cross-contaminate the consecutive-grep counter
-        if count >= _BLOCK_AFTER:
-            return (
-                f"BLOCKED: you have run this exact grep {count} times in a row and the results "
-                "have NOT changed. STOP re-searching — use what you already have, or change the "
-                "pattern/path/glob/type/output_mode/offset."
-            )
-
         # Virtual history/ namespace: no files on disk to ripgrep — scan the sealed turn docs in Python.
         hf = host._history_route(path) if hasattr(host, "_history_route") else None
         if hf is not None:
@@ -127,16 +92,21 @@ def make_grep_tool(host) -> ToolEntry:
             return hf.grep(pattern, path=virtual_path, output_mode=mode, context=context,
                            offset=offset, limit=limit)
 
-        # Confine the search target under the workspace root (rejects escapes).
+        # Resolve through the live ReachSet: project-relative paths plus grounded
+        # narrow absolute focus roots, while blanket/sensitive escapes stay denied.
         try:
-            target = host._resolve(path)
+            target = host.resolve_read(path) if hasattr(host, "resolve_read") else host._resolve(path)
+        except ReachSteer as e:
+            return ToolText(str(e), status=ToolStatus.STEERED)
         except (PermissionError, ValueError) as e:
-            return ToolText(f"Error: {e}", ok=False)   # ok=False so a repeated boundary-escape is seen by the failure guardrail
+            return ToolText(f"Error: {e}", ok=False)
 
         rg = shutil.which("rg")
         if not rg:
-            # Quiet, non-failing: degrade gracefully when ripgrep is absent.
-            return "grep: ripgrep (rg) is not available in this environment; no results."
+            return ToolText(
+                "grep: ripgrep (rg) is not available in this environment; search was not run.",
+                status=ToolStatus.FAILED,
+            )
 
         cmd = [rg] + (["--path-separator", "/"] if IS_WINDOWS else [])  # model-facing paths: '/' on all platforms
         if mode == "files_with_matches":
@@ -160,14 +130,19 @@ def make_grep_tool(host) -> ToolEntry:
                 cwd=host.root(), timeout=30
             )
         except (OSError, subprocess.SubprocessError) as e:
-            return f"grep: search failed ({e}); no results."
+            return ToolText(f"grep: search failed ({e}); search was not completed.",
+                            status=ToolStatus.FAILED)
 
         # rg exit codes: 0 = matches, 1 = no matches (not an error), 2 = real error.
         if proc.returncode == 1:
             return "grep: no matches found."
         if proc.returncode not in (0, 1):
             err = (proc.stderr or "").strip()
-            return f"grep: no matches found.{(' (' + err + ')') if err else ''}"
+            detail = f" ({err})" if err else ""
+            return ToolText(
+                f"grep: ripgrep failed with exit code {proc.returncode}{detail}",
+                status=ToolStatus.FAILED,
+            )
 
         lines = [ln for ln in proc.stdout.splitlines() if ln]
         if not lines:
@@ -203,7 +178,8 @@ _GLOB_SCHEMA = {
     "function": {
         "name": "glob",
         "description": (
-            "Find files AND directories by NAME pattern under the workspace (for CONTENTS use grep). Matching "
+            "Find files AND directories by NAME pattern in the current project or a grounded absolute focus "
+            "root (for CONTENTS use grep). Matching "
             "folders (e.g. a 'hunter/' project dir) are returned too, listed first. Supports glob wildcards incl. "
             "brace sets, e.g. '*.py', 'src/**/*.{ts,tsx}', '*hunter*'. Paths most-recently-modified first, capped. "
             "Use to locate a file or project folder before opening it."
@@ -212,7 +188,9 @@ _GLOB_SCHEMA = {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "File-name glob, e.g. '*.py' or '**/*.{ts,tsx}'."},
-                "path": {"type": "string", "description": "Subdirectory to search under (default: workspace root)."},
+                "path": {"type": "string", "description": (
+                    "Project-relative subdirectory or grounded absolute focus root (default: project root)."
+                )},
                 "limit": {"type": "integer", "description": "Max paths to return (default 100)."},
             },
             "required": ["pattern"],
@@ -299,7 +277,9 @@ def make_glob_tool(host) -> ToolEntry:
         path = args.get("path") or "."
         limit = _norm_int(args.get("limit"), _GLOB_DEFAULT_LIMIT) or _GLOB_DEFAULT_LIMIT
         try:
-            target = host._resolve(path)
+            target = host.resolve_read(path) if hasattr(host, "resolve_read") else host._resolve(path)
+        except ReachSteer as e:
+            return ToolText(str(e), status=ToolStatus.STEERED)
         except (PermissionError, ValueError) as e:
             return ToolText(f"Error: {e}", ok=False)
 
@@ -312,8 +292,18 @@ def make_glob_tool(host) -> ToolEntry:
                                        errors="replace", cwd=host.root(), timeout=30)
                 if proc.returncode in (0, 1):          # 0 = files, 1 = none (not an error)
                     files = [ln for ln in proc.stdout.splitlines() if ln]
-            except (OSError, subprocess.SubprocessError):
-                files = []
+                else:
+                    err = (proc.stderr or "").strip()
+                    detail = f" ({err})" if err else ""
+                    return ToolText(
+                        f"glob: ripgrep failed with exit code {proc.returncode}{detail}",
+                        status=ToolStatus.FAILED,
+                    )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return ToolText(
+                    f"glob: search failed ({exc}); search was not completed.",
+                    status=ToolStatus.FAILED,
+                )
         else:
             files = _glob_walk(target, pattern, limit)   # graceful degrade when rg is absent
 

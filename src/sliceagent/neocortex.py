@@ -1,28 +1,20 @@
-"""NEOCORTEX — the long-term / semantic memory: distilled lessons, auto-surfaced every turn with no
-tool call (unlike HIPPOCAMPUS's explicit reads of the history/ files). Two sides live in this one
-module: `NeocortexMixin` (recall/remember/mark_used, the memem-backed cross-session lesson store
-mixed into MememMemory in memory.py) and the CONSOLIDATION pipeline (the cache→long-term step that
-distills the episodic cache into those lessons, plus reusable skills).
+"""Legacy Neocortex adapter and consolidation helpers.
 
-CONSOLIDATION — the cache→long-term step (MEMORY-SPEC step 4).
-Reads the lossless episodic cache for a session and PROMOTES durable knowledge, ROUTED BY TYPE
-(EverOS pattern: facts→memory, procedures→skills):
+Canonical L2 is the native, provenance-linked USER/PROJECT/CRAFT knowledge repository exposed at
+``@sliceagent/memory/``. ``NeocortexMixin`` preserves the pre-refactor direct-Memem API for explicit legacy
+callers; it is not the production L2 owner. Memem is an optional semantic index/legacy bridge, never a brain
+layer or durability switch.
+
+The pure promotion helpers read the episodic JSONL compatibility mirror and propose derived outputs:
   - FACTS: a CORRECTIVE episode (pitfall hit, then ended clean) → a declarative "Pitfall/Resolution"
-    lesson, deduped, secrets excluded, FREQUENCY-WEIGHTED (a recurring pitfall ranks first).
+    knowledge candidate, deduped, secrets excluded, frequency-weighted.
   - PROCEDURES: a SMOOTH successful multi-step workflow → a reusable SKILL.md, deduped
-    by action-shape and frequency-weighted (repeated workflows first — EverOS "repeated patterns
-    become skills"); capped to avoid skill spam.
-Both `promote_episodes` and `promote_procedures` are pure (no I/O, no LLM) → testable offline.
-`NeocortexMixin.consolidate` wires them to the cache + remember()/skill files. The deterministic skill
-body is a RECORDED procedure; LLM-distillation (generalizing the steps) is the clean upgrade at
-`render_skill`. Cross-session frequency is handled separately by retrieval-feedback (bump_access).
+    by action shape and frequency; capped to avoid skill spam.
 
-MINING HELPERS — shared by the CACHE-sourced distill path.
-The WRITE side of the memory loop is CACHE-ONLY: distillation happens at session end in
-`NeocortexMixin.consolidate` → `promote_episodes` / `promote_procedures`, which read the episodic
-CACHE (`read_episodes`, a HIPPOCAMPUS concern), never the live slice. These pure helpers — error-
-signature dedup, self-inflicted-error filtering, and pitfall titling — are reused by that cache path
-(and the tests). No slice import; no event sink.
+``LocalMemory.consolidate_for_project`` binds promoted facts to native L2 records with L0 source references.
+Skills are adjacent executable capabilities, not L2 records or a fourth memory layer. ``NeocortexMixin`` keeps
+the older direct-Memem consolidation path only while compatibility callers migrate. Both promotion helpers are
+pure (no I/O or LLM) and never read the live slice.
 """
 from __future__ import annotations
 
@@ -151,7 +143,7 @@ def promote_episodes(records: list[dict]) -> list[dict]:
     return out
 
 
-# ── B2: /learn — turn the session transcript into a reusable USER skill ──────────
+# ── B2: /learn — distill selected session evidence into an adjacent reusable skill ──────
 _LEARN_STANDARDS = """\
 Author the skill to this standard:
 - name: lowercase-hyphenated, no spaces.
@@ -169,16 +161,16 @@ Author the skill to this standard:
 def build_learn_prompt(user_request: str = "") -> str:
     """B2 (/learn): build ONE prompt that has the LIVE agent distill a reusable skill from
     the source the user named and save it via the `write_skill` tool. No separate distill engine + no new
-    LLM seam (llm-agnostic, works on any backend); the agent reads THIS session from the CACHE via the
-    history/ files (never the slice), honoring the cache-only-distill invariant."""
+    LLM seam (llm-agnostic, works on any backend); the agent explicitly reads selected persisted evidence
+    instead of assuming that a growing transcript is present. Skills remain adjacent capabilities, not L2."""
     req = (user_request or "").strip() or ("the workflow we just went through in this session - review the "
                                             "steps taken and distill them into a reusable skill")
     return (
         "[/learn] Distill a REUSABLE SKILL from the source below and save it with the write_skill tool.\n\n"
         f"WHAT TO LEARN FROM:\n{req}\n\n"
         "Do this:\n"
-        "1. Gather the material with the tools you already have: read_file(\"history/index.md\") then the "
-        "turn files (review THIS session's earlier turns - the lossless cache), read_file / grep for files, "
+        "1. Gather the material with the tools you already have: read_file(\"@sliceagent/history/index.md\") "
+        "then only the relevant canonical turn artifacts, read_file / grep for project files, and "
         "the recent conversation for 'what we just did'. If the scope is ambiguous, make a reasonable choice "
         "and note it; do not stall.\n"
         "2. Call write_skill ONCE with a name, a <=60-char description, and the body. After it succeeds, "
@@ -342,10 +334,11 @@ _MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one patholo
 
 
 class NeocortexMixin:
-    """Cross-session LESSONS (memem-backed) + the session-end CONSOLIDATION sweep. Mixed into
-    MememMemory (memory.py) alongside HippocampusMixin (hippocampus.py) — `self` at runtime is a
-    concrete MememMemory instance, so `self._vault`/`self._scope` (set by MememMemory.__init__) and
-    `self.read_episodes` (HippocampusMixin) resolve normally via the MRO."""
+    """Deprecated direct-Memem lesson API retained by ``MememMemory`` compatibility callers.
+
+    Production ``LocalMemory`` owns typed native L2 and uses the pure helpers above without this mixin.
+    Methods here therefore describe legacy Memem behavior, not the canonical knowledge contract.
+    """
 
     # --- lessons ---
     def recall(self, query: str, k: int = 6, paths: list[str] | None = None) -> list[Snippet]:
@@ -397,19 +390,20 @@ class NeocortexMixin:
             pass   # feedback is best-effort; must never break a recall
 
     def consolidate(self, session_id: str, *, llm=None, mode: str = "deterministic") -> dict:
-        """Session-end sweep: promote durable knowledge from the episodic CACHE (never the slice),
-        ROUTED BY TYPE — FACTS (corrective lessons) → memem; PROCEDURES (repeated smooth workflows) →
-        reusable SKILL.md the SkillManager discovers next session. `mode="llm"` (with an `llm`) renders
-        skill bodies via render_skill_llm (generalized) instead of render_skill (recorded); both fall
-        back to deterministic on any failure. RETURNS a stats dict so the caller reports the truth (never a
-        blind 'success'); each item is guarded so one bad lesson/skill can't abort the batch. Never raises."""
+        """Run the deprecated compatibility sweep from episodic JSONL into Memem and skill files.
+
+        Native production consolidation lives on ``LocalMemory`` and binds facts to typed L2 with provenance.
+        Here facts go to the optional legacy bridge and procedures become adjacent ``SKILL.md`` assets.
+        ``mode="llm"`` generalizes skill bodies, with deterministic fallback. Returns truthful stats and never
+        raises.
+        """
         from .memory import _skills_dir, write_skill_file
         stats = {"lessons": 0, "skills": 0, "skills_rejected": 0, "errors": 0}
         try:
             records = self.read_episodes(session_id)   # HippocampusMixin, resolved via self/MRO
             if not records:
                 return stats
-            for lesson in promote_episodes(records):                 # facts → memem (tagged with files: R1)
+            for lesson in promote_episodes(records):                 # legacy facts → optional Memem bridge
                 try:
                     self.remember(lesson["content"], title=lesson["title"], scope=self._scope,
                                   tags=lesson["tags"], paths=lesson.get("files"))
@@ -417,7 +411,7 @@ class NeocortexMixin:
                 except Exception:  # noqa: BLE001 — one bad lesson must not sink the rest
                     stats["errors"] += 1
             skills_dir = _skills_dir()
-            for proc in promote_procedures(records):                 # procedures → skill packs (AUTO)
+            for proc in promote_procedures(records):                 # procedures → adjacent skill packs
                 try:
                     body = (render_skill_llm(proc, llm) if mode == "llm" else render_skill(proc))
                     if write_skill_file(proc["name"], body, skills_dir=skills_dir):   # guarded; None = rejected

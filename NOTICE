@@ -6,7 +6,7 @@ This product includes code ported from, and architecture reimplemented after, th
 open-source projects below. We are grateful to their authors.
 
 ────────────────────────────────────────────────────────────────────────────
-Hermes — https://github.com/NousResearch/hermes   (MIT License)
+Hermes Agent — https://github.com/NousResearch/hermes-agent   (MIT License)
 Copyright (c) 2025 Nous Research
 
   Verbatim / closely-ported source:
@@ -28,7 +28,7 @@ Kimi-Code — https://github.com/MoonshotAI/kimi-code   (Moonshot AI)
   ARCHITECTURE AND PATTERNS reimplemented in Python (no source copied — ideas,
   not code):
     access.py + scheduler.py (resource-access model for safe tool parallelism),
-    policy.py (permission chain), config.py (layered config), clock.py, cron.py,
+    config.py (layered config), clock.py, cron.py,
     flags.py, model_catalog.py, mcp_client.py (the mcp__server__tool namespacing),
     loop.py (micro-compaction), tui.py (selector menus + footer/streaming),
     code_grep.py (ripgrep pagination), agents.py (named-agent registry).

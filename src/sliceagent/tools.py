@@ -1,9 +1,9 @@
 """LocalToolHost — the default ToolHost.
 
-Safe execution lives here: file ops are confined to the workspace root (no path
-traversal out of it), and shell runs through a Sandbox backend (sandbox.py) — so
-swapping in a container later never touches the loop. Authorization (which calls
-are allowed at all) is separate: policy.py via the PermissionHook.
+Safe execution lives here: file ops resolve through a ReachSet containing the
+primary project plus narrow grounded focus roots (with traversal and sensitive
+blanket grants rejected), and shell runs through a Sandbox backend (sandbox.py).
+The runtime's narrow catastrophic-command safeguard is composed at the loop boundary.
 
 Note: Python's str.replace is literal, so str_replace has no $-pattern footgun
 (unlike JS).
@@ -15,22 +15,34 @@ import posixpath
 import re
 import shlex
 import tempfile
+from dataclasses import replace
 
+from .active_work import (
+    ActiveWorkError,
+    ResourceRef as WorkResourceRef,
+    UNRESOLVED_STATUSES,
+    WorkDelta,
+    WorkGraph,
+    WorkItem,
+)
 from .access import AllAccess, FileAccess
 from .binsniff import looks_binary
 from .context import ResourceKind, ResourceRef, reserved_resource_ref
+from .contextfs import ContextFS, is_context_path
 from .execution import ToolEffect, ToolStatus
 from .fuzzy import fuzzy_find_unique
 from .platform_compat import (IS_WINDOWS, ProcessGroupTerminationError, is_win_abs,
                               msys_to_win, norm_rel, win_path_candidates)
 from .procman import ProcManager
+from .reach import ReachSet, ReachSteer, SENSITIVE_DIR_NAMES
 from .registry import ToolEntry, ToolRegistry, ToolText
 from .sandbox import SANDBOX_TIMEOUT, LocalSandbox
 from .sensory_cortex import _is_ignored
 from .terminal import SessionManager
+from .workspace_handoff import WorkspaceScheduleDecision
 
 # I1 PROVENANCE — host SELF-INFLICTED error sentinels. These name failures caused by the HOST's own
-# guard rails (file-tool confinement, permission denial), NOT by a real bug in the user's code. Lesson
+# capability boundaries (file-tool confinement or OS denial), NOT by a real bug in the user's code. Lesson
 # mining filters pitfalls whose signature contains one of these so a turn whose only error was the
 # agent hitting its OWN sandbox mines nothing (D2). Lower-cased substrings, matched task-agnostically;
 # defined HERE (the source of these strings) so the denylist tracks the actual error messages.
@@ -201,6 +213,12 @@ NOTE_PROP = {
 }
 
 
+_LEGACY_SEMANTIC_STATE_TOOLS = frozenset({
+    "world_set", "world_clear", "require", "requirement_done", "supersede_requirement",
+    "drop_requirement", "update_plan",
+})
+
+
 def with_note(schema: dict) -> dict:
     """Inject the 'note' arg (first, OPTIONAL) into a tool schema — the FINDINGS capture seam.
     Applied to EVERY tool the model sees, regardless of source (builtin/MCP/plugin/skill).
@@ -237,7 +255,11 @@ _CONTROL_DROP[0x7f] = None
 def _strip_control(s: str) -> str:
     return s.translate(_CONTROL_DROP)
 # Credential/secret dirs the shell-path auto-grant (#31) must never widen file-tool reach into.
-_SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".config", "keyrings", ".password-store"}
+_SECRET_DIRS = set(SENSITIVE_DIR_NAMES)
+
+
+class BinaryTextError(ValueError):
+    """A text-edit request targeted bytes that cannot be safely round-tripped as text."""
 
 
 TOOL_SCHEMAS = [
@@ -247,8 +269,10 @@ TOOL_SCHEMAS = [
         "<system> footer giving the total line count and how to page; pass `offset` (1-based start line) and/or "
         "`limit` (max lines) to read a specific range. To list a directory use list_files; to SEARCH file "
         "contents use the `grep` tool (ripgrep-backed) — not bash grep. "
-        "Arg `path` is workspace-relative or absolute but confined to the workspace — for outside paths use "
-        "run_command. A binary file returns a hexdump preview, not editable text.",
+        "Arg `path` may be relative to the current project, an exact absolute target under the user's home, or a "
+        "read-only @sliceagent/ internal-context handle; start at @sliceagent/index.md. Grounded external targets "
+        "remain reachable as focus roots. "
+        "A binary file returns a hexdump preview, not editable text.",
         {"path": {"type": "string"},
          "offset": {"type": "integer", "description": "1-based first line to read (optional)"},
          "limit": {"type": "integer", "description": "max number of lines to return (optional)"}},
@@ -262,8 +286,9 @@ TOOL_SCHEMAS = [
     _fn("change_workspace",
         "Switch SliceAgent to a DIFFERENT project/workspace when the user explicitly asks to go to, open, "
         "or work in another directory. `path` must be an existing directory (discover it first if needed). "
-        "This schedules a safe process handoff after the current turn is durably saved; every tool, index, "
-        "plugin, MCP server, log, and workspace boundary is rebuilt from the new directory. Call this as the "
+        "This schedules a safe in-process handoff after the current turn is durably saved; every tool, index, "
+        "plugin, MCP server, log, and primary-project view is rebuilt from the new directory while the same logical "
+        "request and model connection continue. PROJECT-memory scope changes; USER/CRAFT memory stays available. Call this as the "
         "FINAL tool action, then briefly say the switch is happening and finish the turn.",
         {"path": {"type": "string", "description": "absolute path, ~ path, or current-workspace-relative directory"}},
         ["path"]),
@@ -291,7 +316,7 @@ TOOL_SCHEMAS = [
         {"ref": {"type": "string"},
          "include_ignored": {
              "type": "boolean",
-             "description": "Set true only for execution reconciliation: computes the complete ignored-file manifest too",
+             "description": "Set true when resolving execution uncertainty: computes the complete ignored-file manifest too",
          }}, []),
     _fn("str_replace",
         "Make a SURGICAL edit to an EXISTING file — replace one snippet, leave the rest. The default for "
@@ -308,7 +333,7 @@ TOOL_SCHEMAS = [
         "failure). Pass timeout (seconds, default 30, max 600) for slow builds. Use for one-shot commands that "
         "finish; for a process that must STAY alive use proc_start, for an interactive REPL use terminal_open, "
         "to chain several edits + a test in one turn use execute_code. No cwd arg — prepend `cd DIR &&`. The "
-        "shell is unconfined (can reach outside the workspace, unlike the file tools). If a command could "
+        "host records grounded paths used outside the primary workspace so file tools can re-observe them. If a command could "
         "emit a LARGE dump (disassembly, a long log, a dataset), FILTER it in the command itself — pipe "
         "through grep/head/tail/sed -n or target a range — so only the relevant slice returns.",
         {"command": {"type": "string"}, "timeout": {"type": "number"}}, ["command"]),
@@ -317,7 +342,8 @@ TOOL_SCHEMAS = [
         "over run_command when you'd chain many calls; over proc_start when it's one-shot (blocking, ~30s). "
         "Helpers (no imports): read_file(path), write_file(path, content), append_file(path, content), "
         "str_replace(path, old, new), list_files(path='.'), run(shell_cmd). Workspace is cwd + on sys.path. ONLY "
-        "what you print() is returned. The file helpers are workspace-confined — use run() (shell) for outside paths.",
+        "what you print() is returned. The Python file helpers operate in the primary workspace; use the ordinary "
+        "file tools for grounded focus roots, or run() for a shell step whose paths the host can surface afterward.",
         {"code": {"type": "string"}}, ["code"]),
     _fn("ask_user",
         "Ask the user a concise follow-up question and WAIT for their answer (returned to you). Use this "
@@ -375,10 +401,10 @@ TOOL_SCHEMAS = [
     _fn("world_clear", "Remove a key from your WORLD MODEL (omit key to clear all of it).",
         {"key": {"type": "string"}}, []),
     _fn("reconcile_execution",
-        "Resolve a prior INDETERMINATE operation only AFTER using read-only tools in this turn to observe "
-        "every affected workspace/process target. For an opaque target, ask the user for live confirmation "
-        "too. Record what settled and the evidence observed; this clears the effectful-tool gate. Never call "
-        "it from assumption or prior memory.",
+        "Record the observed resolution of a prior INDETERMINATE operation after checking the relevant live "
+        "workspace/process target. For an opaque external target, ask the user when their confirmation is the "
+        "only available evidence. This clears the advisory uncertainty marker; it is not required before "
+        "ordinary work or workspace/task switching. Never call it from assumption or prior memory.",
         {"resolution": {"type": "string", "description": "evidence-backed observed final state"}},
         ["resolution"]),
     _fn("require",
@@ -413,7 +439,142 @@ TOOL_SCHEMAS = [
                        "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
                        "required": ["step", "status"]}}},
         ["steps"]),
+    _fn("update_work",
+        "Maintain ACTIVE WORK for a multi-step or cross-boundary request. Add or update only concrete child "
+        "work items; the host owns the exact request root and sealed delivery (and any legacy verified record). Changes are "
+        "source-linked to the current request, dependency-checked, and applied atomically. Use this when work "
+        "must survive another turn, workspace switch, or subagent; skip it for a simple one-step answer. For a "
+        "declared staged or multi-wave plan, create the complete promised frontier before execution, including "
+        "later partitions as open items—never record only the current batch while future coverage lives in prose.",
+        {"expected_revision": {"type": "integer", "description": "ACTIVE WORK graph revision currently shown"},
+         "changes": {"type": "array", "items": {"type": "object", "properties": {
+             "id": {"type": "string", "description": (
+                 "stable short CHILD work-item ID; never use the host-owned current request-root ID"
+             )},
+             "description": {"type": "string", "description": "concrete model-maintained task description"},
+             "status": {"type": "string", "enum": [
+                 "open", "in_progress", "waiting_user", "ready", "cancelled", "superseded",
+             ]},
+             "add_dependencies": {"type": "array", "items": {"type": "string"}},
+             "add_resources": {"type": "array", "items": {"type": "object", "properties": {
+                 "kind": {"type": "string"}, "ref": {"type": "string"},
+                 "revision": {"type": "string"}}, "required": ["kind", "ref"]}},
+             "superseded_by": {"type": "string"}}, "required": ["id"]}},
+        }, ["changes"]),
 ]
+
+
+_MODEL_WORK_STATUSES = frozenset({
+    "open", "in_progress", "waiting_user", "ready", "cancelled", "superseded",
+})
+
+
+def build_work_delta(
+    graph: WorkGraph,
+    args: dict,
+    *,
+    logical_id: str,
+    workspace_epoch: int,
+) -> WorkDelta:
+    """Normalize the small public update_work shape into the strict immutable graph contract."""
+    if not isinstance(graph, WorkGraph):
+        raise ValueError("ACTIVE WORK is unavailable")
+    expected = args.get("expected_revision", graph.revision)
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        raise ValueError("expected_revision must be an integer")
+    changes = args.get("changes")
+    if not isinstance(changes, list) or not changes or len(changes) > 32:
+        raise ValueError("changes must contain 1..32 work-item objects")
+    roots = [root for root in graph.unresolved_roots if not logical_id or root.logical_id == logical_id]
+    if not roots:
+        raise ValueError("no active request root is available for update_work")
+    root = roots[-1]
+    creates, updates = [], []
+    seen: set[str] = set()
+    for raw in changes:
+        if not isinstance(raw, dict):
+            raise ValueError("each work change must be an object")
+        item_id = str(raw.get("id") or "").strip()
+        if not item_id or len(item_id) > 120 or item_id in seen:
+            raise ValueError("each work change needs a unique ID of at most 120 characters")
+        seen.add(item_id)
+        previous = graph.get(item_id)
+        # Omission means "leave this field alone" for an existing record.  Defaulting every partial update to
+        # ``open`` made a schema-valid resource/dependency addition accidentally attempt an illegal
+        # in_progress/waiting_user/ready -> open transition.
+        status = str(raw.get("status") or (previous.status if previous is not None else "open"))
+        if status not in _MODEL_WORK_STATUSES:
+            raise ValueError("the model cannot set delivered/verified or an unknown work status")
+        add_dependencies = raw.get("add_dependencies") or []
+        if not isinstance(add_dependencies, list) or any(
+                not isinstance(value, str) or not value.strip() for value in add_dependencies):
+            raise ValueError("add_dependencies must be a list of non-empty work-item IDs")
+        resource_rows = raw.get("add_resources") or []
+        if not isinstance(resource_rows, list) or len(resource_rows) > 32:
+            raise ValueError("add_resources must be a list of at most 32 objects")
+        resources = []
+        for resource in resource_rows:
+            if not isinstance(resource, dict):
+                raise ValueError("each resource must be an object")
+            resources.append(WorkResourceRef(
+                str(resource.get("kind") or ""), str(resource.get("ref") or ""),
+                workspace_epoch=int(workspace_epoch), revision=str(resource.get("revision") or ""),
+            ))
+        superseded_by = str(
+            raw.get("superseded_by")
+            or (previous.superseded_by if previous is not None else "")
+        ).strip()
+        if status == "superseded" and not superseded_by:
+            raise ValueError("superseded work must name superseded_by")
+        if previous is None:
+            description = str(raw.get("description") or "").strip()
+            if not description:
+                raise ValueError("new work items require a non-empty description")
+            creates.append(WorkItem(
+                id=item_id, root_id=root.id, source_refs=root.source_refs,
+                description=description, status=status, logical_id=root.logical_id,
+                workspace_epoch=int(workspace_epoch),
+                dependencies=tuple(dict.fromkeys(add_dependencies)),
+                resource_refs=tuple(dict.fromkeys(resources)), superseded_by=superseded_by,
+            ))
+            continue
+        if previous.kind == "request":
+            if previous.id == root.id or status not in {"cancelled", "superseded"}:
+                raise ValueError(
+                    "update_work may only cancel/supersede an older request root; the current root is host-owned",
+                )
+            if status == "superseded" and superseded_by != root.id:
+                raise ValueError("an older request root may be superseded only by the current request root")
+            updates.append(replace(
+                previous, status=status, superseded_by=superseded_by,
+            ))
+            # Retiring a request retires its still-live ownership subtree atomically.  Leaving those children
+            # unresolved below a terminal root both pollutes the frontier and lets the next request's compaction
+            # silently erase work that still claimed to be active.
+            updates.extend(
+                replace(
+                    child,
+                    status="cancelled",
+                    superseded_by="",
+                    stop_reason=f"request_{status}",
+                )
+                for child in graph.items
+                if child.id != previous.id
+                and child.root_id == previous.id
+                and child.status in UNRESOLVED_STATUSES
+            )
+            continue
+        if previous.root_id != root.id:
+            raise ValueError("update_work may update only child items of the current request")
+        updates.append(replace(
+            previous,
+            description=str(raw.get("description", previous.description)).strip(),
+            status=status,
+            dependencies=tuple(dict.fromkeys((*previous.dependencies, *add_dependencies))),
+            resource_refs=tuple(dict.fromkeys((*previous.resource_refs, *resources))),
+            superseded_by=superseded_by,
+        ))
+    return WorkDelta(expected_revision=expected, creates=tuple(creates), updates=tuple(updates))
 
 
 def _default_ask_user(question: str, options) -> str:
@@ -472,12 +633,12 @@ class LocalToolHost:
         # I2 — RE-OBSERVATION REACH = ACTION REACH. File tools and shell must reach the
         # SAME places, or the agent writes (via shell, unconfined) files its file tools can
         # never read back, and OPEN FILES lies "(not created yet)" about real on-disk files.
-        # `_extra_roots` holds dirs the goal/user EXPLICITLY targets (added via add_root):
-        # _resolve accepts a path under the workspace root OR any extra root. Explicit and
-        # bounded — never a blanket '/'; the workspace stays the default and only the launch
-        # dir is implicit. Task-agnostic (we don't parse the goal) and safe (opt-in).
-        self._extra_roots: list[str] = []
-        self._focus: str | None = None   # most-recently-worked EXTERNAL dir → the active focus (slice-surfaced)
+        # The workspace is the default frame, not a prison. ReachSet keeps it distinct from grounded
+        # external focus roots while preserving one path capability for every path-aware tool.
+        self._reach = ReachSet(lambda: self._root or os.getcwd())
+        # Permanent cognitive address space. Runtime providers arrive later; the root/status surface itself is
+        # always truthful and independent of optional semantic-memory backends.
+        self._contextfs = ContextFS()
         # The read-only VIRTUAL `history/` namespace (this session's sealed turns as files). Injected by the
         # CLI (a HistoryFS) once memory+session exist; None on the eval/headless path (no durable archive).
         self._history = None
@@ -491,6 +652,9 @@ class LocalToolHost:
         # Host control-plane callback. The tool only REQUESTS a workspace-runtime handoff; the CLI performs it
         # after a successful durable turn seal. None in tests/embedded hosts = unsupported.
         self.on_workspace_switch = None
+        # Read-only provider used to validate update_work against the active graph before an effect is emitted.
+        # It returns (WorkGraph, logical_turn_id, workspace_epoch); the reducer remains the sole mutator.
+        self._active_work_provider = None
         self._edit_journal: list = []   # (rel, full, prev_bytes|None) per write — powers /undo
         self.pending_images: list = []  # images @-attached for the NEXT seed build (vision models only)
         # The registry is the single source of tools; MCP/plugin/skill tools register
@@ -540,6 +704,7 @@ class LocalToolHost:
             "require": self._t_require, "requirement_done": self._t_requirement_done,
             "supersede_requirement": self._t_supersede_requirement,
             "drop_requirement": self._t_drop_requirement, "update_plan": self._t_update_plan,
+            "update_work": self._t_update_work,
             "code_review": self._t_code_review,
         }
         for schema in TOOL_SCHEMAS:
@@ -549,11 +714,52 @@ class LocalToolHost:
                 accesses=(lambda args, n=name: self._builtin_accesses(n, args)),
                 source="builtin",
                 capabilities=(frozenset({"workspace_handoff"}) if name == "change_workspace" else frozenset()),
-                effect_factory=(self._read_resource_effects if name == "read_file" else None),
+                effect_factory=(
+                    self._read_resource_effects if name == "read_file"
+                    else self._work_delta_effects if name == "update_work"
+                    else None
+                ),
             ))
 
+    def bind_active_work(self, provider) -> None:
+        """Bind the current application task without giving the tool host mutation ownership."""
+        self._active_work_provider = provider
+
+    def _active_work_snapshot(self) -> tuple[WorkGraph, str, int]:
+        if not callable(self._active_work_provider):
+            raise ValueError("ACTIVE WORK is unavailable in this host")
+        graph, logical_id, workspace_epoch = self._active_work_provider()
+        if not isinstance(graph, WorkGraph):
+            raise ValueError("ACTIVE WORK provider returned no graph")
+        return graph, str(logical_id or ""), int(workspace_epoch)
+
+    def _work_delta_effects(self, invocation, status, _text) -> tuple[ToolEffect, ...]:
+        if status is not ToolStatus.SUCCEEDED:
+            return ()
+        graph, logical_id, workspace_epoch = self._active_work_snapshot()
+        delta = build_work_delta(
+            graph, dict(invocation.args), logical_id=logical_id, workspace_epoch=workspace_epoch,
+        )
+        return (ToolEffect(
+            id=f"work-delta:{invocation.provider_index}:{invocation.id}:0",
+            kind="work_delta", payload={"delta": delta.to_dict()},
+        ),)
+
     def root(self) -> str:
-        return os.path.realpath(self._root or os.getcwd())
+        return self._reach.primary
+
+    # Compatibility projections for older embedding hosts/tests. ReachSet remains the sole owner.
+    @property
+    def _extra_roots(self) -> list[str]:
+        return list(self._reach.focus_roots)
+
+    @property
+    def _focus(self) -> str | None:
+        return self._reach.active_focus
+
+    @_focus.setter
+    def _focus(self, path: str | None) -> None:
+        self._reach.active_focus = path
 
     def add_root(self, path: str) -> str | None:
         """Mark a directory the goal/user EXPLICITLY targets as in-reach for file tools.
@@ -562,52 +768,37 @@ class LocalToolHost:
         SETTABLE root, not goal-parsing heuristics. After this, read_file/edit_file/list_files
         resolve paths under `path` exactly as the shell already does (shell is unconfined),
         so a shell-written file is always readable back through OPEN FILES — reach matches.
-        Refuses a blanket root ('/' or '~') so the workspace boundary is never erased.
+        Refuses a blanket root ('/' or '~') so grounded reach cannot become ambient home/system access.
         Returns the realpath added (idempotent), or None if rejected/unusable."""
         if not path:
             return None
-        full = os.path.realpath(os.path.expanduser(path))
-        # never widen reach to the whole filesystem or the bare home dir
-        if full == os.sep or full == os.path.realpath(os.path.expanduser("~")):
-            return None
-        # win32: '/' realpaths to the CURRENT DRIVE's root ('C:\'), which the os.sep check
-        # above can't see — refuse any drive root / UNC share root too (splitdrive tail).
-        if IS_WINDOWS and os.path.splitdrive(full)[1] in ("", os.sep, "/"):
-            return None
-        if full == self.root() or full in self._extra_roots:
-            return full
-        self._extra_roots.append(full)
-        return full
+        return self._reach.add(path, source="explicit")
 
     def allowed_roots(self) -> list[str]:
-        """The set of dirs file tools may reach: the workspace root ∪ explicitly-targeted dirs.
+        """The set of dirs file tools may reach: the primary project ∪ grounded focus roots.
         Honored by `_resolve`; matches where the shell already acts (I2: reach = action reach)."""
-        roots = [self.root()]
-        for r in self._extra_roots:
-            if r not in roots:
-                roots.append(r)
-        return roots
+        return list(self._reach.roots)
 
     def focus(self) -> tuple[str | None, list[str]]:
         """The active focus (most-recently-worked EXTERNAL dir) + every extra root the file tools reach
         beyond the workspace. Surfaced in the slice so the model KNOWS its file tools reach there: the
         auto-granted reach was invisible, so the agent defaulted to the workspace frame and lost the
         thread across turns (the hunter 'index.ts' miss). Delegated by SubagentHost via __getattr__."""
-        return self._focus, list(self._extra_roots)
+        return self._reach.active_focus, list(self._reach.focus_roots)
 
     def resolution_base(self) -> str:
         """The CURRENT PROJECT a bare RELATIVE path resolves against — the frame, not the floor. Defaults
-        to the active focus (the most-recent dir worked in) when set, else the boundary root. This ONLY
+        to the active focus (the most-recent dir worked in) when set, else the primary root. This ONLY
         moves the relative-path anchor + display frame; it NEVER widens reach: the result of `_resolve`
-        must still land inside `allowed_roots()`, and the immutable boundary root is unchanged. So the
-        'current project' can roam over the authorized dirs while the floor it sits on never moves."""
-        base = self._focus or self.root()
-        # defensive: the base must itself be an authorized root (focus is only ever set to a granted dir)
+        must still land inside `allowed_roots()`, and the primary root is unchanged. So the
+        working frame can move among grounded roots without silently widening the floor."""
+        base = self._reach.active_focus or self.root()
+        # defensive: the base must itself be a reachable root (focus is only ever set to a granted dir)
         return base if base in self.allowed_roots() else self.root()
 
     def locate(self, path: str) -> str:
         """Resolve a working-set path for RE-READING (OPEN FILES). Base-STABLE — independent of the current
-        project: a relative path is matched against EVERY authorized root (boundary root first, then extra
+        project: a relative path is matched against EVERY reachable root (boundary root first, then extra
         roots) and the first EXISTING match wins, so a pin stays truthful even after `resolution_base()`
         moves. Falls back to the boundary-root resolution when nothing exists, so the truthful
         '(not created yet)' / 'outside reach' branch in build_artifacts still fires per exception type."""
@@ -672,12 +863,20 @@ class LocalToolHost:
     def resolve_read(self, path: str) -> str:
         """Resolution shared by read_file AND the OPEN FILES display so they never diverge. Prefer the
         current-project (focus) copy; if nothing exists there, fall back to a base-STABLE search of every
-        authorized root (locate). Keeps focus-relative semantics while making a paged-out blob — or any file
+        reachable root (locate). Keeps focus-relative semantics while making a paged-out blob — or any file
         under a root that isn't the current focus — reachable regardless of where focus now points (the
         blob's read_file('.sliceagent/blobs/…') ref was minted against a possibly-different base)."""
         try:
             full = self._resolve(path)
-        except (ValueError, PermissionError):
+        except PermissionError:
+            # An exact absolute target below HOME is enough to grant the narrow containing directory for
+            # ordinary observation/work. This removes the shell-vs-file split without admitting HOME or
+            # credential directories. Relative traversal and system paths remain outside automatic reach.
+            if self._reach.observation_root(path) or self._reach.target_root(path):
+                full = self._resolve(path)
+            else:
+                return self.locate(path)
+        except ValueError:
             return self.locate(path)
         if os.path.exists(full):
             return full
@@ -688,16 +887,16 @@ class LocalToolHost:
         """Canonical model-visible handle for a reserved archive path.
 
         The model may spell a virtual handle either as ``artifacts/x.md`` or as the equivalent absolute
-        path below an authorized root (for example ``/workspace/artifacts/x.md``).  Archive filesystems are
+        path below a reachable root (for example ``/workspace/artifacts/x.md``). Archive filesystems are
         intentionally unaware of physical roots, so collapse the latter spelling back to the same relative
-        handle before dispatch.  Absolute paths outside every authorized root stay absolute and therefore
+        handle before dispatch. Absolute paths outside every reachable root stay absolute and therefore
         cannot acquire virtual-archive meaning.
         """
         raw = str(path or "").strip()
         expanded = os.path.expanduser(raw)
         if os.path.isabs(expanded):
             full = os.path.realpath(expanded)
-            # Prefer the most-specific authorized root when roots are nested: the archive mount is relative
+            # Prefer the most-specific reachable root when roots are nested: the archive mount is relative
             # to the root that directly owns it, not an ancestor that happens to contain that root.
             roots = sorted((os.path.realpath(root) for root in self.allowed_roots()),
                            key=len, reverse=True)
@@ -715,8 +914,10 @@ class LocalToolHost:
         reserved namespace AND no real on-disk file shadows it — a real file/dir ALWAYS wins the name (I2: the
         virtual view never lies about disk). Else None. ponytail: these are reserved virtual namespaces; a
         project with a real top-level history/ or subagents/ dir keeps its files (real wins). Absolute paths
-        under an authorized root are first collapsed to their model-visible archive handle. Used by
+        under a reachable root are first collapsed to their model-visible archive handle. Used by
         read_file/list_files/grep to route reads, and by the write tools to reject (a virtual route ⇒ read-only)."""
+        if is_context_path(path):
+            return self._contextfs
         p = self._archive_handle(path)
         for mount, fs in (("artifacts", self._artifacts), ("history", self._history),
                           ("subagents", self._subagents),
@@ -748,11 +949,34 @@ class LocalToolHost:
         """Attach the read's resource kind to canonical execution truth."""
         if status is not ToolStatus.SUCCEEDED:
             return ()
+        import hashlib
+        from .fan_in import artifact_read_coverage, artifact_view_kind, canonical_artifact_id
+
         ref = self.resource_ref(str(invocation.args.get("path") or ""))
+        payload = {"resource_kind": ref.kind.value, "handle": ref.handle}
+        content = str(_text or "")
+        artifact_id = canonical_artifact_id(ref.kind, ref.handle)
+        if ref.kind is ResourceKind.SUBAGENT:
+            # A named specialist handle is an alias. The rendered immutable report leads with its exact
+            # per-job id, so consumption joins to the seal rather than to the mutable alias spelling.
+            exact = re.match(r"^# (sub-\d+) —", content)
+            if exact:
+                artifact_id = exact.group(1)
+        if artifact_id:
+            artifact_view = artifact_view_kind(ref.kind, ref.handle)
+            payload.update({
+                "artifact_id": artifact_id,
+                "artifact_view": artifact_view,
+                "read_coverage": artifact_read_coverage(
+                    invocation.args, content, resource_kind=ref.kind, handle=ref.handle,
+                ),
+                "content_sha256": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest(),
+                "content_bytes": len(content.encode("utf-8", "replace")),
+            })
         return (ToolEffect(
             id=f"resource:{invocation.provider_index}:{invocation.id}:0",
             kind="resource_observed",
-            payload={"resource_kind": ref.kind.value, "handle": ref.handle},
+            payload=payload,
         ),)
 
     def _history_readonly_guard(self, path):
@@ -761,15 +985,19 @@ class LocalToolHost:
         fs = self._history_route(path)
         if fs is None:
             return None
-        what = ("artifacts/ is the read-only authoritative local artifact archive"
+        what = ("@sliceagent/ is the read-only internal context namespace"
+                if fs is self._contextfs else
+                "artifacts/ is the read-only authoritative local artifact archive"
                 if fs is self._artifacts else
                 "subagents/ is a read-only view of your subagents' sealed reports"
                 if fs is self._subagents else
                 "roster/ is a read-only view of your standing specialists (hire/wake them via spawn tools)"
                 if fs is self._roster else
                 "history/ is a read-only view of this session's past turns (the episodic archive)")
-        return ToolText(f"{what} — you can read_file/list_files/grep it, but it can't be written. "
-                        "Save work elsewhere.", ok=False)
+        return ToolText(
+            f"{what} — you can read_file/list_files/grep it, but it can't be written. Save work elsewhere.",
+            status=ToolStatus.STEERED,
+        )
 
     def _resolve(self, path: str) -> str:
         """Resolve a tool path under an ALLOWED root (workspace ∪ explicitly-targeted dirs);
@@ -780,8 +1008,8 @@ class LocalToolHost:
         path = os.path.expanduser(path)  # P2 — '~' → $HOME before any join/realpath
         roots = self.allowed_roots()
         # A bare relative path resolves against the CURRENT PROJECT (resolution_base), not always the
-        # boundary root — so when the agent moves into another authorized project, relative paths follow
-        # it. Reach is unchanged: `full` must still land inside an authorized root below.
+        # boundary root — so when the agent moves into another reachable project, relative paths follow
+        # it. Reach is unchanged: `full` must still land inside a reachable root below.
         base = self.resolution_base()
         full = path if os.path.isabs(path) else os.path.join(base, path)
         full = os.path.realpath(full)
@@ -790,10 +1018,11 @@ class LocalToolHost:
                 return full
         # P3 — prescriptive error: name the boundary AND the escape hatch so a no-transcript
         # model recovers instead of re-deriving the dead end (and looping into shell fallback).
-        raise PermissionError(
-            f"path escapes the boundary ({base}): {path} — File tools are confined to your "
-            "authorized directories (the boundary). To act on paths outside it, use "
-            "run_command/execute_code (shell is unconfined), or re-run sliceagent rooted at that directory.")
+        raise ReachSteer(
+            f"path is outside the current workspace and grounded focus roots ({base}): {path}. "
+            "Use the exact absolute target under your home directory, use run_command for a deliberately named "
+            "system path, or call change_workspace(path) to make another project primary; the interface and "
+            "model stay connected.")
 
     def _resolve_for_access(self, path: str) -> str | None:
         """Canonical PHYSICAL path for SCHEDULING conflict detection only — NOT a security check (the real
@@ -815,29 +1044,46 @@ class LocalToolHost:
     def schemas(self) -> list[dict]:
         # inject the 'note' arg into every tool so the model's per-turn conclusion rides on the
         # call it already makes and lands in the slice's FINDINGS tier (anti-re-derivation)
-        return [with_note(s) for s in self.registry.schemas()]
+        schemas = self.registry.schemas()
+        if callable(self._active_work_provider):
+            # Active Work is the sole semantic state API in the new kernel.  Hiding the old requirement/plan/
+            # world scratchpads and their generic note arg removes seven competing ways to describe the same
+            # task.  Registry entries remain executable for old checkpoints/embedding hosts but are not offered
+            # to the production model once the application graph is bound.
+            return [
+                schema for schema in schemas
+                if schema.get("function", {}).get("name") not in _LEGACY_SEMANTIC_STATE_TOOLS
+            ]
+        return [with_note(schema) for schema in schemas]
 
     def accesses(self, name: str, args: dict) -> list:
         return self.registry.accesses(name, args)
 
-    def resolve_intent_effect(self, name: str, args: dict):
-        """Expose registry semantic metadata through the same host surface wrappers project."""
-        return self.registry.resolve_intent_effect(name, args)
-
     def run(self, name: str, args: dict) -> str:
         return self.registry.run(name, args)  # registry wraps the handler in try/except
+
+    def preflight_run(self, name: str, args: dict):
+        """Return one registry admission for the scheduler's truthful start boundary."""
+        return self.registry.admit(name, args)
+
+    def run_preflighted(self, name: str, args: dict, admission) -> str:
+        """Execute the exact entry admitted before ``ToolStarted`` without a volatile second check."""
+        if getattr(admission, "name", None) != name:
+            from .registry import ToolText
+            return ToolText("Error: tool admission does not match invocation", ok=False)
+        return self.registry.run_admitted(admission, args)
 
     def read_text(self, path: str, *, lossy: bool = True) -> str:
         # Read bytes first so the binary gate runs BEFORE we trust the file as text.
         # A NUL byte / mostly-control-char head means "not text" — feeding it through
         # OPEN FILES would corrupt the slice and burn tokens. ValueError flows through
         # the registry try/except so both read_file and str_replace degrade gracefully.
-        full = self._resolve(path)
+        full = self.resolve_read(path) if lossy else self._resolve(path)
         with open(full, "rb") as f:
             raw = f.read()
         sample = raw[:8192].decode("utf-8", errors="replace")
         if looks_binary(path, sample):
-            raise ValueError(f"{path} appears to be binary; not shown")
+            raise BinaryTextError(f"{path} appears to be binary; not shown")
         # DISPLAY callers (read_file / OPEN FILES render) pass lossy=True: a stray invalid UTF-8 byte PAST
         # the 8192-byte sniff sample must not crash an otherwise-text file's read. The READ-MODIFY-WRITE
         # caller (str_replace) passes lossy=False: strict decode RAISES on any invalid byte so the call
@@ -883,9 +1129,14 @@ class LocalToolHost:
             return f"Workspace already active: {target}"
         if self.on_workspace_switch is None:
             return ToolText("Error: this host does not support workspace handoff.", ok=False)
-        problem = self.on_workspace_switch(target)
-        if problem:
-            return ToolText(f"Error: {problem}", ok=False)
+        decision = self.on_workspace_switch(target)
+        if isinstance(decision, WorkspaceScheduleDecision):
+            if not decision.accepted:
+                return ToolText(decision.message, status=decision.status)
+        elif decision:
+            # Compatibility for embedding hosts that still implement the historical
+            # ``"" on success, problem string on failure`` callback.
+            return ToolText(f"Error: {decision}", ok=False)
         return (
             f"Workspace switch scheduled: {target}. The host will save this turn and atomically activate the "
             "new workspace while keeping the interface and model connection alive. Do not call more tools; "
@@ -1003,7 +1254,7 @@ class LocalToolHost:
         hf = self._history_route(path)
         if hf is not None:               # list the virtual history/ namespace (index.md + turn-N.md)
             return hf.listing(self._archive_handle(path))
-        base = self._resolve(path)
+        base = self.resolve_read(path)
         if not args.get("recursive"):
             entries = sorted(os.listdir(base))
             shown = [e + "/" if os.path.isdir(os.path.join(base, e)) else e
@@ -1101,12 +1352,20 @@ class LocalToolHost:
         full = self.resolve_read(args["path"])   # I2: edit the SAME file read_file shows (search all roots), not a focus-relative phantom
         try:
             cur = self.read_text(full, lossy=False)  # read the resolved target; strict: abort on invalid UTF-8, never write back a mangled file
+        except BinaryTextError as ex:
+            return ToolText(
+                f"{ex}. str_replace did not run; use a binary-aware command or replace the complete asset.",
+                status=ToolStatus.STEERED,
+            )
         except UnicodeDecodeError as ex:
             # actionable error (not an opaque codec traceback) — read_file shows the file as editable, so name
             # the cause + the fallback rather than half-disagreeing with the display path.
-            return ToolText(f"Error: {args['path']} contains a non-UTF-8 byte ({ex}); str_replace can't safely "
-                            "edit it (a whole-file write-back would corrupt the other bytes). Use edit_file to "
-                            "rewrite the file, or fix its encoding first.", ok=False)
+            return ToolText(
+                f"{args['path']} contains a non-UTF-8 byte ({ex}); str_replace can't safely edit it "
+                "(a whole-file write-back would corrupt the other bytes). Use edit_file to rewrite the file, "
+                "or fix its encoding first.",
+                status=ToolStatus.STEERED,
+            )
         crlf = self._detect_crlf(full)                # preserve the file's line endings on write-back
         old = args["old_string"]
         new = args["new_string"]
@@ -1129,8 +1388,11 @@ class LocalToolHost:
                 self._journal(args["path"], full)
                 self._atomic_write(full, updated)
                 return self._edit_result(args["path"], cur, updated, cur.index(cand), new)
-            return ToolText(f"Error: old_string occurs {n} times in {args['path']}; add context to make it "
-                            "unique, or pass replace_all=true to change them all", ok=False)
+            return ToolText(
+                f"old_string occurs {n} times in {args['path']}; add context to make it unique, "
+                "or pass replace_all=true to change them all",
+                status=ToolStatus.STEERED,
+            )
         # FALLBACK: whitespace-tolerant UNIQUE fuzzy span (raw first, then de-numbered). fuzzy_find_unique
         # returns None on 0/>1 candidates, so uniqueness is preserved — we never replace an ambiguous match.
         for cand in candidates:
@@ -1140,9 +1402,12 @@ class LocalToolHost:
                 self._journal(args["path"], full)
                 self._atomic_write(full, updated)
                 return self._edit_result(args["path"], cur, updated, span[0], new, fuzzy=True)
-        return ToolText(f"Error: old_string not found in {args['path']} — your snippet does not match "
-                f"the file. Copy the EXACT text from OPEN FILES (the live content, WITHOUT the line-number "
-                f"prefix), or rewrite the whole file with edit_file. Do NOT retry the same str_replace.", ok=False)
+        return ToolText(
+            f"old_string not found in {args['path']} — your snippet does not match the file. Copy the EXACT "
+            "text from OPEN FILES (the live content, WITHOUT the line-number prefix), or rewrite the whole "
+            "file with edit_file. Do NOT retry the same str_replace.",
+            status=ToolStatus.STEERED,
+        )
 
     # --- edit journal (powers /undo) -----------------------------------------
     def _journal(self, rel: str, full: str) -> None:
@@ -1183,7 +1448,7 @@ class LocalToolHost:
         non-image through as image/png."""
         import base64
         try:
-            full = self._resolve(path)
+            full = self.resolve_read(path)
             with open(full, "rb") as _f:
                 raw = _f.read()
         except OSError as e:
@@ -1213,7 +1478,7 @@ class LocalToolHost:
             "-C", self.root(),
         ]
         try:
-            # `git diff` omits untracked files. A reconciliation tool that says "No changes" on a workspace
+            # `git diff` omits untracked files. An uncertainty observation that says "No changes" on a workspace
             # containing them is false evidence, so always pair it with a porcelain inventory. Disable a
             # repo-configured fsmonitor command: merely observing an untrusted repo must not execute it.
             status = subprocess.run(
@@ -1223,7 +1488,7 @@ class LocalToolHost:
             ignored = None
             if include_ignored:
                 # `git status` deliberately hides ignored paths, but an uncertain command can write them too.
-                # Enumerate recursively only for the expensive reconciliation view; ordinary reviews stay lean.
+                # Enumerate recursively only for the expensive uncertainty view; ordinary reviews stay lean.
                 ignored = subprocess.run(
                     [*base, "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
                     capture_output=True, text=True, timeout=30,
@@ -1310,7 +1575,7 @@ class LocalToolHost:
             ans = "(no answer)"
         answer = str(ans).strip()
         if not answer or answer.casefold() in {"(no answer)", "(cancelled)", "(canceled)"}:
-            return ToolText("No user answer was received.", ok=False)
+            return ToolText("No user answer was received.", status=ToolStatus.CANCELLED)
         return f"User answered: {answer}"
 
     def _t_run_command(self, args: dict) -> str:
@@ -1374,6 +1639,9 @@ class LocalToolHost:
     # --- interactive PTY sessions (terminal) ---
     def _t_terminal_open(self, args: dict) -> str:
         name = args.get("session") or "main"
+        problem = self.terminals.open_problem(name)
+        if problem:
+            return ToolText(problem, status=ToolStatus.STEERED)
         self.terminals.open(name, cwd=self.root(), command=args.get("command") or None)
         banner = self.terminals.peek(name, timeout=0.6)  # peek, not read — don't eat the first prompt
         return f"{self._host_only_note()}Opened terminal session {name!r}.\n{banner}"
@@ -1464,6 +1732,45 @@ class LocalToolHost:
         done = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "done")
         doing = sum(1 for s in steps if isinstance(s, dict) and s.get("status") == "in_progress")
         return f"PLAN updated: {n} steps ({done} done, {doing} in progress) — shown in your PLAN section."
+
+    def _t_update_work(self, args: dict) -> str:
+        try:
+            graph, logical_id, workspace_epoch = self._active_work_snapshot()
+            delta = build_work_delta(
+                graph, args, logical_id=logical_id, workspace_epoch=workspace_epoch,
+            )
+            # Validate the full proposed graph now; effect construction repeats this against the same snapshot
+            # and the reducer performs the one authoritative apply.
+            proposed = graph.apply_delta(delta)
+        except (ActiveWorkError, TypeError, ValueError) as exc:
+            return ToolText(f"Error: ACTIVE WORK update rejected: {exc}", ok=False)
+        roots = tuple(
+            root for root in proposed.unresolved_roots
+            if not logical_id or root.logical_id == logical_id
+        )
+        frontier = []
+        if roots:
+            root = roots[-1]
+            frontier = [
+                item for item in proposed.items
+                if item.id != root.id and item.root_id == root.id
+                and item.status in {"open", "in_progress", "waiting_user"}
+            ]
+        result = (
+            f"ACTIVE WORK update accepted: {len(delta.creates)} created, "
+            f"{len(delta.updates)} updated (base revision {delta.expected_revision})."
+        )
+        if frontier:
+            shown = frontier[:12]
+            result += "\nUnfinished current-request frontier: " + "; ".join(
+                f"{item.id} [{item.status}]" for item in shown
+            )
+            if len(frontier) > len(shown):
+                result += f"; +{len(frontier) - len(shown)} more"
+            result += ". A settled batch does not retire these items."
+        else:
+            result += "\nUnfinished current-request frontier: none."
+        return result
 
     def _t_execute_code(self, args: dict) -> str:
         out = self._execute_code(args["code"])

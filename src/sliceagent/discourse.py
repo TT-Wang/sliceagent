@@ -16,6 +16,7 @@ from typing import Iterable, Mapping
 
 from .intent import (EvidenceQuery, QualityEvidenceQuery,
                      derive_evidence_query)
+from .persistence import artifact_order_key
 
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
@@ -122,6 +123,42 @@ def _plain(text: str) -> str:
     return value
 
 
+def _proposal_scan(text: str) -> str:
+    """Blank example/code spans while preserving offsets into the visible assistant response."""
+    chars = list(str(text or ""))
+
+    def blank(start: int, end: int) -> None:
+        for index in range(max(0, start), min(len(chars), end)):
+            if chars[index] not in "\r\n":
+                chars[index] = " "
+
+    source = str(text or "")
+    offset = 0
+    fence: tuple[str, int] | None = None
+    for line in source.splitlines(keepends=True):
+        marker = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        in_fence = fence is not None
+        if marker is not None:
+            token = marker.group(1)
+            if fence is None:
+                fence = (token[0], len(token))
+            elif (token[0] == fence[0] and len(token) >= fence[1]
+                  and not line[marker.end():].strip()):
+                fence = None
+            blank(offset, offset + len(line))
+        elif in_fence:
+            blank(offset, offset + len(line))
+        elif re.match(r"^(?:\t| {4,}|\s*>)", line):
+            blank(offset, offset + len(line))
+        offset += len(line)
+    # A whole question shown as quoted/inline-code data is not the assistant asking it. A quoted path inside
+    # a real surrounding question remains visible because the question mark sits outside the quote.
+    for pattern in (r'"[^"\r\n]*\?[^"\r\n]*"', r"'[^'\r\n]*\?[^'\r\n]*'", r"`[^`\r\n]*\?[^`\r\n]*`"):
+        for match in re.finditer(pattern, source):
+            blank(*match.span())
+    return "".join(chars)
+
+
 def extract_pending_proposal(text: str) -> dict | None:
     """Return one immediate assistant action offer, or ``None``.
 
@@ -129,8 +166,9 @@ def extract_pending_proposal(text: str) -> dict | None:
     Merely mentioning that a fix exists is not a proposal.
     """
     source = str(text or "")
-    choices = list(_CHOICE_QUESTION.finditer(source))
-    anchors = extract_addressable_anchors(source) if choices else ()
+    scan = _proposal_scan(source)
+    choices = list(_CHOICE_QUESTION.finditer(scan))
+    anchors = extract_addressable_anchors(scan) if choices else ()
     option_anchors = []
     if choices and anchors:
         question = choices[-1]
@@ -156,14 +194,16 @@ def extract_pending_proposal(text: str) -> dict | None:
     # pending action. This is deliberately narrow: an arbitrary yes/no question (or even an arbitrary path
     # question) cannot confer effect authority. The surrounding assistant text must identify a workspace-like
     # frame, and the question must contain one concrete absolute/home path.
-    for question in reversed(list(_QUESTION_SENTENCE.finditer(source))):
+    for question in reversed(list(_QUESTION_SENTENCE.finditer(scan))):
         sentence = question.group(1)
         if _PATH_CONFIRMATION.search(sentence) is None:
             continue
+        context = scan[max(0, question.start(1) - 400):question.end(1)]
         paths = list(_PATH_TOKEN.finditer(sentence))
         if not paths:
+            paths = list(_PATH_TOKEN.finditer(context))
+        if not paths:
             continue
-        context = source[max(0, question.start(1) - 400):question.end(1)]
         if _WORKSPACE_CONTEXT.search(context) is None:
             continue
         path_match = paths[-1]
@@ -179,13 +219,13 @@ def extract_pending_proposal(text: str) -> dict | None:
     # A workspace-navigation disambiguation question offering named directory options. No absolute path is
     # present, so this is the naming analogue of the path-confirmation branch above: the reply naming an
     # option is a typed navigate selection, not an arbitrary yes/no continuation.
-    for question in reversed(list(_QUESTION_SENTENCE.finditer(source))):
+    for question in reversed(list(_QUESTION_SENTENCE.finditer(scan))):
         sentence = question.group(1)
         if _NAV_DISAMBIGUATION.search(sentence) is None:
             continue
         # A strong nav verb (navigate/switch to/cd) + >=2 directory-like options is signal enough; no
         # extra workspace-context word is required (it wrongly rejected the plural "directories").
-        context = source[max(0, question.start(1) - 400):question.end(1)]
+        context = scan[max(0, question.start(1) - 400):question.end(1)]
         names: list[str] = []
         for option in _DIR_OPTION.finditer(context):
             name = option.group(1)
@@ -199,7 +239,7 @@ def extract_pending_proposal(text: str) -> dict | None:
             "source_range": [start, end],
             "nav_targets": names,
         }
-    matches = list(_PROPOSAL.finditer(source))
+    matches = list(_PROPOSAL.finditer(scan))
     if not matches:
         return None
     match = matches[-1]
@@ -372,6 +412,7 @@ def extract_addressable_anchors(text: str) -> tuple[DiscourseAnchor, ...]:
     lines = source.splitlines(keepends=True)
     anchors: list[DiscourseAnchor] = []
     active: dict | None = None
+    list_indent: int | None = None
     offset = 0
 
     def finish(end: int) -> None:
@@ -397,12 +438,21 @@ def extract_addressable_anchors(text: str) -> tuple[DiscourseAnchor, ...]:
         if head is not None:
             finish(offset)
             heading = _plain(head.group(1)) or "numbered list"
+            list_indent = None
         elif numbered is not None:
-            finish(offset)
-            active = {
-                "start": offset, "line_end": offset + len(line),
-                "ordinal": int(numbered.group(1)), "collection": heading,
-            }
+            indent = len(body.expandtabs(4)) - len(body.expandtabs(4).lstrip(" "))
+            if active is not None and indent > active["indent"]:
+                pass  # nested item: retain it as detail inside the enclosing top-level item
+            elif list_indent is not None and indent > list_indent:
+                pass
+            else:
+                finish(offset)
+                if list_indent is None:
+                    list_indent = indent
+                active = {
+                    "start": offset, "line_end": offset + len(line), "indent": indent,
+                    "ordinal": int(numbered.group(1)), "collection": heading,
+                }
         offset += len(line)
     finish(len(source))
     return tuple(anchors)
@@ -437,7 +487,7 @@ def _receipt_operations_for_query(
         }
         raw_disposition = str(raw.get("disposition") or "unknown")
         known_dispositions = {
-            "succeeded", "failed", "cancelled", "indeterminate", "not_started", "rejected",
+            "succeeded", "steered", "failed", "cancelled", "indeterminate", "not_started", "rejected",
         }
         disposition = raw_disposition if raw_disposition in known_dispositions else "unknown"
         reason_text = _plain(raw.get("rejection_reason") or raw.get("outcome_text") or "")
@@ -466,7 +516,9 @@ def _receipt_operations_for_query(
             "child_artifacts": len(artifact_refs),
             **({"reason": reason_excerpt, "reason_truncated": len(reason_text) > len(reason_excerpt)}
                if query.predicate == "failure_detail"
-               and disposition != "succeeded" and reason_text else {}),
+               and disposition in {
+                   "rejected", "failed", "cancelled", "indeterminate", "not_started", "unknown",
+               } and reason_text else {}),
         })
     return tuple(selected)
 
@@ -476,15 +528,21 @@ def _operation_counts(operations: Iterable[Mapping]) -> dict[str, int]:
     return {
         "requested": sum(bool(item.get("requested")) for item in operations),
         "rejected_before_execution": sum(bool(item.get("rejected_before_execution")) for item in operations),
+        "steered_before_execution": sum(
+            bool(item.get("rejected_before_execution"))
+            and str(item.get("disposition")) == "steered"
+            for item in operations
+        ),
         "execution_started": sum(bool(item.get("execution_started")) for item in operations),
         "settled": sum(bool(item.get("settled")) for item in operations),
         "succeeded": sum(str(item.get("disposition")) == "succeeded" for item in operations),
+        "steered": sum(str(item.get("disposition")) == "steered" for item in operations),
         "failed": sum(str(item.get("disposition")) == "failed" for item in operations),
         "cancelled": sum(str(item.get("disposition")) == "cancelled" for item in operations),
         "indeterminate": sum(str(item.get("disposition")) == "indeterminate" for item in operations),
         "not_started": sum(str(item.get("disposition")) == "not_started" for item in operations),
         "unknown": sum(str(item.get("disposition")) not in {
-            "succeeded", "failed", "cancelled", "indeterminate", "not_started", "rejected",
+            "succeeded", "steered", "failed", "cancelled", "indeterminate", "not_started", "rejected",
         } or str(item.get("disposition")) == "unknown" for item in operations),
         "effects_declared": sum(int(item.get("effects_declared") or 0) for item in operations),
         "effects_applied": sum(int(item.get("effects_applied") or 0) for item in operations),
@@ -509,11 +567,44 @@ def _digest_ids(values: Iterable[str]) -> str:
     return digest.hexdigest()
 
 
+def _artifact_gap_ids(gaps: Iterable) -> tuple[str, ...]:
+    """Normalize persistence discovery gaps without coupling evidence code to one store type."""
+    out = []
+    for gap in gaps or ():
+        if isinstance(gap, Mapping):
+            value = gap.get("artifact_id") or gap.get("id")
+        else:
+            value = getattr(gap, "artifact_id", "")
+        if value:
+            out.append(str(value))
+    return tuple(dict.fromkeys(out))
+
+
 def _coerce_evidence_query(value) -> EvidenceQuery:
     if isinstance(value, EvidenceQuery):
         return value
     derived = derive_evidence_query(str(value or ""))
     return derived or EvidenceQuery(source="execution_receipt")
+
+
+def _has_durable_order(artifact) -> bool:
+    body = getattr(artifact, "structured_body", {}) or {}
+    meta = body.get("meta") if isinstance(body, Mapping) else None
+    value = meta.get("order_ns") if isinstance(meta, Mapping) else None
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _latest_order_candidates(items: Iterable) -> tuple:
+    """Select latest, expanding an unresolved legacy same-second tie instead of inventing an order."""
+    items = tuple(items)
+    if not items:
+        return ()
+    latest = max(items, key=artifact_order_key)
+    if _has_durable_order(latest):
+        return (latest,)
+    timestamp = str(getattr(latest, "timestamp", "") or "")
+    return tuple(item for item in items if not _has_durable_order(item)
+                 and str(getattr(item, "timestamp", "") or "") == timestamp)
 
 
 def _artifacts_in_query_scope(query: EvidenceQuery, artifacts: Iterable) -> tuple:
@@ -523,12 +614,9 @@ def _artifacts_in_query_scope(query: EvidenceQuery, artifacts: Iterable) -> tupl
     turns = tuple(item for item in items if str(getattr(item, "kind", "") or "") == "turn")
     if not turns:
         return ()
-    order_key = lambda item: (  # noqa: E731 - shared deterministic ordering for the two scope modes
-        str(getattr(item, "timestamp", "") or ""),
-        str(getattr(item, "id", "") or ""),
-    )
+    order_key = artifact_order_key
     if query.scope == "latest_turn":
-        return (max(turns, key=order_key),)
+        return _latest_order_candidates(turns)
 
     # "last attempt/run/execution" means the latest turn containing an operation in the selected family,
     # not the latest conversational filler. Keep every newer turn in the proof domain: a receiptless newer
@@ -548,6 +636,14 @@ def _artifacts_in_query_scope(query: EvidenceQuery, artifacts: Iterable) -> tupl
         return turns
     latest_match = max(matches, key=order_key)
     boundary = order_key(latest_match)
+    if not _has_durable_order(latest_match):
+        boundary_timestamp = str(getattr(latest_match, "timestamp", "") or "")
+        return tuple(item for item in turns if (
+            _has_durable_order(item) and order_key(item) >= boundary
+        ) or (
+            not _has_durable_order(item)
+            and str(getattr(item, "timestamp", "") or "") >= boundary_timestamp
+        ))
     return tuple(item for item in turns if order_key(item) >= boundary)
 
 
@@ -583,7 +679,10 @@ def execution_receipts_from_artifacts(query: EvidenceQuery | str, artifacts: Ite
             continue
         elif query.predicate == "failure_detail":
             projected_operations = tuple(
-                operation for operation in operations if operation.get("disposition") != "succeeded"
+                operation for operation in operations
+                if operation.get("disposition") in {
+                    "rejected", "failed", "cancelled", "indeterminate", "not_started", "unknown",
+                }
             )
             if not projected_operations and not turn_level_adverse:
                 continue
@@ -745,7 +844,9 @@ def aggregate_execution_receipts_from_artifacts(
     }
 
 
-def execution_receipt_coverage(artifacts: Iterable, query: EvidenceQuery | str | None = None) -> dict:
+def execution_receipt_coverage(
+    artifacts: Iterable, query: EvidenceQuery | str | None = None, *, gaps: Iterable = (),
+) -> dict:
     """Describe receipt coverage across the exact task or latest-turn scope selected by the query."""
     query = _coerce_evidence_query(query or EvidenceQuery(source="execution_receipt"))
     turns = sorted(
@@ -755,6 +856,21 @@ def execution_receipt_coverage(artifacts: Iterable, query: EvidenceQuery | str |
     )
     receipt_bearing = []
     missing = []
+    corrupt = _artifact_gap_ids(gaps)
+    ambiguous = ()
+    if query.scope in {"latest_turn", "latest_matching_execution"}:
+        legacy_by_timestamp: dict[str, list[str]] = {}
+        for artifact in turns:
+            if _has_durable_order(artifact):
+                continue
+            timestamp = str(getattr(artifact, "timestamp", "") or "")
+            legacy_by_timestamp.setdefault(timestamp, []).append(
+                str(getattr(artifact, "id", "") or "")
+            )
+        ambiguous = tuple(
+            artifact_id for ids in legacy_by_timestamp.values() if len(ids) > 1
+            for artifact_id in ids if artifact_id
+        )
     for artifact in turns:
         body = dict(getattr(artifact, "structured_body", {}) or {})
         artifact_id = str(getattr(artifact, "id", "") or "")
@@ -766,7 +882,7 @@ def execution_receipt_coverage(artifacts: Iterable, query: EvidenceQuery | str |
         "kind": "execution_receipt_coverage",
         "candidate_turn_artifacts": len(turns),
         "receipt_bearing": len(receipt_bearing),
-        "coverage": "partial" if missing else "complete",
+        "coverage": "partial" if missing or corrupt or ambiguous else "complete",
         "scope": query.scope,
         "candidate_set_sha256": _digest_ids(
             str(getattr(artifact, "id", "") or "") for artifact in turns
@@ -774,6 +890,12 @@ def execution_receipt_coverage(artifacts: Iterable, query: EvidenceQuery | str |
         "missing_receipt_count": len(missing),
         "missing_receipt_sample": missing[:3],
         "missing_set_sha256": _digest_ids(missing),
+        "corrupt_artifact_count": len(corrupt),
+        "corrupt_artifact_sample": list(corrupt[:3]),
+        "corrupt_set_sha256": _digest_ids(corrupt),
+        "ambiguous_order_count": len(ambiguous),
+        "ambiguous_order_sample": list(ambiguous[:3]),
+        "ambiguous_order_set_sha256": _digest_ids(ambiguous),
         "source_index_handle": "artifacts/index.md",
     }
 
@@ -789,12 +911,9 @@ def _quality_scope_artifacts(query: QualityEvidenceQuery, artifacts: Iterable) -
     turns = sorted(
         (artifact for artifact in artifacts
          if str(getattr(artifact, "kind", "") or "") == "turn"),
-        key=lambda artifact: (
-            str(getattr(artifact, "timestamp", "") or ""),
-            str(getattr(artifact, "id", "") or ""),
-        ),
+        key=artifact_order_key,
     )
-    return turns[-1:] if query.scope == "latest_response" and turns else turns
+    return _latest_order_candidates(turns) if query.scope == "latest_response" and turns else turns
 
 
 def _json_value(value):
@@ -868,10 +987,24 @@ def _quality_grounding_artifact_ids(turns: Iterable) -> tuple[str, ...]:
 
 
 def _subagent_grounding_envelope(record: Mapping) -> dict:
-    """Project the child claim and its bounded observation capsule as distinct evidence layers."""
+    """Project child claims and the explicitly bounded observation preview as distinct evidence layers.
+
+    Current child artifacts may retain a much larger page-backed observation archive. That archive is never
+    copied wholesale into a quality-audit prompt; the exact artifact/evidence locators remain the refinement
+    path. Legacy artifacts had only ``observations``, which was already bounded at capture time.
+    """
     body = record.get("structured_body") if isinstance(record.get("structured_body"), Mapping) else {}
     brief = body.get("brief") if isinstance(body.get("brief"), Mapping) else record.get("brief")
     brief = brief if isinstance(brief, Mapping) else {}
+    archived_observations = body.get("observations") or ()
+    if not isinstance(archived_observations, (list, tuple)):
+        archived_observations = ()
+    preview_rows = (
+        body.get("observation_preview")
+        if "observation_preview" in body else archived_observations
+    ) or ()
+    if not isinstance(preview_rows, (list, tuple)):
+        preview_rows = ()
     observations = [
         {
             "v": int(item.get("v") or 1),
@@ -886,11 +1019,17 @@ def _subagent_grounding_envelope(record: Mapping) -> dict:
             "redacted": bool(item.get("redacted")),
             "truncated": bool(item.get("truncated")),
         }
-        for item in (body.get("observations") or ())
+        for item in preview_rows
         if isinstance(item, Mapping)
     ]
     report = str(body.get("report") or "")
-    observation_hashes = {item["view_sha256"] for item in observations}
+    # Claims bind to the full archived views. Only claims whose references resolve there are well-formed; the
+    # bounded preview may omit the supporting bytes, in which case it remains a locator rather than support.
+    observation_hashes = {
+        str(item.get("view_sha256") or "")
+        for item in archived_observations
+        if isinstance(item, Mapping) and str(item.get("status") or "") == "succeeded"
+    }
     claims = []
     from .subagent_contract import SubagentClaim
     raw_claims = body.get("claims") or ()
@@ -1094,6 +1233,7 @@ def _deterministic_response_constraint_mismatches(request: str, assistant: str) 
 
 def quality_exchanges_from_artifacts(
     query: QualityEvidenceQuery, artifacts: Iterable, *, grounding_artifacts: Iterable = (),
+    gaps: Iterable = (),
 ) -> tuple[dict, ...]:
     """Project exact sealed request/assistant pairs for an observed response-quality judgment.
 
@@ -1181,9 +1321,11 @@ def quality_exchanges_from_artifacts(
         grounding_digest.update(b"\0")
     unique_projected_grounding = tuple(dict.fromkeys(projected_grounding_ids))
     unique_missing_grounding = tuple(dict.fromkeys(missing_grounding))
+    corrupt = _artifact_gap_ids(gaps)
+    ambiguous = tuple(candidate_ids) if query.scope == "latest_response" and len(turns) > 1 else ()
     coverage = (
         "unavailable" if not turns else
-        "partial" if missing or unique_missing_grounding else
+        "partial" if missing or unique_missing_grounding or corrupt or ambiguous else
         "complete"
     )
     header = {
@@ -1201,6 +1343,12 @@ def quality_exchanges_from_artifacts(
         "grounding_artifact_count": len(unique_projected_grounding),
         "missing_grounding_artifact_count": len(unique_missing_grounding),
         "missing_grounding_artifact_sample": list(unique_missing_grounding[:3]),
+        "corrupt_artifact_count": len(corrupt),
+        "corrupt_artifact_sample": list(corrupt[:3]),
+        "corrupt_set_sha256": _digest_ids(corrupt),
+        "ambiguous_order_count": len(ambiguous),
+        "ambiguous_order_sample": list(ambiguous[:3]),
+        "ambiguous_order_set_sha256": _digest_ids(ambiguous),
         "candidate_set_sha256": _digest_ids(candidate_ids),
         "grounding_set_sha256": grounding_digest.hexdigest(),
         "source_set_sha256": source_digest.hexdigest(),
@@ -1223,6 +1371,11 @@ def _execution_projection_signature(referents: Iterable[Mapping]) -> dict:
         "receipt_count": int((aggregate or {}).get("receipt_count", 0) or 0),
         "candidate_set_sha256": str((coverage or {}).get("candidate_set_sha256") or ""),
         "missing_set_sha256": str((coverage or {}).get("missing_set_sha256") or ""),
+        "corrupt_set_sha256": str((coverage or {}).get("corrupt_set_sha256") or ""),
+        "corrupt_artifact_count": int((coverage or {}).get("corrupt_artifact_count", 0) or 0),
+        "ambiguous_order_set_sha256": str(
+            (coverage or {}).get("ambiguous_order_set_sha256") or ""
+        ),
         "coverage": str((coverage or {}).get("coverage") or "unavailable"),
     }
 
@@ -1240,6 +1393,11 @@ def _quality_projection_signature(projections: Iterable[Mapping]) -> dict:
         "grounding_artifact_count": int((coverage or {}).get("grounding_artifact_count", 0) or 0),
         "missing_grounding_artifact_count": int(
             (coverage or {}).get("missing_grounding_artifact_count", 0) or 0
+        ),
+        "corrupt_artifact_count": int((coverage or {}).get("corrupt_artifact_count", 0) or 0),
+        "corrupt_set_sha256": str((coverage or {}).get("corrupt_set_sha256") or ""),
+        "ambiguous_order_set_sha256": str(
+            (coverage or {}).get("ambiguous_order_set_sha256") or ""
         ),
         "grounding_set_sha256": str((coverage or {}).get("grounding_set_sha256") or ""),
         "coverage": str((coverage or {}).get("coverage") or "unavailable"),
@@ -1570,12 +1728,15 @@ def resolve_discourse_references(
     for raw in focus or ():
         anchor = raw if isinstance(raw, DiscourseAnchor) else DiscourseAnchor.from_dict(raw)
         if anchor is not None:
-            focus_keys.add((anchor.artifact_id, anchor.collection, anchor.ordinal))
+            focus_keys.add((anchor.artifact_id, anchor.collection, anchor.ordinal, anchor.source_range))
             focus_anchors.append(anchor)
     stable_resolved = []
     for mention in stable_mentions:
         matches = [anchor for anchor in pool if anchor.stable_id == mention]
-        identities = {(anchor.artifact_id, anchor.collection, anchor.ordinal) for anchor in matches}
+        identities = {
+            (anchor.artifact_id, anchor.collection, anchor.ordinal, anchor.source_range)
+            for anchor in matches
+        }
         if len(identities) == 1:
             stable_resolved.append(ResolvedAnchor(mention, matches[0], 100))
     if not mentions:
@@ -1612,7 +1773,7 @@ def resolve_discourse_references(
                 score += 5
             if anchor.stable_id and anchor.stable_id in low:
                 score += 20
-            if (anchor.artifact_id, anchor.collection, anchor.ordinal) in focus_keys:
+            if (anchor.artifact_id, anchor.collection, anchor.ordinal, anchor.source_range) in focus_keys:
                 score += 10 if again else 4
             if original and anchor.sequence == oldest:
                 score += 10
@@ -1620,7 +1781,7 @@ def resolve_discourse_references(
         scored.sort(key=lambda item: item[0], reverse=True)
         best = scored[0][0]
         winners = [anchor for score, anchor in scored if score == best]
-        identities = {(anchor.artifact_id, anchor.collection) for anchor in winners}
+        identities = {(anchor.artifact_id, anchor.collection, anchor.source_range) for anchor in winners}
         if len(identities) != 1:
             ambiguous_candidates.extend(winners)
             continue
@@ -1723,6 +1884,7 @@ def interpret_turn(
     inherited_subject = _subject_from_focus(focus)
     explicit_subject = _explicit_subject(request)
     repair = _focus_repair(request)
+    artifact_gaps = tuple(getattr(artifacts, "gaps", ()) or ())
     all_artifacts = tuple(artifacts)
     artifacts = tuple(artifact for artifact in all_artifacts
                       if not task_id or str(getattr(artifact, "task_id", "") or "") == task_id)
@@ -1762,7 +1924,9 @@ def interpret_turn(
     projections: tuple[dict, ...] = ()
     snapshot_basis: dict | None = None
     continuation = bool(getattr(contract, "evidence_continuation", False))
-    snapshot_valid = continuation and _valid_adjacent_snapshot(
+    # A corrupt record may be one of the frozen source/domain turns. Never re-materialize an exact adjacent
+    # proof over only the readable survivors.
+    snapshot_valid = continuation and not artifact_gaps and _valid_adjacent_snapshot(
         previous_evidence_snapshot, artifacts=all_artifacts, task_id=task_id,
         execution_query=contract.evidence_query,
         quality_query=contract.quality_evidence_query,
@@ -1797,7 +1961,12 @@ def interpret_turn(
                     "candidate_turn_artifacts": 0, "receipt_bearing": 0,
                     "missing_receipt_count": 0, "scope": contract.evidence_query.scope,
                     "candidate_set_sha256": _digest_ids(()), "missing_set_sha256": _digest_ids(()),
-                    "missing_receipt_sample": [], "source_index_handle": "artifacts/index.md",
+                    "missing_receipt_sample": [], "corrupt_artifact_count": len(artifact_gaps),
+                    "corrupt_artifact_sample": list(_artifact_gap_ids(artifact_gaps)[:3]),
+                    "corrupt_set_sha256": _digest_ids(_artifact_gap_ids(artifact_gaps)),
+                    "ambiguous_order_count": 0, "ambiguous_order_sample": [],
+                    "ambiguous_order_set_sha256": _digest_ids(()),
+                    "source_index_handle": "artifacts/index.md",
                 }))
             if contract.quality_evidence_query is not None:
                 projections = ({
@@ -1809,6 +1978,11 @@ def interpret_turn(
                     "missing_exchange_sample": [], "candidate_set_sha256": _digest_ids(()),
                     "grounding_artifact_count": 0, "missing_grounding_artifact_count": 0,
                     "missing_grounding_artifact_sample": [],
+                    "corrupt_artifact_count": len(artifact_gaps),
+                    "corrupt_artifact_sample": list(_artifact_gap_ids(artifact_gaps)[:3]),
+                    "corrupt_set_sha256": _digest_ids(_artifact_gap_ids(artifact_gaps)),
+                    "ambiguous_order_count": 0, "ambiguous_order_sample": [],
+                    "ambiguous_order_set_sha256": _digest_ids(()),
                     "grounding_set_sha256": hashlib.sha256(b"").hexdigest(),
                     "source_set_sha256": hashlib.sha256(b"").hexdigest(),
                     "source_index_handle": "artifacts/index.md",
@@ -1828,7 +2002,9 @@ def interpret_turn(
             )
         receipt_refs = execution_receipts_from_artifacts(evidence_query, evidence_artifacts)
         aggregate = aggregate_execution_receipts_from_artifacts(evidence_query, evidence_artifacts)
-        coverage = execution_receipt_coverage(evidence_artifacts, evidence_query)
+        coverage = execution_receipt_coverage(
+            evidence_artifacts, evidence_query, gaps=artifact_gaps,
+        )
         scoped_execution_artifacts = _artifacts_in_query_scope(evidence_query, evidence_artifacts)
         if aggregate is not None:
             contract = replace(contract, referents=(
@@ -1875,6 +2051,7 @@ def interpret_turn(
             )
         projections = quality_exchanges_from_artifacts(
             contract.quality_evidence_query, quality_artifacts, grounding_artifacts=all_artifacts,
+            gaps=artifact_gaps,
         )
         if snapshot_basis is None:
             snapshot_basis = {

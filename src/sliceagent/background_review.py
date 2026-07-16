@@ -1,32 +1,31 @@
 """Async background-review fork (item 16) — OPT-IN, OFF by default, behind an env flag.
 
-After a turn, fork a daemon thread that critiques the just-finished episode and writes lessons
-to the memory store. sliceagent has NO transcript to replay, so
-the fork instead re-runs the EXISTING consolidation code (consolidate.promote_episodes /
-promote_procedures) over the durable episodic JSONL — same write surface as session-end
-consolidate, just incremental and off the critical path.
+After a turn, fork a daemon thread that reviews the just-finished compatibility episode and proposes typed
+L2 knowledge plus adjacent skills. SliceAgent has no growing transcript to replay, so the fork reuses the
+existing promotion helpers over the legacy episodic JSONL mirror. Production writes bind native knowledge to
+the project identity captured when the source work ran; Memem is only an optional downstream bridge.
 
 WHY THIS CAN'T DESTABILIZE THE DEFAULT PATH (the hard requirement):
   - OFF by default. Only runs when AGENT_BACKGROUND_REVIEW is truthy.
-  - The fork reads ONLY the durable episodic cache (already flushed to disk by hippocampus.py's EpisodeSink)
-    and writes ONLY to durable stores (memem remember / SKILL.md / FTS5 index). It NEVER
+  - The fork reads ONLY the episodic compatibility mirror (already flushed by ``EpisodeSink``) and writes
+    ONLY typed L2 candidates plus adjacent ``SKILL.md`` assets. It NEVER
     touches the Slice, the Session, the loop, the dispatcher, or the prompt cache.
   - It is a daemon thread: it can't block process exit and an exception in it is swallowed.
   - Re-entrancy guard: at most one review in flight; a new turn while one runs is skipped.
   - The main turn has already returned before this is even spawned (cli wires it AFTER
     run_turn), so latency is never on the user's critical path.
 
-NO-TRANSCRIPT INVARIANT: upheld structurally — the worker's only inputs are durable records
-and its only outputs are durable stores. Nothing it does can enter a slice tier directly; a
-lesson it writes is recalled later through the SAME relevance-gated memory tier as any other.
+NO-TRANSCRIPT INVARIANT: upheld structurally — the worker's only inputs are persisted records and its only
+outputs are durable stores. Nothing it does enters a slice directly; a knowledge record is later admitted by
+the same hard scope and relevance rules as any other L2 lead.
 
 PUBLIC SIGNATURES (pinned):
     background_review_enabled() -> bool
     class BackgroundReviewer:
-        def __init__(self, memory, *, scope: str, on_log=None) -> None
+        def __init__(self, memory, *, scope: str, project_id: str = "", on_log=None) -> None
         def review(self, session_id: str) -> None        # spawns the daemon (no-op if disabled/busy)
         def join(self, timeout: float | None = None) -> None   # tests/shutdown: wait for the worker
-    make_background_reviewer(memory, *, scope: str, on_log=None) -> BackgroundReviewer | None
+    make_background_reviewer(memory, *, scope: str, project_id: str = "", on_log=None) -> BackgroundReviewer | None
 """
 from __future__ import annotations
 
@@ -43,15 +42,15 @@ def background_review_enabled() -> bool:
 
 
 class BackgroundReviewer:
-    """Forks a daemon thread per review that consolidates the latest episode incrementally.
+    """Fork a daemon thread that incrementally derives knowledge and skill candidates.
 
-    Reuses consolidate.promote_episodes / promote_procedures verbatim (the moat's existing
-    write logic) — this module adds ONLY the fork + safety scaffolding, no new mining logic.
+    This module adds only the fork and safety scaffolding around the existing pure promotion helpers.
     """
 
-    def __init__(self, memory, *, scope: str, on_log=None) -> None:
+    def __init__(self, memory, *, scope: str, project_id: str = "", on_log=None) -> None:
         self.memory = memory
         self.scope = scope
+        self.project_id = str(project_id or "")
         self._on_log = on_log
         self._lock = threading.Lock()
         self._busy = False
@@ -101,18 +100,31 @@ class BackgroundReviewer:
         critique must NEVER affect the foreground session."""
         try:
             from .neocortex import promote_episodes, promote_procedures, render_skill
-            records = self.memory.read_episodes(session_id)
+            read_bound = getattr(self.memory, "read_project_episodes", None)
+            if self.project_id and callable(read_bound):
+                records = read_bound(session_id, project_id=self.project_id)
+            else:
+                records = self.memory.read_episodes(session_id)
             if not records:
                 return
             # critique the LATEST turn in the context of the session: promote_* are pure and
             # frequency-weight across the whole session, so passing all records gives the newest
             # corrective/procedural signal its proper recurrence count. Dedup against what's
-            # already stored is memem's job (remember is idempotent-ish on identical content).
+            # Native project-bound writes own durable identity; an optional Memem mirror is downstream.
             lessons = promote_episodes(records)
             for lesson in lessons:
                 try:
-                    self.memory.remember(lesson["content"], title=lesson["title"], scope=self.scope,
-                                         tags=lesson["tags"], paths=lesson.get("files"))  # file-context parity
+                    remember_bound = getattr(self.memory, "remember_for_project", None)
+                    if self.project_id and callable(remember_bound):
+                        remember_bound(
+                            lesson["content"], project_id=self.project_id,
+                            title=lesson["title"], tags=lesson["tags"], paths=lesson.get("files"),
+                        )
+                    else:
+                        self.memory.remember(
+                            lesson["content"], title=lesson["title"], scope=self.scope,
+                            tags=lesson["tags"], paths=lesson.get("files"),
+                        )  # compatibility memory without an immutable project-binding seam
                 except Exception:
                     pass
             procs = promote_procedures(records)
@@ -136,11 +148,13 @@ class BackgroundReviewer:
                 self._busy = False
 
 
-def make_background_reviewer(memory, *, scope: str, on_log=None) -> BackgroundReviewer | None:
+def make_background_reviewer(
+    memory, *, scope: str, project_id: str = "", on_log=None,
+) -> BackgroundReviewer | None:
     """Factory. Returns None when the feature is disabled OR memory isn't durable — so the
     host can skip wiring entirely and the default path adds zero objects."""
     if not background_review_enabled():
         return None
     if not getattr(memory, "is_durable", False):
         return None
-    return BackgroundReviewer(memory, scope=scope, on_log=on_log)
+    return BackgroundReviewer(memory, scope=scope, project_id=project_id, on_log=on_log)

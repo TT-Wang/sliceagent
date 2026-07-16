@@ -262,15 +262,27 @@ _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 _PREFIX_RE = re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])")
 
 
-def _mask_token(token: str) -> str:
+def _mask_token(token: str, *, preserve_length: bool = False) -> str:
     if not token:
         return "***"
+    if preserve_length:
+        return "*" * len(token)
     if len(token) < 18:
         return "***"
     return f"{token[:6]}...{token[-4:]}"
 
 
-def redact_text(text: str, *, code_file: bool = False) -> str:
+def _replace_group(match: re.Match, group: int, replacement: str) -> str:
+    start = match.start(group) - match.start()
+    end = match.end(group) - match.start()
+    return match.group(0)[:start] + replacement + match.group(0)[end:]
+
+
+def _same_shape_mask(value: str) -> str:
+    return "".join(char if char in "\r\n" else "*" for char in value)
+
+
+def redact_text(text: str, *, code_file: bool = False, preserve_length: bool = False) -> str:
     """Mask API keys, tokens, JWTs, private keys, DB passwords, etc. in a block of text.
     Safe on any string — non-matching text passes through unchanged. Always on (this is a
     safety boundary, not a logging preference, so the env-toggle from the source is dropped).
@@ -286,31 +298,67 @@ def redact_text(text: str, *, code_file: bool = False) -> str:
         return text
 
     if _has_known_prefix_substring(text):
-        text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
+        text = _PREFIX_RE.sub(
+            lambda m: _mask_token(m.group(1), preserve_length=preserve_length), text,
+        )
 
     if not code_file:
         if "=" in text:
-            text = _ENV_ASSIGN_RE.sub(
-                lambda m: (f"{m.group(1)}={m.group(2)}{_mask_token(m.group(3))}{m.group(2)}"
-                           if m.group(2) is not None
-                           else f"{m.group(1)}={_mask_token(m.group(4))}"), text)
+            if preserve_length:
+                text = _ENV_ASSIGN_RE.sub(lambda m: _replace_group(
+                    m, 3 if m.group(3) is not None else 4,
+                    _mask_token(m.group(3) if m.group(3) is not None else m.group(4),
+                                preserve_length=True),
+                ), text)
+            else:
+                text = _ENV_ASSIGN_RE.sub(
+                    lambda m: (f"{m.group(1)}={m.group(2)}{_mask_token(m.group(3))}{m.group(2)}"
+                               if m.group(2) is not None
+                               else f"{m.group(1)}={_mask_token(m.group(4))}"), text)
         if ":" in text and '"' in text:
-            text = _JSON_FIELD_RE.sub(lambda m: f'{m.group(1)}: "{_mask_token(m.group(2))}"', text)
+            text = _JSON_FIELD_RE.sub(
+                (lambda m: _replace_group(m, 2, _mask_token(m.group(2), preserve_length=True)))
+                if preserve_length else
+                (lambda m: f'{m.group(1)}: "{_mask_token(m.group(2))}"'),
+                text,
+            )
 
     if "authorization" in text.casefold():   # case-insensitive guard matches the IGNORECASE regex it gates
-        text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
+        text = _AUTH_HEADER_RE.sub(
+            (lambda m: _replace_group(m, 2, _mask_token(m.group(2), preserve_length=True)))
+            if preserve_length else
+            (lambda m: m.group(1) + _mask_token(m.group(2))), text,
+        )
     if ":" in text:
-        text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
+        text = _TELEGRAM_RE.sub(
+            (lambda m: _replace_group(m, 3, "*" * len(m.group(3))))
+            if preserve_length else
+            (lambda m: f"{m.group(1) or ''}{m.group(2)}:***"), text,
+        )
     if "BEGIN" in text and "-----" in text:
-        text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        text = _PRIVATE_KEY_RE.sub(
+            (lambda m: _same_shape_mask(m.group(0))) if preserve_length else "[REDACTED PRIVATE KEY]",
+            text,
+        )
     if "://" in text:
-        text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
-        text = _URL_USERINFO_RE.sub(r"\1***@", text)   # creds in http/https/ftp/git/… URLs
+        text = _DB_CONNSTR_RE.sub(
+            (lambda m: _replace_group(m, 2, "*" * len(m.group(2))))
+            if preserve_length else
+            (lambda m: f"{m.group(1)}***{m.group(3)}"), text,
+        )
+        text = _URL_USERINFO_RE.sub(
+            (lambda m: m.group(1) + "*" * (len(m.group(0)) - len(m.group(1)) - 1) + "@")
+            if preserve_length else r"\1***@", text,
+        )   # creds in http/https/ftp/git/… URLs
     if "eyJ" in text:
-        text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
+        text = _JWT_RE.sub(
+            lambda m: _mask_token(m.group(0), preserve_length=preserve_length), text,
+        )
     if "+" in text:
         def _redact_phone(m):
             phone = m.group(1)
+            if preserve_length:
+                return "*" * len(phone)
             return (phone[:2] + "****" + phone[-2:]) if len(phone) <= 8 else (phone[:4] + "****" + phone[-4:])
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 

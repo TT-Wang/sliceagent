@@ -1,5 +1,4 @@
-"""Same-step exact-call dedup (layer 1 only — NOT the cross-step
-streak/force-stop, which sliceagent's no-progress guardrail already covers).
+"""Same-step exact-call dedup.
 
 Lossless by construction: a duplicate (name, args) read-only call in ONE batch reuses the first call's
 result instead of executing the tool twice, and every tool_call_id still gets a (byte-identical) reply.
@@ -14,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from sliceagent.registry import ToolText                     # noqa: E402
 from sliceagent.loop import run_tool_batch                   # noqa: E402
 from sliceagent.hooks import Hooks                           # noqa: E402
-from sliceagent.guardrails import canonical_tool_args        # noqa: E402
+from sliceagent.tool_identity import canonical_tool_args      # noqa: E402
 from sliceagent.events import ToolResult, ToolStarted        # noqa: E402
 
 CHECKS = []

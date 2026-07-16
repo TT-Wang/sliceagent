@@ -1,6 +1,7 @@
 """Execution lifecycle and immutable receipt regressions. No model or network."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -17,9 +18,10 @@ from sliceagent.events import (  # noqa: E402
     ToolStarted,
 )
 from sliceagent.execution import ToolInvocation  # noqa: E402
-from sliceagent.hooks import Hooks, ToolDecision  # noqa: E402
+from sliceagent.hooks import Hooks, ToolPreflight  # noqa: E402
 from sliceagent.loop import run_tool_batch  # noqa: E402
 from sliceagent.receipts import (TurnReceipt, compact_receipt_projection,  # noqa: E402
+                                 receipt_completion_label, receipt_has_adverse_lifecycle,
                                  receipt_summary_parts)
 from sliceagent.runtime_persistence import CoreArtifactFS, LocalTurnStore  # noqa: E402
 
@@ -36,20 +38,20 @@ class _Host:
         return "ok"
 
 
-class _MixedPolicy(Hooks):
-    def authorize_tool(self, name, _args):
-        return ToolDecision(name != "denied_tool", "denied for receipt test")
+class _LifecycleStop(Hooks):
+    def preflight_tool(self, name, _args):
+        return ToolPreflight(name == "denied_tool", "cancelled for receipt test", kind="lifecycle")
 
 
 def _call(name: str, identity: str, **args):
     return NS(name=name, id=identity, args=args)
 
 
-def test_policy_rejection_never_announces_physical_execution():
+def test_lifecycle_stop_never_announces_physical_execution():
     host = _Host()
     events = []
     _, results = run_tool_batch(
-        [_call("denied_tool", "deny-1", path="a.py")], host, events.append, _MixedPolicy(),
+        [_call("denied_tool", "deny-1", path="a.py")], host, events.append, _LifecycleStop(),
     )
 
     assert host.ran == []
@@ -57,7 +59,7 @@ def test_policy_rejection_never_announces_physical_execution():
     assert any(isinstance(event, ToolRejected) for event in events)
     assert any(isinstance(event, ToolSettled) for event in events)
     assert not any(isinstance(event, (ToolExecutionStarted, ToolStarted)) for event in events)
-    assert results[0]["status"] == "failed"
+    assert results[0]["status"] == "cancelled"
 
 
 def test_allowed_handler_has_distinct_requested_started_and_settled_boundaries():
@@ -87,7 +89,7 @@ def test_receipt_is_sealed_in_existing_artifact_and_separates_turn_disposition()
     run_tool_batch(
         [_call("denied_tool", "deny-1", path="a.py"),
          _call("read_file", "read-1", path="b.py")],
-        host, sink, _MixedPolicy(), turn_id="turn-1",
+        host, sink, _LifecycleStop(), turn_id="turn-1",
     )
     store.seal(
         state={"status": "active"}, record={"meta": {"ptok": 10, "ctok": 3}}, status="end_turn",
@@ -96,20 +98,54 @@ def test_receipt_is_sealed_in_existing_artifact_and_separates_turn_disposition()
     receipt = artifact.to_dict()["structured_body"]["turn_receipt"]
 
     assert artifact.status == "end_turn", "an operation warning must not rewrite the terminal turn status"
-    assert receipt["disposition"] == "completed_with_warnings"
+    assert receipt["disposition"] == "completed"
     assert receipt["counts"]["requested"] == 2
-    assert receipt["counts"]["rejected_before_execution"] == 1
+    assert receipt["counts"]["rejected_before_execution"] == 0
+    assert receipt["counts"]["cancelled"] == 1
+    assert receipt["counts"]["lifecycle_not_run"] == 1
     assert receipt["counts"]["execution_started"] == 1
     assert receipt["counts"]["settled"] == 2
-    assert receipt["operations"][0]["disposition"] == "rejected"
+    assert receipt["operations"][0]["disposition"] == "cancelled"
+    assert receipt["operations"][0]["preflight_kind"] == "lifecycle"
     assert receipt["operations"][0]["execution_started"] is False
     assert receipt["operations"][1]["disposition"] == "succeeded"
     assert receipt["usage"] == {"prompt_tokens": 10, "completion_tokens": 3}
+    compact = compact_receipt_projection(receipt)
+    assert receipt_completion_label(compact, "end_turn") == "turn saved"
+    assert not receipt_has_adverse_lifecycle(compact)
+    assert any("not run" in part for part in receipt_summary_parts(compact))
     virtual = CoreArtifactFS(store.coordinator.artifacts)
     rendered = virtual.read_file(f"artifacts/{artifact.id}.md")
-    assert "denied_tool · requested 1 · started 0 · rejected 1" in rendered
+    assert "denied_tool · requested 1 · started 0 · rejected 0" in rendered
     assert "read_file · requested 1 · started 1 · rejected 0 · succeeded 1" in rendered
-    assert "completed_with_warnings" in virtual.index()
+    assert "completed_with_warnings" not in virtual.index()
+
+
+def test_catastrophic_preflight_remains_an_explicit_adverse_refusal():
+    from sliceagent.receipts import receipt_completion_label
+
+    invocation = ToolInvocation("stop-1", "run_command", {"command": "shutdown now"}, 0)
+    events = (
+        {"type": "tool-requested", "payload": {
+            "invocation_id": invocation.id, "name": invocation.name,
+            "args": dict(invocation.args), "provider_index": 0,
+        }},
+        {"type": "tool-rejected", "payload": {
+            "invocation_id": invocation.id, "name": invocation.name,
+            "args": dict(invocation.args), "provider_index": 0,
+            "reason": "Safety stop: catastrophic fixture", "rejection_kind": "catastrophic",
+        }},
+        {"type": "tool-settled", "payload": {
+            "invocation_id": invocation.id, "name": invocation.name,
+            "outcome": {"status": "cancelled", "text": "Safety stop: catastrophic fixture"},
+        }},
+    )
+    receipt = TurnReceipt.from_events(events, turn_id="turn-stop", turn_status="end_turn")
+    record = receipt.to_dict()
+    assert record["disposition"] == "completed_with_warnings"
+    assert record["counts"]["rejected_before_execution"] == 1
+    assert record["operations"][0]["preflight_kind"] == "catastrophic"
+    assert receipt_completion_label(record, "end_turn") == "turn saved with warnings"
 
 
 def test_started_without_settlement_strengthens_seal_to_indeterminate():
@@ -162,7 +198,7 @@ def test_legacy_policy_denial_is_recovered_as_rejected_before_start():
             "rejection_provenance": "legacy_policy_gate",
             "outcome": {
                 "status": "failed",
-                "text": "Error: blocked by policy: turn authority missing",
+                "text": "Error: blocked by policy: interactive consent required",
             },
         }},
     )
@@ -170,7 +206,7 @@ def test_legacy_policy_denial_is_recovered_as_rejected_before_start():
     assert operation.rejected_before_execution is True
     assert operation.execution_started is False
     assert operation.disposition == "rejected"
-    assert operation.rejection_reason == "turn authority missing"
+    assert operation.rejection_reason == "interactive consent required"
 
 
 def test_legacy_handler_text_cannot_erase_a_recorded_physical_start():
@@ -194,7 +230,18 @@ def test_legacy_handler_text_cannot_erase_a_recorded_physical_start():
 def test_child_artifact_effect_links_exact_spawn_operation_and_compacts_for_terminal():
     effect = {
         "id": "child-1:artifact", "kind": "child_artifact",
-        "payload": {"artifact_id": "child-1", "kind": "explorer"},
+        "payload": {
+            "artifact_id": "child-1", "kind": "synthesiser", "status": "ok",
+            "work_item_id": "review-parser",
+            "stop_reason": "end_turn", "stop_cause": "complete",
+            "recovered_from": ["provider_timeout"],
+            "source_coverage_status": "source_partial",
+            "required_ref_count": 2,
+            "consumed_refs": ["subagents/sub-1.md"],
+            "cited_refs": ["subagents/sub-1.md"],
+            "covered_refs": ["subagents/sub-1.md"],
+            "source_gaps": ["secret raw gap detail must stay outside compact state"],
+        },
     }
     events = (
         {"type": "tool-requested", "payload": {
@@ -215,10 +262,48 @@ def test_child_artifact_effect_links_exact_spawn_operation_and_compacts_for_term
     )
     receipt = TurnReceipt.from_events(events, turn_id="turn-1")
     assert receipt.operations[0].artifact_refs == ("child-1",)
+    assert receipt.operations[0].work_item_id == "review-parser"
+    assert receipt.operations[0].child_status == "ok"
+    assert receipt.operations[0].child_stop_reason == "end_turn"
+    assert receipt.operations[0].child_stop_cause == "complete"
+    assert receipt.operations[0].child_recovered_from == ("provider_timeout",)
+    assert receipt.operations[0].child_source_coverage_status == "source_partial"
+    assert receipt.operations[0].child_required_ref_count == 2
+    assert receipt.operations[0].child_covered_ref_count == 1
+    assert receipt.operations[0].child_source_gap_count == 1
+    operation_record = receipt.operations[0].to_dict()
+    assert operation_record["work_item_id"] == "review-parser"
+    assert operation_record["child_recovered_from"] == ["provider_timeout"]
     assert receipt.counts["child_artifacts"] == 1
     compact = compact_receipt_projection(receipt.to_dict())
     assert compact is not None and compact["agents"]["child_artifacts"] == 1
-    assert receipt_summary_parts(compact) == ("1 agent succeeded",)
+    assert compact["agents"]["source_coverage"] == {
+        "source_complete": 0, "source_partial": 1, "source_unsupported": 0, "not_assessed": 0,
+        "required_refs": 2, "consumed_refs": 1, "cited_refs": 1, "covered_refs": 1,
+        "source_gaps": 1,
+    }
+    assert "secret raw gap detail" not in json.dumps(compact)
+    assert receipt_summary_parts(compact) == (
+        "agents · 1/1 succeeded",
+        "agents · 1 source partial · 1/2 granted reports covered",
+    )
+
+
+def test_mixed_agent_and_tool_summary_calls_non_agent_work_other_operations():
+    compact = {
+        "counts": {
+            "requested": 27, "execution_started": 27, "settled": 27,
+            "succeeded": 23, "failed": 4,
+        },
+        "agents": {
+            "requested": 7, "execution_started": 7, "settled": 7,
+            "succeeded": 3, "failed": 4,
+        },
+    }
+    assert receipt_summary_parts(compact) == (
+        "agents · 3/7 succeeded", "agents · 4 failed",
+        "other operations · 20/20 succeeded",
+    )
 
 
 def test_plain_completion_uses_receipt_lifecycle_not_lossy_failure_tally():
@@ -244,8 +329,8 @@ def test_plain_completion_uses_receipt_lifecycle_not_lossy_failure_tally():
         cli_sink()(TurnCommitted(True, "end_turn", receipt=compact))
     rendered = output.getvalue()
     assert "turn saved with warnings" in rendered
-    assert "1 agent rejected before start" in rendered
-    assert "1 agent failed" not in rendered, rendered
+    assert "agents · 0/1 succeeded" in rendered and "agents · 1 rejected before start" in rendered
+    assert "agents · 1 failed" not in rendered, rendered
 
 
 def test_deduplicated_logical_call_is_settled_but_not_physically_started():

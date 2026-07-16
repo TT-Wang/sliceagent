@@ -9,6 +9,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.agents import AgentSpec, BUILTIN_AGENTS, load_agents  # noqa: E402
+from sliceagent.execution import ToolStatus                           # noqa: E402
 from sliceagent.subagent import SubagentHost                          # noqa: E402
 from sliceagent.access import AllAccess, ReadAllAccess                # noqa: E402
 
@@ -66,7 +67,7 @@ class _Inner:
 
 @check
 def spawn_agent_schema_lists_the_roster():
-    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None, max_depth=1, depth=0)
+    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, max_depth=1, depth=0)
     names = [s["function"]["name"] for s in host.schemas()]
     # ONE delegation tool now — spawn_agent subsumes the old spawn_explore/spawn_subagent (measured parity)
     assert "spawn_agent" in names
@@ -75,18 +76,24 @@ def spawn_agent_schema_lists_the_roster():
     d = sa["function"]["description"]
     assert "explorer" in d and "general" in d            # kinds still enumerated
     assert "name" in d and "HIRE" in d                   # the identity/hire dial is taught in-schema
+    assert "20–30k source tokens" in d and "Waves of 2–3" in d
+    assert "complete declared coverage frontier" in d and "fixed future wave" in d
+    assert "one child per directory" in d and "exact child count" in d
+    assert "one per area/module/question" not in d, "schema must not contradict bounded-wave guidance"
+    scope = sa["function"]["parameters"]["properties"]["scope"]["description"]
+    assert "source-weight-bounded" in scope
 
 
 @check
 def spawn_agent_unknown_is_graceful():
-    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None, max_depth=1, depth=0)
+    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, max_depth=1, depth=0)
     out = host.run("spawn_agent", {"agent": "nope", "task": "x"})
-    assert out.startswith("Error: unknown agent"), out
+    assert out.status is ToolStatus.STEERED and "unknown agent" in out, out
 
 
 @check
 def spawn_agent_access_readonly_vs_writable():
-    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None, max_depth=1, depth=0)
+    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, max_depth=1, depth=0)
     assert isinstance(host.accesses("spawn_agent", {"agent": "explorer"})[0], ReadAllAccess)
     assert isinstance(host.accesses("spawn_agent", {"agent": "general"})[0], AllAccess)
 
@@ -95,7 +102,7 @@ def spawn_agent_access_readonly_vs_writable():
 def custom_agent_child_tools_restricted_to_allowlist():
     # a child host built for a custom read-only spec exposes ONLY its allowlist.
     spec = AgentSpec("reviewer", tools=("read_file", "grep"))
-    child = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
+    child = SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                          max_depth=1, depth=1, spec=spec)
     names = [s["function"]["name"] for s in child.schemas()]
     assert names == ["read_file"], names   # _Inner only offers read_file; grep absent there but allowlisted
@@ -114,16 +121,16 @@ class _InnerWithAsk:
 @check
 def subagent_cannot_ask_user_but_parent_can():
     # CHILD (any spec) must not be offered ask_user; a general child keeps its other (writable) tools.
-    child = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None, policy=None,
+    child = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None,
                          max_depth=1, depth=1, spec=BUILTIN_AGENTS["general"])
     names = [s["function"]["name"] for s in child.schemas()]
     assert "ask_user" not in names, names
     assert "edit_file" in names, "a general child keeps its writable tools — only ask_user is barred"
     # defense-in-depth: even a hallucinated ask_user call is barred, not executed (no user prompt → no stall)
     out = child.run("ask_user", {"question": "?"})
-    assert out.startswith("Error: a subagent cannot ask the user"), out
+    assert out.status is ToolStatus.STEERED and "a subagent cannot ask the user" in out, out
     # the top-level agent (parent host, spec=None) CAN still ask the user
-    parent = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None, policy=None,
+    parent = SubagentHost(_InnerWithAsk(), llm=None, retriever=None, memory=None,
                           max_depth=1, depth=0)
     assert "ask_user" in [s["function"]["name"] for s in parent.schemas()]
 

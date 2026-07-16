@@ -80,8 +80,10 @@ def escape_error_is_prescriptive():
     except PermissionError as e:
         raised = True
         msg = str(e)
-        assert "run_command" in msg or "execute_code" in msg, f"escape error names no shell hatch: {msg!r}"
-        assert "escapes the boundary" in msg
+        assert "exact absolute target" in msg, f"escape error omits the narrow ReachSet path: {msg!r}"
+        assert "change_workspace" in msg, f"escape error omits the live workspace handoff: {msg!r}"
+        assert "re-run sliceagent" not in msg.lower(), f"escape error still tells the user to reconnect: {msg!r}"
+        assert "grounded focus roots" in msg
     assert raised
 
 

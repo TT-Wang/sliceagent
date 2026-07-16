@@ -54,6 +54,8 @@ def now_footer_is_intent_aware_and_outermost():
     assert "# NOW" in out and out.index("# NOW") > out.index("</context>"), "NOW is outside the fence"
     assert "QUESTION" in out and "answer it directly" in out, "footer offers converse, not only act/edit"
     assert "CURRENT REQUEST" in out, "footer points back at the request"
+    assert "reasonable reversible judgment" in out and "material ambiguity" in out
+    assert "effect ceiling" not in out and "explicitly authorizes a CHANGE" not in out
 
 
 @check

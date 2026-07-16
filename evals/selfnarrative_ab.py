@@ -62,7 +62,7 @@ _JUDGE = None  # lazy: --help and receipt-only tooling must remain offline/impor
 AGENT_ENV = {"LLM_API_KEY": os.environ.get("LLM_API_KEY", ""),
              "LLM_BASE_URL": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
              "AGENT_MODEL": "deepseek-chat",
-             "AGENT_PROXY": "off", "AGENT_TUI": "off", "AGENT_POLICY": "let-it-go",
+             "AGENT_PROXY": "off", "AGENT_TUI": "off",
              "SLICEAGENT_PROMPT_FILE": "", "SLICEAGENT_MEMORY_MODEL_FILE": ""}
 
 FILES = {

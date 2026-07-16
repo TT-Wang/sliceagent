@@ -251,7 +251,7 @@ def hook_injected_messages_participate_in_capacity_projection():
 
 
 @check
-def in_place_policy_injection_survives_post_hook_elastic_tightening():
+def in_place_runtime_note_survives_post_hook_elastic_tightening():
     from types import SimpleNamespace as NS
 
     from sliceagent.hooks import Hooks
@@ -268,13 +268,13 @@ def in_place_policy_injection_survives_post_hook_elastic_tightening():
         request_block="CURRENT REQUEST: preserve-me\n", now_block="NOW",
     )
 
-    class InjectPolicy(Hooks):
+    class InjectRuntimeNote(Hooks):
         def __init__(self):
             self.calls = 0
 
         def prepare_messages(self, messages):
             self.calls += 1
-            messages[0]["content"] += "\nPOLICY:" + "H" * 300
+            messages[0]["content"] += "\nRUNTIME NOTE:" + "H" * 300
             return None
 
     class LLM:
@@ -292,11 +292,11 @@ def in_place_policy_injection_survives_post_hook_elastic_tightening():
         def schemas(self):
             return []
 
-    hook = InjectPolicy(); llm = LLM()
+    hook = InjectRuntimeNote(); llm = LLM()
     result = run_turn(build_slice=lambda: plan, llm=llm, tools=Host(),
                       dispatch=lambda _event: None, hooks=hook, max_steps=1)
     assert result.stop_reason == "end_turn" and hook.calls == 1
-    assert "POLICY:" in llm.seen[0][0]["content"], "elasticity discarded a hook's policy injection"
+    assert "RUNTIME NOTE:" in llm.seen[0][0]["content"], "elasticity discarded a hook injection"
     assert "LOCATOR" in llm.seen[0][1]["content"] and "FULL:" not in llm.seen[0][1]["content"]
 
 

@@ -1,20 +1,14 @@
-"""Guidance strings/functions — denial + budget-ceiling wording.
+"""Guidance strings/functions for budget-ceiling wording.
 No model, no pytest. Run: python tests/test_guidance.py
 
-Module-level assertions only. The integration cases (denied tool -> Error in
-slice.last_error; run_turn max_steps dispatches TurnInterrupted with this message)
-are owned by W1 and asserted in their wiring tests, not here.
+Module-level assertions only. The run_turn integration case is owned by W1.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.guidance import (                              # noqa: E402
-    BUDGET_EXHAUSTED,
-    DENIAL_NO_PROMPT,
-    DENIAL_USER,
-)
+from sliceagent.guidance import BUDGET_EXHAUSTED  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -59,29 +53,6 @@ def budget_is_stable_per_kind():
     # pure function of its argument — same input, byte-identical output (cache-safe)
     assert BUDGET_EXHAUSTED("max_steps") == BUDGET_EXHAUSTED("max_steps")
     assert BUDGET_EXHAUSTED("max_steps") != BUDGET_EXHAUSTED("token_budget")
-
-
-@check
-def denial_no_prompt_has_do_not_retry_guidance():
-    low = DENIAL_NO_PROMPT.lower()
-    assert isinstance(DENIAL_NO_PROMPT, str) and DENIAL_NO_PROMPT
-    assert "do not retry" in low                             # action-oriented: don't spin
-    assert "instead" in low                                  # + do X instead
-    assert "permission" in low or "approv" in low            # names the cause
-
-
-@check
-def denial_user_has_do_not_retry_guidance():
-    low = DENIAL_USER.lower()
-    assert isinstance(DENIAL_USER, str) and DENIAL_USER
-    assert "do not retry" in low                             # action-oriented: don't spin
-    assert "instead" in low or "different" in low            # + do X instead
-    assert "declin" in low or "user" in low                  # names the cause
-
-
-@check
-def denials_are_distinct():
-    assert DENIAL_NO_PROMPT != DENIAL_USER
 
 
 def main():

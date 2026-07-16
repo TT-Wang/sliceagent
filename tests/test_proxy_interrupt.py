@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.llm import _choose_proxy                              # noqa: E402
+from sliceagent.llm import OpenAILLM, _choose_proxy, _proxy_route_for_display  # noqa: E402
 from sliceagent.events import TurnInterrupted, make_dispatcher         # noqa: E402
 from sliceagent.hooks import CompositeHooks                            # noqa: E402
 from sliceagent.loop import run_turn                                   # noqa: E402
@@ -36,6 +36,46 @@ def explicit_proxy_always_wins():
     assert _choose_proxy("https://api.openai.com/v1", "none") == "none"             # user forces direct
     assert _choose_proxy("https://api.openai.com/v1", "off") == "none"             # 'off' alias → direct
     assert _choose_proxy("https://api.deepseek.com", "http://x:1") == "http://x:1"  # user forces a proxy URL
+
+
+@check
+def public_proxy_route_omits_every_credential_bearing_component():
+    raw = "http://alice:p%40ss@proxy.example:8443/private?token=secret#fragment"
+    assert _proxy_route_for_display(raw) == "http://proxy.example:8443"
+    assert _proxy_route_for_display("socks5://u:p@[2001:db8::1]:1080") == "socks5://[2001:db8::1]:1080"
+    assert _proxy_route_for_display("http://[broken") == "configured proxy"
+
+
+@check
+def startup_and_live_model_status_keep_raw_proxy_private():
+    """Both startup and /model render ``proxy_used``; transport alone retains the authenticated URL."""
+    keys = ("AGENT_PROXY", "HTTPS_PROXY", "HTTP_PROXY")
+    saved = {key: os.environ.pop(key, None) for key in keys}
+    llm = None
+    startup_proxy = "http://startup-user:startup-secret@proxy-one.invalid:8080"
+    switched_proxy = "http://switch-user:switch-secret@proxy-two.invalid:9090"
+    try:
+        llm = OpenAILLM(
+            model="proxy-status-test", api_key="test-key",
+            base_url="http://provider-one.invalid/v1", proxy=startup_proxy, timeout=0.01,
+        )
+        assert llm.proxy_used == "http://proxy-one.invalid:8080"
+        assert llm._transport_spec[2] == startup_proxy
+        assert "startup-user" not in llm.proxy_used and "startup-secret" not in llm.proxy_used
+
+        os.environ["AGENT_PROXY"] = switched_proxy
+        llm.switch(api_key="test-key-2", base_url="http://provider-two.invalid/v1")
+        assert llm.proxy_used == "http://proxy-two.invalid:9090"
+        assert llm._transport_spec[2] == switched_proxy
+        assert "switch-user" not in llm.proxy_used and "switch-secret" not in llm.proxy_used
+    finally:
+        if llm is not None:
+            llm.client.close()
+        for key in keys:
+            if saved[key] is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = saved[key]
 
 
 # ── ctrl-c during a 'thinking' (blocking) call aborts the turn ───────────────

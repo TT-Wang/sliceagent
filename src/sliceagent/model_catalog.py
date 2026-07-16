@@ -18,8 +18,9 @@ class ModelCapability:
     family: str = "unknown"
     # OpenAI gpt-5 / o-series renamed the completion cap to `max_completion_tokens` and REJECT `max_tokens`.
     tokens_param: str = "max_tokens"
-    # accepts the OpenAI `reasoning_effort` param (gpt-5 / o-series). NOT deepseek (uses extra_body.thinking)
-    # nor moonshot/anthropic — those map "fast" to their own knobs in llm._reasoning_kwargs.
+    # Routes explicit effort through OpenAI's Responses API (gpt-5 / o-series). DeepSeek V4 also accepts a
+    # reasoning_effort field, but stays on Chat Completions and is mapped separately in llm._reasoning_kwargs;
+    # this flag therefore deliberately remains False for DeepSeek.
     supports_reasoning_effort: bool = False
     supports_tools: bool = True
     supports_stream_options: bool = True   # OpenAI stream_options={include_usage}; set False if a provider 400s
@@ -34,7 +35,12 @@ _UNKNOWN = ModelCapability()
 # 0/unknown by design: sliceagent's overflow is reactive, so nothing fabricates a window — see ModelCapability.)
 _PRICES = {
     "gpt-5": (1.25, 0.125, 10.0), "gpt-4": (2.50, 1.25, 10.0), "o3": (2.0, 0.5, 8.0),
-    "deepseek": (0.27, 0.07, 1.10), "kimi": (0.60, 0.15, 2.50), "moonshot": (0.60, 0.15, 2.50),
+    # DeepSeek V4 public API pricing (fresh input, cache-hit input, output). The retiring chat/reasoner aliases
+    # currently resolve to V4 Flash, so the family fallback uses that same price instead of stale V3 rates.
+    "deepseek-v4-pro": (0.435, 0.003625, 0.87),
+    "deepseek-v4-flash": (0.14, 0.0028, 0.28),
+    "deepseek": (0.14, 0.0028, 0.28),
+    "kimi": (0.60, 0.15, 2.50), "moonshot": (0.60, 0.15, 2.50),
     "claude": (3.0, 0.30, 15.0),
 }
 
@@ -113,6 +119,8 @@ def capability(model: str, base_url: str = "") -> ModelCapability:
     if m.startswith(("o1", "o3", "o4", "o5", "o6", "gpt-5", "gpt-6")) and _is_openai_endpoint(b):
         return ModelCapability("openai-reasoning", tokens_param="max_completion_tokens",
                                supports_reasoning_effort=True, supports_vision=vis)
+    if m in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+        return ModelCapability("deepseek", supports_vision=vis, context_window=1_000_000)
     if "deepseek" in m or "deepseek" in b:
         return ModelCapability("deepseek", supports_vision=vis)   # reasoning via extra_body.thinking
     if "kimi" in m or "moonshot" in b:

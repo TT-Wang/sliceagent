@@ -1,5 +1,5 @@
 """PTY widget tests — drive the rich-TUI keyboard selector with REAL key bytes through a pseudo-terminal
-and assert the result. Covers `_arrow_select` (the permission confirm Yes/No/Always): ←/→ move, Enter
+and assert the result. Covers the generic `_arrow_select` widget: ←/→ move, Enter
 chooses, hotkeys jump, app-cursor arrows, combined arrow+Enter. This is the keyboard-selection path that
 regressed three times; only a real pty + real escape bytes tests it faithfully.
 
@@ -38,17 +38,26 @@ def _drive(presses) -> int:
     os.close(slave)
     import threading
     stop = threading.Event()
+    ready = threading.Event()
 
     def drain():
         while not stop.is_set():
-            r, _, _ = select.select([master], [], [], 0.1)
+            try:
+                r, _, _ = select.select([master], [], [], 0.1)
+            except OSError:
+                break
             if r:
                 try:
-                    os.read(master, 4096)
+                    if os.read(master, 4096):
+                        ready.set()
                 except OSError:
                     break
-    threading.Thread(target=drain, daemon=True).start()
-    time.sleep(0.6)                       # let the child reach _arrow_select's read loop
+    drain_thread = threading.Thread(target=drain, daemon=True)
+    drain_thread.start()
+    # Wait for the selector's first draw instead of assuming every subprocess
+    # reaches raw mode within a fixed delay. The old 0.6s sleep became flaky
+    # late in the full standalone battery on a loaded machine.
+    ready.wait(timeout=3.0)
     for chunk in presses:
         os.write(master, chunk)
         time.sleep(0.15)                  # gap → each keypress arrives as its own os.read (like a human)
@@ -59,6 +68,7 @@ def _drive(presses) -> int:
         p.kill()
         rc = -1
     stop.set()
+    drain_thread.join(timeout=0.5)
     try:
         os.close(master)
     except OSError:

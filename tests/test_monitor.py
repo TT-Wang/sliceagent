@@ -173,6 +173,7 @@ def live_server_smoke():
 @check
 def file_sink_persists_snapshot():
     import os
+    import stat
     import tempfile
     from sliceagent.monitor import _session_files, make_file_monitor_sink
     d = tempfile.mkdtemp()
@@ -185,6 +186,47 @@ def file_sink_persists_snapshot():
     snap = json.load(open(p))
     assert snap["session"] == "sess-A" and snap["steps"][0]["user"] == "USER-SLICE"
     assert [s for s, _ in _session_files(d)] == ["sess-A"]
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+@check
+def file_sink_repairs_modes_and_sanitizes_session_filename():
+    import stat
+    import tempfile
+    from sliceagent.monitor import make_file_monitor_sink
+    d = tempfile.mkdtemp()
+    os.chmod(d, 0o755)
+    sink = make_file_monitor_sink("../escape", dir=d)
+    sink(sb("SYS", "sensitive")); sink.writer.drain()
+    expected = os.path.join(d, "___escape.json")
+    assert os.path.exists(expected) and not os.path.exists(os.path.join(os.path.dirname(d), "escape.json"))
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(expected).st_mode) == 0o600
+
+
+@check
+def relative_snapshot_writer_does_not_chmod_cwd():
+    if os.name == "nt":
+        return
+    import stat
+    import tempfile
+    from sliceagent.monitor import _SnapshotWriter
+    with tempfile.TemporaryDirectory() as cwd:
+        os.chmod(cwd, 0o755)
+        previous = os.getcwd()
+        try:
+            os.chdir(cwd)
+            writer = _SnapshotWriter("state.json", debounce_ms=0)
+            writer.submit({"private": True}, flush=True)
+            assert writer.drain()
+            writer.close()
+            assert stat.S_IMODE(os.stat(cwd).st_mode) == 0o755
+            assert stat.S_IMODE(os.stat("state.json").st_mode) == 0o600
+        finally:
+            os.chdir(previous)
 
 
 @check

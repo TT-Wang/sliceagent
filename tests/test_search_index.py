@@ -24,6 +24,46 @@ def _rec(title="", note="", actions=(), obs=(), files=()):
 
 
 @check
+def index_file_and_directory_are_private_and_repaired():
+    if not fts5_available() or os.name == "nt":
+        return
+    import stat
+    with tempfile.TemporaryDirectory() as parent:
+        root = os.path.join(parent, "index-state")
+        os.makedirs(root, mode=0o755)
+        path = os.path.join(root, "idx.db")
+        idx = make_episode_index(path)
+        try:
+            assert idx.is_active
+            assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+            os.chmod(path, 0o644)
+            idx.index_episode(session_id="s", task_id="t", turn=1, ts="now",
+                              title="private", note="private", text="private")
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        finally:
+            idx.close()
+
+
+@check
+def relative_index_path_does_not_chmod_cwd():
+    if not fts5_available() or os.name == "nt":
+        return
+    import stat
+    with tempfile.TemporaryDirectory() as cwd:
+        os.chmod(cwd, 0o755)
+        previous = os.getcwd()
+        try:
+            os.chdir(cwd)
+            idx = make_episode_index("idx.db")
+            idx.close()
+            assert stat.S_IMODE(os.stat(cwd).st_mode) == 0o755
+            assert stat.S_IMODE(os.stat("idx.db").st_mode) == 0o600
+        finally:
+            os.chdir(previous)
+
+
+@check
 def fts5_is_available_here():
     # the test environment must support FTS5 for the rest to be meaningful
     assert fts5_available() is True

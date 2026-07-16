@@ -15,7 +15,8 @@ import re
 import shlex
 from dataclasses import dataclass
 
-from .registry import ToolEntry, ToolIntentEffect, ToolText
+from .execution import ToolEffect, ToolStatus
+from .registry import ToolEntry, ToolText
 from .text_utils import one_line
 
 _MAX_SCAN_DEPTH = 8   # bound skill-root walk depth — defensive vs deep trees
@@ -56,6 +57,9 @@ class Skill:
     provenance: str = "user"   # "user" | "consolidation" (item 13); from `provenance:` frontmatter
     root: str = ""             # the discovery root this skill came from (where its .usage.json lives)
     when_to_use: str = ""      # from `when-to-use:` frontmatter — shown in the catalog to improve routing
+    # Optional declarative terminal output envelope.  This is procedure metadata, not executable policy;
+    # a successful skill load emits it as typed evidence for the PFC completion contract.
+    completion_contract: str = ""
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -121,8 +125,12 @@ class SkillManager:
         if not name or not body.strip():
             return
         prov = (meta.get("provenance") or "user").strip().lower() or "user"
+        completion_contract = (
+            meta.get("completion-contract") or meta.get("completion_contract") or ""
+        ).strip()
         self._skills.setdefault(name, Skill(name, desc, body.strip(), path, provenance=prov,
-                                            root=root, when_to_use=when))  # first-wins
+                                            root=root, when_to_use=when,
+                                            completion_contract=completion_contract))  # first-wins
 
     def add(self, name: str, body: str, description: str = "") -> None:
         """Register an in-memory skill (e.g. contributed by a plugin). First-wins, so a
@@ -143,6 +151,10 @@ class SkillManager:
             return None
         self._bump_usage(s)   # item 13: last-used sidecar feeds consolidate's frequency weight
         return s.body
+
+    def get(self, name: str) -> Skill | None:
+        """Return immutable-ish discovery metadata without recording a procedure use."""
+        return self._skills.get((name or "").strip().lower())
 
     def _bump_usage(self, s: "Skill") -> None:
         """Bump the .usage.json sidecar in the skill's discovery root. Best-effort: a sidecar
@@ -201,9 +213,23 @@ def make_skill_tool(manager: SkillManager) -> ToolEntry | None:
         # result into the ACTIVE SKILL tier (persists across turns).
         return expand_skill_args(body, args.get("arguments") or "")
 
+    def effects(invocation, status, _text):
+        if status is not ToolStatus.SUCCEEDED:
+            return ()
+        skill = manager.get(str(invocation.args.get("name") or ""))
+        if skill is None:
+            return ()
+        return (ToolEffect(
+            id=f"skill:{invocation.id}:activated",
+            kind="skill_activated",
+            payload={
+                "name": skill.name,
+                "completion_contract": skill.completion_contract,
+            },
+        ),)
+
     return ToolEntry(name="skill", schema=schema, handler=handler,
-                     accesses=lambda _a: [], source="skill",
-                     intent_effect=ToolIntentEffect.OBSERVE)
+                     accesses=lambda _a: [], source="skill", effect_factory=effects)
 
 
 def make_skill_manager(roots: list[str] | None = None) -> SkillManager:

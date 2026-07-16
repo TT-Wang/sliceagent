@@ -331,7 +331,7 @@ def live_evaluator_proves_the_challenge_reuses_the_exact_frozen_projection():
             f"projection: sha256={execution_hash}"
             + (f"; FROZEN at the prior response cutoff before artifacts/{frozen}.md; later seals are excluded"
                if frozen else "")
-            + "\n# QUALITY EVIDENCE GATE\n"
+            + "\n# QUALITY EVIDENCE\n"
             f"coverage: COMPLETE; exact request/response pairs={pairs}; missing pairs=0\n"
             f"source projection: sha256={quality_hash}\n"
             + ("verification baseline: reuse the FROZEN prior-response evidence projection\n"

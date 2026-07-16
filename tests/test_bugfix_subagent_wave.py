@@ -21,8 +21,8 @@ def check(fn):
 
 
 class _Hooks:
-    def authorize_tool(self, name, args):
-        return NS(allow=True, reason="")
+    def preflight_tool(self, name, args):
+        return NS(stop=False, reason="")
     def transform_tool_result(self, name, args, out):
         return None
 
@@ -56,7 +56,7 @@ def _host(spec):
             return []
         def schemas(self):
             return []
-    return SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
+    return SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                         max_depth=2, max_steps=5, depth=0, notify=lambda m: None,
                         spec=spec, agents=BUILTIN_AGENTS)
 

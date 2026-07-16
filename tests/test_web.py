@@ -8,6 +8,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent import web                          # noqa: E402
+from sliceagent.execution import ToolStatus        # noqa: E402
 from sliceagent.tools import LocalToolHost          # noqa: E402
 
 CHECKS = []
@@ -76,6 +77,42 @@ def fetch_url_blocks_private_and_fences_public():
     assert "refusing" in tools["fetch_url"].handler({"url": "http://127.0.0.1/x"}).lower(), "SSRF block"
     out = tools["fetch_url"].handler({"url": "http://8.8.8.8/page"})
     assert "Doc body text here" in out and "UNTRUSTED web" in out, "public fetch returns fenced text"
+
+
+@check
+def fetch_transport_failure_is_explicitly_failed():
+    web._http_get = lambda url, *, timeout: (_ for _ in ()).throw(TimeoutError("timed out"))
+    tools = {t.name: t for t in web.make_web_tools(_host())}
+    out = tools["fetch_url"].handler({"url": "http://8.8.8.8/page"})
+    assert "could not fetch" in out and "timed out" in out
+    assert out.status is ToolStatus.FAILED
+
+
+@check
+def web_search_transport_failure_is_explicitly_failed():
+    web._http_get = lambda url, *, timeout: (_ for _ in ()).throw(OSError("network down"))
+    tools = {t.name: t for t in web.make_web_tools(_host())}
+    out = tools["web_search"].handler({"query": "hello"})
+    assert "search failed" in out and "network down" in out
+    assert out.status is ToolStatus.FAILED
+
+
+@check
+def empty_search_and_unreadable_page_remain_successful_observations():
+    tools = {t.name: t for t in web.make_web_tools(_host())}
+    original_search = web._ddg_search
+    original_fetch = web._fetch
+    try:
+        web._ddg_search = lambda query, limit: []
+        search_out = tools["web_search"].handler({"query": "nothing"})
+        assert "no results" in search_out and not hasattr(search_out, "status")
+
+        web._fetch = lambda url: "<script>only script text</script>"
+        fetch_out = tools["fetch_url"].handler({"url": "http://8.8.8.8/page"})
+        assert "no readable text" in fetch_out and not hasattr(fetch_out, "status")
+    finally:
+        web._ddg_search = original_search
+        web._fetch = original_fetch
 
 
 @check

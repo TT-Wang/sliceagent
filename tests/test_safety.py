@@ -173,6 +173,20 @@ def redact_text_clean_passes_through_unchanged():
     assert redact_text(s) == s
 
 
+@check
+def persistence_mask_preserves_exact_source_offsets():
+    samples = (
+        "Credentials: sk-1234567890abcdefgh. Never modify config.py.",
+        'API_KEY = "abcdefghijklmnopqrstuv"; keep the suffix',
+        'Authorization: Bearer abcdefghijklmnopqrstuv then continue',
+        "postgres://user:password@host/db then continue",
+    )
+    for source in samples:
+        masked = redact_text(source, preserve_length=True)
+        assert len(masked) == len(source)
+        assert masked != source and masked.endswith(source[source.rfind(" "):])
+
+
 # ── wrap_untrusted: fence + empty ────────────────────────────────────────────
 
 @check

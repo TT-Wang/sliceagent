@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.events import StepEnd, ToolResult            # noqa: E402
+from sliceagent.execution import ToolStatus                  # noqa: E402
 from sliceagent.pfc import Slice, slice_sink  # noqa: E402
 from sliceagent.regions import record_note  # noqa: E402
 from sliceagent.telemetry import Telemetry                   # noqa: E402
@@ -39,6 +40,20 @@ def telemetry_respects_the_window():
         t(StepEnd(0, {}, "x"))                                    # advance 3 steps (> window 2)
     t(ToolResult("read_file", {"path": "x"}, "d", False))         # gap 3 > 2 → NOT a re-read
     assert t.summary()["re_reads"] == 0, t.summary()
+
+
+@check
+def telemetry_does_not_count_a_benign_steer_as_an_observation():
+    t = Telemetry()
+    t(ToolResult(
+        "read_file", {"path": "outside.py"}, "use an exact target", False,
+        status=ToolStatus.STEERED.value,
+    ))
+    t(ToolResult(
+        "search_history", {"query": ""}, "provide a query", False,
+        status=ToolStatus.STEERED.value,
+    ))
+    assert t.summary() == {"reads": 0, "re_reads": 0, "re_read_rate": 0.0, "recalls": 0}
 
 
 # ── #5: convergence counter resets on a genuinely-new finding ────────────────

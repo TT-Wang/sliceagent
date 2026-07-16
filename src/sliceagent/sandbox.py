@@ -19,12 +19,12 @@ import os
 import re
 import signal
 import subprocess
-
-from .platform_compat import (SIG_KILL, kill_tree, popen_group_kwargs,
-                              sh as _sh)
 import sys
 import uuid
 from typing import Protocol, runtime_checkable
+
+from .platform_compat import (IS_WINDOWS, SIG_KILL, kill_tree,
+                              popen_group_kwargs, sh as _sh)
 
 # env var names whose values are secrets the child shouldn't see by default
 _SECRET_RE = re.compile(
@@ -129,6 +129,15 @@ class DockerSandbox(BaseSandbox):
 
     def __init__(self, image: str, *, network: str = "none", docker: str = "docker",
                  env: dict | None = None, scrub_secrets: bool = True):
+        if IS_WINDOWS:
+            # The Linux-image backend intentionally bind-mounts the workspace at the SAME absolute path.
+            # A native ``C:\\...`` host path cannot also be the Linux container's ``-w`` path.  Reject the
+            # configuration instead of starting a container whose workspace semantics are silently wrong.
+            # WSL2 reports a POSIX platform and remains supported.
+            raise ValueError(
+                "docker sandbox is unavailable on native Windows; use AGENT_SANDBOX=local "
+                "or run SliceAgent inside WSL2/Linux"
+            )
         super().__init__(scrub_secrets=scrub_secrets)
         self.image = image
         # fail CLOSED: blank/whitespace network → "none" (no networking), not "drop the flag" (which gives

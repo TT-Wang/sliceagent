@@ -37,9 +37,9 @@ def a_move_on_directive_clears_a_stale_open_user_report_but_a_follow_up_keeps_it
 
 
 @check
-def slice_has_exactly_six_authoritative_regions():
+def slice_has_one_active_work_owner_plus_six_runtime_regions():
     assert [f.name for f in fields(Slice)] == [
-        "intent", "task", "evidence", "work", "continuity", "runtime",
+        "active_work", "intent", "task", "evidence", "work", "continuity", "runtime",
     ]
     assert not hasattr(__import__("sliceagent.pfc", fromlist=["x"]), "_SLICE_SEAL_POLICY"), \
         "lifecycle must live on regions, not in a parallel policy table"

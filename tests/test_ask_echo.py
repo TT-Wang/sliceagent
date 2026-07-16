@@ -1,4 +1,4 @@
-"""ask_user / confirm must PAUSE the live turn-spinner before reading input — otherwise the Rich Live
+"""ask_user must pause the live turn-spinner before reading input — otherwise the Rich Live
 region owns the terminal and the user's typed answer is not echoed (the 'my answer is invisible' bug).
 No model. Run: PYTHONPATH=src python tests/test_ask_echo.py
 """
@@ -37,19 +37,6 @@ def ask_user_pauses_the_live_spinner_before_reading():
     ans = tui.ask_user(fc, "which color?")
     assert ans == "blue" and fc.inputs == 1, "the answer must be read and returned"
     assert sink._status is None, "the live spinner MUST be stopped before input (else no echo)"
-
-
-@check
-def confirm_pauses_the_live_spinner_before_reading():
-    from rich.console import Console
-    from sliceagent import tui
-    from sliceagent.events import TurnStarted
-    sink = tui.RichSink(Console(), {})
-    sink(TurnStarted("working"))
-    assert sink._status is not None
-    ans = tui.confirm(_FakeConsole("y"), "run_command", "rm -rf x", "danger")
-    assert ans == "yes"
-    assert sink._status is None, "confirm must stop the live spinner before reading input"
 
 
 def main():

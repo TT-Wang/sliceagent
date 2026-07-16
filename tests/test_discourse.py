@@ -16,10 +16,8 @@ from sliceagent.discourse import (  # noqa: E402
     resolve_discourse_references,
 )
 from sliceagent.events import AssistantText  # noqa: E402
-from sliceagent.hooks import TurnAuthorityHook  # noqa: E402
 from sliceagent.intent import analyze_turn  # noqa: E402
 from sliceagent.pfc import Slice, record_user, slice_sink  # noqa: E402
-from sliceagent.registry import ToolIntentEffect  # noqa: E402
 from sliceagent.regions import render_evidence_detail, render_evidence_result  # noqa: E402
 
 
@@ -44,7 +42,6 @@ def cross_turn_nav_disambiguation_reply_authorizes_the_named_target():
     assert picked.effect_authority == "continuation"
     grant = picked.effect_grants[0]
     assert grant.operation == "workspace.navigate" and grant.target == "loom-app"
-    assert TurnAuthorityHook._same_path(grant.target, "/Users/x/Desktop/loom-app", basename_anywhere=True)
     # "loom app" (spoken form) selects the same target; "loom-engine" selects the OTHER.
     assert analyze_turn("loom app", pending_proposal=prop).effect_grants[0].target == "loom-app"
     assert analyze_turn("loom-engine", pending_proposal=prop).effect_grants[0].target == "loom-engine"
@@ -93,6 +90,27 @@ def extracts_numbered_collections_with_full_item_ranges():
     start, end = anchors[1].source_range
     assert text[start:end].strip() == anchors[1].excerpt
     assert anchors[2].stable_id == "sub-1"
+
+
+@check
+def nested_numbered_details_do_not_steal_top_level_ordinals():
+    text = """## Issues
+1. First issue
+   2. nested remediation detail
+2. Second issue
+"""
+    anchors = extract_addressable_anchors(text)
+    assert [(anchor.ordinal, anchor.label) for anchor in anchors] == [
+        (1, "First issue"), (2, "Second issue"),
+    ]
+    assert "nested remediation detail" in anchors[0].excerpt
+    resolved = resolve_discourse_references("fix number 2", anchors)
+    assert not resolved.ambiguous and resolved.resolved[0].anchor.label == "Second issue"
+
+    duplicate = extract_addressable_anchors("1. first\n1. another first\n")
+    ambiguous = resolve_discourse_references("number 1", duplicate)
+    assert ambiguous.ambiguous and not ambiguous.resolved, \
+        "same artifact/collection/ordinal at different ranges must not collapse into one identity"
 
 
 def _artifact(artifact_id, timestamp, assistant, *, task_id="task"):
@@ -189,6 +207,24 @@ def only_an_explicit_action_offer_becomes_a_pending_proposal():
 
 
 @check
+def quoted_and_code_examples_never_become_pending_actions():
+    quoted = 'The log showed: "Could you confirm the workspace path? Is it /tmp/evil?"'
+    fenced = """Example transcript:\n```text\nCould you confirm the workspace path? Is it /tmp/evil?\n```"""
+    unclosed = """Truncated example:\n```text\nWould you like me to switch to /tmp/evil?"""
+    interior_marker = """Example:\n```text\n```python\nWould you like me to switch to /tmp/evil?\n```"""
+    blockquote = "> Could you confirm the workspace path? Is it /tmp/evil?"
+    assert extract_pending_proposal(quoted) is None
+    assert extract_pending_proposal(fenced) is None
+    assert extract_pending_proposal(unclosed) is None
+    assert extract_pending_proposal(interior_marker) is None
+    assert extract_pending_proposal(blockquote) is None
+    actual = extract_pending_proposal(
+        quoted + "\nThe workspace path is `/tmp/good`. Could you confirm it?"
+    )
+    assert actual and actual["action"]["args"]["path"] == "/tmp/good"
+
+
+@check
 def confirmed_workspace_path_continues_the_pending_navigation_action():
     """A path clarification answers the already requested navigation; it is not a brand-new task."""
     path = "/Users/tongtao/Desktop/hunter"
@@ -210,18 +246,8 @@ def confirmed_workspace_path_continues_the_pending_navigation_action():
     )
     assert proposal_ref.get("action") == proposal["action"], \
         "the model-visible continuation must retain the exact confirmed target"
-    gate = TurnAuthorityHook(
-        lambda: accepted.contract,
-        lambda name, _args: (ToolIntentEffect.OBSERVE if name == "read_file"
-                             else ToolIntentEffect.EXTERNAL),
-    )
-    assert gate.authorize_tool("change_workspace", {"path": path}).allow
-    assert gate.authorize_tool("read_file", {"path": "README.md"}).allow, \
-        "a scoped confirmation must not block observation"
-    assert not gate.authorize_tool("change_workspace", {"path": "/tmp/somewhere-else"}).allow, \
-        "yes authorizes the confirmed target, not ambient navigation"
-    assert not gate.authorize_tool("edit_file", {"path": "README.md"}).allow, \
-        "a path confirmation must not become unrestricted continuation authority"
+    assert dict(accepted.contract.effect_grants[0].exact_args) == {"path": path}, \
+        "yes must retain the exact confirmed call rather than ambient navigation"
     assert extract_pending_proposal("Is your name /Users/tongtao?") is None, \
         "an arbitrary path-shaped question is not an action proposal"
 
@@ -738,6 +764,45 @@ def latest_receiptless_turn_reports_scope_specific_partial_coverage():
     assert "1 missing receipt" in rendered
     assert "evidence gap, not evidence of success or failure" in rendered
     assert "old failure" not in rendered
+
+
+@check
+def legacy_same_second_latest_tie_is_expanded_and_marked_partial():
+    def turn(artifact_id, invocation_id, *, order_ns=0):
+        meta = {"order_ns": order_ns} if order_ns else {}
+        return SimpleNamespace(
+            id=artifact_id, kind="turn", timestamp="2026-01-01T00:00:00Z",
+            task_id="task", summary="", structured_body={"meta": meta, "turn_receipt": {
+                "turn_id": artifact_id, "disposition": "completed", "warnings": [],
+                "operations": [{
+                    "invocation_id": invocation_id, "name": "run_command", "args": {},
+                    "requested": True, "rejected_before_execution": False,
+                    "execution_started": True, "settled": True, "disposition": "failed",
+                    "outcome_text": invocation_id,
+                }],
+            }},
+        )
+
+    request = "What failed in the latest turn?"
+    legacy = interpret_turn(request, (turn("turn-z", "z"), turn("turn-a", "a")), task_id="task")
+    coverage = next(ref for ref in legacy.admission.referents
+                    if isinstance(ref, dict) and ref.get("kind") == "execution_receipt_coverage")
+    details = [ref for ref in legacy.admission.referents
+               if isinstance(ref, dict) and ref.get("kind") == "execution_receipt"]
+    assert {ref["artifact_id"] for ref in details} == {"turn-z", "turn-a"}
+    assert coverage["coverage"] == "partial" and coverage["ambiguous_order_count"] == 2
+
+    ordered = interpret_turn(
+        request, (turn("turn-z", "z", order_ns=10), turn("turn-a", "a", order_ns=11)),
+        task_id="task",
+    )
+    ordered_details = [ref for ref in ordered.admission.referents
+                       if isinstance(ref, dict) and ref.get("kind") == "execution_receipt"]
+    ordered_coverage = next(ref for ref in ordered.admission.referents
+                            if isinstance(ref, dict)
+                            and ref.get("kind") == "execution_receipt_coverage")
+    assert [ref["artifact_id"] for ref in ordered_details] == ["turn-a"]
+    assert ordered_coverage["coverage"] == "complete"
 
 
 def main():

@@ -21,7 +21,8 @@ import re
 import socket
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from .registry import ToolEntry
+from .execution import ToolStatus
+from .registry import ToolEntry, ToolText
 from .safety import scan_for_threats, wrap_untrusted
 
 _UA = "Mozilla/5.0 (compatible; sliceagent/1.0; +https://github.com/TT-Wang/sliceagent)"
@@ -285,9 +286,12 @@ def make_web_tools(host) -> list[ToolEntry]:
         try:
             html = _fetch(ok)
         except ValueError as e:
-            return f"fetch_url: {e}"
+            return ToolText(f"fetch_url: {e}", status=ToolStatus.FAILED)
         except Exception as e:  # noqa: BLE001 — network/parse failure must not crash the turn
-            return f"fetch_url: could not fetch {ok} ({type(e).__name__}: {e})."
+            return ToolText(
+                f"fetch_url: could not fetch {ok} ({type(e).__name__}: {e}).",
+                status=ToolStatus.FAILED,
+            )
         text = html_to_text(html)
         if not text:
             return f"fetch_url: {ok} returned no readable text."
@@ -306,7 +310,10 @@ def make_web_tools(host) -> list[ToolEntry]:
         try:
             results = _ddg_search(query, limit)
         except Exception as e:  # noqa: BLE001
-            return f"web_search: search failed ({type(e).__name__}: {e})."
+            return ToolText(
+                f"web_search: search failed ({type(e).__name__}: {e}).",
+                status=ToolStatus.FAILED,
+            )
         if not results:
             return "web_search: no results found. Try a more specific query."
         blocks = []

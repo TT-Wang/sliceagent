@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 
 os.environ["SLICEAGENT_VAULT"] = tempfile.mkdtemp(prefix="subidx-")   # hermetic: FTS index stays in tmp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -16,7 +17,6 @@ from sliceagent.memory import NullMemory  # noqa: E402
 from sliceagent.subagent import run_subagent, SubagentHost  # noqa: E402
 from sliceagent.agents import BUILTIN_AGENTS  # noqa: E402
 from sliceagent.retriever import NullRetriever  # noqa: E402
-from sliceagent.registry import ToolIntentEffect  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -74,7 +74,7 @@ def launch_order_survives_reverse_completion_order():
     m = _mem()
     host = SubagentHost(
         _ToolsHost(), llm=_FakeLLM("unused"), retriever=NullRetriever(), memory=m,
-        policy=None, session_id="s1",
+        session_id="s1",
     )
     first_id, first = host._next_artifact_identity(task_id="task-1", parent_id="turn-1")
     second_id, second = host._next_artifact_identity(task_id="task-1", parent_id="turn-1")
@@ -91,20 +91,6 @@ def launch_order_survives_reverse_completion_order():
     fs = SubagentFS(m, "s1")
     assert "launch-order: 2" in fs.read_file("subagents/sub-1.md")
     assert "launch-order: 1" in fs.read_file("subagents/sub-2.md")
-
-
-@check
-def delegation_effect_metadata_distinguishes_readers_from_writers():
-    host = SubagentHost(
-        _ToolsHost(), llm=_FakeLLM("unused"), retriever=NullRetriever(), memory=NullMemory(),
-        policy=None, agents=BUILTIN_AGENTS,
-    )
-    assert host.resolve_intent_effect("spawn_agent", {"agent": "explorer"}) \
-        is ToolIntentEffect.OBSERVE
-    assert host.resolve_intent_effect("spawn_agent", {"agent": "general"}) \
-        is ToolIntentEffect.EXTERNAL
-    assert host.resolve_intent_effect("spawn_agent", {"agent": "not-real"}) \
-        is ToolIntentEffect.UNKNOWN
 
 
 @check
@@ -144,19 +130,31 @@ class _Resp:
 
 
 class _FakeLLM:
-    """Ends the child turn in one step with a final assistant text (its report)."""
+    """Reads one workspace file, then returns its report; shallow child views share the call counter."""
     def __init__(self, text):
         self._text = text
         self.reasoning = "fast"
+        self._calls = [0]
     def complete(self, messages, schemas):
+        self._calls[0] += 1
+        if schemas and not any(message.get("role") == "tool" for message in messages):
+            response = _Resp("inspect source")
+            response.finish_reason = "tool_calls"
+            response.tool_calls = [SimpleNamespace(
+                name="read_file", args={"path": "a.py"}, id="read-1",
+            )]
+            return response
         return _Resp(self._text)
 
 
 class _ToolsHost:
-    def schemas(self): return []
+    def schemas(self):
+        return [{"type": "function", "function": {
+            "name": "read_file", "parameters": {"type": "object", "properties": {}},
+        }}]
     def root(self): return "/tmp/ws"
     def accesses(self, name, args): return []
-    def run(self, name, args): return ""
+    def run(self, name, args): return "observed outreach implementation"
     def read_text(self, path): return ""
 
 
@@ -169,7 +167,7 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
     mem = _mem()
     llm = _FakeLLM(report)
     out = run_subagent("investigate the outreach flow", tools=_ToolsHost(), llm=llm,
-                       retriever=NullRetriever(), memory=mem, policy=None, max_steps=2,
+                       retriever=NullRetriever(), memory=mem, max_steps=2,
                        read_only=True, session_id="s1")
 
     # (1) MOAT: the parent's tool result is a BOUNDED digest + a recall handle — NOT the full transcript.
@@ -179,7 +177,7 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
     # synthesis time while remaining O(1) per child; the full report still stays behind the handle.
     assert len(out) < 1400, f"parent return not bounded: {len(out)}"
     assert "presentation-truncated" in out
-    assert "primary observation: unavailable" in out
+    assert "primary observation" in out and "observed outreach implementation" in out
     assert "FINAL CONCLUSION" in out, "the bounded head+tail view must preserve the report's conclusion"
     assert "presentation omitted" in out, "the missing middle must be explicit and refinable"
 
@@ -194,7 +192,7 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
 def run_subagent_without_session_stays_inline_backcompat():
     # no session_id → not archived; falls back to the pre-artifact inline summary (no recall handle).
     out = run_subagent("do a thing", tools=_ToolsHost(), llm=_FakeLLM("did the thing"),
-                       retriever=NullRetriever(), memory=_mem(), policy=None, max_steps=2,
+                       retriever=NullRetriever(), memory=_mem(), max_steps=2,
                        read_only=True, session_id="")
     assert "read_file(\"subagents/" not in out and out.startswith("[explore "), out
 
@@ -203,15 +201,15 @@ def run_subagent_without_session_stays_inline_backcompat():
 def child_cannot_read_parent_reserved_namespaces():
     # ISOLATION (bug-hunt #2): a CHILD shares the base host, so without a guard it could page the parent's
     # trajectory (history/) or a sibling's sealed artifact (subagents/). Both must be blocked; real files pass.
-    child = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None, policy=None,
+    child = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None,
                          max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"])
     for p in ("subagents/sub-1.md", "subagents/index.md", "history/turn-1.md", "./history/"):
         r = child.run("read_file", {"path": p})
         assert "private namespace" in r, f"child reached reserved ns {p!r}: {r!r}"
-    # a real project file is NOT blocked (delegates to inner → "")
-    assert child.run("read_file", {"path": "pkg/mod.py"}) == ""
+    # a real project file is NOT blocked (delegates to the inner host)
+    assert child.run("read_file", {"path": "pkg/mod.py"}) == "observed outreach implementation"
     # a PARENT host (spec=None) is not a child → no isolation block (it OWNS these namespaces)
-    parent = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None, policy=None,
+    parent = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None,
                           max_depth=1, depth=0, spec=None)
     assert "private namespace" not in parent.run("read_file", {"path": "subagents/sub-1.md"})
 
@@ -241,7 +239,7 @@ def child_cannot_search_the_parents_history():
         def accesses(self, n, a): return []
         def run(self, n, a): return "RAN:" + n
         def read_text(self, p): return ""
-    child = SubagentHost(_InnerWithSearch(), llm=None, retriever=None, memory=None, policy=None,
+    child = SubagentHost(_InnerWithSearch(), llm=None, retriever=None, memory=None,
                          max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"])
     names = [s.get("function", {}).get("name") for s in child.schemas()]
     assert "search_history" not in names and "read_file" in names, names   # dropped from schemas, reads kept

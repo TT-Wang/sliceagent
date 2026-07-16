@@ -13,6 +13,7 @@ verbatim user text into the vault for marginal continuity gain.
 """
 from __future__ import annotations
 
+from .active_work import WorkGraph
 from .intent import IntentState
 from .interfaces import TaskState
 from .persistence import Checkpoint
@@ -29,7 +30,7 @@ def task_state_from_checkpoint(checkpoint: Checkpoint) -> TaskState:
 
 def slice_to_task_state(s: Slice, task_id: str, *, session_id: str = "", title: str = "",
                         status: str = "active", tags: str = "", resolution: str = "",
-                        links: list[str] | None = None) -> TaskState:
+                        links: list[str] | None = None, workspace_epoch: int = 0) -> TaskState:
     return TaskState(
         task_id=task_id, session_id=session_id,
         title=title or one_line(s.goal, 60), status=status, goal=s.goal,
@@ -38,11 +39,17 @@ def slice_to_task_state(s: Slice, task_id: str, *, session_id: str = "", title: 
         findings=list(s.findings),
         finding_source={k: v for k, v in s.finding_source.items() if k in set(s.findings)},  # provenance, bounded to live findings
         current_request=s.intent.current_request,
+        workspace_epoch=max(0, int(workspace_epoch)),
+        active_work=s.active_work.to_records(),
         intent_entries=s.intent.to_records(),
         intent_next_id=s.intent.next_id,
         requirements=[dict(r) for r in s.intent.as_legacy_requirements()],  # derived v1 compatibility view
         plan=[dict(p) for p in s.plan],                   # carry the PLAN (TodoWrite) across resume
         progress_signals=s.task.progress_records(),       # compact task-scoped progress, never raw calls
+        deliverable_requirement=(
+            s.task.deliverable_requirement.to_dict()
+            if s.task.deliverable_requirement is not None else None
+        ),
         open_report=getattr(s, "open_report", ""),        # carry the OPEN USER REPORT blocker (was silently lost)
         reconciliation_required=getattr(s, "reconciliation_required", ""),
         reconciliation_targets=list(getattr(s, "reconciliation_targets", ())),
@@ -70,6 +77,7 @@ def task_state_to_slice(ts: TaskState, s: Slice | None = None) -> Slice:
         current_request=getattr(ts, "current_request", "") or ts.goal,
         next_id=getattr(ts, "intent_next_id", 1),
     )
+    s.active_work = WorkGraph.from_records(getattr(ts, "active_work", None))
     version = int(getattr(ts, "schema_version", 1) or 1)
     if version >= 2 and not _records and getattr(ts, "requirements", None):
         raise ValueError("v2 task state has legacy requirements but no valid typed intent records")
@@ -77,6 +85,10 @@ def task_state_to_slice(ts: TaskState, s: Slice | None = None) -> Slice:
         s.intent.load_legacy_requirements(getattr(ts, "requirements", []))
     s.plan = [dict(p) for p in getattr(ts, "plan", [])]                   # restore the PLAN (TodoWrite)
     s.task.load_progress_records(getattr(ts, "progress_signals", []))
+    from .deliverables import DeliverableRequirement
+    s.task.deliverable_requirement = DeliverableRequirement.from_dict(
+        getattr(ts, "deliverable_requirement", None),
+    )
     s.open_report = getattr(ts, "open_report", "")                        # restore the OPEN USER REPORT blocker
     s.reconciliation_required = getattr(ts, "reconciliation_required", "")
     s.reconciliation_targets = list(getattr(ts, "reconciliation_targets", ()))

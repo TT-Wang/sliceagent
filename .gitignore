@@ -56,6 +56,8 @@ evals/*
 !evals/oldprompt_memory_model.txt
 !evals/receipt_claims.py
 !evals/receipt_prompt_ab.py
+!evals/context_contract_eval.py
+!evals/self_inspection_tool_eval.py
 !evals/selfnarrative_ab.py
 !evals/usersim.py
 !evals/usersim_pty.py
@@ -66,8 +68,13 @@ docs/MEMEM-DIAGNOSIS.md
 # internal engineering roadmap (wave planning), not product docs — untracked 2026-07-02
 ROADMAP.md
 
-# all of docs/ is internal (architecture/spec/brand assets) — not published; untracked 2026-07-02
-docs/
+# Architecture specs below are part of the OSS design contract; other internal
+# drafts and brand assets remain local by default.
+docs/*
+!docs/ENDGAME-CONTEXT-DESIGN.md
+!docs/MEMORY-LAYERS-DESIGN.md
+!docs/SUBAGENT-DESIGN.md
+!docs/CONFIGURATION.md
 
 # ColBench raw HF dataset (huge; selected tasks are committed under evals/colbench/tasks/)
 evals/colbench/data/

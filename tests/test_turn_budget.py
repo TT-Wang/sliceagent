@@ -1,4 +1,4 @@
-"""run_turn integration: max_steps budget guidance + denial wording. (These W1 cases were carried over
+"""run_turn integration: max_steps budget guidance. (These W1 cases were carried over
 from the former test_overflow_rebuild.py; the rebuild-path / tighten-ladder tests there were retired
 together with the rebuild loop mode.) No model, no pytest.
 Run: PYTHONPATH=src python tests/test_turn_budget.py
@@ -8,12 +8,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.events import ToolResult, TurnInterrupted              # noqa: E402
-from sliceagent.guidance import BUDGET_EXHAUSTED, DENIAL_NO_PROMPT, DENIAL_USER  # noqa: E402
-from sliceagent.hooks import PermissionHook, ToolDecision, Hooks       # noqa: E402
+from sliceagent.events import TurnInterrupted                         # noqa: E402
+from sliceagent.guidance import BUDGET_EXHAUSTED                      # noqa: E402
+from sliceagent.hooks import Hooks                                    # noqa: E402
 from sliceagent.interfaces import Snippet                              # noqa: E402
-from sliceagent.loop import run_tool_batch, run_turn                   # noqa: E402
-from sliceagent.pfc import Slice, slice_sink  # noqa: E402
+from sliceagent.loop import run_turn                                  # noqa: E402
+from sliceagent.pfc import Slice                                      # noqa: E402
 from sliceagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
@@ -76,38 +76,6 @@ def run_turn_max_steps_dispatches_budget_guidance():
     assert len(interrupts) == 1
     assert interrupts[0].reason == "max_steps"
     assert interrupts[0].message == BUDGET_EXHAUSTED("max_steps")
-
-
-@check
-def denied_tool_surfaces_denial_wording_into_last_error():
-    # PermissionHook with an `ask` policy and no prompt -> DENIAL_NO_PROMPT.
-    s = Slice(); s.reset("t")
-
-    def ask_policy(name, args):
-        return ToolDecision(False, "needs approval", ask=True)
-
-    hook = PermissionHook(ask_policy, on_ask=None)
-    events = []
-    sink = slice_sink(s)
-    run_tool_batch([_TC()], _NoopTools(), lambda e: (events.append(e), sink(e)), hook)
-    results = [e for e in events if isinstance(e, ToolResult)]
-    assert len(results) == 1
-    out = results[0].output
-    assert out.startswith("Error: blocked by policy:")
-    assert DENIAL_NO_PROMPT in out
-    assert s.last_error.startswith("Error: blocked by policy:")
-    assert "approval channel" in s.last_error  # phrase unique to DENIAL_NO_PROMPT
-
-
-@check
-def denied_by_user_uses_denial_user_wording():
-    def ask_policy(name, args):
-        return ToolDecision(False, "needs approval", ask=True)
-
-    hook = PermissionHook(ask_policy, on_ask=lambda n, a, r: "no")
-    d = hook.authorize_tool("edit_file", {"path": "x"})
-    assert d.allow is False
-    assert d.reason == DENIAL_USER
 
 
 def main():

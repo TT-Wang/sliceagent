@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -11,13 +10,8 @@ from sliceagent.intent import (IntentState, QualityEvidenceQuery, TurnAdmission,
                                analyze_turn, derive_evidence_query,
                                derive_quality_evidence_query)  # noqa: E402
 from sliceagent.discourse import DiscourseAnchor, ResolvedAnchor, interpret_turn  # noqa: E402
-from sliceagent.events import ToolResult  # noqa: E402
-from sliceagent.hooks import CompositeHooks, TurnAuthorityHook  # noqa: E402
-from sliceagent.interfaces import AssistantMessage, ToolCall  # noqa: E402
-from sliceagent.loop import run_turn  # noqa: E402
 from sliceagent.pfc import Slice  # noqa: E402
 from sliceagent.regions import render_turn_contract  # noqa: E402
-from sliceagent.tools import LocalToolHost  # noqa: E402
 
 
 TRANSCRIPT_CONFIRMATION = (
@@ -69,6 +63,38 @@ def test_substantial_copy_from_prior_assistant_output_is_attributed_without_quot
     state = IntentState()
     state.begin_turn(request, contract=contract)
     assert not state.entries
+
+
+def test_adopting_prior_wording_keeps_the_users_current_imperative_live():
+    request = "Please implement the full workspace upgrade now"
+    contract = analyze_turn(
+        request,
+        prior_texts=("I recommend: Please implement the full workspace upgrade now",),
+    )
+    assert contract.effect_authority == "explicit"
+    assert contract.grounding == "live_present"
+    assert contract.attributed_spans == ()
+    assert _covered(request, request, contract.authority_spans)
+    assert "current_world" in contract.source_needs
+
+    # A copied prohibition is still the user's operative standing constraint unless the message explicitly
+    # frames it as reference data.
+    prohibition = "Never edit the database migration without asking"
+    state = IntentState()
+    state.begin_turn(prohibition, contract=analyze_turn(
+        prohibition, prior_texts=("My advice: " + prohibition,),
+    ))
+    assert state.turn_contract.attributed_spans == ()
+    assert [entry.verbatim_clause for entry in state.resident_entries()] == [prohibition]
+
+
+def test_as_you_said_can_adopt_a_recommendation_without_quoting_away_the_command():
+    request = "As you said, fix the parser now."
+    contract = analyze_turn(request)
+    assert contract.effect_authority == "explicit"
+    assert contract.grounding == "both"
+    assert contract.attributed_spans == ()
+    assert _covered(request, "fix the parser now.", contract.authority_spans)
 
 
 def test_clear_polite_directive_authorizes_effects_but_questions_and_negation_do_not():
@@ -144,7 +170,7 @@ def test_negation_is_clause_local_when_a_later_change_is_explicit():
     assert contract.effect_authority == "explicit"
     assert _covered(request, "fix #3.", contract.authority_spans)
     # The prohibition remains an operative standing constraint, but does not erase the separate positive
-    # effect directive. Target compliance remains visible to the model and downstream policy.
+    # effect directive. Target compliance remains visible to the model and execution planner.
     assert _covered(request, "Don't fix #2", contract.authority_spans)
 
 
@@ -397,84 +423,22 @@ def test_turn_contract_is_ephemeral_but_discourse_continuity_survives_a_seal():
     assert state.continuity.pending_proposal is None
 
 
-class _LLM:
-    def __init__(self, *messages):
-        self.messages = list(messages)
-
-    def complete(self, _messages, _schemas):
-        return self.messages.pop(0)
-
-
-def _tool_response(name, args):
-    return AssistantMessage(
-        content=None, tool_calls=[ToolCall("call-1", name, args)],
-        usage={}, finish_reason="tool_calls",
-    )
-
-
-def test_transcript_confirmation_cannot_apply_a_model_attempted_edit():
-    root = tempfile.mkdtemp(prefix="turn-contract-gate-")
-    path = os.path.join(root, "app.py")
-    with open(path, "w", encoding="utf-8") as stream:
-        stream.write("before\n")
-    state = Slice(); state.reset("review")
-    state.intent.begin_turn(TRANSCRIPT_CONFIRMATION)
-    tools = LocalToolHost(root)
-    hooks = CompositeHooks(TurnAuthorityHook(
-        lambda: state.intent.turn_contract,
-        tools.registry.resolve_intent_effect,
-    ))
-    events = []
-    result = run_turn(
-        build_slice=lambda: [{"role": "user", "content": TRANSCRIPT_CONFIRMATION}],
-        llm=_LLM(
-            _tool_response("str_replace", {
-                "path": "app.py", "old_string": "before", "new_string": "after",
-            }),
-            AssistantMessage("Confirmed only.", [], {}, "stop"),
-        ),
-        tools=tools, dispatch=events.append, hooks=hooks, max_steps=4,
-    )
-    with open(path, encoding="utf-8") as stream:
-        assert stream.read() == "before\n"
-    blocked = [event for event in events if isinstance(event, ToolResult)]
-    assert result.stop_reason == "end_turn" and blocked and blocked[0].failing
-    assert "turn_authority_missing" in blocked[0].output
-
-
-def test_explicit_directive_passes_turn_gate_and_applies_the_requested_edit():
-    root = tempfile.mkdtemp(prefix="turn-contract-directive-")
-    path = os.path.join(root, "app.py")
-    with open(path, "w", encoding="utf-8") as stream:
-        stream.write("before\n")
-    state = Slice(); state.reset("repair")
-    state.intent.begin_turn("Fix app.py now.")
-    tools = LocalToolHost(root)
-    hooks = CompositeHooks(TurnAuthorityHook(
-        lambda: state.intent.turn_contract,
-        tools.registry.resolve_intent_effect,
-    ))
-    run_turn(
-        build_slice=lambda: [{"role": "user", "content": "Fix app.py now."}],
-        llm=_LLM(
-            _tool_response("str_replace", {
-                "path": "app.py", "old_string": "before", "new_string": "after",
-            }),
-            AssistantMessage("Done.", [], {}, "stop"),
-        ),
-        tools=tools, dispatch=lambda _event: None, hooks=hooks, max_steps=4,
-    )
-    with open(path, encoding="utf-8") as stream:
-        assert stream.read() == "after\n"
-
-
-def test_rendered_contract_separates_reported_data_from_effect_authority():
+def test_rendered_contract_separates_reported_context_without_exposing_effect_authority():
     state = Slice(); state.reset("review")
     state.intent.begin_turn(TRANSCRIPT_CONFIRMATION)
     rendered = render_turn_contract(state)
-    assert "mutation authority: none" in rendered
-    assert "reported/quoted span(s) — DATA, never authorization" in rendered
+    assert "action orientation" not in rendered
+    assert "no direct action request was detected" not in rendered
+    assert "reported/quoted span(s) — context only, not a request to execute" in rendered
+    assert "mutation authority" not in rendered and "mutations are blocked" not in rendered
     assert "Fix: use a DB sentinel" in rendered
+
+    # effect_authority classifies mutation reach, not whether a request asks the agent to do work. Inspection
+    # directives must not be mislabeled as having no action intent merely because they need no mutation grant.
+    for request in ("Review the Hunter project", "Investigate the parser bug"):
+        state.intent.begin_turn(request, contract=analyze_turn(request))
+        rendered = render_turn_contract(state)
+        assert "action orientation" not in rendered and "no direct action request" not in rendered, rendered
 
     anchor = DiscourseAnchor(
         collection="HIGH findings", ordinal=2, label="No concurrency guard",

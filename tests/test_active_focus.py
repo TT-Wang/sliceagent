@@ -101,6 +101,26 @@ def system_prompt_resolves_referents_before_asking():
     assert "history/" in low, "prompt must point to the history/ files before re-asking"
 
 
+@check
+def system_prompt_is_autonomous_except_at_material_or_consequential_forks():
+    from sliceagent.prompt import MEMORY_ACCUMULATE, SYSTEM_PROMPT
+    low = SYSTEM_PROMPT.lower()
+    memory = MEMORY_ACCUMULATE.lower()
+    assert "autonomy first" in low
+    assert "material ambiguity" in low and "consequential external action" in low
+    assert "routine observation, task-local edits, tests" in low
+    assert "clarify before committing" not in low
+    assert "host-enforced effect ceiling" not in memory
+    assert "reasonable judgment" in memory
+    # Autonomy changes action selection, never evidence standards.
+    assert "canonical execution receipts" in memory
+    assert "never reconstruct what the prior answer said from plausibility" in memory
+    for stale_host_promise in (
+        "host checks and removes", "host replaces", "host-checked against", "before publication",
+    ):
+        assert stale_host_promise not in memory
+
+
 # ---- bounded-C: the current project (relative base) follows focus; the boundary floor never moves -----
 @check
 def resolution_base_follows_current_project_but_floor_stays():

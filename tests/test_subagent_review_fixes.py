@@ -42,7 +42,7 @@ def s5_budget_hook_accounts_every_usage_record_through_one_method():
 @check
 def s5_subagent_host_has_no_parallel_budget_sink_state():
     from sliceagent.subagent import SubagentHost
-    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
+    host = SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                         max_depth=1, depth=0)
     assert "budget_sink" not in vars(host)
 

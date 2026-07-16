@@ -94,6 +94,25 @@ def _error_text(error: Exception) -> str:
     return str(error).lower()
 
 
+def normalize_http_status(value: object) -> Optional[int]:
+    """Normalize SDK HTTP statuses without accepting ambiguous prose.
+
+    Provider SDKs disagree on whether ``status``/``status_code`` is an integer
+    or a numeric string.  Keep the rest of the recovery pipeline typed by
+    accepting only real integers or all-digit strings in the HTTP status range.
+    Booleans are deliberately rejected even though ``bool`` subclasses ``int``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        code = value
+    elif isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        code = int(value.strip())
+    else:
+        return None
+    return code if 100 <= code < 600 else None
+
+
 def _extract_status_code(error: Exception) -> Optional[int]:
     """Walk the error and its cause chain to find an HTTP status code.
 
@@ -104,12 +123,12 @@ def _extract_status_code(error: Exception) -> Optional[int]:
     for _ in range(5):  # max depth to prevent infinite loops
         if current is None:
             break
-        code = getattr(current, "status_code", None)
-        if isinstance(code, int):
+        code = normalize_http_status(getattr(current, "status_code", None))
+        if code is not None:
             return code
         # Some SDKs use .status instead of .status_code
-        code = getattr(current, "status", None)
-        if isinstance(code, int) and 100 <= code < 600:
+        code = normalize_http_status(getattr(current, "status", None))
+        if code is not None:
             return code
         # Walk cause chain
         cause = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
@@ -223,5 +242,5 @@ class ContextOverflow(Exception):
 
     def __init__(self, original: Exception, *, status_code: Optional[int] = None):
         self.original = original
-        self.status_code = status_code
+        self.status_code = normalize_http_status(status_code)
         super().__init__(str(original))

@@ -11,7 +11,10 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.execution import ToolStatus  # noqa: E402
-from sliceagent.mcp_client import McpRuntime, McpServer, _mcp_handler  # noqa: E402
+import sliceagent.mcp_client as mcp_client  # noqa: E402
+from sliceagent.mcp_client import (McpRuntime, McpServer, _mcp_handler,  # noqa: E402
+                                   _params_from_conf)
+from sliceagent.registry import ToolRegistry  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -62,6 +65,39 @@ def shutdown_cancels_pending_tasks():  # #61/#62
 
 
 @check
+def connect_timeout_cancels_the_discarded_server_worker():
+    rt = McpRuntime()
+    state = {"cancelled": False}
+
+    class SlowServer(McpServer):
+        async def _serve(self, _params):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+    server = SlowServer("slow", rt)
+    raised = False
+    try:
+        try:
+            server.connect(object(), timeout=0.05)
+        except (concurrent.futures.TimeoutError, TimeoutError):
+            raised = True
+        time.sleep(0.15)
+        assert raised
+        assert state["cancelled"], "a timed-out connect must not leave its discarded worker/process alive"
+
+        async def pending_workers():
+            return [task for task in asyncio.all_tasks()
+                    if task is not asyncio.current_task() and not task.done()]
+
+        assert rt.submit(pending_workers(), 1) == []
+    finally:
+        rt.shutdown()
+
+
+@check
 def timed_out_queued_mcp_operation_is_indeterminate_even_if_it_finishes_late():
     rt = McpRuntime()
     server = McpServer("late", rt)
@@ -85,6 +121,88 @@ def timed_out_queued_mcp_operation_is_indeterminate_even_if_it_finishes_late():
     time.sleep(0.3)
     assert state["mutated"], "the late side effect proves FAILED would have been dishonest"
     rt.shutdown()
+
+
+@check
+def custom_mcp_env_never_inherits_process_secrets():
+    secret_names = ("LLM_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY")
+    previous = {name: os.environ.get(name) for name in secret_names}
+    try:
+        for name in secret_names:
+            os.environ[name] = f"secret-{name}"
+        params = _params_from_conf({"command": "demo", "env": {"MODE": "stdio", "PORT": 1234}})
+        assert params.env == {"MODE": "stdio", "PORT": "1234"}, params.env
+        assert not (set(secret_names) & set(params.env)), params.env
+        defaulted = _params_from_conf({"command": "demo"})
+        assert defaulted.env is None, "None delegates to the MCP SDK's safe platform allowlist"
+        for invalid in ({"command": 123}, {"command": "demo", "args": "--one-string"},
+                        {"command": "demo", "args": ["ok", 3]}):
+            try:
+                _params_from_conf(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"invalid MCP process config was accepted: {invalid!r}")
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@check
+def malformed_remote_tool_metadata_is_skipped_without_partial_startup_failure():
+    class FakeServer:
+        def __init__(self, name, _runtime):
+            self.name = name
+
+        def connect(self, _params, _timeout):
+            schema = {"type": "object", "properties": {}}
+            return [
+                type("Tool", (), {"name": "good", "description": "works", "inputSchema": schema})(),
+                type("Tool", (), {"name": "bad", "description": 123, "inputSchema": schema})(),
+                type("Tool", (), {"name": None, "description": "missing name", "inputSchema": schema})(),
+            ]
+
+        def call(self, _tool, _args):
+            return "ok"
+
+    original = mcp_client.McpServer
+    registry, logs = ToolRegistry(), []
+    mcp_client.McpServer = FakeServer
+    try:
+        connected, runtime = mcp_client.connect_mcp_servers(
+            registry, {"demo": {"command": "demo"}}, runtime=object(), on_log=logs.append,
+        )
+    finally:
+        mcp_client.McpServer = original
+    assert len(connected) == 1 and runtime is not None
+    assert registry.names() == ["mcp__demo__good"]
+    assert sum("ignored malformed tool metadata" in item for item in logs) == 2, logs
+
+
+@check
+def invalid_tool_filters_are_rejected_before_spawning_the_server():
+    constructed = []
+
+    class FakeServer:
+        def __init__(self, name, _runtime):
+            constructed.append(name)
+
+    original = mcp_client.McpServer
+    mcp_client.McpServer = FakeServer
+    logs = []
+    try:
+        connected, runtime = mcp_client.connect_mcp_servers(
+            ToolRegistry(), {"demo": {"command": "demo", "include": 7}},
+            runtime=object(), on_log=logs.append,
+        )
+    finally:
+        mcp_client.McpServer = original
+    assert connected == [] and runtime is not None
+    assert constructed == [], "invalid selection metadata must be rejected before a process can spawn"
+    assert any("invalid config" in item for item in logs), logs
 
 
 def main():

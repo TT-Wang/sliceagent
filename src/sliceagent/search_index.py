@@ -1,17 +1,20 @@
-"""Cross-session episode search — a durable SQLite FTS5 index over episodic records.
+"""Legacy cross-session episode discovery over compatibility records.
 
-Three shapes (discovery / scroll / read), ZERO LLM — every shape returns actual
-stored rows. sliceagent has no transcript, so we
-index per-EPISODE records (one row per turn) appended by hippocampus.py's EpisodeSink. The index is an
-ADDITIVE sidecar over the already-durable JSONL cache — the JSONL stays the source of
-truth, this is a queryable mirror. Recall (hippocampus.py's recall_history) is single-session today; this lets
-it search ACROSS sessions without ever feeding a growing transcript.
+This module does not define a memory layer. Canonical L0 is the immutable application event ledger plus
+sealed artifacts exposed through ``@sliceagent/evidence/`` and ``@sliceagent/history/``. The episodic JSONL
+written by :mod:`sliceagent.hippocampus` is a compatibility/consolidation mirror, and this SQLite FTS5
+database is a rebuildable search sidecar over that mirror. Neither is a source of truth or a recovery commit
+point. In particular, episode search is L0 discovery, not L2 semantic knowledge.
 
-NO-TRANSCRIPT INVARIANT: this never enters the slice. It is a durable store the model
-queries on demand (exactly like recall_history), bounded by `limit`/snippet length.
+Three shapes (discovery / scroll / read), ZERO LLM — every shape returns actual stored compatibility rows.
+The index stores one row per turn appended by ``EpisodeSink`` and can search across legacy sessions without
+feeding a growing transcript to the model.
 
-GRACEFUL DEGRADE: if sqlite3 or FTS5 is unavailable, `EpisodeIndex` construction returns
-a no-op (index_episode does nothing, search returns []), so the JSONL path is untouched.
+NO-TRANSCRIPT INVARIANT: this sidecar never enters the slice wholesale. The model queries it on demand
+(exactly like ``search_history``), bounded by ``limit`` and snippet length.
+
+GRACEFUL DEGRADE: if sqlite3 or FTS5 is unavailable, ``EpisodeIndex`` construction returns a no-op
+(``index_episode`` does nothing and ``search`` returns ``[]``). Canonical L0 remains unaffected.
 
 PUBLIC SIGNATURES (pinned — other agents code against these verbatim):
     fts5_available() -> bool
@@ -35,6 +38,8 @@ from __future__ import annotations
 import os
 import re
 import threading
+
+from .private_state import private_dir, private_file
 
 _FTS_TABLE = "episodes"
 # Recency tie-break weight for search() — how much a hit's age can re-order it WITHIN the relevance band
@@ -74,7 +79,7 @@ def fts5_available() -> bool:
 
 
 def default_index_path() -> str:
-    """The index lives under the same vault as the episodic JSONL (memory._vault_root).
+    """Place the legacy discovery sidecar beside its episodic JSONL compatibility input.
 
     Lazy import keeps this module free of a hard memory.py dependency for tests.
     """
@@ -119,10 +124,10 @@ def episode_searchable_text(record: dict) -> str:
 
 
 class EpisodeIndex:
-    """SQLite FTS5 mirror of episodic records, queryable across sessions.
+    """Rebuildable SQLite FTS5 sidecar over legacy episodic records.
 
     Best-effort throughout: every method swallows its own errors (an index hiccup must
-    never break a session — same discipline as memory.append_episode). When FTS5 is
+    never break a session or canonical L0). When FTS5 is
     unavailable or the DB can't open, `is_active` is False and all writes/reads no-op.
     """
 
@@ -137,7 +142,12 @@ class EpisodeIndex:
             return
         try:
             import sqlite3
-            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+            if db_path != ":memory:":
+                parent = os.path.dirname(db_path)
+                if parent and parent != ".":
+                    private_dir(parent)
+                if os.path.exists(db_path):
+                    private_file(db_path)
             # check_same_thread=False so the OPT-IN background-review fork (item 16) can
             # index from its worker thread without a second connection.
             con = sqlite3.connect(db_path, check_same_thread=False)
@@ -148,6 +158,8 @@ class EpisodeIndex:
                 "tokenize='porter unicode61')"
             )
             con.commit()
+            if db_path != ":memory:":
+                private_file(db_path)
             self._con = con
             self.is_active = True
         except Exception:
@@ -175,6 +187,8 @@ class EpisodeIndex:
                     (session_id, task_id, str(turn), ts, title or "", note or "", text or ""),
                 )
                 self._con.commit()
+                if self.db_path != ":memory:":
+                    private_file(self.db_path)
         except Exception:
             pass
 

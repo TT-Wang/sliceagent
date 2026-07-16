@@ -64,7 +64,7 @@ def count_projection_is_exact_and_bounded_across_ten_thousand_operations():
         operations = []
         for offset in range(100):
             disposition = "rejected" if offset == 0 else "succeeded"
-            operations.append(_operation(identity, disposition=disposition, reason="policy denied"))
+            operations.append(_operation(identity, disposition=disposition, reason="extension declined"))
             identity += 1
         artifacts.append(_artifact(turn, operations))
 

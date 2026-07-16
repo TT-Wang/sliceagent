@@ -1,15 +1,18 @@
-"""Reliability hardening: hook-safety (advisory fails-open, authorize fails-CLOSED), streaming-assembly
+"""Reliability hardening: hook-safety (extension failures fail open), streaming-assembly
 resilience (skip a bad chunk, salvage a mid-stream break, re-roll when nothing assembled), and the opt-in
 per-tool scheduler timeout. No model, no pytest. Run: PYTHONPATH=src python tests/test_reliability.py
 """
 import os
+import subprocess
 import sys
+import textwrap
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.access import none                                   # noqa: E402
-from sliceagent.loop import _safe_advisory, _safe_authorize, run_tool_batch  # noqa: E402
+from sliceagent.loop import _safe_advisory, _safe_preflight, run_tool_batch  # noqa: E402
 from sliceagent.scheduler import run_scheduled                       # noqa: E402
 
 CHECKS = []
@@ -26,13 +29,58 @@ def advisory_hook_failure_degrades_to_default():
 
 
 @check
-def authorize_hook_fails_closed():
+def preflight_hook_failure_degrades_to_proceed():
     class _Boom:
-        def authorize_tool(self, n, a):
-            raise RuntimeError("permission backend down")
-    d = _safe_authorize(_Boom(), "run_command", {"command": "rm -rf /"})
-    assert d.allow is False, "a crashing permission hook MUST deny (fail closed), never allow"
-    assert "denied" in (d.reason or "")
+        def preflight_tool(self, n, a):
+            raise RuntimeError("extension backend down")
+    result = _safe_preflight(_Boom(), "run_command", {"command": "pytest"})
+    assert result.stop is False, "a crashing lifecycle hook must not strand ordinary work"
+
+
+@check
+def composite_preflight_failure_does_not_skip_later_catastrophic_floor():
+    from sliceagent.hooks import CatastrophicSafeguardHook, CompositeHooks, Hooks
+
+    class _None(Hooks):
+        def preflight_tool(self, _name, _args):
+            return None
+
+    class _Boom(Hooks):
+        def preflight_tool(self, _name, _args):
+            raise RuntimeError("optional extension unavailable")
+
+    for first in (_None(), _Boom()):
+        result = _safe_preflight(
+            CompositeHooks(first, CatastrophicSafeguardHook()),
+            "run_command", {"command": "rm -rf /"},
+        )
+        assert result.stop and result.kind == "catastrophic"
+
+
+@check
+def composite_hook_failure_never_skips_sibling_budget_lifecycle():
+    from sliceagent.hooks import BudgetHook, CompositeHooks, Hooks
+
+    class _Broken(Hooks):
+        def __getattribute__(self, name):
+            if name in {
+                "before_step", "record_step_usage", "remaining_token_budget", "reset_for_turn",
+            }:
+                return lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(name))
+            return super().__getattribute__(name)
+
+    budget = BudgetHook(5)
+    budget.spent = 99
+    hooks = CompositeHooks(_Broken(), budget)
+    hooks.reset_for_turn()
+    assert budget.spent == 0 and hooks.remaining_token_budget() == 5
+    assert hooks.record_step_usage({"prompt_tokens": 2, "completion_tokens": 1}) is None
+    assert budget.spent == 3 and hooks.remaining_token_budget() == 2
+    assert hooks.record_step_usage({"prompt_tokens": 2, "completion_tokens": 1}) == {
+        "stop_turn": True,
+    }
+    assert budget.spent == 6
+    assert hooks.before_step(2).get("stop_turn") is True
 
 
 class _TC:
@@ -48,25 +96,24 @@ class _Tools:
 
 
 @check
-def run_tool_batch_blocks_when_authorize_raises():
+def run_tool_batch_runs_ordinary_work_when_preflight_raises():
     class _RaisingHooks:
-        def authorize_tool(self, n, a):
+        def preflight_tool(self, n, a):
             raise RuntimeError("boom")
         def transform_tool_result(self, n, a, o):
             return None
     blocked, results = run_tool_batch([_TC("run_command", {}, "1")], _Tools(), lambda e: None, _RaisingHooks())
-    assert blocked == 1, "a raising authorize must count as a block"
-    assert results[0]["failing"] is True
-    assert "blocked by policy" in results[0]["output"], results[0]["output"]
-    assert "RAN" not in results[0]["output"], "the tool must NOT have executed"
+    assert blocked == 0
+    assert results[0]["failing"] is False
+    assert results[0]["output"] == "RAN", "extension failure must fail open for ordinary work"
 
 
 @check
-def run_tool_batch_allows_when_authorize_ok():
+def run_tool_batch_runs_when_preflight_proceeds():
     class _OkHooks:
-        def authorize_tool(self, n, a):
+        def preflight_tool(self, n, a):
             from types import SimpleNamespace
-            return SimpleNamespace(allow=True, reason="")
+            return SimpleNamespace(stop=False, reason="")
         def transform_tool_result(self, n, a, o):
             return None
     _, results = run_tool_batch([_TC("read_file", {"path": "x"}, "1")], _Tools(), lambda e: None, _OkHooks())
@@ -150,12 +197,86 @@ def scheduler_no_timeout_is_unchanged():
 
 
 @check
-def scheduler_reaps_an_overrunning_task():
+def scheduler_timeout_returns_after_bounded_grace():
+    release = threading.Event()
+    finished = threading.Event()
+
     def slow():
-        time.sleep(0.6); return "SLOW"
-    out = run_scheduled([(none(), lambda: "fast"), (none(), slow)], timeout=0.2)
-    assert out[0] == "fast", "the fast task must still return its real result"
-    assert "timed out" in out[1], f"the overrunning task must be reaped: {out[1]!r}"
+        try:
+            release.wait()
+            return "SLOW"
+        finally:
+            finished.set()
+
+    started = time.monotonic()
+    try:
+        out = run_scheduled([(none(), lambda: "fast"), (none(), slow)], timeout=0.05)
+        elapsed = time.monotonic() - started
+        assert out[0] == "fast", "the fast task must still return its real result"
+        assert "still running" in out[1], f"the unresolved reader must be explicit: {out[1]!r}"
+        assert elapsed < 0.35, "deadline + bounded grace must return without awaiting the hung reader"
+    finally:
+        release.set()
+        assert finished.wait(1), "the daemon fixture must settle and release its global reader slot"
+
+
+@check
+def delegation_wave_is_bounded_by_the_lifecycle_ceiling():
+    """A spawned child is PURE_READ but timeout_safe=False (exempt from the SHORT per-tool reader deadline so
+    it can SEAL its report). Before the fix that exemption also removed ALL wall-clock bounding, so a child
+    whose loop never returned froze the parent turn forever (wave_timeout=None). The generous lifecycle
+    ceiling must bound it: a never-returning timeout_safe=False PURE_READ wave returns INDETERMINATE within
+    lifecycle_timeout + grace, EVEN when the ordinary reader timeout is off (None) — proving the ceiling, not
+    the reader deadline, is what cuts it."""
+    from sliceagent.execution import ToolInvocation, ToolOutcome, ToolPurity, ToolStatus
+    from sliceagent.scheduler import ScheduledTool, run_ordered
+
+    release = threading.Event()
+    finished = threading.Event()
+    inv = ToolInvocation("wedged-child", "spawn_agent", {}, 0)
+
+    def wedged():
+        try:
+            release.wait()
+            return ToolOutcome(inv, ToolStatus.SUCCEEDED, "sealed")
+        finally:
+            finished.set()
+
+    task = ScheduledTool(inv, ToolPurity.PURE_READ, wedged, timeout_safe=False)
+    started = time.monotonic()
+    try:
+        # timeout=None → the SHORT reader deadline is OFF, so ONLY the lifecycle ceiling can cut the wave.
+        out = run_ordered([task], timeout=None, lifecycle_timeout=0.05)
+        elapsed = time.monotonic() - started
+        assert out[0].status is ToolStatus.INDETERMINATE, f"a wedged child must not hang the turn: {out[0].status}"
+        assert elapsed < 0.35, f"lifecycle ceiling + grace must return without awaiting the child: {elapsed:.2f}s"
+    finally:
+        release.set()
+        assert finished.wait(1), "the daemon child must settle and release its lifecycle reader slot"
+
+
+@check
+def timed_out_reader_does_not_block_process_exit():
+    code = textwrap.dedent("""
+        import threading
+        from sliceagent.execution import ToolInvocation, ToolOutcome, ToolPurity, ToolStatus
+        from sliceagent.scheduler import ScheduledTool, run_ordered
+
+        gate = threading.Event()
+        invocation = ToolInvocation("exit-hang", "read_file", {}, 0)
+        task = ScheduledTool(
+            invocation,
+            ToolPurity.PURE_READ,
+            lambda: (gate.wait(), ToolOutcome(invocation, ToolStatus.SUCCEEDED, "late"))[1],
+        )
+        assert run_ordered([task], timeout=0.01)[0].status is ToolStatus.INDETERMINATE
+    """)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "src"))
+    completed = subprocess.run(
+        [sys.executable, "-c", code], env=env, timeout=2, check=False,
+    )
+    assert completed.returncode == 0, "a detached timed-out reader must not participate in Python exit joins"
 
 
 # ---- review round 1: incomplete tool-call salvage must be dropped (llm.py) ----
@@ -176,9 +297,9 @@ def stream_drops_incomplete_tool_call():
     assert resp.choices[0].message.content == "answer"
 
 
-# ---- review round 1: budget accounting fails CLOSED (loop.py) -----------------
+# ---- extension usage observers cannot strand a completed turn -----------------
 @check
-def crashing_budget_hook_parks_the_turn_fail_closed():
+def crashing_usage_observer_degrades_to_no_opinion():
     from sliceagent.events import make_dispatcher
     from sliceagent.hooks import Hooks
     from sliceagent.loop import run_turn
@@ -201,8 +322,8 @@ def crashing_budget_hook_parks_the_turn_fail_closed():
 
     res = run_turn(build_slice=build_slice, llm=_LLM(), tools=_Tools(),
                    dispatch=make_dispatcher(lambda e: None), hooks=_BudgetCrash(), max_steps=3)
-    assert res.stop_reason == "token_budget", (
-        f"a crashing budget hook must fail CLOSED (park 'token_budget'), got {res.stop_reason!r}")
+    assert res.stop_reason == "end_turn", \
+        f"a crashing extension observer must not invent a budget stop, got {res.stop_reason!r}"
 
 
 # ---- crash-recovery WAL ------------------------------------------------------
@@ -308,54 +429,56 @@ def run_turn_survives_a_crashing_checkpoint():
     assert res.stop_reason == "end_turn", "a crashing checkpoint must not abort the turn"
 
 
-# ---- loop guard: deduped reads must NOT kill a long run (only real spin counts as STUCK) -------
 @check
-def deduped_read_block_is_not_stuck():
-    from sliceagent.hooks import GuardrailHook
-    g = GuardrailHook()
-    for _ in range(8):
-        d = g.authorize_tool("read_file", {"path": "a.py"})
-        if not d.allow:
-            assert d.counts_as_stuck is False, "a deduped idempotent-read block must NOT count toward STUCK"
-            return
-        g.transform_tool_result("read_file", {"path": "a.py"}, "same content")   # success, same result
-    raise AssertionError("the default guard should eventually block a repeated no-progress read")
+def interrupt_mid_wave_harvests_settled_siblings_before_propagating():
+    """The Esc-during-fan-out incident: 7 finished children were re-labelled indeterminate because the
+    interrupted wave re-raised without surfacing settled outcomes. A SIGINT mid-wave must publish the REAL
+    outcomes of already-finished jobs (their side effects exist on disk) and lose only the true stragglers."""
+    if os.name == "nt":
+        return  # POSIX-signal-driven scenario
+    import signal as _signal
+    from sliceagent.execution import ToolInvocation, ToolOutcome, ToolPurity, ToolStatus
+    from sliceagent.scheduler import ScheduledTool, run_ordered
 
+    hang = threading.Event()
+    started = threading.Event()
 
-@check
-def repeated_failing_call_is_stuck():
-    from sliceagent.hooks import GuardrailHook
-    g = GuardrailHook()
-    for _ in range(8):
-        d = g.authorize_tool("run_command", {"command": "x"})
-        if not d.allow:
-            assert d.counts_as_stuck is True, "a repeated FAILING call MUST count toward STUCK"
-            return
-        g.transform_tool_result("run_command", {"command": "x"}, "Error: boom")   # failing result
-    raise AssertionError("the default guard should block a repeated exact failure")
+    def fast(inv):
+        return lambda: ToolOutcome(inv, ToolStatus.SUCCEEDED, f"done-{inv.id}")
 
+    def slow(inv):
+        def run():
+            started.set()
+            hang.wait(20)                      # the straggler that held the wave hostage
+            return ToolOutcome(inv, ToolStatus.SUCCEEDED, "late")
+        return run
 
-@check
-def run_tool_batch_counts_only_hard_blocks():
-    from sliceagent.hooks import ToolDecision
+    invs = [ToolInvocation(f"iv-{n}", "read_file", {"path": f"f{n}"}, n) for n in range(3)]
+    tasks = [
+        ScheduledTool(invs[0], ToolPurity.PURE_READ, fast(invs[0])),
+        ScheduledTool(invs[1], ToolPurity.PURE_READ, fast(invs[1])),
+        ScheduledTool(invs[2], ToolPurity.PURE_READ, slow(invs[2])),
+    ]
+    published: list = []
 
-    class _Soft:
-        def authorize_tool(self, n, a):
-            return ToolDecision(False, "this read returned the same result", counts_as_stuck=False)
-        def transform_tool_result(self, n, a, o):
-            return None
+    def sigint_when_ready():
+        started.wait(5)
+        time.sleep(0.3)                        # let the two fast jobs settle
+        os.kill(os.getpid(), _signal.SIGINT)   # delivered to the main thread blocked in condition.wait
 
-    class _Hard:
-        def authorize_tool(self, n, a):
-            return ToolDecision(False, "real spin", counts_as_stuck=True)
-        def transform_tool_result(self, n, a, o):
-            return None
-
-    soft, rs = run_tool_batch([_TC("read_file", {"path": "a"}, "1")], _Tools(), lambda e: None, _Soft())
-    hard, _ = run_tool_batch([_TC("run_command", {}, "1")], _Tools(), lambda e: None, _Hard())
-    assert soft == 0, "a soft (deduped) block must not count toward the STUCK floor"
-    assert hard == 1, "a hard (spin) block must count toward the STUCK floor"
-    assert rs[0]["failing"] is True and "same result" in rs[0]["output"], "soft-blocked call still nudges"
+    threading.Thread(target=sigint_when_ready, daemon=True).start()
+    interrupted = False
+    try:
+        run_ordered(tasks, on_outcomes=lambda wave: published.extend(wave))
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        hang.set()                             # release the daemon straggler
+    assert interrupted, "the interrupt must still propagate (the turn parks)"
+    texts = {out.invocation.id: out.text for out in published}
+    assert texts.get("iv-0") == "done-iv-0" and texts.get("iv-1") == "done-iv-1", \
+        f"settled siblings must be harvested with their REAL outcomes, got {texts}"
+    assert "iv-2" not in texts, "the genuine straggler must NOT get a fabricated success"
 
 
 def main():

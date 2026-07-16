@@ -1,7 +1,7 @@
 """Single source of truth for every sliceagent environment variable.
 
-Before this, 28 env vars were scattered across llm.py / cli.py / config.py / hooks.py with no discovery and
-no validation (a typo'd AGENT_POLICY silently used the default). This module centralizes them so:
+Before this, environment variables were scattered across llm.py / cli.py / config.py / hooks.py with no
+discovery and no validation. This module centralizes them so:
   * `sliceagent config --list` can show every knob, its group, default, and current value;
   * `validate_env()` warns on a misspelled enum value at startup instead of silently defaulting;
   * a coverage test asserts no AGENT_*/LLM_*/SLICEAGENT_* var is read in the code without being documented here.
@@ -32,11 +32,6 @@ REGISTRY: list[EnvVar] = [
            "even after compaction (secondary net; the bounded slice is the primary).", ""),
     EnvVar("AGENT_PROVIDER", "agent", "Default provider id to use from the config's [providers.<id>] tables "
            "(overrides [agent].default_provider).", ""),
-    EnvVar("AGENT_POLICY", "agent", "Permission mode: baby-sitter (confirm all) | teenager (auto edits, "
-           "confirm commands) | let-it-go (auto, blocks catastrophic). All block catastrophic moves.",
-           "teenager", choices=("baby-sitter", "teenager", "let-it-go"),
-           aliases=("guard", "allow", "readonly", "ask", "babysitter", "teen", "letgo", "letitgo", "yolo", "baby"),
-           validate=True),
     EnvVar("AGENT_ROUTER", "agent", "Topic router: lexical (instant, no LLM) or llm (classifier round-trip).",
            "lexical", choices=("lexical", "llm"), validate=True),
     EnvVar("AGENT_REASONING", "agent", "Reasoning effort: full=provider default, fast=minimal, high/max=more.",
@@ -50,21 +45,26 @@ REGISTRY: list[EnvVar] = [
            "core mode exposes one-shot read-only explorers only.", ""),
     EnvVar("AGENT_ADVANCED_TOOLS", "agent", "Expose persistent process and interactive terminal tools; "
            "off by default in the demo kernel.", ""),
-    EnvVar("AGENT_EXPLORER_REASONING", "agent", "Reasoning effort for read-only explorer children.", "full"),
-    EnvVar("AGENT_AUTO_APPROVE", "agent", "Comma-separated globs of pre-approved safe commands (skip prompt).", ""),
-    EnvVar("AGENT_INTENT_GATE", "agent", "'essential' (default) — lift the fail-closed turn-authority gate, "
-           "keeping catastrophic-command + confirm-mode protections; 'strict' — restore the full v2 gate.", "essential"),
+    EnvVar("AGENT_EXPLORER_REASONING", "agent", "Explorer profile: staged uses fast evidence navigation plus "
+           "one full tool-free synthesis; fast/full/high/max keep a single-stage override.", "staged",
+           choices=("staged", "fast", "full", "high", "max"), validate=True),
+    EnvVar("AGENT_EXPLORER_NAV_STEPS", "agent", "Fast-navigation model-step ceiling for staged explorers. "
+           "Values are clamped to 1..(the child max minus the reserved synthesis step).", "6"),
     EnvVar("AGENT_VERIFY_CMD", "agent", "Oracle verify command run after a turn (e.g. 'pytest -q').", ""),
     EnvVar("AGENT_MAX_TOKENS", "agent", "Per-turn task token budget, including delegated child usage (parks when exhausted).", ""),
     EnvVar("AGENT_COMPLETION_TOKENS", "agent", "Per-REQUEST completion cap (max output tokens); distinct from the AGENT_MAX_TOKENS turn budget.", "8192"),
     EnvVar("AGENT_CONTEXT_WINDOW", "agent", "Provider context window used for strict per-call capacity "
            "preflight when the model catalog cannot supply one (0/unset = explicit compatibility mode).", ""),
     EnvVar("AGENT_MAX_STEPS", "agent", "Per-turn step ceiling (runaway backstop); raise for deep analysis.", "60"),
-    EnvVar("AGENT_SELFCHECK_MAX", "agent", "Max grounded done-gate verification rounds before accepting 'done'.", "3"),
-    EnvVar("AGENT_TOOL_TIMEOUT", "agent", "Per-tool wall-clock deadline in seconds (0/unset = off).", ""),
+    EnvVar("AGENT_TOOL_TIMEOUT", "agent",
+           "Outer deadline for declared pure-read tools in seconds (0/unset = off).", ""),
+    EnvVar("AGENT_DELEGATION_TIMEOUT", "agent",
+           "Hard ceiling for a child-agent wave in seconds; invalid/non-positive values use 900.", "900"),
     EnvVar("AGENT_ROOT", "agent", "Workspace root override (defaults to the current directory).", ""),
     EnvVar("AGENT_ALLOW_PLUGINS", "agent", "Set truthy to load project/user plugins.", ""),
-    EnvVar("AGENT_SANDBOX", "agent", "Tool sandbox backend.", "local", choices=("local", "docker"), validate=True),
+    EnvVar("AGENT_SANDBOX", "agent", "Tool sandbox backend; docker requires POSIX/WSL2 "
+           "(native Windows: use local or run under WSL2).", "local",
+           choices=("local", "docker"), validate=True),
     EnvVar("AGENT_WEB", "agent", "Enable the web tools (fetch_url + web_search, DuckDuckGo, no key); set "
            "0/off to disable network egress from the agent.", "1"),
     # ── provider / network ────────────────────────────────────────────────────────────────────
@@ -72,6 +72,13 @@ REGISTRY: list[EnvVar] = [
     EnvVar("LLM_BASE_URL", "provider", "OpenAI-compatible endpoint (e.g. https://api.moonshot.cn/v1).", ""),
     EnvVar("LLM_TIMEOUT", "provider", "Per-request timeout in seconds.", ""),
     EnvVar("LLM_TIMEOUT_SEC", "provider", "Alias for LLM_TIMEOUT.", ""),
+    EnvVar("LLM_HARD_TIMEOUT_SEC", "provider", "Absolute whole-request watchdog in seconds; unset derives "
+           "a provider-agnostic ceiling from the completion-token budget (minimum 180 seconds).", ""),
+    EnvVar("LLM_STREAM_CLOSE_GRACE_SEC", "provider", "Seconds to confirm SSE connection closure after "
+           "cancellation/deadline before reporting an indeterminate call.", "2"),
+    EnvVar("LLM_PROVIDER_MAX_INFLIGHT", "provider", "Process-wide physical request ceiling per provider "
+           "account. Timed-out calls retain a slot until their transport actually closes; invalid or "
+           "non-positive values use the default.", "4"),
     EnvVar("AGENT_PROXY", "provider", "HTTP proxy URL for LLM calls; 'none'/'off' forces direct. Unset = direct (no proxy).", ""),
     EnvVar("OPENAI_API_KEY", "provider", "Legacy alias for LLM_API_KEY.", "", secret=True),
     EnvVar("MOONSHOT_API_KEY", "provider", "Legacy alias for LLM_API_KEY (Moonshot).", "", secret=True),
@@ -85,14 +92,18 @@ REGISTRY: list[EnvVar] = [
            "on", choices=("on", "off"), aliases=("1", "true", "yes", "0", "false", "no")),
     EnvVar("SHOW_SLICE", "ui", "Set truthy to print the rebuilt slice each turn (debug view).", ""),
     # ── memory ────────────────────────────────────────────────────────────────────────────────
-    EnvVar("SLICEAGENT_VAULT", "memory", "Optional semantic-memory and legacy task-state vault.", ""),
+    EnvVar("SLICEAGENT_VAULT", "memory", "Legacy episodic/task/roster compatibility vault.", ""),
+    EnvVar("SLICEAGENT_KNOWLEDGE_DB", "memory", "Override the native typed-knowledge SQLite database path.", ""),
+    EnvVar("SLICEAGENT_PROJECT_REGISTRY", "memory", "Override the private stable project-identity registry path.", ""),
+    EnvVar("SLICEAGENT_USER_ID", "memory", "Stable local user scope key for typed USER knowledge.", "local-user"),
+    EnvVar("SLICEAGENT_AGENT_ID", "memory", "Stable agent scope key for typed CRAFT knowledge.", "sliceagent"),
     EnvVar("MEMEM_VAULT", "memory", "memem's lesson vault (markdown long-term memories), if memem is installed.", ""),
     EnvVar("SLICEAGENT_SKILLS_DIR", "memory", "Extra directory to discover skills from.", ""),
     EnvVar("SLICEAGENT_BASH", "agent", "Windows only: bash.exe that runs shell commands (default: auto-detect Git Bash).", ""),
     EnvVar("AGENT_BACKGROUND_REVIEW", "agent", "Set truthy to run an off-thread reviewer that consolidates "
            "lessons after each turn.", ""),
     EnvVar("SLICEAGENT_CACHE_DIR", "memory", "sliceagent state root for always-on checkpoints, immutable "
-           "artifacts, recovery journals, and the optional episodic cache.", ""),
+           "artifacts, recovery journals, and the optional episodic compatibility mirror.", ""),
     EnvVar("AGENT_EXPERIMENTAL_ALL", "debug", "Master switch: set truthy to enable ALL experimental flags "
            "(per-flag AGENT_EXPERIMENTAL_<ID> overrides).", ""),
     # ── monitoring / debug ────────────────────────────────────────────────────────────────────

@@ -30,7 +30,8 @@ class _Dist:
         return self._values.get(name)
 
 
-def _uv_tool(*, specifier="==0.1.0", extra_requirement=False, requirement_fields="", tool_lines="",
+def _uv_tool(*, specifier="==0.1.0", extra_requirement=False, requirement_fields="",
+             tool_lines='python = "3.12"',
              index_url="https://pypi.org/simple/", symlink_entrypoint=False, option_lines=""):
     root = tempfile.mkdtemp(prefix="updater-uv-")
     tool_dir = os.path.join(root, "custom-tools")
@@ -229,8 +230,16 @@ def current_uv_structured_public_index_receipt_is_recognized_exactly():
         'index = [{ url = "https://pypi.org/simple", explicit = false, default = true, '
         'format = "simple", authenticate = "auto" }]\n'
     )
-    prefix, _, _ = _uv_tool(index_url=None, option_lines=public)
+    prefix, _, _ = _uv_tool(index_url=None, option_lines=public, tool_lines="")
     assert detect_installation(prefix=prefix, distribution=_Dist()).kind == "uv-tool"
+
+    # uv 0.11.26 emits this ordinary scalar on every canonical receipt. It identifies
+    # the tool interpreter and must not be mistaken for a custom package source.
+    prefix, _, _ = _uv_tool(index_url=None, option_lines=public, tool_lines='python = "3.12"')
+    assert detect_installation(prefix=prefix, distribution=_Dist()).kind == "uv-tool"
+
+    prefix, _, _ = _uv_tool(index_url=None, option_lines=public, tool_lines="python = { custom = true }")
+    assert detect_installation(prefix=prefix, distribution=_Dist()).kind == "uv-tool-custom"
 
     custom_variants = (
         'index = [{ url = "https://packages.example.invalid/simple", explicit = false, default = true }]\n',

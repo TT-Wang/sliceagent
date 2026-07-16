@@ -19,6 +19,7 @@ from rich.console import Console  # noqa: E402
 from sliceagent import tui  # noqa: E402
 from sliceagent.events import (AssistantText, ApiRetry, StepBegin, StepEnd, ToolResult,  # noqa: E402
                                TurnCommitted, TurnEnd, TurnInterrupted, TurnPhaseChanged, TurnStarted)
+from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -28,7 +29,7 @@ def check(fn):
 
 def _render(events, *, width=100):
     c = Console(file=StringIO(), force_terminal=True, width=width, color_system=None)
-    stats = {"model": "m", "policy": "allow", "topic": "", "tokens": 0}
+    stats = {"model": "m", "topic": "", "tokens": 0}
     sink = tui.make_rich_sink(c, stats, await_commit=True)
     for e in events:
         sink(e)
@@ -64,6 +65,185 @@ def tool_result_fail_shows_cross():
 
 
 @check
+def indeterminate_tool_is_unknown_not_an_ordinary_failure():
+    invocation = ToolInvocation("cmd-1", "run_command", {"command": "deploy"}, 0)
+    outcome = ToolOutcome(invocation, ToolStatus.INDETERMINATE, "connection dropped\ncheck remote state")
+    out, _ = _render([ToolResult(
+        "run_command", {"command": "deploy"}, outcome.text, True,
+        status="indeterminate", invocation_id="cmd-1", outcome=outcome,
+    )])
+    assert "! run deploy · state unknown" in out, out
+    assert "connection dropped" in out and "check remote state" in out, out
+
+
+def _agent_result(call_id, ordinal, task, status, *, cause="", report="report", source_coverage="",
+                  evidence_status="", evidence_account=None):
+    invocation = ToolInvocation(call_id, "spawn_agent", {"agent": "explorer", "task": task}, ordinal - 1)
+    effect = ToolEffect(f"{call_id}:child", "child_artifact", {
+        "artifact_id": f"child-{ordinal}", "kind": "explorer", "launch_ordinal": ordinal,
+        "status": "ok" if status is ToolStatus.SUCCEEDED else "error",
+        "stop_reason": "end_turn" if status is ToolStatus.SUCCEEDED else "error",
+        "stop_cause": cause or ("complete" if status is ToolStatus.SUCCEEDED else "error"),
+        **({"source_coverage_status": source_coverage} if source_coverage else {}),
+        **({"explorer_evidence_status": evidence_status} if evidence_status else {}),
+        **({"explorer_evidence": evidence_account} if evidence_account is not None else {}),
+    })
+    outcome = ToolOutcome(invocation, status, report, (effect,))
+    return ToolResult(
+        "spawn_agent", dict(invocation.args), report, status is not ToolStatus.SUCCEEDED,
+        status=status.value, invocation_id=call_id, outcome=outcome,
+    )
+
+
+@check
+def parallel_agents_render_as_one_typed_outcome_group():
+    out, _ = _render([
+        _agent_result("agent-2", 2, "audit UI", ToolStatus.FAILED,
+                      cause="provider_timeout", report="Error: provider timed out"),
+        _agent_result("agent-1", 1, "audit persistence", ToolStatus.SUCCEEDED,
+                      report="a very long child report that belongs in its artifact"),
+        StepEnd(1, {}, "tool_use"),
+    ])
+    assert "agents · 1/2 sealed" in out and "1 timed out" in out, out
+    assert out.index("1 explorer") < out.index("2 explorer"), "launch order must survive reverse completion"
+    assert "audit persistence" in out and "audit UI" in out, out
+    assert "provider timeout" in out and "Error: provider timed out" in out, out
+    assert "a very long child report" not in out, "successful child prose belongs in the sealed report"
+    assert "artifacts · artifacts/index.md · 2 stored" in out, out
+
+
+@check
+def operational_success_and_partial_source_coverage_render_as_separate_facts():
+    result = _agent_result(
+        "synth-1", 1, "merge reports", ToolStatus.SUCCEEDED,
+        source_coverage="source_partial",
+    )
+    out, _ = _render([result, StepEnd(1, {}, "tool_use")])
+    assert "agents · 1/1 sealed" in out, out
+    assert "source coverage · 1 source partial" in out, out
+    assert "source partial" in out and "ground" not in out and "verified" not in out, out
+
+
+@check
+def typed_evidence_quality_is_visible_without_becoming_execution_failure():
+    out, _ = _render([
+        _agent_result(
+            "nav", 1, "map files", ToolStatus.SUCCEEDED,
+            evidence_status="navigation_only",
+            evidence_account={"navigation_success_count": 4},
+        ),
+        _agent_result(
+            "partial", 2, "inspect code", ToolStatus.SUCCEEDED,
+            evidence_status="content_partial",
+            evidence_account={"content_success_count": 5, "retained_content_view_count": 2},
+        ),
+        _agent_result(
+            "none", 3, "inspect missing area", ToolStatus.SUCCEEDED,
+            evidence_status="none", report="content retained according to prose",
+        ),
+        _agent_result(
+            "legacy", 4, "inspect legacy child", ToolStatus.SUCCEEDED,
+            report="navigation_only according to prose",
+        ),
+        StepEnd(1, {}, "tool_use"),
+    ])
+    assert "agents · 4/4 sealed" in out, out
+    assert "1 navigation only" in out and "1 content partial" in out and "1 no evidence" in out, out
+    assert "1 not assessed" in out, "missing typed evidence must not be inferred from report prose"
+    assert "evidence nav 4" in out and "evidence partial 2/5" in out, out
+    assert "✗" not in out, "weak/absent evidence is not an execution failure"
+
+
+@check
+def multiline_tool_output_is_bounded_without_flattening_the_cause():
+    output = "headline\nframe one\nframe two\nframe three\nframe four\nroot cause"
+    out, _ = _render([ToolResult("run_command", {"command": "pytest"}, output, True)])
+    assert "headline" in out and "root cause" in out and "… 1 line omitted" in out, out
+
+
+@check
+def tool_preview_cannot_replay_terminal_control_sequences():
+    out, _ = _render([ToolResult(
+        "run_command", {"command": "demo"},
+        "\x1b[31mred\x1b[0m\n\x1b]0;spoof-title\x07done", False,
+    )])
+    assert "red" in out and "done" in out, out
+    assert "\x1b" not in out and "\x07" not in out, repr(out)
+
+
+@check
+def all_model_and_argument_text_is_terminal_safe():
+    out, _ = _render([
+        ToolResult("read_file", {"path": "src/\x1b[2Jspoof.py"}, "ok", False),
+        StepEnd(1, {}, "tool_use"),
+        AssistantText(
+            "Answer \x1b]0;fake-title\x07with **markdown** and \x1b[2Jclear "
+            "plus C1 \u009b2J and bidi left\u202eright"
+        ),
+        TurnEnd("end_turn", 1, {}), TurnCommitted(True, "end_turn"),
+    ])
+    assert "spoof.py" in out and "markdown" in out and "clear" in out, out
+    assert "\x1b" not in out and "\x07" not in out and "\u009b" not in out and "\u202e" not in out, repr(out)
+
+
+@check
+def unknown_explicit_tool_status_is_indeterminate():
+    out, _ = _render([ToolResult(
+        "run_command", {"command": "deploy"}, "provider extension status", False,
+        status="timed_out",
+    )])
+    assert "! run deploy · state unknown" in out, out
+
+
+@check
+def failed_agent_fanout_has_a_hard_row_cap_and_manifest():
+    events = [
+        _agent_result(f"agent-{index}", index, f"audit area {index}", ToolStatus.FAILED,
+                      cause="provider_timeout", report=f"Error: failure detail {index}")
+        for index in range(1, 101)
+    ]
+    out, _ = _render([*events, StepEnd(1, {}, "tool_use")], width=80)
+    lines = out.splitlines()
+    assert len(lines) <= 20, f"agent group flooded scrollback with {len(lines)} rows"
+    assert "100 timed out" in out and "… 92 more agents" in out, out
+    assert "artifacts · artifacts/index.md · 100 stored" in out, out
+
+
+@check
+def mixed_rejected_and_started_agents_keep_distinct_request_ordinals():
+    rejected_invocation = ToolInvocation(
+        "agent-rejected", "spawn_agent", {"agent": "explorer", "task": "invalid request"}, 0,
+    )
+    rejected = ToolOutcome(rejected_invocation, ToolStatus.FAILED, "rejected before start")
+    started_invocation = ToolInvocation(
+        "agent-started", "spawn_agent", {"agent": "explorer", "task": "real audit"}, 1,
+    )
+    child = ToolEffect("agent-started:child", "child_artifact", {
+        "artifact_id": "child-real", "kind": "explorer", "launch_ordinal": 1,
+        "stop_cause": "complete",
+    })
+    started = ToolOutcome(started_invocation, ToolStatus.SUCCEEDED, "report", (child,))
+    out, _ = _render([
+        ToolResult("spawn_agent", dict(rejected_invocation.args), rejected.text, True,
+                   status="failed", invocation_id=rejected_invocation.id, outcome=rejected),
+        ToolResult("spawn_agent", dict(started_invocation.args), started.text, False,
+                   status="succeeded", invocation_id=started_invocation.id, outcome=started),
+        StepEnd(1, {}, "tool_use"),
+    ])
+    assert "1 explorer — invalid request" in out and "2 explorer — real audit" in out, out
+
+
+@check
+def legacy_success_without_an_artifact_keeps_its_only_report_visible():
+    out, _ = _render([
+        ToolResult("spawn_agent", {"agent": "explorer", "task": "legacy audit"},
+                   "legacy inline report", False, status="succeeded"),
+        StepEnd(1, {}, "tool_use"),
+    ])
+    assert "legacy audit" in out and "legacy inline report" in out, out
+
+
+@check
 def successful_tool_notes_become_deduplicated_milestones():
     out, _ = _render([
         TurnStarted("verify retry behavior"),
@@ -74,7 +254,7 @@ def successful_tool_notes_become_deduplicated_milestones():
         ToolResult("run_command", {"command": "pytest", "note": "A failed claim must stay hidden."},
                    "exit 1", True),
     ])
-    assert out.count("◆ The retry regression now passes.") == 1, out
+    assert out.count("agent note · The retry regression now passes.") == 1, out
     assert "A failed claim must stay hidden." not in out, out
 
 
@@ -122,7 +302,7 @@ def committed_receipt_distinguishes_agent_rejection_from_execution_failure():
         TurnCommitted(True, "end_turn", receipt=receipt),
     ])
     assert "turn saved with warnings" in out, out
-    assert "1 agent rejected before start" in out, out
+    assert "agents · 0/1 succeeded" in out and "agents · 1 rejected before start" in out, out
     assert "agent failed" not in out and "agent started" not in out, out
 
 
@@ -153,6 +333,33 @@ def adverse_receipt_facts_survive_an_ordinary_width_completion():
 
 
 @check
+def every_adverse_receipt_state_survives_narrow_completion_rows():
+    receipt = {
+        "turn_status": "indeterminate", "disposition": "indeterminate",
+        "counts": {
+            "requested": 7, "rejected_before_execution": 1, "execution_started": 4,
+            "settled": 6, "succeeded": 1, "failed": 1, "cancelled": 2,
+            "lifecycle_not_run": 1, "indeterminate": 1, "not_started": 1,
+        },
+        "agents": {
+            "requested": 7, "rejected_before_execution": 1, "execution_started": 4,
+            "settled": 6, "succeeded": 1, "failed": 1, "cancelled": 2,
+            "lifecycle_not_run": 1, "indeterminate": 1, "not_started": 1,
+        },
+    }
+    out, _ = _render([
+        TurnStarted("delegate"), TurnEnd("indeterminate", 1, {}),
+        TurnCommitted(True, "indeterminate", receipt=receipt),
+    ], width=60)
+    for fact in (
+        "agents · 1/7 succeeded", "agents · 1 rejected before start", "agents · 1 failed",
+        "agents · 1 cancelled", "agents · 1 indeterminate", "agents · 1 not started",
+        "agents · 1 not run",
+    ):
+        assert fact in out, (fact, out)
+
+
+@check
 def read_wave_flushes_at_step_end_before_any_answer_or_turn_end():
     out, _ = _render([
         TurnStarted("inspect files"),
@@ -171,7 +378,7 @@ def rejected_completion_draft_is_replaced_before_commit():
         AssistantText("draft that failed verification"),
         StepEnd(1, {}, "end_turn"),
         TurnPhaseChanged("checking_completion", "running checks"),
-        StepBegin(2),                 # completion gate requested another pass → discard prior draft
+        StepBegin(2),                 # optional oracle requested another pass → discard prior draft
         AssistantText("final verified response"),
         StepEnd(2, {}, "end_turn"),
         TurnEnd("end_turn", 2, {}),
@@ -221,7 +428,7 @@ def partial_and_unsaved_answers_are_never_styled_as_normal_final_responses():
         TurnStarted("use a tool"),
         AssistantText("I will inspect that now.", final=False),
     ])
-    assert "assistant · update" in update and "I will inspect" in update, update
+    assert "assistant update" in update and "I will inspect" in update, update
 
 
 @check
@@ -244,7 +451,7 @@ def slash_completer_offers_navigation_commands():
     from prompt_toolkit.document import Document
     comp = tui._InputCompleter()   # no repo files wired → behaves slash-only here
     got = [c.text for c in comp.get_completions(Document("/mo", len("/mo")), None)]
-    assert "/model" in got and "/mode" in got, got
+    assert got == ["/model"], got
     update = [c.text for c in comp.get_completions(Document("/up", len("/up")), None)]
     assert "/update" in update, update
     # /switch was removed from the palette in the menu redesign (parked-topic resume dropped)

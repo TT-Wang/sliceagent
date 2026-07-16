@@ -27,6 +27,13 @@ class _Mem:
         self.saved.append((title, content, paths))
 
 
+class _ProjectBoundMem(_Mem):
+    def remember_for_project(
+        self, content, *, project_id, title="", tags="", paths=None,
+    ):
+        self.saved.append((project_id, title, content, paths))
+
+
 def _corrective_records():
     # a corrective-and-cleared episode: an early turn hit an error (meta.failing=True), a later
     # turn edited the file and ended CLEAN (meta.failing=False, stop_reason=end_turn). That last-
@@ -80,6 +87,23 @@ def enabled_writes_lesson_off_thread():
         title, content, paths = mem.saved[0]
         assert "parser.py" in content
         assert paths and "parser.py" in " ".join(paths)   # fix #1: file-context tag now flows through
+    finally:
+        os.environ.pop("AGENT_BACKGROUND_REVIEW", None)
+
+
+@check
+def review_uses_the_workspace_project_binding_not_mutable_foreground_scope():
+    os.environ["AGENT_BACKGROUND_REVIEW"] = "1"
+    try:
+        mem = _ProjectBoundMem(_corrective_records())
+        reviewer = make_background_reviewer(
+            mem, scope="human-label", project_id="stable-project-a",
+        )
+        assert reviewer is not None
+        reviewer.review("s")
+        reviewer.join(5.0)
+        assert len(mem.saved) == 1
+        assert mem.saved[0][0] == "stable-project-a"
     finally:
         os.environ.pop("AGENT_BACKGROUND_REVIEW", None)
 

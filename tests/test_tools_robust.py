@@ -7,6 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from sliceagent.execution import ToolStatus  # noqa: E402
 from sliceagent.tools import LocalToolHost   # noqa: E402
 
 CHECKS = []
@@ -121,11 +122,11 @@ def str_replace_indent_only_via_fuzzy():
 
 @check
 def str_replace_nonunique_still_errors():
-    # >1 exact occurrences: hard error, no fuzzy attempt, file untouched.
+    # >1 exact occurrences: recoverable steer, no fuzzy attempt, file untouched.
     h, root = _host()
     _write(root, "a.txt", "x\nx\n")
     out = h._t_str_replace({"path": "a.txt", "old_string": "x", "new_string": "y"})
-    assert out.startswith("Error:") and "2 times" in out
+    assert out.status is ToolStatus.STEERED and "2 times" in out
     assert _read(root, "a.txt") == "x\nx\n", "non-unique match must not modify the file"
 
 
@@ -137,7 +138,7 @@ def str_replace_fuzzy_nonunique_still_errors():
     original = "  foo\n  bar\n\tfoo\n\tbar\n"   # two trimmed 'foo\nbar' blocks, diff indent
     _write(root, "a.py", original)
     out = h._t_str_replace({"path": "a.py", "old_string": "foo\nbar", "new_string": "baz"})
-    assert out.startswith("Error:") and "not found" in out
+    assert out.status is ToolStatus.STEERED and "not found" in out
     assert _read(root, "a.py") == original, "ambiguous fuzzy match must not modify the file"
 
 
@@ -146,7 +147,7 @@ def str_replace_no_match_errors():
     h, root = _host()
     _write(root, "a.txt", "hello\n")
     out = h._t_str_replace({"path": "a.txt", "old_string": "nope", "new_string": "x"})
-    assert out.startswith("Error:") and "not found" in out
+    assert out.status is ToolStatus.STEERED and "not found" in out
 
 
 # --- item 8: binary detection in read_text ------------------------------------
@@ -203,7 +204,7 @@ def str_replace_on_binary_degrades_via_registry():
     h, root = _host()
     _write(root, "blob.bin", "abc\x00def")
     out = h.run("str_replace", {"path": "blob.bin", "old_string": "abc", "new_string": "x"})
-    assert out.startswith("Error:") and "binary" in out
+    assert out.status is ToolStatus.STEERED and "binary" in out
 
 
 def main():

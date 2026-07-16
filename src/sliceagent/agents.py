@@ -22,14 +22,14 @@ _READ_ONLY_SET = frozenset(READ_ONLY_TOOLS)   # mutability is decided against th
 # Tools NO subagent may use, regardless of its allowlist. A
 # subagent must not stop to ask the END-USER — ambiguity is the parent's job; a child that blocks on input
 # is a stall (and racy/meaningless when several run in parallel). It returns its summary instead.
-SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user", "change_workspace"})
+SUBAGENT_EXCLUDED_TOOLS = frozenset({"ask_user", "change_workspace", "update_work"})
 
 # Mutating tools — an agent whose allowlist includes ANY of these is "writable" (globally serialized vs
 # other writers); an allowlist with none of them is read-only (parallelizes as a swarm).
 WRITE_TOOLS = frozenset({
     "edit_file", "append_to_file", "str_replace", "run_command", "execute_code",
     "world_set", "world_clear", "require", "drop_requirement", "requirement_done",
-    "supersede_requirement", "update_plan", "reconcile_execution",
+    "supersede_requirement", "update_plan", "update_work", "reconcile_execution",
     "terminal_open", "terminal_send", "terminal_read", "terminal_wait", "terminal_close",
     "proc_start", "proc_poll", "proc_tail", "proc_wait", "proc_kill",
     "spawn_subagent", "spawn_explore", "spawn_agent",
@@ -108,6 +108,9 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
             "Rules:\n"
             "- CITE every merged claim to its source handle, e.g. (subagents/sub-2.md) — a claim you cannot "
             "cite does not go in the synthesis.\n"
+            "- The host's source-complete status means only that every granted report was completely read and "
+            "path-cited. It does NOT establish entailment, correctness, agreement, or independent verification; "
+            "retain each source's uncertainty and distinguish report testimony from observed fact.\n"
             "- CONFLICTS between reports are FINDINGS, not noise: surface them explicitly ('sub-1 says X; "
             "sub-3 says Y') rather than picking a side silently.\n"
             "- COVERAGE GAPS are part of the synthesis: state what none of the inputs examined.\n"
@@ -159,9 +162,8 @@ BUILTIN_AGENTS: dict[str, AgentSpec] = {
             "plainly — a clean area is a valid result. Do NOT ask the user."
         ),
     ),
-    # An independent ADVERSARIAL verifier. Runs in a FRESH
-    # slice and returns only a VERDICT + evidence — so it complements the parent's structural done-gates
-    # (OracleHook/SelfCheckHook) with a second, skeptical opinion WITHOUT any context crossing the seal.
+    # An independent ADVERSARIAL verifier. Runs in a FRESH slice and returns only a VERDICT + evidence,
+    # giving the parent a skeptical second opinion without any context crossing the seal.
     # Read-only EXCEPT running checks: read/grep + run_command/execute_code (to build/test/probe), no edit
     # tools (the allowlist is enforced at runtime in subagent.py). It is "writable" by classification (shell
     # is in WRITE_TOOLS) so it serializes vs other writers — correct for a verifier that runs tests.

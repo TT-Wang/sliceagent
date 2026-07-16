@@ -143,6 +143,7 @@ def boot_binds_pinned_provider_as_a_unit_never_default_providers_base():
 @check
 def save_prefs_none_deletes_a_stale_pin():
     import json
+    import stat
     import tempfile
     import sliceagent.config as _cfgmod
     with tempfile.TemporaryDirectory() as tmp:
@@ -153,8 +154,41 @@ def save_prefs_none_deletes_a_stale_pin():
             _cfgmod.save_prefs({"model": "b", "provider": None})       # typed /model → pin removed
             got = json.load(open(os.path.join(tmp, "prefs.json")))
             assert got.get("model") == "b" and "provider" not in got, f"stale pin survived: {got}"
+            if os.name != "nt":
+                assert stat.S_IMODE(os.stat(tmp).st_mode) == 0o700
+                assert stat.S_IMODE(os.stat(os.path.join(tmp, "prefs.json")).st_mode) == 0o600
+            assert not [name for name in os.listdir(tmp) if name.endswith(".tmp")], \
+                "atomic preference writes must not leave fixed or unique temp fragments"
         finally:
             _cfgmod._prefs_path = orig
+
+
+@check
+def loading_user_config_repairs_modes_without_changing_project_config():
+    if os.name == "nt":
+        return
+    import stat
+    import tempfile
+    import sliceagent.config as config_module
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as project:
+        user_dir = os.path.join(home, ".sliceagent")
+        os.makedirs(user_dir)
+        user_path = os.path.join(user_dir, "config.toml")
+        project_path = os.path.join(project, "sliceagent.toml")
+        for path in (user_path, project_path):
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write('[agent]\nmodel = "m"\n')
+            os.chmod(path, 0o644)
+        original = config_module._config_files
+        config_module._config_files = lambda _root=None: [user_path, project_path,
+                                                           os.path.join(project, ".sliceagent", "config.toml")]
+        try:
+            config_module.Config.load(project)
+        finally:
+            config_module._config_files = original
+        assert stat.S_IMODE(os.stat(user_dir).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(user_path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(project_path).st_mode) == 0o644
 
 
 @check
@@ -220,20 +254,6 @@ def config_show_tolerates_a_scalar_under_providers():
         with open(os.path.join(cfgdir, "config.toml"), "w") as f:
             f.write('[providers]\nfoo = "bar"\n')               # scalar, not a table
         assert run_config([], home=d) == 0, "a scalar under [providers] must not crash `config`"
-
-
-@check
-def readonly_allowlist_rejects_exec_and_write_affordances():
-    from sliceagent.policy import _is_readonly_command as ro
-    for bypass in ["env sh -c 'touch x'", "env python3 e.py", "sort -o important.py /dev/null",
-                   "sort --output=x a", "date -s 2020-01-01", "tree -o out.txt",
-                   "uniq /dev/null important.py", "git grep --open-files-in-pager=/tmp/e.sh x",
-                   "git grep -Oless foo"]:
-        assert not ro(bypass), f"must NOT auto-run (execs/writes): {bypass!r}"
-    for ok in ["ls -la", "cat f", "du -s .", "grep -o pat file", "sort a.txt",
-               "git --no-pager grep foo", "git --no-pager log --oneline",
-               "printenv PATH", "date", "tree -L 2", "wc -l f"]:
-        assert ro(ok), f"read-only command must still auto-run: {ok!r}"
 
 
 @check

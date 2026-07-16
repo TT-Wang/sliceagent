@@ -1,8 +1,6 @@
 """End-to-end launch smoke test: `sliceagent` must reach the input prompt WITHOUT crashing.
 
-Regression guard for the cli.py banner `NameError: name 'policy_mode' is not defined` (the var was
-renamed to the resolved `_eff_mode`/`canonical` in the 3-modes change but the banner still referenced the
-old name). No prior test exercised `main()` end-to-end, so the crash shipped. Runs main() in a subprocess
+No prior test exercised `main()` end-to-end, so a banner-only crash once shipped. Runs main() in a subprocess
 with a fake key + AGENT_TUI=off + EOF stdin, so it boots, prints the banner, and exits on EOF — no network.
 """
 import os
@@ -37,7 +35,8 @@ def main_reaches_prompt_without_crashing():
     r = _launch()
     out = r.stdout + r.stderr
     assert "Traceback" not in out and "NameError" not in out, out[-2000:]
-    assert "policy=" in out, "startup banner never rendered (the line that held the NameError):\n" + out[-1500:]
+    assert "model=dummy-model-smoke" in out, "startup banner never rendered:\n" + out[-1500:]
+    assert "policy=" not in out
     assert r.returncode == 0, f"nonzero exit {r.returncode}\n{out[-1500:]}"
 
 
@@ -190,6 +189,117 @@ def chitchat_consumes_stale_continuity_but_remains_exactly_adjacent():
     }
 
 
+def pending_proposal_assents_bypass_chitchat_in_both_entry_paths():
+    from sliceagent.cli import _use_chitchat_fast_path
+    from sliceagent.discourse import extract_pending_proposal, interpret_turn
+    from sliceagent.pfc import Slice
+
+    proposal = extract_pending_proposal(
+        "The hunter workspace is `/tmp/hunter`. Could you confirm it?"
+    )
+    assert proposal and proposal.get("action")
+    state = Slice(); state.reset("switch workspace")
+    state.continuity.pending_proposal = proposal
+
+    for answer in ("ok", "okay", "sounds good"):
+        contract = interpret_turn(answer, (), pending_proposal=proposal).contract
+        assert contract.effect_authority == "continuation" and contract.effect_grants
+        assert not _use_chitchat_fast_path(answer, state), \
+            f"{answer!r} must reach the normal admission path while the proposal is adjacent"
+
+    # The optimization remains intact for the same social phrases when no action is awaiting an answer.
+    state.continuity.pending_proposal = None
+    for message in ("hi", "thanks", "ok", "okay", "sounds good"):
+        assert _use_chitchat_fast_path(message, state), message
+    assert not _use_chitchat_fast_path("ok do it", state)
+
+
+def cost_projection_always_includes_session_token_totals():
+    from sliceagent.cli import _cost_lines
+
+    stats = {
+        "model": "deepseek-reasoner", "tokens": 12_345, "fresh": 678,
+        "saved_cached_tok": 9_876, "cost": 0.1234,
+    }
+    lines = _cost_lines(stats)
+    assert any("12,345 total" in line and "678 fresh" in line
+               and "9,876 cached-history saved" in line for line in lines), lines
+    assert any("per-turn curve off" in line for line in lines)
+
+    class Metrics:
+        @staticmethod
+        def summary():
+            return {
+                "per_turn_fresh": [10, 11], "avg_turn_fresh": 10.5,
+                "cache_hit_rate": 0.9, "tool_calls": 3, "output": 7,
+                "retries": 0, "overflows": 0,
+            }
+
+    detailed = _cost_lines(stats, Metrics())
+    assert any("per_turn_fresh=[10, 11]" in line for line in detailed), detailed
+
+
+def live_failure_restores_inline_bridges_and_streaming_sink():
+    from sliceagent.cli import _restore_inline_after_live_failure
+
+    class LLM:
+        sink = None
+        def set_delta_sink(self, sink):
+            self.sink = sink
+
+    class Rich:
+        def on_delta(self, *_args):
+            pass
+        def subagent_notify(self, *_args):
+            pass
+
+    llm, rich = LLM(), Rich()
+    live_runtime = {"active": True}
+    workspace_setter = {"fn": lambda _root: None}
+    ask_bridge = {"fn": lambda *_args: "stale-live-answer"}
+    subagent_bridge = {"fn": None}
+    inline_ask = lambda *_args: "inline-answer"
+    _restore_inline_after_live_failure(
+        llm=llm, rich_sink=rich, live_runtime=live_runtime,
+        workspace_setter=workspace_setter, ask_bridge=ask_bridge,
+        ask_user=inline_ask, subagent_bridge=subagent_bridge, interactive=True,
+    )
+    assert live_runtime == {"active": False}
+    assert workspace_setter["fn"] is None
+    assert ask_bridge["fn"] is inline_ask
+    assert llm.sink == rich.on_delta
+    assert subagent_bridge["fn"] == rich.subagent_notify
+
+
+def durable_debug_log_is_created_and_repaired_private():
+    import stat
+    import tempfile
+    from sliceagent import cli as cli_mod
+    from sliceagent.cli import log_sink
+    from sliceagent.events import AssistantText
+
+    root = tempfile.mkdtemp(prefix="private-log-")
+    path = os.path.join(root, "durable-log.jsonl")
+    old_umask = os.umask(0o022)
+    try:
+        sink = log_sink(path=path)
+        sink(AssistantText("first private answer"))
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        os.chmod(path, 0o644)
+        sink(AssistantText("second private answer"))
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        os.chmod(path, 0o644)
+        old_cap, cli_mod.LOG_MAX_BYTES = cli_mod.LOG_MAX_BYTES, 0
+        try:
+            sink(AssistantText("rotate private answer"))
+        finally:
+            cli_mod.LOG_MAX_BYTES = old_cap
+        assert stat.S_IMODE(os.stat(path + ".1").st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    finally:
+        os.umask(old_umask)
+
+
 if __name__ == "__main__":
     main_reaches_prompt_without_crashing()
     print("PASS main_reaches_prompt_without_crashing")
@@ -203,3 +313,11 @@ if __name__ == "__main__":
     print("PASS update_routes_before_env_or_api_key_startup")
     chitchat_consumes_stale_continuity_but_remains_exactly_adjacent()
     print("PASS chitchat_consumes_stale_continuity_but_remains_exactly_adjacent")
+    pending_proposal_assents_bypass_chitchat_in_both_entry_paths()
+    print("PASS pending_proposal_assents_bypass_chitchat_in_both_entry_paths")
+    cost_projection_always_includes_session_token_totals()
+    print("PASS cost_projection_always_includes_session_token_totals")
+    live_failure_restores_inline_bridges_and_streaming_sink()
+    print("PASS live_failure_restores_inline_bridges_and_streaming_sink")
+    durable_debug_log_is_created_and_repaired_private()
+    print("PASS durable_debug_log_is_created_and_repaired_private")

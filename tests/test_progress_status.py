@@ -5,6 +5,7 @@ Run: PYTHONPATH=src python tests/test_progress_status.py
 import io
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -16,6 +17,7 @@ from rich.text import Text                                             # noqa: E
 
 from sliceagent.events import (ApiRetry, ModelCallPrepared, SliceBuilt, StepBegin, StepEnd,  # noqa: E402
                                ToolResult, ToolStarted, TurnStarted)
+from sliceagent.execution import ToolInvocation                            # noqa: E402
 from sliceagent.progress import TurnProgress                            # noqa: E402
 from sliceagent.tui import RichSink, _LiveStatus, _fmt_tally, _render_progress  # noqa: E402
 
@@ -146,6 +148,46 @@ def retry_and_next_provider_attempt_keep_one_live_status():
     assert s.progress.snapshot().phase.value == "retrying"
     s(ModelCallPrepared(1, 2, []))
     assert s._status is first and s.progress.snapshot().provider_attempt == 2
+    s._stop()
+
+
+@check
+def renderer_serializes_reduce_render_and_status_as_one_transition():
+    """A slow earlier callback cannot publish stale state after a later result."""
+    s = _sink(force=False)
+    s._spinner_on = False
+    s(TurnStarted("inspect concurrently"))
+    invocation = ToolInvocation("read-race", "read_file", {"path": "race.py"}, 0)
+    original_reduce = s.progress.reduce
+    entered = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+
+    def blocked_reduce(event):
+        if isinstance(event, ToolStarted) and event.name == "read_file":
+            entered.set()
+            assert release.wait(2), "test failed to release the first transition"
+        return original_reduce(event)
+
+    s.progress.reduce = blocked_reduce
+    first = threading.Thread(target=lambda: s(ToolStarted(
+        invocation.name, dict(invocation.args), invocation,
+    )))
+    second = threading.Thread(target=lambda: (
+        s(ToolResult(
+            invocation.name, dict(invocation.args), "ok", False,
+            invocation_id=invocation.id,
+        )), second_done.set(),
+    ))
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    assert not second_done.wait(0.1), "later event must wait for the renderer transition lock"
+    release.set()
+    first.join(2); second.join(2)
+    assert second_done.is_set() and not first.is_alive() and not second.is_alive()
+    snap = s.progress.snapshot()
+    assert snap.active_tools == () and snap.phase.value == "integrating", snap
     s._stop()
 
 

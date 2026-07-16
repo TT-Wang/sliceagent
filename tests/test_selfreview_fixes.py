@@ -1,4 +1,4 @@
-"""Regression tests for the fixes verified from sliceagent's own code-review (the 6 real findings) plus
+"""Regression tests for the fixes verified from sliceagent's own code-review plus
 the calibrated `reviewer` agent kind. No model, no network.
 Run: PYTHONPATH=src python tests/test_selfreview_fixes.py
 """
@@ -12,30 +12,6 @@ CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
-
-
-# ---- H8: the destructive-auto allowlist must catch outward/irreversible commands under a broad glob -----
-
-@check
-def h8_destructive_auto_covers_push_publish_rmdir():
-    from sliceagent.hooks import _is_destructive_command
-    for cmd in ("git push origin main", "git push", "npm publish", "yarn publish", "twine upload dist/*",
-                "cargo publish", "poetry publish", "gem push x.gem", "rmdir olddir",
-                "git branch -d feature", "git branch -D feature", "rm -rf build", "git reset --hard"):
-        assert _is_destructive_command("run_command", cmd), f"should be destructive: {cmd!r}"
-    for cmd in ("ls -la", "git status", "cat file.py", "git log --oneline", "npm install", "git pull"):
-        assert not _is_destructive_command("run_command", cmd), f"should NOT be destructive: {cmd!r}"
-
-
-@check
-def h8_broad_glob_does_not_auto_approve_destructive():
-    from sliceagent.hooks import PermissionHook
-    class _Pol:
-        def classify(self, name, args): return None
-    h = PermissionHook(_Pol(), auto_approve=["*"])   # the broad glob is a constructor arg
-    assert h._pre_allowed("run_command", {"command": "ls"}, "run_command:ls") is True         # benign auto-ok
-    assert h._pre_allowed("run_command", {"command": "git push"}, "k") is False               # destructive → ask
-    assert h._pre_allowed("run_command", {"command": "npm publish"}, "k") is False
 
 
 # ---- H4: version-shaped tokens are not extracted as auto-grant paths -----------------------------------

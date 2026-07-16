@@ -3,8 +3,8 @@
 A layered config file (user then project, project overriding)
 that declares persistent settings AND extension surfaces (skills dirs, MCP servers,
 plugin dirs). Precedence is ENV > project file > user file > default, so a quick
-`AGENT_POLICY=allow sliceagent ...` still overrides the file and ALL prior env-driven
-behavior is preserved (the file just makes settings persistent).
+environment override still wins over the file and prior env-driven behavior is
+preserved (the file just makes settings persistent).
 
 Read-only TOML via stdlib tomllib (Python 3.11+ — no new dependency).
 """
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import tomllib
+
+from .private_state import atomic_write_private, private_dir, private_file
 
 
 def _read_toml(path: str) -> dict:
@@ -45,7 +47,12 @@ def load_prefs() -> dict:
     """The user's last /model + /reasoning choice (or {} if none/unreadable)."""
     try:
         import json
-        with open(_prefs_path(), encoding="utf-8") as f:
+        path = _prefs_path()
+        parent = os.path.dirname(path)
+        if os.path.isdir(parent):
+            private_dir(parent)
+        private_file(path)
+        with open(path, encoding="utf-8") as f:
             return json.load(f) or {}
     except Exception:  # noqa: BLE001 — missing/corrupt prefs must never break startup
         return {}
@@ -58,16 +65,12 @@ def save_prefs(updates: dict) -> None:
     try:
         import json
         path = _prefs_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         cur = load_prefs()
         for k, v in updates.items():
             if v is None:
                 cur.pop(k, None)
         cur.update({k: v for k, v in updates.items() if v})
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cur, f, indent=2)
-        os.replace(tmp, path)
+        atomic_write_private(path, json.dumps(cur, indent=2))
     except Exception:  # noqa: BLE001 — persistence is a nicety, not a hard requirement
         pass
 
@@ -94,8 +97,12 @@ class Config:
     @classmethod
     def load(cls, root: str | None = None) -> "Config":
         merged: dict = {}
-        for f in _config_files(root):
+        files = _config_files(root)
+        for index, f in enumerate(files):
             if os.path.isfile(f):
+                if index == 0:  # user config may contain provider API keys; project config keeps repo modes
+                    private_dir(os.path.dirname(f))
+                    private_file(f)
                 merged = _deep_merge(merged, _read_toml(f))
         return cls(merged)
 
@@ -154,10 +161,6 @@ class Config:
         return self._provider_table().get("model") or self._get("agent", "model", None, "")
 
     @property
-    def policy(self) -> str:
-        return self._get("agent", "policy", "AGENT_POLICY", "teenager")
-
-    @property
     def mine(self) -> str:
         return self._get("agent", "mine", "AGENT_MINE", "deterministic")
 
@@ -185,15 +188,6 @@ class Config:
     @property
     def sandbox_network(self) -> str:
         return self._get("sandbox", "network", None, "none")
-
-    @property
-    def intent_gate(self) -> str:
-        """"essential" (default) lifts the fail-closed turn-authority gate — it over-blocks ordinary local
-        work and its errors mislead. The ESSENTIAL protections stay regardless (catastrophic-command blocking
-        + confirm-mode prompts via the policy, plus the loop guard). "strict" restores the full v2 gate that
-        denies task-state/external effects unless the exact turn authorizes them. Env: AGENT_INTENT_GATE."""
-        return str(self._get("policy", "intent_gate", "AGENT_INTENT_GATE", "essential")
-                   or "essential").strip().lower()
 
     # --- oracle / budget ---
     @property

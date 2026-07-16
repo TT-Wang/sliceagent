@@ -23,6 +23,9 @@ Or install from PyPI yourself (you manage the Python — needs ≥ 3.11):
 uv tool install --python 3.12 "sliceagent[tui]"   # or: pipx install "sliceagent[tui]" / pip install "sliceagent[tui]"
 ```
 
+The base install includes native typed knowledge and canonical history. Use `sliceagent[tui,memory]` only when
+you also want the optional Memem semantic index (its structured protocol requires Memem 2.10+).
+
 From source (development):
 
 ```bash
@@ -62,6 +65,10 @@ export AGENT_MODEL="kimi-k2.7-code"
 
 Env vars always override the config file. See every knob with `sliceagent config --list`.
 
+DeepSeek official-API users should migrate saved `deepseek-chat` / `deepseek-reasoner` model names to
+`deepseek-v4-flash` or `deepseek-v4-pro` via `/model` or `sliceagent init`. The old names remain temporary
+wire-compatible aliases during DeepSeek's retirement window, but new setup no longer offers them.
+
 ## 3. Run it
 
 ```bash
@@ -84,9 +91,9 @@ The flags are independent; leave either unset to keep that surface out of the mo
 depth defaults to `1`; raise `AGENT_SUBAGENT_DEPTH` only if you intentionally want advanced agents to spawn
 children. Local checkpoints and immutable turn/subagent artifacts are always on and can be read through
 `artifacts/`. Semantic cross-session lessons are an optional derived layer; recovery does not depend on them.
-An uncertain timeout parks the task and gates further effects until the agent re-observes every affected
-live target and records reconciliation; unrelated reads cannot clear the gate, and opaque effects require
-live user confirmation.
+An uncertain timeout pauses only the current turn so later calls in that batch cannot overtake an operation
+whose outcome is unknown. The receipt remains advisory evidence on later turns: the agent should re-observe
+relevant state before relying on it, but ordinary work, topic changes, and workspace switches remain available.
 
 Useful keys & commands:
 
@@ -97,11 +104,17 @@ Useful keys & commands:
 UI modes (via `AGENT_TUI`): `rich` (default, inline) · `live` (always-pinned box, streams above it) ·
 `off` (plain stdout, good for pipes/CI).
 
+Sandbox note: `AGENT_SANDBOX=docker` is supported on POSIX and inside WSL2. On native Windows, use the
+default `local` backend or launch SliceAgent inside WSL2; native-Windows Docker is rejected at startup so a
+Windows host path cannot be mistaken for a valid Linux-container workspace path.
+
 ## 4. Reading the output
 
-The status bar reads `model · net · policy · Σ tokens · fresh`. The **fresh** number is the one to watch:
-it's the per-turn non-cached input cost. With active task state held stable, it does not grow merely because
-the session is older; it can still expand when the task gains genuine constraints, files, or evidence.
+The status bar shows the active workspace and model together with cumulative session token use and money
+saved. The **fresh** input number is the non-cached portion accumulated in this session. For a per-turn curve,
+start with `AGENT_METRICS=1` and use `/cost`; with active task state held stable, that per-turn input does not
+grow merely because the session is older, though it can expand when the task gains genuine constraints, files,
+or evidence.
 
 ## Troubleshooting
 

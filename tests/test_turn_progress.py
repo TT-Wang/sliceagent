@@ -21,6 +21,7 @@ from sliceagent.events import (  # noqa: E402
     SliceBuilt,
     StepBegin,
     StepEnd,
+    SubagentProgress,
     ToolResult,
     ToolStarted,
     TurnCommitted,
@@ -29,7 +30,7 @@ from sliceagent.events import (  # noqa: E402
     TurnPhaseChanged,
     TurnStarted,
 )
-from sliceagent.execution import ToolInvocation  # noqa: E402
+from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus  # noqa: E402
 from sliceagent.progress import ProgressPhase, TurnProgress  # noqa: E402
 from sliceagent.regions import MAX_PLAN_CHARS, MAX_PLAN_ITEMS  # noqa: E402
 
@@ -61,7 +62,9 @@ def _machine(start: float = 100.0):
 
 
 def _start(machine: TurnProgress):
-    return machine.reduce(TurnStarted("fix the parser", task_title="Parser fix", task_id="task-1"))
+    return machine.reduce(TurnStarted(
+        "fix the parser", task_title="Parser fix", task_id="task-1", turn_id="turn-1",
+    ))
 
 
 def _status(snapshot) -> str:
@@ -156,6 +159,36 @@ def retry_remains_live_and_prepared_call_owns_the_attempt_number():
     assert prepared.phase is ProgressPhase.THINKING
     assert prepared.provider_attempt == 2, "ModelCallPrepared is authoritative for physical attempt count"
     assert "thinking" in _status(prepared) and "attempt 2" in _status(prepared), _status(prepared)
+
+
+@check
+def terminal_open_and_wait_use_truthful_command_progress():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+
+    opened = machine.reduce(ToolStarted(
+        "terminal_open", {"session": "server", "command": "python -m app"},
+    ))
+    assert opened.phase is ProgressPhase.RUNNING
+    assert opened.active_tools[0].bucket == "cmd"
+    assert "python -m app" in _status(opened), _status(opened)
+    after_open = machine.reduce(ToolResult(
+        "terminal_open", {"session": "server", "command": "python -m app"},
+        "started", False,
+    ))
+    assert after_open.counts.get("cmd") == 1, after_open.counts
+
+    waiting = machine.reduce(ToolStarted(
+        "terminal_wait", {"session": "server", "until": "ready"},
+    ))
+    assert waiting.phase is ProgressPhase.WAITING
+    assert waiting.active_tools[0].bucket == "cmd"
+    assert "waiting for server" in _status(waiting), _status(waiting)
+    settled = machine.reduce(ToolResult(
+        "terminal_wait", {"session": "server", "until": "ready"}, "ready", False,
+    ))
+    assert settled.counts.get("cmd") == 2, settled.counts
 
 
 @check
@@ -274,6 +307,353 @@ def interruption_is_terminal_without_claiming_success():
     assert not interrupted.turn_complete and not interrupted.committed
     assert interrupted.detail == "the edit was interrupted after it started"
     assert "interrupt" in _status(interrupted), _status(interrupted)
+
+
+@check
+def parallel_subagents_are_identity_safe_and_terminal_state_is_monotonic():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    first = ToolInvocation("spawn-1", "spawn_agent", {"agent": "explorer", "task": "audit storage"}, 0)
+    second = ToolInvocation("spawn-2", "spawn_agent", {"agent": "explorer", "task": "audit TUI"}, 1)
+    machine.reduce(ToolStarted(first.name, dict(first.args), first))
+    started = machine.reduce(ToolStarted(second.name, dict(second.args), second))
+    assert started.phase is ProgressPhase.DELEGATING and "2 agents running" in started.detail
+
+    machine.subagent_activity(SubagentProgress(
+        "child-1", "turn-1", 1, "explorer", "storage", 1,
+        "running", "read_file store.py", 3, 3,
+    ))
+    active = machine.subagent_activity(SubagentProgress(
+        "child-2", "turn-1", 2, "explorer", "ui", 1,
+        "running", "grep renderer", 2, 2,
+    ))
+    assert len(active.subagents) == 2 and "2 agents running" in active.detail
+    nested = SubagentProgress(
+        "child-2-1", "turn-1", 1, "explorer", "widgets", 2,
+        "running", "read widget.py", 1, 1, parent_agent_id="child-2",
+    )
+    active = machine.subagent_activity(nested)
+    nested_state = next(item for item in active.subagents if item.agent_id == "child-2-1")
+    assert nested_state.parent_agent_id == "child-2" and nested_state.depth == 2
+    assert "ui → widgets" in active.detail, active.detail
+    leaf = machine.subagent_activity(SubagentProgress(
+        "child-2-1-1", "turn-1", 1, "explorer", "leaf", 3,
+        "failed", "provider timeout", 1, 2, parent_agent_id="child-2-1",
+    ))
+    assert "ui → widgets → leaf · provider timeout" in leaf.detail, leaf.detail
+
+    settled = machine.subagent_activity(SubagentProgress(
+        "child-1", "turn-1", 1, "explorer", "storage", 1,
+        "report_ready", "report ready", 3, 999,
+    ))
+    assert "1 sealed" in settled.detail
+    # A late callback cannot resurrect a terminal child, even with a later sequence.
+    late = machine.subagent_activity(SubagentProgress(
+        "child-1", "turn-1", 1, "explorer", "storage", 1,
+        "running", "late stale read", 4, 1000,
+    ))
+    child_one = next(item for item in late.subagents if item.agent_id == "child-1")
+    assert child_one.phase == "report_ready" and "late stale" not in late.detail
+
+    first_effect = ToolEffect("child-1:effect", "child_artifact", {"artifact_id": "child-1"})
+    first_outcome = ToolOutcome(first, ToolStatus.SUCCEEDED, "report", (first_effect,))
+    after_parent_result = machine.reduce(ToolResult(
+        "spawn_agent", dict(first.args), "report", False, status="succeeded",
+        invocation_id=first.id, outcome=first_outcome,
+    ))
+    assert "1 sealed" in after_parent_result.detail and "agents running" in after_parent_result.detail
+    retired = machine.subagent_activity(SubagentProgress(
+        "child-1", "turn-1", 1, "explorer", "storage", 1,
+        "report_ready", "late terminal callback", 3, 2_000,
+    ))
+    retained = next(item for item in retired.subagents if item.agent_id == "child-1")
+    assert retained.phase == "report_ready" and retained.detail == "sealed", \
+        "settled calls must tombstone callbacks while retaining the terminal matrix row through StepEnd"
+    integrated = machine.reduce(StepEnd(1, {}, "tool_use"))
+    assert integrated.subagents == (), "the durable settled group replaces the transient matrix at StepEnd"
+
+    # An old physical turn cannot contaminate a new active projection.
+    stale = machine.subagent_activity(SubagentProgress(
+        "old-child", "turn-0", 1, "explorer", "old", 1,
+        "running", "wrong turn", 1, 1,
+    ))
+    assert all(item.agent_id != "old-child" for item in stale.subagents)
+
+
+@check
+def unmatched_typed_result_cannot_retire_a_concurrent_same_name_sibling():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    real = ToolInvocation("spawn-real", "spawn_agent", {"agent": "explorer", "task": "real"}, 0)
+    machine.reduce(ToolStarted(real.name, dict(real.args), real))
+    machine.subagent_activity(SubagentProgress(
+        "child-real", "turn-1", 1, "explorer", "real", 1,
+        "running", "read real.py", 1, 1,
+    ))
+    rejected = machine.reduce(ToolResult(
+        "spawn_agent", {"agent": "explorer", "task": "rejected"}, "not started", True,
+        status="failed", invocation_id="spawn-never-started",
+    ))
+    assert [tool.invocation_id for tool in rejected.active_tools] == ["spawn-real"], rejected
+    assert [child.agent_id for child in rejected.subagents] == ["child-real"], rejected
+
+
+@check
+def exact_spawn_identity_binds_reverse_callbacks_without_duplicate_rows():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    calls = [
+        ToolInvocation("same-a", "spawn_agent", {"agent": "explorer", "task": "same"}, 0),
+        ToolInvocation("same-b", "spawn_agent", {"agent": "explorer", "task": "same"}, 1),
+    ]
+    for call in calls:
+        machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    for index in (2, 1):
+        call = calls[index - 1]
+        machine.subagent_activity(SubagentProgress(
+            f"child-{index}", "turn-1", index, "explorer", "duplicate", 1,
+            "running", f"work {index}", index, index,
+            invocation_id=call.id, request_ordinal=index, objective="same",
+        ))
+    rows = machine.snapshot().subagents
+    assert len(rows) == 2 and {row.invocation_id for row in rows} == {"same-a", "same-b"}, rows
+    assert {row.request_ordinal for row in rows} == {1, 2}
+    assert not any(row.agent_id.startswith("invocation:") for row in rows), rows
+
+
+@check
+def equal_sequence_conflict_cannot_rewrite_a_child_row():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    call = ToolInvocation("spawn-one", "spawn_agent", {"agent": "explorer", "task": "ui"}, 0)
+    machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    machine.subagent_activity(SubagentProgress(
+        "child-one", "turn-1", 1, "explorer", "ui", 1,
+        "running", "read tui.py", 1, 4, invocation_id=call.id, request_ordinal=1,
+    ))
+    conflict = machine.subagent_activity(SubagentProgress(
+        "child-one", "turn-1", 1, "explorer", "ui", 1,
+        "failed", "fabricated conflict", 1, 4, invocation_id=call.id, request_ordinal=1,
+    ))
+    row = next(item for item in conflict.subagents if item.agent_id == "child-one")
+    assert row.phase == "running" and row.detail == "read tui.py", row
+
+
+@check
+def terminal_child_hint_is_monotonic_even_at_a_higher_sequence():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    call = ToolInvocation("spawn-terminal", "spawn_agent", {
+        "agent": "explorer", "task": "ui",
+    }, 0)
+    machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    machine.subagent_activity(SubagentProgress(
+        "child-terminal", "turn-1", 1, "explorer", "ui", 1,
+        "failed", "provider timeout", 2, 4,
+        invocation_id=call.id, request_ordinal=1,
+    ))
+    later = machine.subagent_activity(SubagentProgress(
+        "child-terminal", "turn-1", 1, "explorer", "ui", 1,
+        "report_ready", "late success claim", 3, 99,
+        invocation_id=call.id, request_ordinal=1,
+    ))
+    row = next(item for item in later.subagents if item.agent_id == "child-terminal")
+    assert row.phase == "failed" and row.detail == "provider timeout", row
+
+
+@check
+def nested_invocation_identity_is_scoped_to_its_parent_branch():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    calls = [
+        ToolInvocation("root-a", "spawn_agent", {"agent": "explorer", "task": "A"}, 0),
+        ToolInvocation("root-b", "spawn_agent", {"agent": "explorer", "task": "B"}, 1),
+    ]
+    for call in calls:
+        machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    for index, call in enumerate(calls, 1):
+        machine.subagent_activity(SubagentProgress(
+            f"parent-{index}", "turn-1", index, "explorer", f"parent-{index}", 1,
+            "running", "parent work", 1, 1,
+            invocation_id=call.id, request_ordinal=index,
+        ))
+        machine.subagent_activity(SubagentProgress(
+            f"nested-{index}", "turn-1", 1, "explorer", f"nested-{index}", 2,
+            "running", "nested work", 1, 1,
+            parent_agent_id=f"parent-{index}", invocation_id="call_1_0", request_ordinal=1,
+        ))
+    rows = {item.agent_id: item for item in machine.snapshot().subagents}
+    assert {"nested-1", "nested-2"}.issubset(rows), rows
+    assert rows["nested-1"].invocation_id == rows["nested-2"].invocation_id == "call_1_0"
+    assert rows["nested-1"].parent_agent_id != rows["nested-2"].parent_agent_id
+
+
+@check
+def malformed_nested_cycle_settles_once_instead_of_freezing_the_ui():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    call = ToolInvocation("cycle", "spawn_agent", {"agent": "explorer", "task": "cycle"}, 0)
+    machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    machine.subagent_activity(SubagentProgress(
+        "A", "turn-1", 1, "explorer", "A", 2, "running", "A", 0, 1,
+        parent_agent_id="B", invocation_id=call.id, request_ordinal=1,
+    ))
+    machine.subagent_activity(SubagentProgress(
+        "B", "turn-1", 1, "explorer", "B", 2, "running", "B", 0, 1,
+        parent_agent_id="A",
+    ))
+    effect = ToolEffect("cycle:effect", "child_artifact", {"artifact_id": "A"})
+    outcome = ToolOutcome(call, ToolStatus.SUCCEEDED, "report", (effect,))
+    settled = machine.reduce(ToolResult(
+        call.name, dict(call.args), "report", False, status="succeeded",
+        invocation_id=call.id, outcome=outcome,
+    ))
+    phases = {item.agent_id: item.phase for item in settled.subagents}
+    assert phases == {"A": "report_ready", "B": "indeterminate"}, phases
+
+
+@check
+def authoritative_result_rekeys_a_missing_callback_and_settles_its_nested_tree():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    call = ToolInvocation("call-A", "spawn_agent", {"agent": "explorer", "task": "A"}, 0)
+    machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    machine.subagent_activity(SubagentProgress(
+        "nested", "turn-1", 1, "explorer", "nested", 2,
+        "running", "nested work", 1, 1, parent_agent_id="child-A",
+    ))
+    effect = ToolEffect("A:effect", "child_artifact", {"artifact_id": "child-A"})
+    outcome = ToolOutcome(call, ToolStatus.SUCCEEDED, "report", (effect,))
+    settled = machine.reduce(ToolResult(
+        call.name, dict(call.args), "report", False, status="succeeded",
+        invocation_id=call.id, outcome=outcome,
+    ))
+    rows = {item.agent_id: item for item in settled.subagents}
+    assert set(rows) == {"child-A", "nested"}, rows
+    assert rows["child-A"].phase == "report_ready" and rows["nested"].phase == "indeterminate"
+
+
+@check
+def result_before_first_callback_keeps_terminal_alias_and_rejects_late_activity():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    call = ToolInvocation("call-A", "spawn_agent", {"agent": "explorer", "task": "A"}, 0)
+    machine.reduce(ToolStarted(call.name, dict(call.args), call))
+    failed = machine.reduce(ToolResult(
+        call.name, dict(call.args), "provider timeout", True, status="failed", invocation_id=call.id,
+    ))
+    assert len(failed.subagents) == 1 and failed.subagents[0].phase == "failed", failed
+    late = machine.subagent_activity(SubagentProgress(
+        "child-A", "turn-1", 1, "explorer", "A", 1,
+        "running", "late callback", 1, 1, invocation_id=call.id, request_ordinal=1,
+    ))
+    assert len(late.subagents) == 1 and late.subagents[0].phase == "failed", late
+
+
+@check
+def invocation_identity_wins_over_a_contradictory_artifact_or_callback_alias():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    calls = {
+        name: ToolInvocation(name, "spawn_agent", {"agent": "explorer", "task": name}, index)
+        for index, name in enumerate(("A", "B"))
+    }
+    for index, (name, call) in enumerate(calls.items(), 1):
+        machine.reduce(ToolStarted(call.name, dict(call.args), call))
+        machine.subagent_activity(SubagentProgress(
+            f"child-{name}", "turn-1", index, "explorer", name, 1,
+            "running", f"work {name}", 1, 1, invocation_id=name, request_ordinal=index,
+        ))
+    # A malformed artifact payload points A's result at B. Exact physical invocation A remains authoritative.
+    effect = ToolEffect("bad", "child_artifact", {"artifact_id": "child-B"})
+    outcome = ToolOutcome(calls["A"], ToolStatus.SUCCEEDED, "report", (effect,))
+    settled = machine.reduce(ToolResult(
+        "spawn_agent", dict(calls["A"].args), "report", False, status="succeeded",
+        invocation_id="A", outcome=outcome,
+    ))
+    rows = {item.agent_id: item for item in settled.subagents}
+    assert rows["child-A"].phase == "report_ready" and rows["child-B"].phase == "running", rows
+    # A later callback cannot hijack child-A by presenting sibling invocation B.
+    hijack = machine.subagent_activity(SubagentProgress(
+        "child-A", "turn-1", 1, "explorer", "A", 1,
+        "running", "hijack", 2, 2, invocation_id="B", request_ordinal=1,
+    ))
+    rows = {item.agent_id: item for item in hijack.subagents}
+    assert rows["child-A"].invocation_id == "A" and rows["child-A"].phase == "report_ready"
+    assert rows["child-B"].invocation_id == "B"
+
+
+@check
+def report_ready_children_are_not_also_counted_as_running():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    for index in (1, 2):
+        invocation = ToolInvocation(
+            f"spawn-{index}", "spawn_agent", {"agent": "explorer", "task": f"area {index}"}, index - 1,
+        )
+        machine.reduce(ToolStarted(invocation.name, dict(invocation.args), invocation))
+        machine.subagent_activity(SubagentProgress(
+            f"child-{index}", "turn-1", index, "explorer", f"area-{index}", 1,
+            "running", "reading", 1, 1,
+        ))
+    one_ready = machine.subagent_activity(SubagentProgress(
+        "child-1", "turn-1", 1, "explorer", "area-1", 1,
+        "report_ready", "report ready", 1, 2,
+    ))
+    assert "1 agent running" in one_ready.detail and "1 sealed" in one_ready.detail
+    assert "2 agents running" not in one_ready.detail, one_ready.detail
+    all_ready = machine.subagent_activity(SubagentProgress(
+        "child-2", "turn-1", 2, "explorer", "area-2", 1,
+        "report_ready", "report ready", 1, 2,
+    ))
+    assert "agents running" not in all_ready.detail and "2 sealed" in all_ready.detail
+
+
+@check
+def a_new_model_step_clears_prior_unlinked_agent_outcomes():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    old = ToolInvocation("old", "spawn_agent", {"agent": "explorer", "task": "old"}, 0)
+    machine.reduce(ToolStarted(old.name, dict(old.args), old))
+    machine.subagent_activity(SubagentProgress(
+        "turn-1:agent:1", "turn-1", 1, "explorer", "old", 1,
+        "failed", "provider timeout", 1, 2,
+    ))
+    machine.reduce(ToolResult(
+        old.name, dict(old.args), "failed", True, status="failed", invocation_id=old.id,
+    ))
+    machine.reduce(StepBegin(2))
+    new = ToolInvocation("new", "spawn_agent", {"agent": "explorer", "task": "new"}, 0)
+    fresh = machine.reduce(ToolStarted(new.name, dict(new.args), new))
+    assert "failed" not in fresh.detail and "new" in fresh.detail, fresh.detail
+
+
+@check
+def unknown_explicit_spawn_status_is_live_uncertainty_not_success():
+    machine, _ = _machine()
+    _start(machine)
+    machine.reduce(StepBegin(1))
+    first = ToolInvocation("first", "spawn_agent", {"agent": "explorer", "task": "first"}, 0)
+    second = ToolInvocation("second", "spawn_agent", {"agent": "explorer", "task": "second"}, 1)
+    machine.reduce(ToolStarted(first.name, dict(first.args), first))
+    machine.reduce(ToolStarted(second.name, dict(second.args), second))
+    uncertain = machine.reduce(ToolResult(
+        first.name, dict(first.args), "provider extension", False,
+        status="timed_out", invocation_id=first.id,
+    ))
+    assert "1 state unknown" in uncertain.detail and "sealed" not in uncertain.detail, uncertain.detail
 
 
 def main():

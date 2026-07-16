@@ -14,15 +14,18 @@ import os
 import tempfile
 import time
 
+from .private_state import private_dir, private_file
+
 
 def state_dir(*parts: str) -> str:
     """The sliceagent STATE root (~/.sliceagent, or $SLICEAGENT_CACHE_DIR) — internal logs / records / WAL live
     HERE, never in the user's workspace. Joins `parts`, creates the dir, returns it. One source of truth so
     nothing scribbles scratch/ into the project being worked on."""
     base = os.environ.get("SLICEAGENT_CACHE_DIR") or os.path.join(os.path.expanduser("~"), ".sliceagent")
-    d = os.path.join(base, *parts)
-    os.makedirs(d, exist_ok=True)
-    return d
+    current = private_dir(base)
+    for part in parts:
+        current = private_dir(os.path.join(current, part))
+    return current
 
 
 def root_key(root: str) -> str:
@@ -100,6 +103,7 @@ def record(root: str, *, goal: str, messages: list, step: int) -> None:
         finally:
             os.close(fd)
         os.replace(tmp, p)
+        private_file(p)  # repair an older permissive target on unusual rename implementations
     except Exception:  # noqa: BLE001 — the WAL must never destabilize a turn
         if tmp is not None:            # tmp may be unbound if json.dumps / _path / mkstemp itself failed
             try:
@@ -112,7 +116,9 @@ def pending(root: str) -> dict | None:
     """The interrupted turn for this workspace, or None. Its mere existence means the last turn never
     reached a clean/parked exit (i.e. a hard crash)."""
     try:
-        with open(_path(root), encoding="utf-8") as f:
+        path = _path(root)
+        private_file(path)  # repair state created by older releases before reading it
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):

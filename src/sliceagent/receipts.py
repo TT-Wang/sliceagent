@@ -45,7 +45,35 @@ def _status(value: object) -> str:
     if isinstance(value, bool):
         return "succeeded" if value else "failed"
     text = str(value or "").strip().lower()
-    return text if text in {"succeeded", "failed", "cancelled", "indeterminate"} else ""
+    return text if text in {"succeeded", "steered", "failed", "cancelled", "indeterminate"} else ""
+
+
+_SOURCE_COVERAGE_STATUSES = (
+    "source_complete", "source_partial", "source_unsupported", "not_assessed",
+)
+_LEGACY_SOURCE_COVERAGE = {
+    "grounded": "source_complete", "partial": "source_partial", "unsupported": "source_unsupported",
+}
+_MAX_RECEIPT_REF_COUNT = 10_000
+
+
+def _source_coverage_status(value: object) -> str:
+    status = str(value or "").strip().casefold()
+    status = _LEGACY_SOURCE_COVERAGE.get(status, status)
+    return status if status in _SOURCE_COVERAGE_STATUSES else ""
+
+
+def _bounded_sequence_count(value: object) -> int:
+    if not isinstance(value, (list, tuple)):
+        return 0
+    return min(len(value), _MAX_RECEIPT_REF_COUNT)
+
+
+def _bounded_count(value: object) -> int:
+    try:
+        return min(max(0, int(value or 0)), _MAX_RECEIPT_REF_COUNT)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 @dataclass(frozen=True)
@@ -65,11 +93,25 @@ class OperationReceipt:
     outcome_text: str
     effect_ids: tuple[str, ...]
     applied_effect_ids: tuple[str, ...]
+    preflight_kind: str = ""
     artifact_refs: tuple[str, ...] = ()
+    work_item_id: str = ""
+    child_status: str = ""
+    child_stop_reason: str = ""
+    child_stop_cause: str = ""
+    child_recovered_from: tuple[str, ...] = ()
+    child_source_coverage_status: str = ""
+    child_required_ref_count: int = 0
+    child_consumed_ref_count: int = 0
+    child_cited_ref_count: int = 0
+    child_covered_ref_count: int = 0
+    child_source_gap_count: int = 0
 
     @property
     def disposition(self) -> str:
         if self.rejected_before_execution:
+            if self.outcome_status == "steered":
+                return "steered"
             return "rejected"
         if self.settled:
             return self.outcome_status or "settled"
@@ -86,6 +128,7 @@ class OperationReceipt:
             "requested": self.requested,
             "rejected_before_execution": self.rejected_before_execution,
             "rejection_reason": self.rejection_reason,
+            "preflight_kind": self.preflight_kind,
             "execution_started": self.execution_started,
             "settled": self.settled,
             "disposition": self.disposition,
@@ -94,6 +137,17 @@ class OperationReceipt:
             "effect_ids": list(self.effect_ids),
             "applied_effect_ids": list(self.applied_effect_ids),
             "artifact_refs": list(self.artifact_refs),
+            "work_item_id": self.work_item_id,
+            "child_status": self.child_status,
+            "child_stop_reason": self.child_stop_reason,
+            "child_stop_cause": self.child_stop_cause,
+            "child_recovered_from": list(self.child_recovered_from),
+            "child_source_coverage_status": self.child_source_coverage_status,
+            "child_required_ref_count": self.child_required_ref_count,
+            "child_consumed_ref_count": self.child_consumed_ref_count,
+            "child_cited_ref_count": self.child_cited_ref_count,
+            "child_covered_ref_count": self.child_covered_ref_count,
+            "child_source_gap_count": self.child_source_gap_count,
         }
 
 
@@ -116,11 +170,20 @@ class TurnReceipt:
         return MappingProxyType({
             "requested": sum(operation.requested for operation in operations),
             "rejected_before_execution": sum(operation.rejected_before_execution for operation in operations),
+            "steered_before_execution": sum(
+                operation.rejected_before_execution and operation.outcome_status == "steered"
+                for operation in operations
+            ),
             "execution_started": sum(operation.execution_started for operation in operations),
             "settled": sum(operation.settled for operation in operations),
             "succeeded": sum(operation.disposition == "succeeded" for operation in operations),
+            "steered": sum(operation.disposition == "steered" for operation in operations),
             "failed": sum(operation.disposition == "failed" for operation in operations),
             "cancelled": sum(operation.disposition == "cancelled" for operation in operations),
+            "lifecycle_not_run": sum(
+                operation.disposition == "cancelled" and operation.preflight_kind == "lifecycle"
+                for operation in operations
+            ),
             "indeterminate": sum(operation.disposition == "indeterminate" for operation in operations),
             "not_started": sum(operation.disposition == "not_started" for operation in operations),
             "effects_declared": sum(len(operation.effect_ids) for operation in operations),
@@ -203,8 +266,15 @@ def derive_turn_receipt(
             rows[identity] = {
                 "invocation_id": identity, "name": "", "provider_index": None, "args": {},
                 "requested": False, "rejected": False, "rejection_reason": "", "started": False,
+                "preflight_kind": "",
                 "settled": False, "status": "", "text": "", "effects": [], "applied": [],
                 "artifacts": [],
+                "work_item_id": "",
+                "child_status": "", "child_stop_reason": "", "child_stop_cause": "",
+                "child_recovered_from": [],
+                "child_source_coverage_status": "", "child_required_ref_count": 0,
+                "child_consumed_ref_count": 0, "child_cited_ref_count": 0,
+                "child_covered_ref_count": 0, "child_source_gap_count": 0,
                 "canonical_requested": False, "canonical_started": False, "canonical_settled": False,
             }
             order.append(identity)
@@ -220,6 +290,43 @@ def derive_turn_receipt(
         if isinstance(index, int) and not isinstance(index, bool) and target["provider_index"] is None:
             target["provider_index"] = index
 
+    def capture_child_payload(target: dict[str, Any], effect_payload: Mapping[str, Any]) -> None:
+        artifact_id = str(effect_payload.get("artifact_id") or "")
+        if artifact_id and artifact_id not in target["artifacts"]:
+            target["artifacts"].append(artifact_id)
+        work_item_id = _one_line(effect_payload.get("work_item_id"), 200)
+        if work_item_id:
+            target["work_item_id"] = work_item_id
+        for target_key, payload_key in (
+            ("child_status", "status"),
+            ("child_stop_reason", "stop_reason"),
+            ("child_stop_cause", "stop_cause"),
+        ):
+            value = _one_line(effect_payload.get(payload_key), 80)
+            if value:
+                target[target_key] = value
+        source_status = _source_coverage_status(
+            effect_payload.get("source_coverage_status") or effect_payload.get("epistemic_status")
+        )
+        if source_status:
+            target["child_source_coverage_status"] = source_status
+        if "required_ref_count" in effect_payload:
+            target["child_required_ref_count"] = _bounded_count(effect_payload.get("required_ref_count"))
+        for target_key, current_key, legacy_key in (
+            ("child_consumed_ref_count", "consumed_refs", ""),
+            ("child_cited_ref_count", "cited_refs", ""),
+            ("child_covered_ref_count", "covered_refs", "grounding_refs"),
+            ("child_source_gap_count", "source_gaps", "grounding_gaps"),
+        ):
+            if current_key in effect_payload or (legacy_key and legacy_key in effect_payload):
+                raw = effect_payload.get(current_key) or effect_payload.get(legacy_key) or ()
+                target[target_key] = _bounded_sequence_count(raw)
+        raw_recovered = effect_payload.get("recovered_from") or ()
+        if isinstance(raw_recovered, (list, tuple)):
+            target["child_recovered_from"] = list(dict.fromkeys(
+                _one_line(item, 80) for item in raw_recovered[:4] if _one_line(item, 80)
+            ))
+
     def capture_effects(target: dict[str, Any], effects: object) -> None:
         """Index declared effect identities and typed child-report relationships."""
         if not isinstance(effects, (list, tuple)):
@@ -233,11 +340,8 @@ def derive_turn_receipt(
             if str(effect.get("kind") or "") != "child_artifact":
                 continue
             effect_payload = effect.get("payload")
-            if not isinstance(effect_payload, Mapping):
-                continue
-            artifact_id = str(effect_payload.get("artifact_id") or "")
-            if artifact_id and artifact_id not in target["artifacts"]:
-                target["artifacts"].append(artifact_id)
+            if isinstance(effect_payload, Mapping):
+                capture_child_payload(target, effect_payload)
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -255,7 +359,8 @@ def derive_turn_receipt(
             target = row(invocation_id)
             identify(target, payload)
             target["requested"] = True
-            target["rejected"] = True
+            target["preflight_kind"] = str(payload.get("rejection_kind") or "rejected").lower()
+            target["rejected"] = target["preflight_kind"] != "lifecycle"
             target["rejection_reason"] = _one_line(payload.get("reason"))
         elif event_type == "tool-execution-started":
             target = row(invocation_id)
@@ -280,9 +385,7 @@ def derive_turn_receipt(
             if str(payload.get("kind") or "") == "child_artifact":
                 effect_payload = payload.get("payload")
                 if isinstance(effect_payload, Mapping):
-                    artifact_id = str(effect_payload.get("artifact_id") or "")
-                    if artifact_id and artifact_id not in target["artifacts"]:
-                        target["artifacts"].append(artifact_id)
+                    capture_child_payload(target, effect_payload)
         elif event_type == "tool-invocation":
             target = row(invocation_id)
             identify(target, payload)
@@ -364,14 +467,30 @@ def derive_turn_receipt(
         outcome_text=target["text"],
         effect_ids=tuple(target["effects"]),
         applied_effect_ids=tuple(target["applied"]),
+        preflight_kind=target["preflight_kind"],
         artifact_refs=tuple(target["artifacts"]),
+        work_item_id=target["work_item_id"],
+        child_status=target["child_status"],
+        child_stop_reason=target["child_stop_reason"],
+        child_stop_cause=target["child_stop_cause"],
+        child_recovered_from=tuple(target["child_recovered_from"]),
+        child_source_coverage_status=target["child_source_coverage_status"],
+        child_required_ref_count=target["child_required_ref_count"],
+        child_consumed_ref_count=target["child_consumed_ref_count"],
+        child_cited_ref_count=target["child_cited_ref_count"],
+        child_covered_ref_count=target["child_covered_ref_count"],
+        child_source_gap_count=target["child_source_gap_count"],
     ) for identity in order for target in (rows[identity],))
 
     warnings = []
     for operation in operations:
         label = operation.name or operation.invocation_id
-        if operation.rejected_before_execution:
+        if operation.rejected_before_execution and operation.outcome_status == "steered":
+            pass
+        elif operation.rejected_before_execution:
             warnings.append(f"{label} rejected before execution: {operation.rejection_reason or 'denied'}")
+        elif operation.disposition == "cancelled" and operation.preflight_kind == "lifecycle":
+            pass
         elif operation.disposition in {"failed", "cancelled", "indeterminate", "not_started"}:
             detail = _one_line(operation.outcome_text)
             warnings.append(f"{label} {operation.disposition}" + (f": {detail}" if detail else ""))
@@ -395,7 +514,8 @@ def derive_turn_receipt(
 
 _COMPACT_COUNT_KEYS = (
     "requested", "rejected_before_execution", "execution_started", "settled",
-    "succeeded", "failed", "cancelled", "indeterminate", "not_started",
+    "succeeded", "steered", "steered_before_execution", "failed", "cancelled",
+    "lifecycle_not_run", "indeterminate", "not_started",
 )
 _SPAWN_TOOLS = frozenset({"spawn_agent", "spawn_explore", "spawn_subagent"})
 
@@ -430,7 +550,37 @@ def _operation_count_projection(operations: Iterable[Mapping[str, Any]]) -> dict
         counts["settled"] += int(settled)
         if disposition in counts:
             counts[disposition] += 1
+        if rejected and disposition == "steered":
+            counts["steered_before_execution"] += 1
+        if disposition == "cancelled" and str(operation.get("preflight_kind") or "") == "lifecycle":
+            counts["lifecycle_not_run"] += 1
     return counts
+
+
+def _source_coverage_projection(operations: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Aggregate only bounded source-coverage arithmetic; report text and gap prose stay in the artifact."""
+    projection = {status: 0 for status in _SOURCE_COVERAGE_STATUSES}
+    projection.update({
+        "required_refs": 0, "consumed_refs": 0, "cited_refs": 0,
+        "covered_refs": 0, "source_gaps": 0,
+    })
+    for operation in operations:
+        status = _source_coverage_status(operation.get("child_source_coverage_status"))
+        if not status:
+            continue
+        projection[status] += 1
+        for target, source in (
+            ("required_refs", "child_required_ref_count"),
+            ("consumed_refs", "child_consumed_ref_count"),
+            ("cited_refs", "child_cited_ref_count"),
+            ("covered_refs", "child_covered_ref_count"),
+            ("source_gaps", "child_source_gap_count"),
+        ):
+            projection[target] = min(
+                _MAX_RECEIPT_REF_COUNT,
+                projection[target] + _bounded_count(operation.get(source)),
+            )
+    return projection
 
 
 def compact_receipt_projection(receipt: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -467,6 +617,10 @@ def compact_receipt_projection(receipt: Mapping[str, Any] | None) -> dict[str, A
         if ref
     }
     agents["child_artifacts"] = len(child_refs)
+    agents["source_coverage"] = _source_coverage_projection(
+        operation for operation in operations
+        if str(operation.get("name") or "") in _SPAWN_TOOLS
+    )
     warnings = receipt.get("warnings")
     warning_count = len(warnings) if isinstance(warnings, (list, tuple)) else 0
     return {
@@ -490,41 +644,49 @@ def _plural(count: int, singular: str, plural: str | None = None) -> str:
     return singular if count == 1 else (plural or singular + "s")
 
 
-def _lifecycle_parts(counts: Mapping[str, Any], *, agent: bool) -> tuple[str, ...]:
+def _lifecycle_parts(
+    counts: Mapping[str, Any], *, agent: bool, other: bool = False,
+) -> tuple[str, ...]:
     requested = _count(counts.get("requested"))
     if not requested:
         return ()
     started = _count(counts.get("execution_started"))
     rejected = _count(counts.get("rejected_before_execution"))
     succeeded = _count(counts.get("succeeded"))
+    steered = _count(counts.get("steered"))
+    steered_before_execution = min(
+        steered, _count(counts.get("steered_before_execution")),
+    )
+    adverse_rejected = max(0, rejected - steered_before_execution)
     failed = _count(counts.get("failed"))
     cancelled = _count(counts.get("cancelled"))
+    lifecycle_not_run = min(cancelled, _count(counts.get("lifecycle_not_run")))
+    adverse_cancelled = max(0, cancelled - lifecycle_not_run)
     indeterminate = _count(counts.get("indeterminate"))
     not_started = _count(counts.get("not_started"))
 
-    noun = _plural(requested, "agent", "agents") if agent else _plural(
-        requested, "operation", "operations",
-    )
+    family = "agents" if agent else ("other operations" if other else "operations")
     if succeeded == requested and started == requested:
-        return (f"{requested} {noun} succeeded",)
-    if rejected == requested:
-        return (f"{requested} {noun} rejected before start",)
+        return (f"{family} · {succeeded}/{requested} succeeded",)
 
-    parts = [f"{'agents' if agent else 'operations'}: {requested} requested"]
+    # One self-contained row per lifecycle family.  The old projection emitted
+    # nounless fragments ("4 failed · 7 started · 3 succeeded"), which was hard for
+    # both humans and the next model turn to bind to agents vs ordinary tools.
+    parts = [f"{family} · {succeeded}/{requested} succeeded"]
 
     def status_part(value: int, status: str) -> None:
-        if not value:
-            return
-        parts.append(f"{value} {status}")
+        if value:
+            parts.append(f"{family} · {value} {status}")
 
-    # Adverse facts lead so terminal truncation cannot hide them behind successful lifecycle detail.
-    status_part(rejected, "rejected before start")
+    # Outcome first; start arithmetic is inferable from requested - rejected/not-run.
+    # Every adverse fact remains explicit and can be laid out on its own terminal row.
+    status_part(adverse_rejected, "rejected before start")
+    status_part(steered, "steered")
     status_part(failed, "failed")
-    status_part(cancelled, "cancelled")
+    status_part(adverse_cancelled, "cancelled")
     status_part(indeterminate, "indeterminate")
     status_part(not_started, "not started")
-    status_part(started, "started")
-    status_part(succeeded, "succeeded")
+    status_part(lifecycle_not_run, "not run")
     return tuple(parts)
 
 
@@ -536,10 +698,30 @@ def receipt_summary_parts(receipt: Mapping[str, Any] | None) -> tuple[str, ...]:
     agents = receipt.get("agents")
     counts = counts if isinstance(counts, Mapping) else {}
     agents = agents if isinstance(agents, Mapping) else {}
-    return (
-        *_lifecycle_parts(agents, agent=True),
-        *_lifecycle_parts(_subtract_counts(counts, agents), agent=False),
+    agent_parts = _lifecycle_parts(agents, agent=True)
+    operation_parts = _lifecycle_parts(
+        _subtract_counts(counts, agents), agent=False, other=bool(agent_parts),
     )
+    source_parts: tuple[str, ...] = ()
+    source = agents.get("source_coverage")
+    if isinstance(source, Mapping):
+        complete = _count(source.get("source_complete"))
+        partial = _count(source.get("source_partial"))
+        unsupported = _count(source.get("source_unsupported"))
+        if complete or partial or unsupported:
+            labels = []
+            for count, label in (
+                (complete, "source complete"),
+                (partial, "source partial"),
+                (unsupported, "source unsupported"),
+            ):
+                if count:
+                    labels.append(f"{count} {label}")
+            covered = _count(source.get("covered_refs"))
+            required = _count(source.get("required_refs"))
+            ref_summary = f" · {covered}/{required} granted reports covered" if required else ""
+            source_parts = ("agents · " + " · ".join(labels) + ref_summary,)
+    return (*agent_parts, *source_parts, *operation_parts)
 
 
 def receipt_has_adverse_lifecycle(receipt: Mapping[str, Any] | None) -> bool:
@@ -549,9 +731,14 @@ def receipt_has_adverse_lifecycle(receipt: Mapping[str, Any] | None) -> bool:
     counts = receipt.get("counts")
     if not isinstance(counts, Mapping):
         return False
-    return any(_count(counts.get(key)) for key in (
-        "rejected_before_execution", "failed", "cancelled", "indeterminate", "not_started",
-    ))
+    return bool(
+        _count(counts.get("rejected_before_execution"))
+        > _count(counts.get("steered_before_execution"))
+        or any(_count(counts.get(key)) for key in (
+            "failed", "indeterminate", "not_started",
+        ))
+        or _count(counts.get("cancelled")) > _count(counts.get("lifecycle_not_run"))
+    )
 
 
 def receipt_completion_label(receipt: Mapping[str, Any] | None, stop_reason: str) -> str:

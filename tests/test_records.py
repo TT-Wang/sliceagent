@@ -25,11 +25,11 @@ def _journal():
 def append_and_read_typed_records():
     j = _journal()
     j.record("usage", turn=1, prompt_tokens=100)
-    j.record("permission", mode="yolo")
+    j.record("lifecycle", state="parked")
     j.record("usage", turn=2, prompt_tokens=50)
     assert len(j.read()) == 3
     assert [r["turn"] for r in j.read("usage")] == [1, 2]
-    assert j.read("permission")[0]["mode"] == "yolo"
+    assert j.read("lifecycle")[0]["state"] == "parked"
 
 
 @check
@@ -63,6 +63,48 @@ def total_usage_aggregates_per_model():
     rec(TurnEnd("end_turn", 1, {"prompt_tokens": 200, "completion_tokens": 20}))
     tot = total_usage(j)
     assert tot["m1"]["prompt_tokens"] == 300 and tot["m1"]["completion_tokens"] == 30 and tot["m1"]["turns"] == 2
+
+
+@check
+def journal_repairs_private_modes_and_relative_helpers_do_not_chmod_cwd():
+    if os.name == "nt":
+        return
+    import stat
+    from sliceagent.private_state import atomic_write_private, open_private_append
+
+    with tempfile.TemporaryDirectory() as root:
+        os.chmod(root, 0o755)
+        path = os.path.join(root, "old.jsonl")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("")
+        os.chmod(path, 0o644)
+        journal = Journal("old", root=root)
+        assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(journal.path).st_mode) == 0o600
+        journal.record("usage", turn=1)
+        assert stat.S_IMODE(os.stat(journal.path).st_mode) == 0o600
+
+    with tempfile.TemporaryDirectory() as cwd:
+        os.chmod(cwd, 0o755)
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(cwd)
+            atomic_write_private("prefs.json", "{}")
+            atomic_write_private("./prefs-dot.json", "{}")
+            with open_private_append("events.jsonl") as stream:
+                stream.write("{}\n")
+            with open_private_append("./events-dot.jsonl") as stream:
+                stream.write("{}\n")
+            Journal("relative", root=".").record("usage", turn=1)
+            assert stat.S_IMODE(os.stat(cwd).st_mode) == 0o755, \
+                "a relative private file/journal must not chmod the caller's workspace directory"
+            assert stat.S_IMODE(os.stat("prefs.json").st_mode) == 0o600
+            assert stat.S_IMODE(os.stat("prefs-dot.json").st_mode) == 0o600
+            assert stat.S_IMODE(os.stat("events.jsonl").st_mode) == 0o600
+            assert stat.S_IMODE(os.stat("events-dot.jsonl").st_mode) == 0o600
+            assert stat.S_IMODE(os.stat("relative.jsonl").st_mode) == 0o600
+        finally:
+            os.chdir(old_cwd)
 
 
 def main():

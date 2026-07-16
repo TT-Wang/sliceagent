@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -28,6 +28,9 @@ class TurnStarted(Event):
     task_title: str = ""
     task_id: str = ""
     plan: list | None = None
+    # Physical turn/segment identity.  Presentation callbacks from concurrent child
+    # workers use it to prove ownership; task_id alone is intentionally longer-lived.
+    turn_id: str = ""
 
 
 @dataclass
@@ -60,9 +63,10 @@ class SliceBuilt(Event):
 class ModelCallPrepared(Event):
     """Exact prepared request immediately before one physical provider attempt.
 
-    ``attempt`` is 1-based within ``step`` and includes SDK-level retries as well as reactive
-    re-projections. Unlike :class:`SliceBuilt`, this is an observation event: consumers must not
-    interpret it as a new turn or semantic-step boundary.
+    ``attempt`` is 1-based within ``step``. SliceAgent is the sole retry owner (the provider SDK is
+    configured one-shot), so every transport attempt passes this boundary; reactive re-projections do too.
+    Unlike :class:`SliceBuilt`, this is an observation event: consumers must not interpret it as a new turn
+    or semantic-step boundary.
     """
 
     step: int
@@ -78,11 +82,14 @@ class AssistantText(Event):
     # Tool-using responses may contain explanatory text before execution.  Only a terminal
     # response is held behind completion verification and durable commit by interactive UIs.
     final: bool = True
+    # True only for deterministic host wording emitted when the provider supplied no assistant text.  Sinks
+    # may render it, but evidence/report collectors must not mistake it for model-authored testimony.
+    synthetic: bool = False
 
 
 @dataclass
 class ToolRequested(Event):
-    """One provider-requested logical invocation, before authorization or scheduling.
+    """One provider-requested logical invocation, before preflight or scheduling.
 
     This is deliberately separate from :class:`ToolExecutionStarted`: a rejected or
     deduplicated call still needs an auditable logical identity, but it never entered a
@@ -94,16 +101,20 @@ class ToolRequested(Event):
 
 @dataclass
 class ToolRejected(Event):
-    """A requested invocation was conclusively rejected before its handler ran."""
+    """A requested invocation was conclusively stopped before its handler ran.
+
+    ``lifecycle`` is a neutral not-run transition; ``catastrophic`` remains an explicit safety refusal.
+    """
 
     invocation: "ToolInvocation"
     reason: str
     outcome: "ToolOutcome | None" = None
+    kind: str = "rejected"
 
 
 @dataclass
 class ToolExecutionStarted(Event):
-    """The pre-handler durability boundary for an authorized physical execution."""
+    """The pre-handler durability boundary for a physical execution."""
 
     invocation: "ToolInvocation"
 
@@ -147,6 +158,63 @@ class ToolResult(Event):
     invocation_id: str = ""
     outcome: "ToolOutcome | None" = None
     apply_effects: bool = True  # false for a logical dedup reply whose source outcome was already reduced
+
+
+@dataclass
+class ToolQueued(Event):
+    """A requested invocation is admitted but waiting for a scheduler slot.
+
+    This is presentation truth, not an execution edge: the handler has not started and may still settle as
+    cancelled.  ``ToolExecutionStarted``/``ToolStarted`` remain the only authoritative physical-start facts.
+    """
+
+    invocation: "ToolInvocation"
+    reason: str = "waiting for scheduler slot"
+    invocation_id: str = ""
+    request_ordinal: int = 0
+
+
+@dataclass
+class SubagentProgress(Event):
+    """Turn-scoped child activity sent to presentation adapters.
+
+    This is not parent context and is never model-visible.  Stable identities and a
+    monotonic sequence prevent concurrent children (or a late callback from an older
+    turn) from overwriting one another's terminal state.
+    """
+
+    agent_id: str
+    parent_turn_id: str
+    launch_ordinal: int = 0
+    kind: str = ""
+    name: str = ""
+    depth: int = 1
+    # Live phases are execution facts, not prose labels. ``running`` remains a compatibility fallback for older
+    # emitters; core children use the more specific awaiting_model/model_active/reasoning/writing/running_tool/
+    # retry_wait/settling states so the matrix never claims "waiting for model" after a tool, delta, or final
+    # child-loop interruption has already arrived. ``settling`` is nonterminal until the outer ToolResult.
+    phase: str = "running"
+    detail: str = ""
+    tool_count: int = 0
+    sequence: int = 0
+    session_id: str = ""
+    # Immediate child-artifact parent for nested delegation.  parent_turn_id remains
+    # the root physical turn owner used for stale-callback rejection.
+    parent_agent_id: str = ""
+    # Exact physical spawn identity.  Artifact/agent ids are durable result identities and may be minted only
+    # after execution begins; invocation identity exists at request time and disambiguates identical siblings.
+    invocation_id: str = ""
+    request_ordinal: int = 0
+    # Stable objective is separate from ``detail``, which is intentionally overwritten by live activity.
+    objective: str = ""
+    # Typed activity metadata. These fields are optional so third-party/older structured callbacks continue to
+    # work; renderers must never parse ``detail`` to invent attempt, tool, timeout, or partial-result facts.
+    attempt: int = 0
+    max_attempts: int = 0
+    retry_delay_s: float = 0.0
+    tool_name: str = ""
+    terminal_reason: str = ""
+    partial: bool = False
 
 
 @dataclass
@@ -203,7 +271,7 @@ class TurnCommitted(Event):
 
 @dataclass
 class TurnInterrupted(Event):
-    reason: str  # "aborted" | "max_steps" | "error"
+    reason: str  # aborted | max_steps | token_budget | blocked(catastrophic only) | overflow | error | indeterminate
     message: str | None = None
 
 
@@ -225,6 +293,10 @@ def make_dispatcher(*sinks: Callable[[Event], None],
     the same blanket exception policy used for presentation.
     """
     def detached(value):
+        if is_dataclass(value) and not isinstance(value, type):
+            return replace(value, **{
+                field.name: detached(getattr(value, field.name)) for field in fields(value)
+            })
         if isinstance(value, Mapping):
             return {str(key): detached(child) for key, child in value.items()}
         if isinstance(value, list):
@@ -234,11 +306,11 @@ def make_dispatcher(*sinks: Callable[[Event], None],
         return copy.deepcopy(value)
 
     def sink_view(event: Event) -> Event:
-        # Completion truth is a compact mapping, but mappings and dataclass events are otherwise mutable.
-        # Give every sink an independent view so an observer cannot rewrite a later observer's terminal claim.
-        if isinstance(event, TurnCommitted):
-            return replace(event, receipt=detached(event.receipt))
-        return event
+        # Events, invocation args, outcome payloads, usage, plans, and prepared messages all carry mutable
+        # containers. Give every required sink and observer a detached dataclass graph so one consumer cannot
+        # rewrite a later consumer's evidence—or the caller's original event. This is intentionally recursive
+        # only over the event payload; callable/runtime owners are never event fields.
+        return detached(event)
 
     def dispatch(event: Event) -> None:
         for sink in required:
@@ -248,4 +320,22 @@ def make_dispatcher(*sinks: Callable[[Event], None],
                 sink(sink_view(event))
             except Exception:
                 pass  # a sink/listener failure must not affect the loop
+
+    def bind_dispatch() -> Dispatcher:
+        """Freeze any dynamic sink routers to the active turn they currently address.
+
+        Tool workers may outlive a cancellation/deadline. A router that simply dereferences the application's
+        current workspace would let a late lifecycle callback journal into the next turn. Required/runtime
+        routers expose ``bind_dispatch`` to return an epoch-pinned sink; ordinary observers are already stable.
+        """
+        def bind_one(sink):
+            binder = getattr(sink, "bind_dispatch", None)
+            return binder() if callable(binder) else sink
+
+        return make_dispatcher(
+            *(bind_one(sink) for sink in sinks),
+            required=tuple(bind_one(sink) for sink in required),
+        )
+
+    dispatch.bind_dispatch = bind_dispatch  # type: ignore[attr-defined]
     return dispatch

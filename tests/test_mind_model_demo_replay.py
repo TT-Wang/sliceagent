@@ -1,8 +1,8 @@
 """Deterministic replay of the mind-model demo failures. No model, network, or pytest required.
 
 This intentionally crosses the public seams the real host uses: discourse interpretation produces one
-TurnAdmission, TurnAuthorityHook enforces it, TurnReceipt reduces canonical execution journals, and the
-turn-contract renderer projects only the selected durable evidence back into the next slice.
+TurnAdmission, TurnReceipt reduces canonical execution journals, and the turn-contract renderer projects
+only the selected durable evidence back into the next slice.
 """
 from __future__ import annotations
 
@@ -13,11 +13,9 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.discourse import extract_pending_proposal, interpret_turn  # noqa: E402
-from sliceagent.events import TurnEnd  # noqa: E402
-from sliceagent.hooks import TurnAuthorityHook  # noqa: E402
+from sliceagent.events import ToolResult, TurnEnd  # noqa: E402
 from sliceagent.pfc import Slice, record_user, slice_sink  # noqa: E402
 from sliceagent.receipts import TurnReceipt  # noqa: E402
-from sliceagent.registry import ToolIntentEffect  # noqa: E402
 from sliceagent.regions import render_evidence_detail, render_evidence_result  # noqa: E402
 from sliceagent.session import apply_turn_continuation  # noqa: E402
 
@@ -33,15 +31,6 @@ def check(fn):
 HUNTER_PATH = "/Users/tongtao/Desktop/hunter"
 
 
-def _authority_gate(admission):
-    return TurnAuthorityHook(
-        lambda: admission,
-        lambda name, _args: (
-            ToolIntentEffect.OBSERVE if name == "read_file" else ToolIntentEffect.EXTERNAL
-        ),
-    )
-
-
 def _sliceagent_focus():
     oriented = interpret_turn("Review the Hunter project", ())
     counterfactual = interpret_turn(
@@ -52,17 +41,11 @@ def _sliceagent_focus():
 
 
 @check
-def hunter_directive_and_only_the_adjacent_exact_yes_authorize_navigation():
+def hunter_directive_and_adjacent_yes_compile_navigation_scope():
     directive = interpret_turn("go to Hunter workspace", ())
     assert directive.admission.effect_authority == "explicit"
     assert directive.admission.target.label == "Hunter"
-    directive_gate = _authority_gate(directive.admission)
-    assert directive_gate.authorize_tool("change_workspace", {"path": HUNTER_PATH}).allow
-    # NAVIGATION tier: a loose named directive authorizes the reversible switch to whatever path the model
-    # resolves — the gate no longer second-guesses the path of an authorized navigation (it can be undone).
-    assert directive_gate.authorize_tool(
-        "change_workspace", {"path": "/Users/tongtao/Desktop/atlas"},
-    ).allow
+    assert directive.admission.effect_grants[0].operation == "workspace.navigate"
 
     assistant = (
         "The Hunter workspace appears to be outside the current project. "
@@ -75,17 +58,12 @@ def hunter_directive_and_only_the_adjacent_exact_yes_authorize_navigation():
 
     adjacent_yes = interpret_turn("yes", (), pending_proposal=proposal)
     assert adjacent_yes.admission.effect_authority == "continuation"
-    adjacent_gate = _authority_gate(adjacent_yes.admission)
-    assert adjacent_gate.authorize_tool("change_workspace", {"path": HUNTER_PATH}).allow
-    assert not adjacent_gate.authorize_tool(
-        "change_workspace", {"path": "/Users/tongtao/Desktop/atlas"},
-    ).allow, "assent is an exact grant for the clarified path, not ambient navigation authority"
+    assert dict(adjacent_yes.admission.effect_grants[0].exact_args) == {"path": HUNTER_PATH}
 
     stale_yes = interpret_turn("yes", ())
     assert stale_yes.admission.effect_authority == "uncertain"
-    assert not _authority_gate(stale_yes.admission).authorize_tool(
-        "change_workspace", {"path": HUNTER_PATH},
-    ).allow, "the same word outside its adjacent proposal must not retain authority"
+    assert not stale_yes.admission.effect_grants, \
+        "the same word outside its adjacent proposal must not retain an action scope"
 
 
 @check
@@ -150,8 +128,207 @@ def failure_questions_and_self_audits_do_not_become_open_user_reports():
     apply_turn_continuation(state, deployment, admission=diagnosed.admission)
     assert state.open_report == deployment, "a product failure question must not be mistaken for agent self-audit"
 
+
 @check
-def quoted_navigation_transcript_is_data_and_cannot_authorize_effects():
+def open_report_closes_only_after_edit_then_real_verification_success():
+    def repaired_state(report="tests still fail"):
+        state = Slice(); state.reset("repair it"); state.open_report = report
+        sink = slice_sink(state)
+        sink(ToolResult(
+            "str_replace", {"path": "app.py", "old_string": "bad", "new_string": "good"},
+            "updated", False, status="succeeded",
+        ))
+        assert state.open_report and state.runtime.report_repair_observed
+        return state, sink
+
+    for name, args, report in (
+        ("run_command", {"command": "PYTHONPATH=src pytest -q"}, "tests still fail"),
+        ("run_command", {"command": "uv run pytest -q"}, "pytest still fails"),
+        ("run_command", {"command": "bash scripts/run_tests.sh"}, "the test suite still fails"),
+        ("run_command", {"command": "npm run build"}, "the build still fails"),
+        ("run_command", {"command": "ruff check ."}, "lint still fails"),
+        ("run_command", {"command": "mypy src"}, "the type check still fails"),
+        ("run_command", {"command": "pytest -q && ruff check ."}, "tests and lint still fail"),
+        ("run_command", {"command": "ruff check ."}, "the verification command failed"),
+    ):
+        state, sink = repaired_state(report)
+        sink(ToolResult(name, args, "passed", False, status="succeeded"))
+        assert not state.open_report, (name, args)
+
+    for command in (
+        "echo pytest", "printf 'npm test'", "python -c \"print('pytest')\"",
+        "pytest || true", "pytest; echo done", "pytest | tee test.log", "pytest & wait",
+        "python -c \"print('ok')\" tests.py", "bash -c \"true\" run_tests.sh",
+        "pytest --collect-only", "npm run test --if-present", "make -n test",
+        "bash -n scripts/run_tests.sh", "cargo test --no-run", "tsc --showConfig",
+        "env --help pytest", "pytest -qh", "npm run test --if-present=true",
+        "ruff check . --exit-zero", "bash --rcfile scripts/run_tests.sh", "mvn test -DskipTests",
+        "go test -list .", "ctest -N", "nox -l", "eslint --print-config app.js",
+    ):
+        state, sink = repaired_state()
+        sink(ToolResult(
+            "run_command", {"command": command}, "mentioned", False, status="succeeded",
+        ))
+        assert state.open_report, command
+
+    for code in (
+        "import pytest\npytest.main(['-q'])",
+        "import unittest\nunittest.TextTestRunner().run(suite)",
+        "import subprocess\nsubprocess.call(['pytest', '-q'])",
+        "import subprocess\nsubprocess.Popen(['pytest', '-q'])",
+        "import os\nos.system('pytest -q')",
+        "import subprocess\nsubprocess.run(['pytest', '-q'])",
+        "run_command('pytest -q')",
+        "try:\n    subprocess.check_call(['pytest'])\nexcept Exception:\n    pass",
+        "def verify():\n    raise SystemExit(pytest.main(['-q']))\nverify()",
+        "import subprocess\nsubprocess.run(['pytest', '--collect-only'], check=True)",
+        "import subprocess\nsubprocess.run(['pytest', '-q'], check=True)",
+        "import subprocess\nsubprocess.check_call(['pytest', '-q'])",
+        "import subprocess\nsubprocess.check_call(['npm', 'run', 'test', '--if-present'])",
+        "import pytest\nraise SystemExit(pytest.main(['-q']))",
+        "import pytest\nraise SystemExit(pytest.main(['--collect-only']))",
+        "import pytest, sys\nsys.exit(pytest.main(['--help']))",
+        "import pytest\nraise SystemExit(pytest.main(args=['--collect-only']))",
+        "import subprocess\nmode = '--collect-only'\nsubprocess.check_call(['pytest', mode])",
+        "import pytest\nmode = '--help'\nraise SystemExit(pytest.main([mode]))",
+    ):
+        state, sink = repaired_state()
+        sink(ToolResult(
+            "execute_code", {"code": code}, "script completed", False, status="succeeded",
+        ))
+        assert state.open_report, code
+
+    for report, command in (
+        ("pytest tests still fail", "ruff check ."),
+        ("lint still fails", "pytest -q"),
+        ("the type check still fails", "npm run build"),
+        ("the build and tests still fail", "npm run build"),
+    ):
+        state, sink = repaired_state(report)
+        sink(ToolResult(
+            "run_command", {"command": command}, "passed", False, status="succeeded",
+        ))
+        assert state.open_report, (report, command)
+
+    sequential, sequential_sink = repaired_state("tests and lint still fail")
+    sequential_sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+    ))
+    assert sequential.open_report
+    assert sequential.runtime.report_verification_families == {"test"}
+    sequential_sink(ToolResult(
+        "run_command", {"command": "ruff check ."}, "passed", False, status="succeeded",
+    ))
+    assert not sequential.open_report
+
+    invalidated, invalidated_sink = repaired_state("tests and lint still fail")
+    invalidated_sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+    ))
+    invalidated_sink(ToolResult(
+        "str_replace", {"path": "app.py", "old_string": "good", "new_string": "better"},
+        "updated", False, status="succeeded",
+    ))
+    invalidated_sink(ToolResult(
+        "run_command", {"command": "ruff check ."}, "passed", False, status="succeeded",
+    ))
+    assert invalidated.open_report
+    assert invalidated.runtime.report_verification_families == {"lint"}
+
+    contradicted, contradicted_sink = repaired_state("tests and lint still fail")
+    contradicted_sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+    ))
+    contradicted_sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "failed", True, status="failed",
+    ))
+    contradicted_sink(ToolResult(
+        "run_command", {"command": "ruff check ."}, "passed", False, status="succeeded",
+    ))
+    assert contradicted.open_report
+    assert contradicted.runtime.report_verification_families == {"lint"}
+
+    # Verification before the repair is not proof about the later bytes.
+    state = Slice(); state.reset("repair it"); state.open_report = "tests still fail"
+    sink = slice_sink(state)
+    sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+    ))
+    sink(ToolResult(
+        "str_replace", {"path": "app.py", "old_string": "bad", "new_string": "good"},
+        "updated", False, status="succeeded",
+    ))
+    assert state.open_report
+
+    for code in (
+        'print("write_file(\\\'app.py\\\', \\\'fixed\\\')")',
+        "# write_file('app.py', 'fixed')",
+        "if False:\n    write_file('app.py', 'fixed')",
+        "def write_file(path, content): return None\nwrite_file('app.py', 'fixed')",
+    ):
+        lexical = Slice(); lexical.reset("repair it"); lexical.open_report = "tests still fail"
+        lexical_sink = slice_sink(lexical)
+        lexical_sink(ToolResult(
+            "execute_code", {"code": code}, "completed", False, status="succeeded",
+        ))
+        assert not lexical.runtime.report_repair_observed
+        lexical_sink(ToolResult(
+            "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+        ))
+        assert lexical.open_report, "source text alone is not a physical repair receipt"
+
+    tracked = Slice(); tracked.reset("repair it")
+    slice_sink(tracked)(ToolResult(
+        "execute_code", {"code": "write_file('app.py', 'fixed')"},
+        "completed", False, status="succeeded",
+    ))
+    assert "app.py" in tracked.edited_files, "code-as-action residency remains best-effort tracked"
+
+    ui = Slice(); ui.reset("repair it"); ui.open_report = "the message panel is still too crowded"
+    ui_sink = slice_sink(ui)
+    ui_sink(ToolResult(
+        "str_replace", {"path": "app.py", "old_string": "dense", "new_string": "spacious"},
+        "updated", False, status="succeeded",
+    ))
+    ui_sink(ToolResult(
+        "run_command", {"command": "pytest -q"}, "passed", False, status="succeeded",
+    ))
+    assert ui.open_report, "a passing code suite does not verify a visual/UX report"
+
+
+@check
+def successful_retry_of_same_edit_clears_only_its_stale_error():
+    state = Slice(); state.reset("edit")
+    sink = slice_sink(state)
+    args = {"path": "app.py", "old_string": "missing", "new_string": "fixed"}
+    sink(ToolResult("str_replace", args, "Error: old string not found", True, status="failed"))
+    assert state.last_error
+    sink(ToolResult("str_replace", args, "updated", False, status="succeeded"))
+    assert not state.last_error
+
+    unrelated = Slice(); unrelated.reset("edit")
+    unrelated_sink = slice_sink(unrelated)
+    unrelated_sink(ToolResult(
+        "str_replace", args, "Error: old string not found", True, status="failed",
+    ))
+    original = unrelated.last_error
+    unrelated_sink(ToolResult(
+        "run_command", {"command": "pwd"}, "/tmp/project", False, status="succeeded",
+    ))
+    assert unrelated.last_error == original, "an unrelated shell success does not resolve an edit failure"
+
+    other_edit = {"path": "app.py", "old_string": "different", "new_string": "also fixed"}
+    unrelated_sink(ToolResult(
+        "str_replace", other_edit, "updated another snippet", False, status="succeeded",
+    ))
+    assert unrelated.last_error == original, "a different edit in the same file is not the failed retry"
+    unrelated_sink(ToolResult(
+        "str_replace", args, "updated intended snippet", False, status="succeeded",
+    ))
+    assert not unrelated.last_error
+
+@check
+def quoted_navigation_transcript_is_attributed_context_not_current_action():
     quoted = interpret_turn(
         'The transcript says: "go to Hunter workspace" and then "yes". '
         "Explain why that behavior was wrong.",
@@ -159,13 +336,7 @@ def quoted_navigation_transcript_is_data_and_cannot_authorize_effects():
     )
     assert quoted.admission.attributed_spans, "the quoted operative language must be marked as data"
     assert quoted.admission.effect_authority in {"none", "uncertain"}
-    decision = _authority_gate(quoted.admission).authorize_tool(
-        "change_workspace", {"path": HUNTER_PATH},
-    )
-    assert not decision.allow and "turn_authority_missing" in decision.reason
-    assert _authority_gate(quoted.admission).authorize_tool(
-        "read_file", {"path": "README.md"},
-    ).allow, "quotation blocks effects without making the turn blind"
+    assert not quoted.admission.effect_grants
 
 
 def _event(event_type: str, payload: dict) -> dict:
@@ -187,13 +358,13 @@ def _spawn_receipt(count: int, *, rejected: bool, turn_id: str) -> TurnReceipt:
         }
         events.append(_event("tool-requested", base))
         if rejected:
-            reason = f"demo policy rejection {index}"
+            reason = f"demo extension rejection {index}"
             events.append(_event("tool-rejected", {**base, "reason": reason}))
             events.append(_event("tool-settled", {
                 **base,
                 "outcome": {
-                    "status": "failed",
-                    "text": f"Error: blocked by policy: {reason}",
+                    "status": "cancelled",
+                    "text": f"Not run: {reason}",
                     "effects": [],
                 },
             }))
@@ -296,8 +467,8 @@ def mixed_spawn_counts_and_failure_self_reflection_come_only_from_receipts():
     assert "execution-started=11" in reflected and "failed=0" in reflected
     assert detail_refs[0]["counts"]["execution_started"] == 0, \
         "the rejected-turn detail remains distinct from the task-wide aggregate"
-    assert "recorded reason excerpt=demo policy rejection 0" in reflected
-    assert "recorded reason excerpt=demo policy rejection 12" in reflected
+    assert "recorded reason excerpt=demo extension rejection 0" in reflected
+    assert "recorded reason excerpt=demo extension rejection 12" in reflected
     assert "PROSE LIE" not in reflected
 
 

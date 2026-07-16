@@ -7,11 +7,13 @@ import os
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 
 os.environ["SLICEAGENT_VAULT"] = tempfile.mkdtemp(prefix="rosteridx-")   # hermetic: FTS index stays in tmp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.hippocampus import HippocampusMixin, SubagentFS, render_artifact  # noqa: E402
+from sliceagent.execution import ToolStatus  # noqa: E402
 from sliceagent.memory import NullMemory  # noqa: E402
 from sliceagent.subagent import SubagentHost, run_subagent, _valid_instance_name  # noqa: E402
 from sliceagent.retriever import NullRetriever  # noqa: E402
@@ -48,15 +50,27 @@ class _FakeLLM:
     def __init__(self, text):
         self._text = text
         self.reasoning = "fast"
+        self._calls = [0]
     def complete(self, messages, schemas):
+        self._calls[0] += 1
+        if schemas and not any(message.get("role") == "tool" for message in messages):
+            response = _Resp("inspect source")
+            response.finish_reason = "tool_calls"
+            response.tool_calls = [SimpleNamespace(
+                name="read_file", args={"path": "a.py"}, id="read-1",
+            )]
+            return response
         return _Resp(self._text)
 
 
 class _ToolsHost:
-    def schemas(self): return []
+    def schemas(self):
+        return [{"type": "function", "function": {
+            "name": "read_file", "parameters": {"type": "object", "properties": {}},
+        }}]
     def root(self): return "/tmp/ws"
     def accesses(self, name, args): return []
-    def run(self, name, args): return ""
+    def run(self, name, args): return "observed implementation"
     def read_text(self, path): return ""
 
 
@@ -125,11 +139,11 @@ def index_is_roster_style():
 def host_rejects_invalid_names_and_threads_valid_ones():
     mem = _mem()
     host = SubagentHost(_ToolsHost(), llm=_FakeLLM("child report"), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, session_id="s1")
+                        memory=mem, max_depth=1, session_id="s1")
     r = host.run("spawn_explore", {"task": "t", "name": "../evil"})
-    assert r.startswith("Error: invalid subagent name"), r
+    assert r.status is ToolStatus.STEERED and "invalid subagent name" in r, r
     r = host.run("spawn_explore", {"task": "t", "name": "sub-7"})    # canonical-handle spoof
-    assert r.startswith("Error: invalid subagent name"), r
+    assert r.status is ToolStatus.STEERED and "invalid subagent name" in r, r
     out = host.run("spawn_explore", {"task": "investigate x", "name": "auth-explorer"})
     assert "[auth-explorer (explore) ok" in out, out                              # identity leads the digest
     # S11: the returned handle is the CANONICAL immutable sub-N.md (not the subagents/<name>.md alias, which
@@ -144,7 +158,7 @@ def host_rejects_invalid_names_and_threads_valid_ones():
 def unnamed_spawn_is_unchanged_backcompat():
     mem = _mem()
     out = run_subagent("do x", tools=_ToolsHost(), llm=_FakeLLM("done"), retriever=NullRetriever(),
-                       memory=mem, policy=None, max_steps=2, read_only=True, session_id="s1")
+                       memory=mem, max_steps=2, read_only=True, session_id="s1")
     assert out.startswith("[explore ok") and 'read_file("subagents/sub-1.md")' in out, out
     assert mem.read_subagent_artifacts("s1")[-1]["artifact"]["name"] == ""
 
@@ -170,7 +184,7 @@ class _MarkerHost(_ToolsHost):
 
 @check
 def grants_allow_exact_reads_only():
-    child = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=None, policy=None,
+    child = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=None,
                          max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"],
                          grants=frozenset({"subagents/sub-1.md"}))
     assert child.run("read_file", {"path": "subagents/sub-1.md"}).startswith("RAN:")      # granted
@@ -191,7 +205,7 @@ def spawn_validates_grants_against_existing_seals():
     mem = _mem()
     mem.append_subagent_artifact("s1", _art("explorer", "r1", name="auth-explorer"))
     host = SubagentHost(_ToolsHost(), llm=_FakeLLM("synth"), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, session_id="s1")
+                        memory=mem, max_depth=1, session_id="s1")
     for bad in (["subagents/sub-99.md"],        # nonexistent job
                 ["subagents/nobody.md"],        # nonexistent name
                 ["subagents/index.md"],         # the manifest is not grantable
@@ -222,9 +236,9 @@ def granted_inputs_are_advertised_in_the_childs_brief():
     class _SpyLLM(_FakeLLM):
         def complete(self, messages, schemas):
             seen["prompt"] = "\n".join(str(m.get("content", "")) for m in messages)
-            return _Resp(self._text)
+            return super().complete(messages, schemas)
     host = SubagentHost(_ToolsHost(), llm=_SpyLLM("done"), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, session_id="s1")
+                        memory=mem, max_depth=1, session_id="s1")
     host.run("spawn_explore", {"task": "t", "grants": ["subagents/sub-1.md"]})
     assert 'read_file("subagents/sub-1.md")' in seen["prompt"], "grant not advertised to the child"
 
@@ -233,7 +247,7 @@ def granted_inputs_are_advertised_in_the_childs_brief():
 def children_cannot_regrant_one_hop_only():
     # a GENERAL child with depth left still may not mint grants for a grandchild
     child = SubagentHost(_ToolsHost(), llm=_FakeLLM("x"), retriever=NullRetriever(), memory=_mem(),
-                         policy=None, max_depth=2, depth=1, spec=BUILTIN_AGENTS["general"],
+                         max_depth=2, depth=1, spec=BUILTIN_AGENTS["general"],
                          session_id="s1", grants=frozenset({"subagents/sub-1.md"}))
     r = child.run("spawn_explore", {"task": "t", "grants": ["subagents/sub-1.md"]})
     assert "cannot re-grant" in r, r
@@ -266,7 +280,7 @@ def synthesis_seal_ships_its_refinement_map():
     mem.append_subagent_artifact("s1", _art("explorer", "auth findings", name="auth-explorer"))
     mem.append_subagent_artifact("s1", _art("explorer", "db findings"))
     host = SubagentHost(_ToolsHost(), llm=_FakeLLM("merged synthesis"), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, session_id="s1")
+                        memory=mem, max_depth=1, session_id="s1")
     out = host.run("spawn_agent", {"agent": "synthesiser", "task": "merge the two surveys",
                                    "grants": ["subagents/sub-1.md", "subagents/sub-2.md"]})
     assert "[synthesiser" in out and 'read_file("subagents/sub-3.md")' in out, out
@@ -284,7 +298,7 @@ from sliceagent.hippocampus import RosterFS  # noqa: E402
 
 def _staff_host(mem, llm=None):
     return SubagentHost(_ToolsHost(), llm=llm or _FakeLLM("job done"), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, session_id="s1")
+                        memory=mem, max_depth=1, session_id="s1")
 
 
 @check
@@ -308,7 +322,7 @@ def wake_is_kind_stable():
     host = _staff_host(mem)
     host.run("spawn_explore", {"task": "t", "name": "auth-explorer"})
     r = host.run("spawn_agent", {"agent": "general", "task": "t", "name": "auth-explorer"})
-    assert r.startswith("Error:") and "standing 'explorer' specialist" in r, r
+    assert r.status is ToolStatus.STEERED and "standing 'explorer' specialist" in r, r
     assert mem.roster_get("auth-explorer")["jobs"] == 1                  # the refused wake added no job
 
 
@@ -319,7 +333,7 @@ def wake_seed_carries_identity_lessons_absent_and_abstention():
     class _SpyLLM(_FakeLLM):
         def complete(self, messages, schemas):
             seen["prompt"] = "\n".join(str(m.get("content", "")) for m in messages)
-            return _Resp(self._text)
+            return super().complete(messages, schemas)
     host = _staff_host(mem, llm=_SpyLLM("mapped the login flow end to end"))
     host.run("spawn_explore", {"task": "first job", "name": "auth-explorer"})
     seen.clear()
@@ -353,7 +367,7 @@ def roster_is_uncapped_a_dormant_specialist_costs_nothing():
 @check
 def own_namespace_carveout_self_memory_not_a_channel():
     mem = _mem()
-    child = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem, policy=None,
+    child = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem,
                          max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"],
                          instance_name="auth-explorer")
     for own in ("roster/auth-explorer", "roster/auth-explorer/profile.md",
@@ -366,12 +380,12 @@ def own_namespace_carveout_self_memory_not_a_channel():
         assert "private namespaces" in r, (other, r)
     assert "roster/auth-explorer/" in child.run("read_file", {"path": "roster/index.md"})  # hint advertised
     # a TEMP (no identity) gets no roster reach at all
-    temp = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem, policy=None,
+    temp = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem,
                         max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"])
     assert "private namespaces" in temp.run("read_file", {"path": "roster/auth-explorer/job-1.md"})
     # TRAVERSAL: '..' inside an own-namespace (or granted) path must never reach a sibling — the guard
     # normalizes exactly like the mounted FS does, so the prefix check sees the CANONICAL target.
-    granted = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem, policy=None,
+    granted = SubagentHost(_MarkerHost(), llm=None, retriever=None, memory=mem,
                            max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"],
                            instance_name="auth-explorer", grants=frozenset({"subagents/sub-1.md"}))
     for sneaky in ("roster/auth-explorer/../other-agent/job-1.md",
@@ -415,7 +429,7 @@ def roster_storage_edges():
     assert NullMemory().roster_get("x") is None and NullMemory().roster_list() == []
     # named spawn on a NullMemory (headless) degrades to a session temp, no crash
     host = SubagentHost(_ToolsHost(), llm=_FakeLLM("d"), retriever=NullRetriever(),
-                        memory=NullMemory(), policy=None, max_depth=1, session_id="")
+                        memory=NullMemory(), max_depth=1, session_id="")
     out = host.run("spawn_explore", {"task": "t", "name": "auth-explorer"})
     assert "[auth-explorer (explore) ok" in out and "hired" not in out, out
 
@@ -459,7 +473,7 @@ def wake_seed_injects_lessons_as_advisory_priors():
     class _SpyLLM(_FakeLLM):
         def complete(self, messages, schemas):
             seen["prompt"] = "\n".join(str(m.get("content", "")) for m in messages)
-            return _Resp(self._text)
+            return super().complete(messages, schemas)
     host = _staff_host(mem, llm=_SpyLLM("ok\nLESSON: never trust the cached schema"))
     host.run("spawn_explore", {"task": "job one", "name": "db-explorer"})
     seen.clear()
@@ -471,7 +485,9 @@ def wake_seed_injects_lessons_as_advisory_priors():
     assert 'end your summary with ONE line: "LESSON:' in p
     seen.clear()
     host.run("spawn_explore", {"task": "temp job"})                      # unnamed temp
-    assert "LESSON:" not in seen["prompt"]
+    # The fake navigator itself returns a LESSON line, which legitimately appears in the staged handoff;
+    # what an unnamed temp must not receive is the standing-specialist reflection instruction.
+    assert "end your summary with ONE line" not in seen["prompt"]
 
 
 @check
@@ -568,7 +584,7 @@ def concurrent_same_name_hire_is_race_safe():
     host = _staff_host(mem)
     r = host.run("spawn_agent", {"agent": ("general" if won != "general" else "explorer"),
                                  "task": "t", "name": "scout"})
-    assert r.startswith("Error:") and "standing" in r, r
+    assert r.status is ToolStatus.STEERED and "standing" in r, r
 
 
 @check
@@ -678,7 +694,7 @@ def cross_process_empty_profile_window_is_retried():
 @check
 def validate_grants_no_crash_when_memory_none():
     # LOW/certain (r2 #3): a parent host with memory=None + a session_id must not AttributeError on grants.
-    host = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None, policy=None,
+    host = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=None,
                         max_depth=1, depth=0, spec=None, session_id="s1")
     err, grants = host._validate_grants(["subagents/sub-1.md"])
     assert err.startswith("Error: cannot grant") and grants == frozenset(), (err, grants)   # clean error, no crash
@@ -724,7 +740,7 @@ def hire_suffix_not_appended_to_a_failed_childs_error():
             r = _Resp(""); r.tool_calls = [_TC()]; r.finish_reason = "tool_calls"; return r
     mem = _mem()
     host = SubagentHost(_ToolsHost(), llm=_LoopLLM(), retriever=NullRetriever(),
-                        memory=mem, policy=None, max_depth=1, max_steps=1, session_id="s1")
+                        memory=mem, max_depth=1, max_steps=1, session_id="s1")
     out = host.run("spawn_agent", {"agent": "general", "task": "do x", "name": "flaky"})
     assert out.startswith("Error:") and "hired standing specialist" not in out, out
     assert mem.roster_get("flaky") is not None                      # the hire is real regardless of outcome
@@ -738,7 +754,7 @@ from sliceagent.regions import render_roster, REGION_ORDER, ROSTER_MANIFEST_K  #
 @check
 def roster_is_surfaced_in_the_slice_manifest():
     # The bug the user hit: the roster was MOUNTED for tool routing but never ADVERTISED in the slice, so a
-    # fresh session couldn't discover read_file("roster/index.md") and spelunked the raw vault instead. The
+    # fresh session couldn't discover @sliceagent/roster/index.md and spelunked the raw vault instead. The
     # STANDING SPECIALISTS region is the fix (the visible-cache-manifest lesson, applied to the roster).
     assert render_roster([]) == ""                                          # empty → nothing
     profs = [{"name": f"spec-{i}", "kind": "explorer", "jobs": i, "last_active": "2026-07-09T00:00:00Z"}
@@ -747,13 +763,14 @@ def roster_is_surfaced_in_the_slice_manifest():
     man = render_roster(profs)
     assert "spec-0 · explorer · 0 job(s)" in man                            # locators: name · kind · jobs
     assert man.count("\n") == ROSTER_MANIFEST_K                             # K lines + one overflow line
-    assert "+6 more" in man and 'read_file("roster/index.md")' in man       # overflow → the full-list call
+    assert "+6 more" in man and 'read_file("@sliceagent/roster/index.md")' in man
     # the region is wired into REGION_ORDER, emits the discovery affordances, and self-suppresses when empty
     lam = next(e for e in REGION_ORDER if e[0] == "roster")[2]
     assert lam({"roster": ""}) == ""
     blk = lam({"roster": man})
     assert "# STANDING SPECIALISTS" in blk
-    assert "spawn_agent(agent=<kind>, name=<name>" in blk and 'read_file("roster/index.md")' in blk
+    assert "spawn_agent(agent=<kind>, name=<name>" in blk
+    assert 'read_file("@sliceagent/roster/index.md")' in blk
 
 
 @check
@@ -783,7 +800,7 @@ def delegation_guidance_is_spliced_when_spawn_agent_is_offered():
                          for m in msgs if m.get("role") == "system")
 
     # a parent host offers spawn_agent → the delegation guidance (and the new mental model) is in the prompt
-    parent = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(), policy=None,
+    parent = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(),
                           max_depth=1, depth=0)
     sysp = _sys(parent)
     assert "<delegation>" in sysp, "delegation block missing from the system prompt"
@@ -792,7 +809,7 @@ def delegation_guidance_is_spliced_when_spawn_agent_is_offered():
     assert "spawn_explore" not in sysp, "stale spawn_explore leaked into the guidance"
 
     # a host at the depth floor offers NO spawn tool → no delegation block (don't advertise a tool it lacks)
-    floor = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(), policy=None,
+    floor = SubagentHost(_ToolsHost(), llm=None, retriever=None, memory=NullMemory(),
                          max_depth=1, depth=1)
     assert "<delegation>" not in _sys(floor)
 

@@ -418,14 +418,15 @@ def correction_linkage_does_not_fuzzily_match_a_related_new_constraint():
 
 
 @check
-def reconciliation_gate_is_mandatory_context():
+def execution_uncertainty_is_mandatory_advisory_context():
     s = Slice(); s.reset("repair")
     s.reconciliation_required = "run_command call-7 may still write"
     host = LocalToolHost(tempfile.mkdtemp(prefix="intent-reconcile-"))
     plan = make_build_slice(s, host, None, NullMemory(), "repair")()
     rendered = plan[1]["content"]
     block = next(item for item in plan.blocks if item.item_id == "region:reconciliation")
-    assert block.mandatory and "EXECUTION RECONCILIATION REQUIRED" in rendered
+    assert block.mandatory and "EXECUTION UNCERTAINTY" in rendered
+    assert "not a permission gate" in rendered and "switching remain available" in rendered
 
 
 @check

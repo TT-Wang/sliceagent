@@ -24,7 +24,8 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -375,6 +376,37 @@ def _atomic_replace(path: str, data: bytes) -> None:
         raise
 
 
+def reserve_durable_order(root: str, *, minimum: int = 0) -> int:
+    """Reserve one crash-durable, strictly increasing publication order.
+
+    Wall-clock timestamps remain human-readable metadata.  They are not a safe ordering primitive: two
+    turns commonly seal in the same second, and clock adjustments can move backwards.  This tiny locked
+    high-watermark gives every newly-begun turn an unambiguous order that survives restart and recovery.
+    """
+    root = os.path.realpath(root)
+    _private_dir(root)
+    path = os.path.join(root, ".turn-order")
+    with _exclusive_lock(path + ".lock"):
+        previous = 0
+        try:
+            with open(path, "r", encoding="ascii") as stream:
+                raw = stream.read().strip()
+        except FileNotFoundError:
+            raw = ""
+        except OSError as exc:
+            raise PersistenceError(f"cannot read durable turn order {path}: {exc}") from exc
+        if raw:
+            try:
+                previous = int(raw)
+            except ValueError as exc:
+                raise PersistenceError(f"durable turn order is corrupt: {path}") from exc
+            if previous < 0:
+                raise PersistenceError(f"durable turn order is corrupt: {path}")
+        value = max(time.time_ns(), previous + 1, int(minimum) + 1)
+        _atomic_replace(path, f"{value}\n".encode("ascii"))
+        return value
+
+
 def _publish_immutable(path: str, data: bytes, *, conflict: type[PersistenceError]) -> bool:
     """Publish once; identical retries succeed, different bytes never overwrite.
 
@@ -484,6 +516,54 @@ class Artifact:
         return _digest(self.to_dict())
 
 
+def artifact_order_key(artifact: Artifact) -> tuple[int, str, str]:
+    """Return the durable turn order, with a backward-compatible timestamp fallback."""
+    body = getattr(artifact, "structured_body", {}) or {}
+    meta = body.get("meta") if isinstance(body, Mapping) else None
+    raw_order = meta.get("order_ns") if isinstance(meta, Mapping) else None
+    if isinstance(raw_order, int) and not isinstance(raw_order, bool) and raw_order > 0:
+        order_ns = raw_order
+    else:
+        timestamp = str(getattr(artifact, "timestamp", "") or "")
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            order_ns = int(parsed.timestamp() * 1_000_000_000)
+        except (OverflowError, TypeError, ValueError):
+            order_ns = 0
+    return (
+        order_ns,
+        str(getattr(artifact, "timestamp", "") or ""),
+        str(getattr(artifact, "id", "") or ""),
+    )
+
+
+@dataclass(frozen=True)
+class ArtifactGap:
+    """One immutable artifact path that could not be decoded or verified."""
+
+    artifact_id: str
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"artifact_id": self.artifact_id, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class ArtifactListing(Sequence[Artifact]):
+    """Sequence-compatible listing that preserves discovery gaps as evidence metadata."""
+
+    items: tuple[Artifact, ...] = ()
+    gaps: tuple[ArtifactGap, ...] = ()
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+
 class ArtifactStore:
     """Content-verified immutable local artifact store."""
 
@@ -527,25 +607,47 @@ class ArtifactStore:
             raise ArtifactCorruptError(f"artifact path {artifact_id!r} contains id {artifact.id!r}")
         return artifact
 
-    def list_all(self) -> tuple[Artifact, ...]:
-        """Discover immutable artifacts without maintaining a second mutable manifest."""
+    def list_all(self) -> ArtifactListing:
+        """Discover immutable artifacts and make every unreadable record an explicit evidence gap."""
+        def gap_id(value: str, prefix: str = "invalid-artifact") -> str:
+            return value if _SAFE_ID.fullmatch(value) else (
+                f"{prefix}-{hashlib.sha256(value.encode('utf-8', errors='replace')).hexdigest()[:12]}"
+            )
+
         out = []
+        gaps = []
         try:
             shards = sorted(os.listdir(self.directory))
         except FileNotFoundError:
-            return ()
+            return ArtifactListing()
+        except OSError as exc:
+            return ArtifactListing(gaps=(ArtifactGap(
+                "artifact-store", f"{type(exc).__name__}: {exc}",
+            ),))
         for shard in shards:
             directory = os.path.join(self.directory, shard)
             if not os.path.isdir(directory):
                 continue
-            for name in sorted(os.listdir(directory)):
+            try:
+                names = sorted(os.listdir(directory))
+            except OSError as exc:
+                gaps.append(ArtifactGap(
+                    gap_id(shard, "shard"), f"{type(exc).__name__}: {exc}",
+                ))
+                continue
+            for name in names:
                 if not name.endswith(".json"):
                     continue
                 try:
                     out.append(self.get(name[:-5]))
-                except PersistenceError:
-                    continue
-        return tuple(sorted(out, key=lambda item: (item.timestamp, item.id)))
+                except PersistenceError as exc:
+                    gaps.append(ArtifactGap(
+                        gap_id(name[:-5]), f"{type(exc).__name__}: {exc}",
+                    ))
+        return ArtifactListing(
+            tuple(sorted(out, key=artifact_order_key)),
+            tuple(sorted(gaps, key=lambda item: item.artifact_id)),
+        )
 
 
 # --------------------------------------------------------------------------- versioned checkpoints
@@ -561,6 +663,7 @@ class Checkpoint:
     artifact_refs: tuple[str, ...] = ()
     applied_transition_ids: tuple[str, ...] = ()
     workspace_versions: Mapping[str, Any] = field(default_factory=dict)
+    order_ns: int = 0
     updated_at: str = ""
     schema_version: int = SCHEMA_VERSION
 
@@ -571,6 +674,8 @@ class Checkpoint:
             raise InvalidRecordError("checkpoint.generation must be a positive integer")
         if self.schema_version != SCHEMA_VERSION:
             raise InvalidRecordError(f"unsupported checkpoint schema version: {self.schema_version}")
+        if not isinstance(self.order_ns, int) or isinstance(self.order_ns, bool) or self.order_ns < 0:
+            raise InvalidRecordError("checkpoint.order_ns must be a non-negative integer")
         _require_text("checkpoint.updated_at", self.updated_at, allow_empty=True)
         if not isinstance(self.state, Mapping) or not isinstance(self.workspace_versions, Mapping):
             raise InvalidRecordError("checkpoint.state and checkpoint.workspace_versions must be objects")
@@ -587,7 +692,7 @@ class Checkpoint:
                    generation=generation, state=state, updated_at=updated_at or _now_iso(), **fields)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "v": self.schema_version, "workspace_id": self.workspace_id,
             "session_id": self.session_id, "task_id": self.task_id,
             "generation": self.generation, "state": self.thawed_state(),
@@ -595,6 +700,10 @@ class Checkpoint:
             "applied_transition_ids": list(self.applied_transition_ids),
             "workspace_versions": _thaw_json(self.workspace_versions), "updated_at": self.updated_at,
         }
+        # Omitting the default keeps every pre-order checkpoint byte/digest compatible.
+        if self.order_ns:
+            out["order_ns"] = self.order_ns
+        return out
 
     def thawed_state(self) -> dict[str, Any]:
         """Return a deep-mutable copy for application-level state reconstruction.
@@ -614,7 +723,8 @@ class Checkpoint:
             task_id=data.get("task_id", ""), generation=int(data.get("generation", 0)),
             state=data.get("state") or {}, artifact_refs=data.get("artifact_refs") or (),
             applied_transition_ids=data.get("applied_transition_ids") or (),
-            workspace_versions=data.get("workspace_versions") or {}, updated_at=data.get("updated_at", ""),
+            workspace_versions=data.get("workspace_versions") or {},
+            order_ns=int(data.get("order_ns", 0) or 0), updated_at=data.get("updated_at", ""),
             schema_version=int(data.get("v", SCHEMA_VERSION)),
         )
 
@@ -683,7 +793,7 @@ class CheckpointStore:
                     f"checkpoint {path} identity does not match its storage key")
             if checkpoint is not None and checkpoint.workspace_id == workspace_id:
                 out.append(checkpoint)
-        return tuple(sorted(out, key=lambda item: (item.updated_at, item.task_id)))
+        return tuple(sorted(out, key=lambda item: (item.order_ns, item.updated_at, item.task_id)))
 
     def compare_and_swap(self, checkpoint: Checkpoint, *, expected_generation: int) -> Checkpoint:
         if not isinstance(checkpoint, Checkpoint):
@@ -746,7 +856,7 @@ class JournalSnapshot:
                 outcomes[invocation_id] = (
                     outcome.get("status") if isinstance(outcome, Mapping) else None
                 )
-        conclusive = {"succeeded", "failed", "cancelled"}
+        conclusive = {"succeeded", "steered", "failed", "cancelled"}
         return tuple(
             payload for invocation_id, payload in invocations.items()
             if not (
@@ -774,6 +884,11 @@ class JournalSnapshot:
         return int(self.header.get("base_generation") or 0)
 
     @property
+    def order_ns(self) -> int:
+        value = self.header.get("order_ns") or 0
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    @property
     def artifact_refs(self) -> tuple[str, ...]:
         """Stable dependency handoffs recorded while the turn was still in flight."""
         return tuple(dict.fromkeys(
@@ -799,13 +914,15 @@ class PendingTurnJournal:
     @classmethod
     def begin(cls, root: str, *, artifact_id: str, workspace_id: str, session_id: str,
               task_id: str, base_generation: int, user_request: str,
-              created_at: str | None = None) -> "PendingTurnJournal":
+              created_at: str | None = None, order_ns: int = 0) -> "PendingTurnJournal":
         _require_id("artifact_id", artifact_id)
         for name, value in (("workspace_id", workspace_id), ("session_id", session_id),
                             ("task_id", task_id), ("user_request", user_request)):
             _require_text(name, value, allow_empty=(name == "user_request"))
         if not isinstance(base_generation, int) or isinstance(base_generation, bool) or base_generation < 0:
             raise InvalidRecordError("base_generation must be a non-negative integer")
+        if not isinstance(order_ns, int) or isinstance(order_ns, bool) or order_ns < 0:
+            raise InvalidRecordError("order_ns must be a non-negative integer")
         root = os.path.realpath(root)
         directory = os.path.join(root, "journals")
         _private_dir(root)
@@ -818,10 +935,16 @@ class PendingTurnJournal:
             "artifact_id": artifact_id, "workspace_id": workspace_id, "session_id": session_id,
             "task_id": task_id, "base_generation": base_generation, "user_request": user_request,
         }
+        if order_ns:
+            stable["order_ns"] = order_ns
         with _exclusive_lock(path + ".lock"):
             if os.path.exists(path):
                 existing = journal.snapshot().header
                 for key, value in stable.items():
+                    # Retrying the same logical turn may reserve (and harmlessly skip) a newer high-watermark.
+                    # The already-fsynced begin header owns publication order for that artifact.
+                    if key == "order_ns":
+                        continue
                     if existing.get(key) != value:
                         raise JournalConflictError(f"journal {artifact_id!r} already has different {key}")
                 return journal
@@ -1044,7 +1167,8 @@ class SealCoordinator:
             self.on_stage(stage)
 
     def begin_turn(self, *, workspace_id: str, session_id: str, task_id: str,
-                   logical_id: str, user_request: str, kind: str = "turn") -> PendingTurnJournal:
+                   logical_id: str, user_request: str, kind: str = "turn",
+                   order_ns: int = 0) -> PendingTurnJournal:
         artifact_id = deterministic_artifact_id(kind=kind, workspace_id=workspace_id,
                                                 session_id=session_id, task_id=task_id,
                                                 logical_id=logical_id)
@@ -1052,7 +1176,7 @@ class SealCoordinator:
         return PendingTurnJournal.begin(self.root, artifact_id=artifact_id,
                                         workspace_id=workspace_id, session_id=session_id,
                                         task_id=task_id, base_generation=base,
-                                        user_request=user_request)
+                                        user_request=user_request, order_ns=order_ns)
 
     def _validate(self, journal: PendingTurnJournal, snapshot: JournalSnapshot,
                   artifact: Artifact, checkpoint: Checkpoint) -> None:
@@ -1071,16 +1195,36 @@ class SealCoordinator:
             raise InvalidRecordError("checkpoint generation does not follow the journal base generation")
         if artifact.id not in checkpoint.artifact_refs:
             raise InvalidRecordError("the target checkpoint must reference the turn artifact")
+        body = artifact.structured_body if isinstance(artifact.structured_body, Mapping) else {}
+        meta = body.get("meta") if isinstance(body, Mapping) else None
+        artifact_order = meta.get("order_ns") if isinstance(meta, Mapping) else 0
+        artifact_order = artifact_order if isinstance(artifact_order, int) \
+            and not isinstance(artifact_order, bool) else 0
+        if artifact_order != snapshot.order_ns or checkpoint.order_ns != snapshot.order_ns:
+            raise InvalidRecordError(
+                "journal, artifact, and checkpoint publication order do not match"
+            )
         if os.path.realpath(journal.root) != self.root:
             raise InvalidRecordError("journal and seal coordinator do not share a persistence root")
         if self.artifacts.root != self.root or self.checkpoints.root != self.root:
             raise InvalidRecordError("artifact, checkpoint, and seal stores must share one persistence root")
         unresolved = snapshot.unresolved_invocations
         if unresolved:
+            from .execution import reconciliation_targets
+
+            affected = tuple(dict.fromkeys(
+                target
+                for item in unresolved
+                for target in reconciliation_targets(
+                    str(item.get("name") or ""),
+                    item.get("args") if isinstance(item.get("args"), Mapping) else {},
+                )
+            ))
             marker = str(checkpoint.state.get("reconciliation_required") or "")
             state_status = str(checkpoint.state.get("status") or "")
-            if (not marker or artifact.status not in {"indeterminate", "interrupted"}
-                    or state_status != "indeterminate"):
+            invalid_receipt = artifact.status not in {"indeterminate", "interrupted"}
+            invalid_effect_state = bool(affected) and (not marker or state_status != "indeterminate")
+            if invalid_receipt or invalid_effect_state:
                 ids = ", ".join(str(item.get("invocation_id") or "unknown") for item in unresolved)
                 raise InvalidRecordError(
                     "cannot cleanly seal invocation(s) without conclusive outcomes: " + ids)
@@ -1188,6 +1332,8 @@ class SealCoordinator:
                 recovered_body = {
                     "journal_events": [_thaw_json(event) for event in snapshot.events],
                 }
+                if snapshot.order_ns:
+                    recovered_body["meta"] = {"order_ns": snapshot.order_ns}
                 if kind == "turn":
                     # Execution lifecycle is a pure journal projection, so crash recovery can preserve it
                     # without replaying a tool or guessing application state. This gives later self-audit the

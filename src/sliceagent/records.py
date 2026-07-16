@@ -2,8 +2,9 @@
 
 A durable, per-session, TYPED event log that sits ABOVE the kernel: replay/resume and the cron /
 background subsystems read it. It NEVER feeds the live slice — replay rebuilds state on RESUME only,
-never mid-turn (preserving the Markov boundary; cf. the records-replay moat-conflict note). Reuses the
-per-session JSONL pattern of the episodic cache rather than inventing a new store.
+never mid-turn (preserving the Markov boundary; cf. the records-replay moat-conflict note). It reuses a
+per-session JSONL encoding also used by the legacy episode mirror; that physical resemblance does not make
+either journal a separate memory layer.
 
 `UsageRecorder` is the first consumer: it journals per-turn token usage as a durable cost log — distinct
 from the in-memory `CostMetrics` summary (metrics.py), which measures the moat curve within a run.
@@ -14,6 +15,7 @@ import json
 import os
 
 from .events import Event, StepEnd, TurnEnd, TurnInterrupted
+from .private_state import open_private_append, private_dir, private_file
 from .recovery import state_dir
 
 # Records live in the sliceagent STATE dir (~/.sliceagent/records), NOT scratch/ in the user's workspace —
@@ -33,15 +35,20 @@ class Journal:
 
     def __init__(self, session_id: str, root: str = RECORDS_ROOT):
         self.path = _records_path(session_id, root)
+        parent = os.path.dirname(self.path)
+        if parent and parent != ".":
+            private_dir(parent)
+        if os.path.exists(self.path):
+            private_file(self.path)
 
     def record(self, rtype: str, **data) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
+        with open_private_append(self.path) as f:
             f.write(json.dumps({"type": rtype, **data}, ensure_ascii=False) + "\n")
 
     def read(self, rtype: str | None = None) -> list[dict]:
         if not os.path.exists(self.path):
             return []
+        private_file(self.path)
         out: list[dict] = []
         with open(self.path, encoding="utf-8", errors="replace") as f:   # truncated multibyte → replacement char (then json.loads skips it); never crash replay
             for line in f:

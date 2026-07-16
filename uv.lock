@@ -1286,9 +1286,6 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
-    { name = "memem" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "openai" },
 ]
 
@@ -1296,6 +1293,11 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+]
+memory = [
+    { name = "memem" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 treesitter = [
     { name = "tree-sitter" },
@@ -1310,8 +1312,8 @@ tui = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0" },
-    { name = "memem", specifier = ">=2.9.7" },
-    { name = "numpy", specifier = ">=1.24" },
+    { name = "memem", marker = "extra == 'memory'", specifier = ">=2.9.7" },
+    { name = "numpy", marker = "extra == 'memory'", specifier = ">=1.24" },
     { name = "openai", specifier = ">=1.40" },
     { name = "prompt-toolkit", marker = "extra == 'tui'", specifier = ">=3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -1320,7 +1322,7 @@ requires-dist = [
     { name = "tree-sitter", marker = "extra == 'treesitter'", specifier = ">=0.21" },
     { name = "tree-sitter-python", marker = "extra == 'treesitter'", specifier = ">=0.21" },
 ]
-provides-extras = ["dev", "treesitter", "tui"]
+provides-extras = ["dev", "memory", "treesitter", "tui"]
 
 [[package]]
 name = "sniffio"

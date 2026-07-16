@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import posixpath
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -19,16 +18,36 @@ from .context_overflow import ContextOverflow
 
 
 # Private scheduler→delegation metadata. It is never part of the provider invocation,
-# policy decision, journal, or public tool schema; SubagentHost consumes it before
+# safeguard preflight, journal, or public tool schema; SubagentHost consumes it before
 # validating the child's public arguments.
 CHILD_TOKEN_BUDGET_ARG = "__sliceagent_token_budget"
+# Private scheduler→child cancellation lease. Unlike provider/audit arguments this is a live process object;
+# run_tool_batch injects it only into the sanitized handler view and SubagentHost consumes it at the edge.
+CHILD_CANCEL_SIGNAL_ARG = "__sliceagent_cancel_signal"
+# Stable presentation correlation for concurrent delegation.  These values never enter the provider-visible
+# invocation or a child brief; they let the progress reducer bind one physical spawn call to exactly one row.
+CHILD_INVOCATION_ID_ARG = "__sliceagent_invocation_id"
+CHILD_REQUEST_ORDINAL_ARG = "__sliceagent_request_ordinal"
 
 
 class ToolStatus(str, Enum):
     SUCCEEDED = "succeeded"
+    STEERED = "steered"
     FAILED = "failed"
     CANCELLED = "cancelled"
     INDETERMINATE = "indeterminate"
+
+    @property
+    def conclusive(self) -> bool:
+        """Whether execution reached a terminal state with no unresolved effects."""
+        return self is not ToolStatus.INDETERMINATE
+
+    @property
+    def failing(self) -> bool:
+        """Whether the outcome is adverse rather than a successful or benign steer."""
+        return self in {
+            ToolStatus.FAILED, ToolStatus.CANCELLED, ToolStatus.INDETERMINATE,
+        }
 
 
 class ToolPurity(str, Enum):
@@ -48,9 +67,17 @@ def _scope_path(value: object) -> str:
 
 
 def reconciliation_targets(name: str, args: Mapping[str, object] | None) -> tuple[str, ...]:
-    """Conservative affected-resource identities for an operation that did not settle conclusively."""
+    """Conservative affected-resource identities for an operation that did not settle conclusively.
+
+    These identities support truthful later re-observation; they are evidence metadata, not an
+    execution constraint. A read-only explorer can leave an unknown answer, but cannot leave a workspace
+    side effect to reconcile.
+    """
     name = str(name or "")
     args = args if isinstance(args, Mapping) else {}
+    if name == "spawn_explore" or (
+            name == "spawn_agent" and str(args.get("agent") or "").casefold() == "explorer"):
+        return ()
     if name.startswith("mcp__"):
         # MCP methods have no trustworthy common effect schema. A nominal database/network method may also
         # write files through its server process (or vice versa), so an interrupted call must retain every
@@ -64,98 +91,10 @@ def reconciliation_targets(name: str, args: Mapping[str, object] | None) -> tupl
         return (f"terminal:{args.get('session') or 'main'}",)
     if name in {"read_file", "list_files", "edit_file", "append_to_file", "str_replace", "grep", "glob"}:
         return (f"path:{_scope_path(args.get('path') or '.')}",)
-    # A shell/code/plugin/child call without a declared resource can affect both local and non-local state.
+    # A shell/code/extension/child call without a declared resource can affect both local and non-local state.
     # Tool semantics deliberately precede incidental argument names: run_command(..., path="README.md") and
-    # an unknown plugin with a `path` field remain opaque. Do not let provider-added keys narrow real reach.
+    # an unknown extension with a `path` field remain opaque. Do not let provider-added keys narrow real reach.
     return ("workspace:*", f"opaque:{name or 'unknown'}")
-
-
-def observation_targets(
-    name: str,
-    args: Mapping[str, object] | None,
-    output: object = "",
-) -> tuple[str, ...]:
-    """Resource identities conclusively observed by one successful read-only call.
-
-    A typed ``SUCCEEDED`` status says the observation tool itself ran; it does not say the affected operation
-    has settled.  This function therefore checks the observation's semantics too (complete file bytes,
-    exited processes/sessions, an affirmative human confirmation, and the code-review inventory marker).
-    """
-    name = str(name or "")
-    args = args if isinstance(args, Mapping) else {}
-    text = str(output or "")
-    folded = text.casefold()
-    if name == "code_review":
-        # Emitted only after tracked/untracked status, recursive ignored-file inventory, and the safe diff.
-        # The handler observes the complete status/diff before presentation paging, so a large inline view
-        # remains conclusive even though the model may page its durable detail blob back for analysis.
-        if folded.startswith("[workspace observation: tracked + untracked + ignored inventory complete]"):
-            return ("workspace:*",)
-        return ()
-    if name == "ask_user":
-        if not folded.startswith("user answered:"):
-            return ()
-        answer = folded.split(":", 1)[1].strip()
-        # Negative, ongoing, or hedged answers are evidence that uncertainty remains, not confirmation.
-        if (not answer or re.search(
-                r"\b(no|not|never mind|unsure|uncertain|unknown|maybe|perhaps|running|alive|pending|"
-                r"in[ -]?progress|still|don't know|do not know|can't tell|cannot tell)\b", answer)):
-            return ()
-        if re.search(r"\b(yes|confirmed|settled|finished|stopped|exited|completed|complete|done|failed)\b", answer):
-            return ("external:*", "opaque:*")
-        return ()
-    if name == "read_file":
-        # The footer reports exact line coverage for both implicit capping and explicit windows. A caller can
-        # deliberately request offset=1 with a large limit to prove a large file in one complete observation;
-        # partial pages never count. Binary previews are hexdump heads, not complete bytes.
-        if "hexdump (first " in folded:
-            return ()
-        footer = re.search(r"<system>read_file .*?: lines (\d+)-(\d+) of (\d+)", text)
-        if footer is not None:
-            start, end, total = (int(value) for value in footer.groups())
-            if start != 1 or end != total:
-                return ()
-        elif args.get("offset") is not None or args.get("limit") is not None:
-            return ()
-        return (f"path:{_scope_path(args.get('path'))}",)
-    if name in {"list_files", "grep", "glob"}:
-        return (f"tree:{_scope_path(args.get('path') or '.')}",)
-    if name in {"proc_poll", "proc_tail", "proc_wait"} and args.get("handle") is not None:
-        first_line = folded.splitlines()[0].strip() if folded.splitlines() else ""
-        handle = re.escape(str(args.get("handle")))
-        settled = (bool(re.fullmatch(r"exited\s+-?\d+", first_line)) if name == "proc_poll" else
-                   bool(re.match(rf"^\[{handle}\s+exited\s+-?\d+\]$", first_line)))
-        if settled:
-            return (f"process:{args.get('handle')}",)
-        return ()
-    if name in {"terminal_read", "terminal_wait"}:
-        first_line = folded.splitlines()[0].strip() if folded.splitlines() else ""
-        if ((name == "terminal_read" and re.fullmatch(r"\(no output; exited\s+-?\d+\)", first_line))
-                or (name == "terminal_wait" and re.match(
-                    r"^\[[^\]\n]+;\s*exited\s+-?\d+\]$", first_line))):
-            return (f"terminal:{args.get('session') or 'main'}",)
-        return ()
-    return ()
-
-
-def reconciliation_covered(required: tuple[str, ...], observed: set[str]) -> bool:
-    """True only when every uncertain resource has a matching live observation."""
-    if not required:
-        required = ("workspace:*",)
-    for target in required:
-        if target in observed:
-            continue
-        if target.startswith("external:") and "external:*" in observed:
-            continue
-        if target.startswith("opaque:") and "opaque:*" in observed:
-            continue
-        if target.startswith("path:"):
-            # A tree listing proves only presence, not the bytes an uncertain edit may have written.
-            # Exact read_file evidence or a workspace-wide code review is required.
-            if "workspace:*" in observed:
-                continue
-        return False
-    return True
 
 
 @dataclass(frozen=True)
@@ -182,7 +121,7 @@ class ToolOutcome:
 
     @property
     def failing(self) -> bool:
-        return self.status is not ToolStatus.SUCCEEDED
+        return self.status.failing
 
     def with_text(self, text: object) -> "ToolOutcome":
         """Change presentation only; status/effects remain authoritative."""
@@ -303,6 +242,12 @@ class TurnOutcome:
     steps: int
     usage: Usage | Mapping[str, object]
     message: str | None = None
+    # Typed wrapper-facing provenance for an unexpected stop. Empty for ordinary lifecycle stops. This lets a
+    # one-shot child recover a provider-call timeout without mistaking a tool/reducer/setup TimeoutError for one.
+    error_origin: str = ""
+    # Machine-readable failure shape within that origin.  In particular, ``indeterminate_model_call`` means a
+    # watchdog returned while provider I/O may remain live, so wrappers must not launch a recovery request.
+    error_kind: str = ""
 
     def __post_init__(self) -> None:
         try:
@@ -450,7 +395,10 @@ def coerce_tool_status(value: object, *, legacy_text: str | None = None) -> Tool
         try:
             return ToolStatus(value.lower())
         except ValueError:
-            pass
+            # A caller explicitly supplied lifecycle data, but it is not one of the protocol states. Treating
+            # that typo/extension drift as success fabricates settlement; uncertainty is the only safe live
+            # projection (recovery already applies the same rule to invalid persisted statuses).
+            return ToolStatus.INDETERMINATE
     if isinstance(value, bool):
         return ToolStatus.SUCCEEDED if value else ToolStatus.FAILED
     if legacy_text is not None:
@@ -460,7 +408,9 @@ def coerce_tool_status(value: object, *, legacy_text: str | None = None) -> Tool
 
 
 __all__ = [
-    "PreflightOverflow", "PreflightReport", "ToolEffect", "ToolInvocation", "ToolOutcome",
+    "CHILD_CANCEL_SIGNAL_ARG", "CHILD_INVOCATION_ID_ARG", "CHILD_REQUEST_ORDINAL_ARG",
+    "CHILD_TOKEN_BUDGET_ARG", "PreflightOverflow", "PreflightReport",
+    "ToolEffect", "ToolInvocation", "ToolOutcome",
     "ToolPurity", "ToolStatus", "TurnOutcome", "TurnStatus", "UnknownContextWindow", "Usage",
     "available_content_capacity", "coerce_tool_status", "estimate_model_call", "model_context_window",
     "preflight_model_call",

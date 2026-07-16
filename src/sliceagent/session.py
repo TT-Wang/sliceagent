@@ -17,6 +17,9 @@ import json
 import os
 import re
 import uuid
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from .interfaces import TaskRef
 from .pfc import Slice
@@ -33,8 +36,41 @@ _CONTINUATION_ONLY = re.compile(
 )
 
 
+MAX_WORKSPACE_TRANSITIONS = 4
+
+
 def _mint_task_id() -> str:
     return "t-" + uuid.uuid4().hex[:8]
+
+
+@dataclass
+class LogicalTurn:
+    """One exact user request spanning one or more workspace-bound runtime segments.
+
+    A workspace handoff is a transport boundary, not another user turn.  Keeping this identity on the
+    application-owned :class:`Session` prevents the target workspace from routing a synthetic ``go`` request,
+    incrementing conversational turn counts, or silently attaching the continuation to a different task.
+    A bounded edge history permits real multi-project workflows while rejecting an A→B edge that the model
+    already traversed in this request. ``admission`` is deliberately runtime-only: the durable segment journal
+    owns its serialised projection.
+    """
+
+    id: str
+    task_id: str
+    request: str
+    source_artifact_id: str
+    source_event_id: str = ""
+    source_workspace: str = ""
+    segment_index: int = 0
+    workspace_epoch: int = 0
+    workspace_switches: int = 0
+    workspace_history: tuple[str, ...] = ()
+    workspace_edges: tuple[tuple[str, str], ...] = ()
+    admission: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def segment_id(self) -> str:
+        return f"{self.id}:segment:{self.segment_index}"
 
 
 class Session:
@@ -47,19 +83,13 @@ class Session:
         # Monotonic only within this live session. Evidence snapshots use it to prove conversational adjacency
         # across task switches; it is intentionally not durable because snapshots are not durable either.
         self.turn_generation: int = 0
+        # Workspace truth changes independently from the application/session identity.  Epoch 0 is the launch
+        # workspace; every successfully published handoff increments it exactly once.
+        self.workspace_epoch: int = 0
+        self.logical_turn: LogicalTurn | None = None
 
     def active(self) -> Slice:
         return self.tasks[self.active_id]
-
-    def _require_reconciled_boundary(self) -> None:
-        if self.active_id is None or self.active_id not in self.tasks:
-            return
-        detail = getattr(self.tasks[self.active_id], "reconciliation_required", "")
-        if detail:
-            raise RuntimeError(
-                "cannot change tasks while an earlier operation is indeterminate; continue this task, "
-                "re-observe the live state, and call reconcile_execution first"
-            )
 
     def _park(self, status: str = "parked") -> None:
         """Durably checkpoint the active topic (for cross-session resume); a no-op under NullMemory.
@@ -81,7 +111,6 @@ class Session:
         and only then call :meth:`activate_prepared_topic`. Preparation itself does not park or publish
         anything; the admission journal must exist before durable/session state changes.
         """
-        self._require_reconciled_boundary()
         tid = _mint_task_id()
         s = Slice()
         s.reset(goal)
@@ -89,7 +118,6 @@ class Session:
 
     def prepare_switch_topic(self, task_id: str) -> tuple[str, Slice]:
         """Load a topic for admission without changing ``active_id``."""
-        self._require_reconciled_boundary()
         if task_id in self.tasks:
             return task_id, self.tasks[task_id]
         ts = self.memory.load_task(task_id)
@@ -130,41 +158,200 @@ class Session:
         self, message: str, *, resume: bool = False, admission=None, contract=None,
         install_intent: bool = True,
     ) -> Slice:
-        """Continue the active topic with a NEW directive: set the goal, start a fresh action epoch
-        but KEEP the durable context — findings and the working set — so the follow-up builds on
-        what's already done.
-
-        I3 WS2 — DEMOTE the anti-loop epoch, don't wipe it. Clearing action_log every directive let a
-        completed sub-step re-run with no REPEATED warning (turn 14 ran the same command twice). Instead
-        we mark prior entries non-failing (a NEW directive shouldn't carry a stale failure) but KEEP
-        their counts, so a genuinely-repeated command still trips REPEATED-with-no-progress. since_edit
-        is still cleared (a fresh convergence epoch).
-
-        I3 OPEN USER REPORT — if this follow-up looks like a FAILURE REPORT, capture it as a blocker;
-        it is NOT cleared by continue_topic (a new directive does not mean the user retracted the
-        report — only verifying the fix, or a real topic change, clears it)."""
+        """Continue the active topic with a new directive while keeping its durable task context."""
         s = self.active()
         # The completed turn was already sealed at its actual terminal boundary by the runtime. Do not seal
-        # again here: a second seal would reset the new TurnRuntime epoch and apply working-set contraction
-        # twice before the follow-up starts.
-        # ``goal`` is the stable task objective. A follow-up—resume cue or ordinary continuation—changes
-        # only current_request; otherwise "yes, do that" destroys the objective in the next checkpoint.
-        # The topic label/objective and the CURRENT REQUEST are distinct. A resume cue should not rename the
-        # parked task, but it is still the user's authoritative request for this turn and must be rendered.
-        # Direct Session callers may still request the historical eager installation.  The production host
-        # passes ``install_intent=False``: it journals the immutable TurnAdmission first, then record_user()
-        # installs it exactly once together with the verbatim conversation entry.
+        # again here: a second seal would reset the new TurnRuntime epoch and contract the working set twice.
         if admission is not None and contract is not None and admission != contract:
             raise ValueError("pass one TurnAdmission, not competing admission/contract values")
         if install_intent:
             s.intent.begin_turn(message, admission=admission or contract)
         return apply_turn_continuation(s, message, resume=resume, admission=admission or contract)
 
+    def start_logical_turn(
+        self, *, logical_id: str, task_id: str, request: str, source_artifact_id: str,
+        source_event_id: str = "", admission=None, source_workspace: str = "",
+    ) -> LogicalTurn:
+        """Bind an admitted user request to its stable task before model/tool execution begins."""
+        if self.logical_turn is not None:
+            raise RuntimeError(f"logical turn {self.logical_turn.id!r} is already active")
+        if self.active_id != str(task_id):
+            raise RuntimeError("logical turn task does not match the active task")
+        logical = LogicalTurn(
+            id=str(logical_id), task_id=str(task_id), request=str(request),
+            source_artifact_id=str(source_artifact_id), source_event_id=str(source_event_id),
+            source_workspace=os.path.realpath(source_workspace)
+            if source_workspace else "", workspace_epoch=self.workspace_epoch,
+            workspace_history=((os.path.realpath(source_workspace),) if source_workspace else ()),
+            admission=admission,
+        )
+        self.logical_turn = logical
+        return logical
+
+    def begin_workspace_segment(
+        self, *, source_artifact_id: str, admission=None, workspace_path: str = "",
+    ) -> LogicalTurn:
+        """Resume the current exact request after a workspace publication, without admitting a new user turn."""
+        logical = self.logical_turn
+        if logical is None:
+            raise RuntimeError("no logical turn is available for workspace continuation")
+        if logical.workspace_switches >= MAX_WORKSPACE_TRANSITIONS:
+            raise RuntimeError(
+                f"a logical turn may cross at most {MAX_WORKSPACE_TRANSITIONS} workspace boundaries",
+            )
+        if self.active_id != logical.task_id or logical.task_id not in self.tasks:
+            raise RuntimeError("workspace continuation lost its task identity")
+        state = self.tasks[logical.task_id]
+        # Re-install the same exact source and contract for this runtime segment only.  In particular, do not call
+        # record_user/continue_topic: they would increment turns, append a duplicate conversation row, and apply
+        # lexical continuation semantics to a message the user never sent twice.
+        next_admission = admission if admission is not None else logical.admission
+        target = os.path.realpath(workspace_path) if workspace_path else ""
+        source = logical.workspace_history[-1] if logical.workspace_history else logical.source_workspace
+        edge = (source, target) if source and target else None
+        if edge is not None and edge in logical.workspace_edges:
+            raise RuntimeError(f"workspace continuation would repeat transition {source} -> {target}")
+        state.intent.begin_turn(
+            logical.request, source_artifact=str(source_artifact_id), admission=next_admission,
+        )
+        # Publish the segment counters only after contract validation succeeds, so a malformed continuation
+        # cannot consume the one-switch allowance while leaving the old segment active.
+        logical.segment_index += 1
+        logical.workspace_switches += 1
+        logical.workspace_epoch = self.workspace_epoch
+        if target:
+            logical.workspace_history = (*logical.workspace_history, target)
+        if edge is not None:
+            logical.workspace_edges = (*logical.workspace_edges, edge)
+        logical.source_artifact_id = str(source_artifact_id)
+        logical.admission = next_admission
+        state.task.activate_objective()
+        state.runtime.reset()
+        self.turn_task_id = logical.task_id
+        return logical
+
+    def finish_logical_turn(self) -> LogicalTurn | None:
+        logical, self.logical_turn = self.logical_turn, None
+        return logical
+
+
+class SessionBinding:
+    """Stable application-owned session identity over a replaceable workspace view.
+
+    Workspace resource factories capture a binding, not a one-off concrete Session. During an atomic handoff
+    the binding is redirected to the merged target view, so topic tools, subagents, episodic sinks, and the CLI
+    all observe the same session without rebuilding the model/UI connection.
+    """
+
+    def __init__(self, target: Session):
+        object.__setattr__(self, "_target", target)
+
+    @property
+    def target(self) -> Session:
+        return object.__getattribute__(self, "_target")
+
+    def bind(self, target: Session) -> None:
+        if target.session_id != self.target.session_id:
+            raise ValueError("cannot rebind an application session to a different session_id")
+        object.__setattr__(self, "_target", target)
+
+    def __getattr__(self, name):
+        return getattr(self.target, name)
+
+    def __setattr__(self, name, value) -> None:
+        if name == "_target":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.target, name, value)
+
+
+def _workspace_rebased_slice(source: Slice) -> Slice:
+    """Carry language/task intent into a new workspace while dropping old physical-world claims."""
+    state = deepcopy(source)
+    # File residency, revisions, shell facts, action tallies, and observed findings belong to the old root.
+    state.work.reset(read_budget=source.work.read_budget, read_ceiling=source.work.read_ceiling)
+    state.findings = []
+    state.finding_source = {}
+    state.last_error = ""
+    state.reconciliation_required = ""
+    state.reconciliation_targets = []
+    state.task.action_log = {}
+    state.task.world = {}
+    state.task.progress_signals = []
+    state.task.goal_source = ""
+    state.plan = []
+    # Keep exact user-authored clauses, but detach store-local artifact/invocation handles. The next target
+    # turn receives its own local source artifact before any new checkpoint can publish.
+    state.intent.current_source = None
+    state.intent.entries = [replace(
+        entry, source_artifact=None, source_range=None, evidence_refs=(),
+    ) for entry in state.intent.entries]
+    state.intent.seal()
+    state.conversation = [
+        {**dict(exchange), "artifact_id": ""} for exchange in state.conversation
+    ]
+    state.continuity.discourse_focus = [
+        dict(anchor) for anchor in state.continuity.discourse_focus
+        if isinstance(anchor, dict) and anchor.get("kind") == "subject_focus"
+    ]
+    if isinstance(state.continuity.pending_proposal, dict):
+        state.continuity.pending_proposal = {
+            key: value for key, value in state.continuity.pending_proposal.items()
+            if key not in {"artifact_id", "source_artifact"}
+        }
+    state.continuity.previous_evidence_snapshot = None
+    state.runtime.reset()
+    return state
+
+
+def rebase_session_for_workspace(current: Session, restored: Session) -> Session:
+    """Merge target checkpoints with the live app conversation under one stable session identity."""
+    if current.session_id != restored.session_id:
+        raise ValueError("workspace session views do not share the application session_id")
+    merged = Session(current.memory, current.session_id)
+    # Target-local authoritative checkpoints win task-ID collisions. Other open topics remain available as
+    # intent/conversation shells and acquire target-local provenance on their next admitted turn.
+    merged.tasks = dict(restored.tasks)
+    for task_id, state in current.tasks.items():
+        if task_id in merged.tasks:
+            # On A→B→A the target can have an older checkpoint for any still-open topic. Keep its valid A-local
+            # physical projection, but overlay app-owned conversation/intent accumulated in B—even when the
+            # user switched away from that topic before navigating back.
+            carried = _workspace_rebased_slice(state)
+            target = deepcopy(merged.tasks[task_id])
+            target.active_work = carried.active_work
+            target.intent = carried.intent
+            target.continuity = carried.continuity
+            target.task.goal = carried.task.goal
+            target.task.objective_status = carried.task.objective_status
+            target.task.goal_source = ""
+            target.task.plan = carried.task.plan
+            target.task.deliverable_requirement = carried.task.deliverable_requirement
+            target.open_report = carried.open_report
+            target.runtime.reset()
+            merged.tasks[task_id] = target
+        elif task_id not in merged.tasks:
+            merged.tasks[task_id] = _workspace_rebased_slice(state)
+    merged.active_id = (
+        current.active_id if current.active_id in merged.tasks else restored.active_id
+    )
+    merged.turn_task_id = None
+    merged.turn_generation = max(current.turn_generation, restored.turn_generation)
+    merged.workspace_epoch = current.workspace_epoch + 1
+    merged.logical_turn = deepcopy(current.logical_turn)
+    return merged
+
 
 def apply_turn_continuation(
     s: Slice, message: str, *, resume: bool = False, admission=None,
 ) -> Slice:
     """Apply the non-intent continuation reducer in live admission and crash recovery."""
+    if s.active_work.items:
+        # The source-linked graph and exact current request now own semantic continuation.  Do not run the
+        # legacy failure-report/retraction/resume grammar or mutate host-authored blocker prose; those fields
+        # remain checkpoint adapters only and the Active Work compiler does not render them.
+        s.since_edit = 0
+        return s
     resuming_unresolved_work = bool(resume or _CONTINUATION_ONLY.fullmatch(str(message or "")))
     if not resuming_unresolved_work:
         # A substantive new directive starts a fresh blocker focus. A bare resume cue does not: the
@@ -173,6 +360,8 @@ def apply_turn_continuation(
         # demote (don't clear): keep counts, drop the failing flag — see WS2 above
         for _sig, action in s.action_log.items():
             action["failing"] = False
+            action.pop("failure_identity", None)
+            action.pop("failure_last", None)
     s.since_edit = 0
     # A sealed-history question or self-audit may contain words such as "failed" or "went wrong" without
     # asserting that anything is broken. The typed admission distinguishes that inquiry from a live user
@@ -291,24 +480,33 @@ def route(llm, message: str, session: "Session") -> tuple[str, str]:
 def make_topic_tools(session: "Session"):
     """Model-facing tools so the agent can route topics itself. Default behaviour is CONTINUE (no
     call); a switch/new is an explicit, recoverable action. Returns ToolEntry list for the registry."""
-    from .registry import ToolEntry
+    from .execution import ToolStatus
+    from .registry import ToolEntry, ToolText
 
     def _new(args: dict) -> str:
         if session.turn_task_id is not None:
-            return ("Error: topic changes are turn-boundary operations. Finish this turn, then start the "
-                    "new topic from the next user request or host command.")
+            return ToolText(
+                "topic changes are turn-boundary operations. Finish this turn, then start the new topic "
+                "from the next user request or host command.",
+                status=ToolStatus.STEERED,
+            )
         tid = session.new_topic(args["goal"])
         return f"Started new topic [{tid}]: {one_line(args['goal'], 80)}. Previous topic parked (resumable)."
 
     def _switch(args: dict) -> str:
         if session.turn_task_id is not None:
-            return ("Error: topic changes are turn-boundary operations. Finish this turn, then switch from "
-                    "the next user request or host command.")
+            return ToolText(
+                "topic changes are turn-boundary operations. Finish this turn, then switch from the next "
+                "user request or host command.",
+                status=ToolStatus.STEERED,
+            )
         try:
             s = session.switch_topic(args["task_id"])
         except KeyError:
-            return (f"Error: no open topic {args.get('task_id')!r}. Pick a task_id from "
-                    "OTHER OPEN THREADS.")
+            return ToolText(
+                f"no open topic {args.get('task_id')!r}. Pick a task_id from OTHER OPEN THREADS.",
+                status=ToolStatus.STEERED,
+            )
         return f"Switched to topic [{args['task_id']}]: {one_line(s.goal, 80)} (its state is restored)."
 
     new_schema = {"type": "function", "function": {

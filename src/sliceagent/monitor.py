@@ -35,6 +35,8 @@ from .events import (
     TurnEnd,
     TurnInterrupted,
 )
+from .private_state import atomic_write_private, private_dir, private_file
+from .tui_projection import normalized_tool_status
 
 _MAX_OUTPUT = 6000   # cap a single tool output in the snapshot (the page stays snappy)
 _MAX_ARGS = 4000     # cap a single tool-args blob
@@ -120,7 +122,8 @@ class SliceMonitor:
                 if self._cur is not None:
                     self._cur["tools"].append({
                         "name": e.name, "args": _clip(json.dumps(e.args, ensure_ascii=False), _MAX_ARGS),
-                        "output": _clip(e.output, _MAX_OUTPUT), "failing": e.failing})
+                        "output": _clip(e.output, _MAX_OUTPUT),
+                        "status": normalized_tool_status(e), "failing": e.failing})
             elif isinstance(e, StepEnd):
                 if self._cur is not None:
                     cu = self._cur.setdefault("usage", {})   # ACCUMULATE across steps (don't overwrite, else the
@@ -225,8 +228,7 @@ _MAX_SESSION_FILES = 20            # MON3: and/or keep only the most-recent M (n
 def _monitor_dir(d: str | None = None) -> str:
     d = d or os.environ.get("SLICEAGENT_MONITOR_DIR") or \
         os.path.join(os.path.expanduser("~"), ".sliceagent", "monitor")
-    os.makedirs(d, exist_ok=True)
-    return d
+    return private_dir(d)
 
 
 class _SnapshotWriter:
@@ -241,6 +243,11 @@ class _SnapshotWriter:
 
     def __init__(self, path: str, debounce_ms: int = _DEBOUNCE_MS):
         self._path = path
+        parent = os.path.dirname(path)
+        if parent and parent != ".":
+            private_dir(parent)
+        if os.path.exists(path):
+            private_file(path)
         self._debounce = debounce_ms / 1000.0
         self._lock = threading.Lock()
         self._pending: dict | None = None   # single-slot: only the freshest snapshot survives
@@ -282,10 +289,7 @@ class _SnapshotWriter:
 
     def _write(self, snap: dict) -> None:
         try:
-            tmp = self._path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False)
-            os.replace(tmp, self._path)
+            atomic_write_private(self._path, json.dumps(snap, ensure_ascii=False))
         except Exception:
             pass
 
@@ -315,7 +319,9 @@ def make_file_monitor_sink(session_id: str, context_fn=None, dir: str | None = N
     coalesce and debounce, with an immediate flush on StepEnd/TurnEnd. MON1 keeps the snapshot O(N).
     Writes are atomic and failure-contained (a monitor write must never break the loop)."""
     monitor = SliceMonitor(context_fn=context_fn)
-    path = os.path.join(_monitor_dir(dir), f"{session_id}.json")
+    safe_id = "".join(char if (char.isalnum() or char in "-_") else "_"
+                      for char in (session_id or "default"))
+    path = os.path.join(_monitor_dir(dir), f"{safe_id}.json")
     inner = monitor.sink
     writer = _SnapshotWriter(path)
     _settle = (StepEnd, TurnEnd, TurnInterrupted)   # the points worth a guaranteed prompt write
@@ -338,7 +344,9 @@ def _session_files(d: str):
         for fn in os.listdir(d):
             if fn.endswith(".json"):
                 try:
-                    out.append((fn[:-5], os.path.getmtime(os.path.join(d, fn))))
+                    path = os.path.join(d, fn)
+                    private_file(path)
+                    out.append((fn[:-5], os.path.getmtime(path)))
                 except OSError:
                     continue   # a file vanished mid-enumeration → skip it, don't truncate the session list
     except OSError:
@@ -489,6 +497,8 @@ PAGE = r"""<!doctype html>
   .tool-h{padding:6px 12px;display:flex;gap:8px;align-items:center;background:#0f141b}
   .tool-h .tn{color:var(--purple);font-weight:600}
   .tool-h .fail{color:var(--red);font-size:11px}
+  .tool-h .steer{color:var(--muted);font-size:11px}
+  .tool-h .unknown{color:var(--amber);font-size:11px}
   .asst pre{color:#e6edf3}
   .hint{color:var(--muted);font-size:11px;padding:6px 12px}
 </style></head>
@@ -569,8 +579,13 @@ function renderDetail(s){
   let did="";
   if(s.assistant) did+=`<div class="asst"><div class="hint">assistant text</div><pre>${esc(s.assistant)}</pre></div>`;
   for(const t of (s.tools||[])){
+    const status=t.status||(t.failing?"failed":"succeeded");
+    const badge=status==="failed"?'<span class="fail">● failed</span>':
+      status==="indeterminate"?'<span class="unknown">! state unknown</span>':
+      status==="steered"?'<span class="steer">↷ steered</span>':
+      status==="cancelled"?'<span class="steer">↷ cancelled</span>':'';
     did+=`<div class="tool"><div class="tool-h"><span class="tn">${esc(t.name)}</span>
-       <span class="hint">${esc(t.args)}</span>${t.failing?'<span class="fail">● failed</span>':''}</div>
+       <span class="hint">${esc(t.args)}</span>${badge}</div>
        <pre>${esc(t.output)}</pre></div>`;
   }
   if(!did) did='<div class="hint">no model output captured for this step yet…</div>';

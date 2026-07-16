@@ -69,6 +69,47 @@ def write_atomic_replaces_and_keeps_original_on_failure():  # #39
 
 
 @check
+def task_checkpoint_repairs_private_vault_modes():
+    if os.name == "nt":
+        return
+    import stat
+    vault = tempfile.mkdtemp(prefix="private-vault-")
+    os.chmod(vault, 0o755)
+    memory = _bare_memory(vault)
+    task = TaskState(task_id="t1", session_id="s1", title="private", goal="private")
+    memory.checkpoint_task(task)
+    task_path = os.path.join(vault, "tasks", "t1.md")
+    session_path = os.path.join(vault, "sessions", "s1.md")
+    assert stat.S_IMODE(os.stat(vault).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(os.path.join(vault, "tasks")).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(os.path.join(vault, "sessions")).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(task_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(session_path).st_mode) == 0o600
+
+
+@check
+def explicit_shared_skill_directory_keeps_its_directory_mode():
+    if os.name == "nt":
+        return
+    import stat
+    from sliceagent.memory import write_skill_file
+    with tempfile.TemporaryDirectory() as shared:
+        os.chmod(shared, 0o755)
+        body = "---\nname: shared\ndescription: test\n---\n\nDo the thing.\n"
+        path = write_skill_file("shared", body, skills_dir=shared)
+        assert path
+        assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755, \
+            "an explicit project/shared skill root must not be made owner-only"
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o644, \
+            "an explicit project/shared SKILL.md must remain collaborator-readable"
+
+        os.chmod(path, 0o664)
+        assert write_skill_file("shared", body + "\nUpdated.\n", skills_dir=shared) == path
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o664, \
+            "an atomic rewrite must preserve an existing shared skill's mode"
+
+
+@check
 def fts_query_is_escaped_and_score_is_positive():  # #40 / #41
     if not fts5_available():
         print("  (fts5 unavailable — skipping #40/#41)")

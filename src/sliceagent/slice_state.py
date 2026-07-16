@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
+from .deliverables import DeliverableRequirement
+
 
 MAX_PROGRESS_SIGNALS = 8
 
@@ -53,6 +55,9 @@ class TaskProgress:
     action_log: dict[str, dict] = field(default_factory=dict)
     world: dict = field(default_factory=dict)
     progress_signals: list[ProgressSignal] = field(default_factory=list)
+    # A procedure may declare one concrete output envelope for the current logical request. It is L1/PFC
+    # working state: durable across a workspace segment/restart, but never user authority or a semantic grade.
+    deliverable_requirement: DeliverableRequirement | None = None
 
     def reset(self, goal: str = "") -> None:
         self.goal = str(goal or "")
@@ -62,11 +67,22 @@ class TaskProgress:
         self.action_log = {}
         self.world = {}
         self.progress_signals = []
+        self.deliverable_requirement = None
 
     def seal(self) -> None:
         # Detailed/repeated invocation state belongs to TurnRuntime. Cross-turn anti-loop information is
         # represented only by bounded/coalesced progress signals.
         self.action_log = {}
+
+    def bind_deliverable(self, requirement: DeliverableRequirement) -> None:
+        if not isinstance(requirement, DeliverableRequirement):
+            raise TypeError("deliverable requirement must be typed")
+        current = self.deliverable_requirement
+        if current is not None and current.logical_id == requirement.logical_id:
+            if (current.kind, current.version) != (requirement.kind, requirement.version):
+                raise ValueError("one logical request cannot silently change its deliverable contract")
+            return  # idempotent activation, including equivalent procedures under different names
+        self.deliverable_requirement = requirement
 
     def set_objective_status(self, status: str) -> None:
         """Apply the small explicit lifecycle without accepting invented persisted values."""
@@ -116,6 +132,9 @@ class EvidenceState:
     findings: list[str] = field(default_factory=list)
     finding_source: dict = field(default_factory=dict)
     last_error: str = ""
+    # Exact physical call identity for the live error only. It is deliberately not carried by TaskState;
+    # after restart, absence of provenance means a later success cannot silently resolve the blocker.
+    last_error_identity: str = ""
     open_report: str = ""
     reconciliation_required: str = ""
     reconciliation_targets: list[str] = field(default_factory=list)
@@ -124,6 +143,7 @@ class EvidenceState:
         self.findings = []
         self.finding_source = {}
         self.last_error = ""
+        self.last_error_identity = ""
         self.open_report = ""
         self.reconciliation_required = ""
         self.reconciliation_targets = []
@@ -193,6 +213,10 @@ class ContinuityState:
     # "verify that against your records". It freezes both selector and derived sources at the prior response's
     # cutoff, so a newly sealed answer cannot retroactively change its own evidence. Never cross-session state.
     previous_evidence_snapshot: dict | None = None
+    # Constant-size lifecycle truth from the latest sealed runtime segment.  This is not a transcript and
+    # contains no args/output; it stays visible without a lexical "what happened?" classifier.
+    last_receipt: dict | None = None
+    last_receipt_artifact_id: str = ""
 
     def reset(self) -> None:
         self.conversation = []
@@ -200,6 +224,8 @@ class ContinuityState:
         self.discourse_focus = []
         self.pending_proposal = None
         self.previous_evidence_snapshot = None
+        self.last_receipt = None
+        self.last_receipt_artifact_id = ""
 
     def seal(self) -> None:
         # The conversation ring is bounded when written; raw requests belong to immutable turn artifacts.
@@ -220,9 +246,20 @@ class TurnRuntime:
     since_edit: int = 0
     turn_actions: int = 0
     explore_mode: bool = False
+    # A user-reported defect closes only after this turn observes both a real repair mutation and a later,
+    # recognized verification success. This marker is deliberately turn-local: surviving a restart/turn
+    # without the verification receipt must keep the report open.
+    report_repair_observed: bool = False
+    report_verification_families: set[str] = field(default_factory=set)
     # Exact source projections selected for this turn (for example paired sealed request/response evidence).
     # They are elastic slice material, not durable transcript state, and disappear at the turn seal.
     source_projections: tuple[dict, ...] = ()
+
+    @property
+    def fan_in_manifest(self):
+        """Bounded delegated-work consumption truth derived from the call ledger."""
+        from .fan_in import build_fan_in_manifest
+        return build_fan_in_manifest(self.recent_calls)
 
     def reset(self) -> None:
         self.step = 0
@@ -233,6 +270,8 @@ class TurnRuntime:
         self.since_edit = 0
         self.turn_actions = 0
         self.explore_mode = False
+        self.report_repair_observed = False
+        self.report_verification_families = set()
         self.source_projections = ()
 
     def seal(self) -> None:

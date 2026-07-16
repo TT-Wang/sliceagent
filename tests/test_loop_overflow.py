@@ -10,10 +10,12 @@ No model, no pytest. Run: PYTHONPATH=src python tests/test_loop_overflow.py
 """
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.context_overflow import ContextOverflow                # noqa: E402
+from sliceagent.errors import RetryCancelledError                     # noqa: E402
 from sliceagent.events import StepEnd, TurnInterrupted                 # noqa: E402
 from sliceagent.hooks import BudgetHook, CompositeHooks, Hooks, OracleHook  # noqa: E402
 from sliceagent.interfaces import Snippet                              # noqa: E402
@@ -145,7 +147,7 @@ def overflow_keeps_compacting_while_trajectory_can_still_shrink():
 
 
 @check
-def reset_hook_failure_is_parked_inside_the_turn_lifecycle():
+def reset_hook_failure_fails_open_inside_the_turn_lifecycle():
     class BrokenReset(Hooks):
         def reset_for_turn(self):
             raise RuntimeError("reset exploded")
@@ -155,8 +157,8 @@ def reset_hook_failure_is_parked_inside_the_turn_lifecycle():
         build_slice=_build(), llm=_ScriptLLM([_Resp(content="unused", finish_reason="stop")]),
         tools=_Tools(), dispatch=events.append, hooks=BrokenReset(), max_steps=2,
     )
-    assert result.stop_reason == "error"
-    assert len([event for event in events if isinstance(event, TurnInterrupted)]) == 1
+    assert result.stop_reason == "end_turn"
+    assert not [event for event in events if isinstance(event, TurnInterrupted)]
 
 
 @check
@@ -240,7 +242,8 @@ class _CountLLM:
 
 @check
 def closeout_tokens_are_accounted():
-    # G: the closeout's extra completion must be counted in total (and fed to the budget). max_steps=2 →
+    # Default-regression: parent turns still own the generic closeout. Its extra completion must be counted in
+    # total (and fed to the budget). max_steps=2 →
     # 2 step calls + 1 closeout call = 3 × 10 prompt tokens = 30. Without the fix the closeout is invisible.
     llm = _CountLLM()
     events = []
@@ -251,6 +254,24 @@ def closeout_tokens_are_accounted():
     closeout = [event for event in events
                 if isinstance(event, StepEnd) and event.stop_reason == "closeout"]
     assert len(closeout) == 1 and closeout[0].usage["prompt_tokens"] == 10
+
+
+@check
+def staged_owner_can_disable_only_the_generic_max_steps_closeout():
+    llm = _CountLLM()
+    events = []
+    result = run_turn(
+        build_slice=_build(), llm=llm, tools=_Tools(), dispatch=events.append,
+        hooks=Hooks(), max_steps=2, allow_park_closeout=False,
+    )
+    assert result.stop_reason == "max_steps"
+    assert llm.calls == 2, "the staged owner reserved its own synthesis; no hidden fast closeout may run"
+    assert result.usage["prompt_tokens"] == 20
+    assert not any(
+        isinstance(event, StepEnd) and event.stop_reason == "closeout" for event in events
+    )
+    interrupts = [event for event in events if isinstance(event, TurnInterrupted)]
+    assert len(interrupts) == 1 and interrupts[0].reason == "max_steps"
 
 
 class _ErrLLM:
@@ -281,32 +302,6 @@ def throwing_build_slice_parks_not_crashes():
                    tools=_Tools(), dispatch=lambda e: events.append(e), hooks=Hooks(), max_steps=10)
     assert res.stop_reason == "error", res.stop_reason
     assert any(isinstance(e, TurnInterrupted) and e.reason == "error" for e in events)
-
-
-@check
-def selfcheck_accepts_after_model_actually_verifies():
-    # GROUNDED gate: 'done' -> forced verification feedback -> model RUNS a tool (real verify) -> 'done' accepted.
-    from sliceagent.hooks import SelfCheckHook
-    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop"),
-                      _Resp(tool_calls=[_TC("noop", {}, "c1")]),         # the model does verification work
-                      _Resp(content="verified, done", finish_reason="stop")])
-    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
-                   dispatch=lambda e: None, hooks=SelfCheckHook(), max_steps=10)
-    assert res.stop_reason == "end_turn", res.stop_reason
-    assert len(llm.seen) == 3, f"expected done->gate->verify-tool->done (3 calls), got {len(llm.seen)}"
-    assert any("definition-of-done" in (m.get("content") or "") for m in llm.seen[1]), \
-        "self-check feedback was not delivered to the model"
-
-
-@check
-def selfcheck_is_bounded_when_model_never_verifies():
-    # A bare re-assertion of 'done' (no tool work) re-fires the gate, but only up to max_fires — never loops.
-    from sliceagent.hooks import SelfCheckHook
-    llm = _ScriptLLM([_Resp(content="done", finish_reason="stop")] * 8)
-    res = run_turn(build_slice=_build(), llm=llm, tools=_Tools(),
-                   dispatch=lambda e: None, hooks=SelfCheckHook(max_fires=2), max_steps=20)
-    assert res.stop_reason == "end_turn", res.stop_reason
-    assert len(llm.seen) == 3, f"max_fires=2 → 2 fires then accept (3 calls), got {len(llm.seen)}"
 
 
 @check
@@ -358,6 +353,39 @@ def overflow_breadcrumb_carries_the_checkpoint():
     crumb = next((m for m in post if str(m.get("content", "")).startswith("[context note: the oldest")), None)
     assert crumb is not None, "overflow breadcrumb missing"
     assert "chose approach Q" in crumb["content"], "breadcrumb must carry the distilled checkpoint state (F2)"
+
+
+@check
+def max_steps_closeout_forwards_the_same_model_cancellation_and_activity_controls():
+    signal = threading.Event()
+    activity = lambda _event, _detail: None
+
+    class ControlledLLM:
+        model = "unknown"; max_tokens = 0
+        def __init__(self):
+            self.controls = []
+        def complete_with_control(self, _messages, _schemas, *, should_cancel=None,
+                                  transport_activity=None):
+            index = len(self.controls)
+            self.controls.append((should_cancel, transport_activity))
+            if index == 0:
+                assert should_cancel is not None and not should_cancel()
+                return _Resp(tool_calls=[_TC("noop", {}, "first")])
+            # Cancellation begins while the max_steps closeout provider request is entering transport. The
+            # exact same callback must reach this second physical call so it can close its stream promptly.
+            signal.set()
+            assert should_cancel is not None and should_cancel()
+            raise RetryCancelledError("closeout cancelled")
+
+    llm = ControlledLLM()
+    result = run_turn(
+        build_slice=_plain_build, llm=llm, tools=_Tools(), dispatch=lambda _event: None,
+        hooks=Hooks(), max_steps=1, signal=signal, transport_activity=activity,
+    )
+    assert result.stop_reason == "max_steps", result.stop_reason
+    assert len(llm.controls) == 2, "normal step plus closeout must be two controlled physical calls"
+    assert all(cancel is not None for cancel, _ in llm.controls)
+    assert all(observer is activity for _, observer in llm.controls)
 
 
 def main():

@@ -23,20 +23,23 @@ The field's default is *bigger windows + summarize*. sliceagent does the opposit
        alt="The core loop: a transcript agent re-sends its entire growing history every turn (208k to 1.66M tokens over 6 turns), while sliceagent rebuilds a history-bounded, task-elastic seed from the carried slice, live files, and lessons, then seals each turn to disk, and the hippocampus pages past turns back into future seeds on demand — peak input stayed ~12-15k in the s1 benchmark, 112x smaller by turn 6.">
 </p>
 
-sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** backed by always-on local artifacts; and an optional **neocortex** that derives durable lessons. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript.
+sliceagent's memory is organized like a brain: fast, lossy **perception** of the live world; an elastic **working memory** for the current task; a **hippocampus** backed by always-on local artifacts; and a typed native **neocortex** for provenance-linked USER, PROJECT, and CRAFT knowledge. Every turn *reconstructs* a history-bounded working set from these — it never replays a growing transcript. With Memem's structured-index protocol (2.10+) installed, Memem is the primary semantic retrieval backend for typed L2; it is not another brain layer or a second record authority.
 
 | Region | Role |
 |---|---|
-| **Sensory cortex** — live perception | Re-derives the world each turn—git state, project facts, repo map—rather than trusting remembered copies. |
-| **Prefrontal cortex** — working memory | The carried **Slice**: task-elastic, provenance-tagged state (intent, findings, plan, change-set), sealed at each turn boundary. |
+| **Sensory cortex** — live perception | Re-derives only live resources named by the active dependency closure; unrelated repo maps, history, and memory are not eagerly injected. |
+| **Prefrontal cortex** — working memory | Immutable, source-linked **Active Work**: unresolved request roots, child work, dependencies, resources, evidence, and delivery state. |
 | **Hippocampus** — episodic memory | Seals each turn or child report into the always-on local artifact store; pages a specific record back in on demand. |
-| **Neocortex** — long-term memory | Optionally derives and retrieves provenance-tagged cross-session lessons; it is not required for task recovery. |
+| **Neocortex** — long-term memory | Stores scoped, provenance-linked USER, PROJECT, and CRAFT records in one typed model; Memem provides primary semantic retrieval when available, with native search as failover. |
 
-Before an effect runs, a typed turn contract binds the current user directive to concrete operations and
-targets; ordinary observation remains available without pretending that “run tests” authorizes every shell
-action. After execution, the sealed turn carries a canonical receipt distinguishing requested, rejected,
-started, settled, and applied work. When asked what it did, SliceAgent selects that evidence instead of
-constructing an autobiography from conversational residue.
+The implementation contracts are documented in [End-game context design](docs/ENDGAME-CONTEXT-DESIGN.md) and
+[Memory layers design](docs/MEMORY-LAYERS-DESIGN.md).
+
+The exact current request is admitted once into an application event ledger and one Active Work root. Context
+is selected from that graph's unresolved dependency closure before physical elasticity is applied. After
+execution, the sealed turn carries a canonical receipt distinguishing requested, rejected, started, settled,
+and applied work. A constant-size receipt projection remains visible without constructing an autobiography
+from conversational residue.
 
 ```text
 ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
@@ -64,7 +67,7 @@ constructing an autobiography from conversational residue.
      live views re-derive, archived detail returns by handle.
 ```
 
-Each turn faults in what the active task references — the carried slice, live views, selected artifacts, and any relevant derived lessons — and hands the model an elastic **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into an immutable local artifact and the next checkpoint is published. If semantic memory is available, it may additionally distill a durable lesson. Net effect: **for stable active task state, context does not grow merely with session age; it can still expand with genuine task complexity.**
+Each turn faults in what the active task references — the carried slice, live views, selected artifacts, and applicable typed USER, PROJECT, or CRAFT knowledge — and hands the model an elastic **Seed**. The model acts; observations fold back into working memory; at the turn boundary the episode is sealed into an immutable local artifact and the next checkpoint is published. Qualifying evidence may then consolidate into a native typed lesson; optional semantic retrieval may index it but is not required. Net effect: **for stable active task state, context does not grow merely with session age; it can still expand with genuine task complexity.**
 
 ## Benchmark
 
@@ -231,6 +234,12 @@ pipx install "sliceagent[tui]"                      # pipx
 pip install "sliceagent[tui]"                       # plain pip (use a venv)
 ```
 
+Native evidence, Active Work, history, and typed knowledge are included in the base install. The
+`sliceagent[tui,memory]` extra adds optional Memem; when its structured-index protocol is available (Memem 2.10+),
+SliceAgent uses it as primary L2 retrieval and falls back to native search on a whole-query failure. Older Memem
+versions are reported as unavailable for this protocol rather than used as an unscoped recall tail. Typed record
+truth and `@sliceagent/` durability remain available without it.
+
 If `pip` refuses with `Requires-Python >=3.11`: `conda create -n sliceagent python=3.12 -y && conda activate sliceagent`, then pip install. Prefer env vars over the wizard? Export **both** `LLM_API_KEY` and `AGENT_MODEL` (plus `LLM_BASE_URL` for non-OpenAI endpoints). `ripgrep` is recommended (code search degrades gracefully without it).
 </details>
 
@@ -248,14 +257,16 @@ SliceAgent and follow the external process guidance it prints. If your installed
 `sliceagent update`, re-run the one-line installer; the installer is deliberately safe to re-run.
 
 Self-managed installs stay self-managed: `uv tool upgrade sliceagent`, `pipx upgrade sliceagent`, or
-`python -m pip install --upgrade "sliceagent[tui]"`. Source checkouts should pull first, then run
+`python -m pip install --upgrade "sliceagent[tui]"` (or `sliceagent[tui,memory]` when using Memem). Source checkouts should pull first, then run
 `uv sync --all-extras`.
 
 Footprint is light (no torch). `pip install -e .` works for a clone. Homebrew / Docker arrive in v0.2. → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)**.
 
 ## Usage
 
-Run `sliceagent` in your project and type what you want in plain language. It rebuilds its working context, investigates, edits (auto-applied or confirmed, per your mode), and can run your tests to verify. A turn looks like:
+Run `sliceagent` in your project and type what you want in plain language. It rebuilds its working context,
+investigates, edits, and can run your tests to verify. Ordinary requested work proceeds without permission
+prompts; only a narrow high-confidence catastrophic-command safeguard can refuse execution. A turn looks like:
 
 ```text
 ❯ why does retry_with_backoff drop the last attempt? fix it
@@ -266,12 +277,14 @@ Run `sliceagent` in your project and type what you want in plain language. It re
   ◌ 2/3 add a regression test · Running pytest -q · 00:12
   │ run pytest -q
   │   38 passed
-  │ ◆ The regression reproduces the bug and passes with the fix.
-  ┌─ assistant ─────────────────────────────────────────────┐
-  │ The loop exits on `attempt == max` before the final      │
-  │ sleep+retry, so the last attempt never runs. Changed the  │
-  │ bound to `attempt <= max` and added a regression test.    │
-  └──────────────────────────────────────────────────────────┘
+  │ agent note · The focused regression now passes.
+  ─ assistant ───────────────────────────────────────────────
+
+    The loop exits on `attempt == max` before the final
+    sleep+retry, so the last attempt never runs. Changed the
+    bound to `attempt <= max` and added a regression test.
+
+  ───────────────────────────────────────────────────────────
   ✓ turn saved · plan 3/3 · 2 passes · 4 read · 1 edit · 1 cmd · 00:18
 ```
 
@@ -281,9 +294,8 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 
 | Command | What it does |
 |---|---|
-| `/config` · `/model` · `/reasoning` | add/switch providers · switch model / reasoning effort (persists) |
-| `/mode` | permission mode: **baby-sitter** (confirm each edit + command) · **teenager** (default; confirm risky ones) · **let-it-go** (auto-run all but catastrophic) |
-| `/undo` | revert the last edit(s) |
+| `/config` · `/model` | add/switch providers · switch model / reasoning effort (persists) |
+| `Esc` | revert the last edit(s) |
 | `/cwd [path]` | show the workspace; with a path, atomically switch it without restarting the UI or model client |
 | `/cost` | tokens and estimated $ spent this session |
 | `/skills` · `/tools` · `/mcp` · `/plugins` · `/agents` | list what's available to the agent |
@@ -293,35 +305,55 @@ Attach a file or path to your message with `@`: `@src/errors.py explain the back
 | `/update` | show the safe process-boundary update command |
 | `Ctrl-C` · `exit` | interrupt the turn · quit |
 
+Public `/` palette: `/config` · `/model` · `/cwd` · `/learn` · `/plan` · `/cost` · `/update` · `/threads` · `/resume` · `/plugins` · `/mcp` · `/skills` · `/tools` · `/agents` · `/help` · `/exit`.
+The typed compatibility aliases `/reasoning`, `/undo`, and `/switch` remain accepted, but stay out of the
+palette because `/model`, Esc, and `/resume` are their clearer public spellings.
+
+File mentions accept exact workspace paths such as `@app/jobs/[id]/page.tsx`; quote paths containing spaces,
+for example `@"docs/my guide.md"`.
+
 Prefix an unrelated request with `New task:` to start it with fresh task state while parking the current task
 for `/resume`. Ambiguous follow-ups deliberately continue the active task so context is never discarded on a
 guess.
 
-It can edit code (workspace-confined, reversible with `/undo`), run regular shell commands through a sandbox (`local` by default, `docker` for full isolation), search the tree and the web, and delegate decomposable research to a fresh one-shot read-only explorer (each child gets its own history-bounded, task-elastic slice). That narrow surface is the demo default. Set `AGENT_ADVANCED_AGENTS=1` to expose writable and named specialist delegation (and nested delegation when `AGENT_SUBAGENT_DEPTH` is raised above its default of `1`), or `AGENT_ADVANCED_TOOLS=1` to expose persistent process and interactive terminal tools. The flags are independent. Three permission modes gate actions, all with a hard floor on catastrophic commands; secrets are scrubbed from anything persisted or logged.
+It can edit code in the primary workspace and grounded focus roots (reversible with `/undo`), run regular shell commands through a sandbox (`local` by default, `docker` for container isolation on POSIX/WSL2), search the tree and the web, and delegate decomposable research to a fresh one-shot read-only explorer (each child gets its own history-bounded, task-elastic slice). Native Windows uses the local backend; run SliceAgent inside WSL2 if you want the Docker backend. That narrow surface is the demo default. Set `AGENT_ADVANCED_AGENTS=1` to expose writable and named specialist delegation (and nested delegation when `AGENT_SUBAGENT_DEPTH` is raised above its default of `1`), or `AGENT_ADVANCED_TOOLS=1` to expose persistent process and interactive terminal tools. The flags are independent. Ordinary work runs directly from the user's request; the host retains only a narrow safeguard against high-confidence catastrophic shell commands. Secrets are scrubbed from anything persisted or logged.
 
-Every clean or interrupted agent task turn and every subagent report is sealed into the always-on local artifact/checkpoint path, independently of semantic memory. The model can refine retained detail through the read-only `artifacts/` namespace. Cross-session semantic lessons are a separate, optional derived layer powered by memem; task recovery does not depend on it.
+Every clean or interrupted agent task turn and every subagent report is sealed into the always-on local artifact/checkpoint path. The model reads exact evidence, project history, Active Work, and typed knowledge through the permanent read-only `@sliceagent/` namespace in every workspace. `@sliceagent/memory/status.md` is the bounded general summary; raw host-counted inventory lives separately at `@sliceagent/memory/diagnostics.md` for explicit diagnostic requests. Compatibility counts are not layer sizes or an L2 backlog. Memem is primary semantic retrieval when enabled; task recovery and typed record truth do not depend on it.
 
-If a timeout or disconnect leaves an operation's side effects uncertain, SliceAgent carries a durable,
-target-scoped reconciliation gate into the next turn: it permits matching live read-only inspection, then
-requires an explicit evidence-backed resolution before more effects or task switching in that workspace.
-Opaque shell/code effects also require live user confirmation; a directory listing is never treated as proof
-of file contents. Ambiguous recovery journals stop startup before plugins or MCP processes run.
+Automatic knowledge push is lifecycle- and revision-aware: stale or dependency-drifted PROJECT observations and
+resolved diagnostic reports remain explicitly searchable, but do not reappear as if they described the current
+workspace. USER preferences and reusable CRAFT procedures do not decay merely because time passed.
+
+If a timeout or disconnect leaves an operation's side effects uncertain, SliceAgent records that uncertainty
+durably and shows it to the model as grounding on later turns. It can re-observe relevant live state before
+making claims, but the receipt does not block ordinary work, task switching, undo, or workspace navigation.
+Ambiguous recovery journals still stop startup before plugins or MCP processes run because that boundary
+protects the integrity of the durable local store rather than interpreting user intent.
 
 **Configuration.** `sliceagent config --list` prints every setting. Set them persistently in `~/.sliceagent/config.toml` (written by `init`), or override any one via an environment variable:
 
 | Setting | Default | Purpose |
 |---|---|---|
 | `AGENT_MODEL` | *(required)* | the model id to run |
-| `AGENT_POLICY` | `teenager` | permission mode |
-| `AGENT_SANDBOX` | `local` | `local` or `docker` (isolated) |
+| `AGENT_SANDBOX` | `local` | `local`, or `docker` on POSIX/WSL2 (native Windows: use `local` or run under WSL2) |
 | `AGENT_MAX_STEPS` | `60` | per-turn step ceiling |
 | `AGENT_CONTEXT_WINDOW` | *(catalog or unset)* | explicit provider window for strict per-call preflight; unknown models otherwise use compatibility mode |
 | `AGENT_ADVANCED_AGENTS` | *(off)* | enable writable and named specialists; unlock the nested surface subject to the depth ceiling |
 | `AGENT_SUBAGENT_DEPTH` | `1` | delegation depth ceiling; raise it to permit nested advanced agents |
+| `AGENT_DELEGATION_TIMEOUT` | `900` | hard ceiling in seconds for one child-agent wave; raise for unusually slow providers |
+| `AGENT_EXPLORER_REASONING` | `staged` | fast evidence navigation followed by one full, tool-free final synthesis (`fast`/`full` are single-stage overrides) |
+| `AGENT_EXPLORER_NAV_STEPS` | `6` | fast-navigation model-step ceiling for staged explorers; one separate synthesis step stays reserved |
+| `LLM_HARD_TIMEOUT_SEC` | *(completion-budget derived)* | absolute per-call watchdog; provider-agnostic default allows the configured completion cap at a conservative generation rate (minimum 180s) |
+| `LLM_STREAM_CLOSE_GRACE_SEC` | `2` | bounded wait to prove a cancelled/timed-out SSE request physically closed before any retry |
+| `LLM_PROVIDER_MAX_INFLIGHT` | `4` | process-wide physical request cap per provider account; indeterminate calls hold their slot until the transport closes |
 | `AGENT_ADVANCED_TOOLS` | *(off)* | enable persistent process and interactive terminal tools |
 | `SLICEAGENT_CACHE_DIR` | `~/.sliceagent` | always-on local checkpoints, immutable artifacts, and recovery journals |
-| `SLICEAGENT_VAULT` | `~/.sliceagent/vault` | optional semantic-memory and legacy compatibility records |
+| `SLICEAGENT_VAULT` | `~/.sliceagent/vault` | legacy episodic/task/roster compatibility records (not canonical typed L2) |
 | `AGENT_VERIFY_CMD` | *(unset)* | test command used as the verification oracle |
+
+DeepSeek official-API configurations should move from the retiring `deepseek-chat` / `deepseek-reasoner`
+aliases to `deepseek-v4-flash` or `deepseek-v4-pro`. SliceAgent keeps the old names temporarily compatible,
+but new provider setup and model suggestions use the V4 names.
 
 ## License
 
@@ -329,7 +361,7 @@ of file contents. Ambiguous recovery journals stop startup before plugins or MCP
 
 ## Acknowledgements
 
-sliceagent's design was informed by two excellent open-source agents: **[Hermes](https://github.com/NousResearch/hermes)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. The optional cross-session semantic-memory layer is powered by [memem](https://github.com/TT-Wang/memem); local artifacts and recovery do not depend on it. With thanks to their authors.
+sliceagent's design was informed by two excellent open-source agents: **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** (MIT) and **[Kimi Code](https://github.com/MoonshotAI/kimi-code)**. A few peripheral utilities are ported from Hermes (see [NOTICE](NOTICE)); most of the rest are patterns we studied and reimplemented on our own terms. [memem](https://github.com/TT-Wang/memem) provides primary semantic retrieval for SliceAgent-owned typed L2 knowledge when the memory extra is installed. Its value/primary-index/cue representation was also informed by Microsoft [Memora](https://github.com/microsoft/Memora) (MIT). Neither is another brain layer, and local artifacts and recovery do not depend on them. With thanks to their authors.
 
 ## Contact
 

@@ -1,8 +1,8 @@
-"""PAGED-OUT HISTORY manifest — the cache made VISIBLE so the model READS the history/ turn files.
+"""PAGED-OUT HISTORY manifest — the cache made visible through canonical ContextFS locators.
 
 The active-ask channel was dead because the episodic cache had no manifest in the slice: the model
 calls read_file because REPO MAP advertises paths, so we advertise the paged-out turns the SAME way —
-as read_file("history/turn-N.md") locators. These checks prove the manifest now renders as a typed
+as read_file("@sliceagent/history/turn-N.md") locators. These checks prove the manifest renders as a typed
 region (locators + copy-pasteable read call), is BOUNDED (moat), carries a payoff breadcrumb for every turn (the
 pin/view-killer was invisible payoff), leaks NO content bodies, and self-suppresses with no durable
 cache. Deterministic — no model, no disk, no memem (a tiny durable-memory stub).
@@ -65,7 +65,7 @@ def manifest_renders_with_fetch_calls():
     assert "# PAGED-OUT HISTORY" in user, "manifest region missing from slice"
     # each turn is a locator line ENDING in its own read_file call (the copy-paste win)
     for n in (1, 2, 3):
-        assert f'read_file("history/turn-{n}.md")' in user, f"turn {n} read call missing"
+        assert f'read_file("@sliceagent/history/turn-{n}.md")' in user, f"turn {n} read call missing"
     assert "3 callers: api.py:40" in user, "the payoff breadcrumb (note) is missing"
     assert "· FAIL" in user, "failing turn not flagged"
 
@@ -76,12 +76,17 @@ def manifest_bounded_with_older_tail():
     N = MANIFEST_TURNS + 4                                          # a session LONGER than the window
     lines = [_line(i, f"turn {i} work", note=f"did thing {i}") for i in range(1, N + 1)]
     user = _build_user(_DurableMem(lines))
-    shown = [n for n in range(1, N + 1) if f'read_file("history/turn-{n}.md")' in user]
+    shown = [
+        n for n in range(1, N + 1)
+        if f'read_file("@sliceagent/history/turn-{n}.md")' in user
+    ]
     assert len(shown) == MANIFEST_TURNS, f"expected {MANIFEST_TURNS} locators, got {len(shown)}: {shown}"
     assert shown == list(range(N + 1 - MANIFEST_TURNS, N + 1)), f"must show the LAST {MANIFEST_TURNS}: {shown}"
     older = N - MANIFEST_TURNS
     assert f"{older} earlier turn(s)" in user, "the '+N earlier' tail is missing"
-    assert 'read_file("history/index.md") for the full index' in user, "older tail should point at the index file"
+    assert 'read_file("@sliceagent/history/index.md") for the full index' in user, (
+        "older tail should point at the canonical index"
+    )
 
 
 # ── every line carries a payoff breadcrumb, even with no note (adoption requirement) ──

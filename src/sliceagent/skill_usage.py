@@ -30,6 +30,8 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 
+from .private_state import is_private_state_path, private_dir, private_file
+
 _USAGE_FILE = ".usage.json"
 _BUMP_LOCK = threading.Lock()   # the skill tool declares no access → concurrent skill() calls run in parallel
 #                                 threads; serialize load→increment→save so an increment isn't lost.
@@ -52,6 +54,9 @@ def load_usage(skills_dir: str) -> dict:
     path = usage_path(skills_dir)
     if not os.path.exists(path):
         return {}
+    if is_private_state_path(path):
+        private_dir(skills_dir)
+        private_file(path)
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -66,12 +71,16 @@ def _save_usage(skills_dir: str, data: dict) -> None:
     """Atomic write. Best-effort — errors are swallowed (telemetry must never break a load)."""
     path = usage_path(skills_dir)
     try:
-        os.makedirs(skills_dir, exist_ok=True)
+        if is_private_state_path(path):
+            private_dir(skills_dir)
+        else:
+            os.makedirs(skills_dir, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=skills_dir, prefix=".usage_", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
             os.replace(tmp, path)
+            private_file(path)
         except BaseException:
             try:
                 os.unlink(tmp)

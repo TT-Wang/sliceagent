@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 
 from .envspec import GROUPS, REGISTRY, current_value
+from .private_state import atomic_write_private, private_dir, private_file
 
 # provider presets: key → (label, base_url, default_model). 'custom' prompts for the base_url.
 # The lineup: one AGGREGATOR door (OpenRouter — breadth, one key) + four first-party doors
@@ -20,7 +21,7 @@ PROVIDERS = {
     "1": ("openrouter", "OpenRouter (hundreds of models, one key)", "https://openrouter.ai/api/v1", "openai/gpt-5.5"),
     "2": ("openai", "OpenAI", "", "gpt-5.5"),
     "3": ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com/v1", "claude-sonnet-5"),
-    "4": ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+    "4": ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-v4-flash"),
     "5": ("moonshot", "Moonshot (Kimi)", "https://api.moonshot.cn/v1", "kimi-k2.7-code"),
     "6": ("custom", "Custom OpenAI-compatible endpoint", "", ""),
 }
@@ -32,7 +33,7 @@ MODEL_SUGGESTIONS = {
                    "moonshotai/kimi-k2.7"],
     "openai": ["gpt-5.5", "gpt-5", "gpt-5-mini", "o3"],
     "anthropic": ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"],
-    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
     "moonshot": ["kimi-k2.7-code", "kimi-k2-0905-preview"],
     "custom": [],
 }
@@ -152,6 +153,10 @@ def _config_path(home: str | None = None) -> str:
 def _read_config(path: str) -> dict:
     import tomllib
     try:
+        parent = os.path.dirname(path)
+        if parent:
+            private_dir(parent)
+        private_file(path)
         with open(path, "rb") as f:
             return tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
@@ -185,6 +190,7 @@ def _backup_if_corrupt(path: str) -> "str | None":
         bak = f"{path}.bak.{n}"
     try:
         os.replace(path, bak)
+        private_file(bak)
         return bak
     except OSError:
         return None
@@ -193,28 +199,10 @@ def _backup_if_corrupt(path: str) -> "str | None":
 def _atomic_write(path: str, body: str) -> None:
     """ATOMIC 0600 write (the file holds an API key — never leave it half-written): write a temp in the same
     dir, fsync, then os.replace(); on ANY failure remove the temp so no key-bearing fragment is left behind."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    import tempfile
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".sliceagent-cfg-", suffix=".tmp")
-    ok = False
-    try:
-        if hasattr(os, "fchmod"):   # not on Windows — NTFS perms aren't octal; user-profile dir is private
-            os.fchmod(fd, 0o600)
-        os.write(fd, body.encode("utf-8"))
-        os.fsync(fd)
-        os.close(fd)
-        os.replace(tmp, path)
-        ok = True
-    finally:
-        if not ok:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    parent = os.path.dirname(path)
+    if parent:
+        private_dir(parent)
+    atomic_write_private(path, body, prefix=".sliceagent-cfg-")
 
 
 def _save_provider(path: str, *, pid: str, model: str, api_key: str, base_url: str) -> "str | None":

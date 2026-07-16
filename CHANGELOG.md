@@ -8,9 +8,9 @@ this project aims for [Semantic Versioning](https://semver.org/).
 ### Added
 - **Intent Fidelity v2.** One shared, ephemeral turn contract now separates user-authorized action spans
   from quoted/reported prior output, grounds historical references in sealed responses, resolves numbered
-  items and launch-ordered subagents, and gates every task-state/external/unknown tool call at the host.
-  Questions and confirmations may still inspect or ask; terse assent acts only on one immediately pending
-  proposal or an explicitly selected numbered option.
+  items and launch-ordered subagents, and helps the model carry terse confirmations onto the immediately
+  pending proposal or explicitly selected numbered option. This intent metadata is advisory context, not a
+  second host-side permission system.
 - **Safe update path.** `sliceagent update` now updates a positively identified canonical `uv tool`
   install before any API-key, workspace, plugin, or MCP startup. Editable/direct installs are preserved,
   alternative package managers receive exact guidance, and `/update` points active sessions to the safe
@@ -29,26 +29,126 @@ this project aims for [Semantic Versioning](https://semver.org/).
   directly against sealed receipts.
 
 ### Changed
+- **One typed memory model, with Memem as retrieval rather than authority.** L0 remains canonical sealed
+  evidence, L1 remains rebuildable Active Work, and native SQLite owns provenance-linked USER/PROJECT/CRAFT
+  L2 records. Memem 2.10's structured external-index protocol is the primary semantic ranker when available:
+  stable IDs, hard scope partitions, one primary abstraction, and bounded cue anchors are always resolved back
+  through SliceAgent's lifecycle, revision, sensitivity, and provenance predicates. Resolved or revision-drifted
+  project diagnostics stay explicit-pull instead of being re-injected as current bugs; a whole-query native
+  fallback preserves availability without co-ranking historical full-body noise.
+- **Autonomous admission kernel.** General permission modes, host-side turn-authority denials,
+  reconciliation locks, and loop-policy refusals are retired. Ordinary requested work now flows directly;
+  the host retains only a narrow, high-confidence safeguard for commands that could catastrophically damage
+  the machine (such as formatting a device or recursively deleting `/` or the user's home).
 - **Calmer, informative Rich TUI.** The footer no longer pins task text; it restores total-token and
   dollar-savings meters. The live reasoning/progress row also shows only current activity (or the active plan
   step), never the task's first prompt. Assistant replies have more breathing room, and the composer drops its
   redundant title. Combined greetings such as “hi how are you” stay on the cheap chitchat path instead of
   becoming a durable task title.
-- **Natural workspace intent.** “Go/open/work in the hunter workspace” now authorizes navigation without
-  requiring implementation-shaped wording. Safe fallback path probes remain observational, an assistant's
-  exact workspace-path clarification becomes a one-turn action scoped to that target, and a second identical
-  authority denial stops immediately instead of entering a retry argument with the user.
-- **Elastic observation authority.** Pipelines and fallback branches composed entirely of proven read-only
-  commands (for example `find … | sort` and `ls … 2>/dev/null || ls …`) remain observation, so inspection does
-  not require mutation authority. Repeated errors now stop only their own operation class instead of poisoning
-  unrelated reads, and terminal stop messages name the failed action without exposing internal guard jargon.
-- **Capability-shaped turn authority.** Effects are matched by governing action, concrete target, and command
-  family rather than by tool name or stray keywords. Coordinated directives retain each capability; quoted
-  filenames, exact commands, dotfiles, file sets, requirements, VCS/package operations, and adjacent “go” or
-  “continue” confirmations remain scoped without making reviews or answer-format requests effectful.
+- **Natural workspace intent.** “Go/open/work in the hunter workspace” now navigates without requiring
+  implementation-shaped wording. Safe fallback path probes remain observational, and an assistant's exact
+  workspace-path clarification carries naturally into a terse confirmation such as “yes.”
+- **Elastic observation flow.** Pipelines and fallback branches composed entirely of read-only commands
+  (for example `find … | sort` and `ls … 2>/dev/null || ls …`) remain ordinary inspection. A failed operation
+  does not poison unrelated reads, and terminal messages report the actual failed action without internal
+  policy jargon.
+- **Capability-shaped intent grounding.** Effects are understood by governing action, concrete target, and
+  command family rather than by tool name or stray keywords. Coordinated directives retain each capability;
+  quoted filenames, exact commands, dotfiles, file sets, requirements, VCS/package operations, and adjacent
+  “go” or “continue” confirmations remain grounded without turning intent recognition into authorization.
 - **Typed evidence selection.** One `EvidenceQuery` now owns execution-recall family, predicate, and scope.
   Receipt projections distinguish exact aggregates from failure details and latest-turn from task-wide recall,
   while the slice remains elastic for active complexity and history-bounded with respect to transcript age.
+- **Plugin execution-admission APIs are intentionally retired.** Plugins continue to register tools, skills,
+  and MCP servers, but the old `register_hook` / `intent_effect` permission surfaces and hook-bearing
+  `load_plugins` tuple are removed with the policy-gate machinery. This is a deliberate pre-1.0 API break;
+  ordinary advisory behavior belongs in tool results or skills, not hidden host-side action gates.
+
+### Fixed
+- **Repository-review placeholders receive one response-only correction.** Skills may declare a typed terminal
+  deliverable contract; the review contract persists in PFC across recovery and workspace handoff, distinguishes
+  consumed child evidence from user-visible synthesis, and gives an obvious private-output placeholder one
+  unpublished response nudge. It does not enforce headings, grade report quality, or block a later terminal answer;
+  ordinary tasks and workspace transport remain outside this narrow reminder.
+- **Child reports and parent seals now publish as one logical fact.** Canonical child artifact writes and
+  launch-turn references are linearized against parent sealing. Cancellation may stop a child before
+  publication, but can no longer arrive between the immutable write and required reference to create an
+  accepted orphan; crash recovery retains the existing parent-lineage repair path.
+- **Broad subagent reviews no longer collapse into timeout cascades.** Repository audits use ignore-aware,
+  source-weighted scopes and staged 2–3-child waves instead of one exhaustive child per directory. Every child
+  drains and assembles SSE off the main thread even without a UI sink, so an ordinary long reasoning response
+  is not mistaken for 60 seconds of transport silence. The completion-budget-aware monotonic watchdog remains
+  configurable with `LLM_HARD_TIMEOUT_SEC`; provider SDK retries stay disabled and the model runner is the one
+  visible retry owner. A process-wide physical-call lease now bounds live requests per provider account,
+  including sockets whose logical watchdog already returned, while pre-admission cancellation cannot start a
+  late request and capacity wait shares the same absolute deadline as execution.
+- **Canonical installs can actually self-update.** The updater now recognizes the standard
+  `python = "3.12"` field emitted by current `uv tool` receipts while continuing to reject custom
+  requirements, resolver settings, and non-public package sources.
+- **Private state modes do not leak into shared skills.** Personal vault/config/default-skill files remain
+  owner-only, while an explicitly selected project/shared skill directory creates collaborator-readable
+  `SKILL.md` files and preserves an existing file mode across atomic rewrites.
+- **Workspace switches preserve the live collaboration state.** One application session identity now spans
+  in-process workspace handoffs; conversation, standing user intent, proposals, and every open topic survive
+  A→B→A, while file residency, observed facts, revisions, receipt snapshots, and old artifact handles are
+  restored only from the selected workspace. Handoff publication stages fallible derived objects first, and
+  teardown/logging failures can no longer falsify a switch that already committed.
+- **Durable evidence has an unambiguous order and explicit gaps.** A crash-durable monotonic turn order is
+  shared by journals, artifacts, and checkpoints (including recovery and idempotent retries); legacy
+  same-second ties expand as partial evidence instead of task-ID guessing. Corrupt immutable records now
+  propagate bounded gap metadata into execution/quality coverage and the artifact index rather than silently
+  producing exact counts over survivors.
+- **Intent continuity no longer drifts across attribution or redaction.** A user who adopts wording from an
+  assistant recommendation retains a live imperative; quoted/fenced proposal examples cannot authorize a
+  later “yes”; nested numbered details cannot steal top-level ordinals; and persistence-only secret masks
+  preserve source offsets so exact user clauses still point to the same words after recovery.
+- **User-reported failures close only on real proof.** Stale tool errors clear only after the exact failed call
+  succeeds. Test/build reports clear only after an explicit file-tool edit followed by a status-propagating
+  shell command whose test/lint/type/build family matches the report; sequential families accumulate only
+  until the next edit. Help, list, collect, dry-run, skip, or exit-zero modes do not count, and source text
+  inside `execute_code` is never treated as a mutation or verification receipt.
+  Neutral lifecycle cancellations remain visible as “not run” without becoming blockers, evidence, warning
+  completions, or policy errors; catastrophic safety refusals remain explicit and adverse.
+- **Child budgets remain hard batch ceilings.** Delegated token reservations now carry across scheduler waves,
+  so interleaved effects or serialized writable children cannot each receive the parent's full remaining cap;
+  children rejected before physical start no longer dilute a valid sibling's reservation.
+- **Subagent fan-out now degrades gracefully under provider pressure.** A wave admits at most four child model
+  loops, launches the first pair immediately, and ramps later starts instead of creating a synchronized provider
+  burst. Explorers default to at most six fast evidence-navigation steps followed by one full, tool-free
+  synthesis. Clean navigation or planned navigation-budget exhaustion may hand off only typed workspace
+  evidence; the latter carries an explicit incomplete-coverage note. The fast navigator suppresses the generic
+  max-step closeout, avoiding a redundant billed call, while cancellation, uncertainty, fatal provider/tool
+  stops, token exhaustion, truncation, and evidence-free runs never synthesize. The live matrix is driven by typed
+  queued/starting/model-active/reasoning/writing/tool/
+  retry/terminal phases rather than detail-string inference. Exhausted attempts, truncated output, cancellation,
+  or a final-synthesis failure start no wrapper-level recovery call: usable report text, observations, trace,
+  usage, and WorkGraph binding seal as an explicitly partial artifact, while cancellation still wakes retry
+  backoff and prevents late publication into a replacement task.
+- **Hung read deadlines stay live.** Timeout-enabled pure reads use bounded daemon workers and a short grace
+  period; unresolved readers become typed indeterminate outcomes, later barriers are cancelled, Ctrl-C remains
+  responsive, and a permanently stuck reader no longer freezes the turn or process exit.
+- **Read scheduling keeps truthful lifecycle boundaries.** Lifecycle children no longer disable adjacent read
+  deadlines; exhausted daemon capacity settles as a typed not-started cancellation; late indeterminate results
+  still close later effects; and a start journal crossing a deadline cannot enter its handler or route a late
+  lifecycle edge into a newer turn/workspace.
+- **Registry outcomes stay typed at every edge.** Preflight-cancelled calls bypass execution-only effect
+  factories, availability is admitted exactly once before the durable start boundary, direct validation
+  failures never construct execution effects, and registry replacement cannot mix an admitted handler with a
+  stale effect factory. Invalid explicit statuses become indeterminate instead of successful, and byte or
+  unrenderable extension results remain inside the canonical outcome path.
+- **Streaming deadlines cannot leak output into a later turn.** On platforms without a synchronous SIGALRM
+  lease, both Chat Completions and Responses interactive paths use the blocking daemon watchdog rather than
+  abandoning an SSE worker that could continue emitting deltas after timeout.
+- **Plugin/MCP extension startup is transactional and bounded.** Plugin packages support relative imports and
+  fully roll back registry, skill, MCP, and module state on failure. MCP timeouts cancel discarded workers,
+  malformed configuration/descriptors are contained before spawn, and remote tool names cannot control
+  page-out paths or labels.
+- **The catastrophic floor survives extension failure and common shell spelling.** A crashing/no-op earlier
+  preflight hook cannot skip the later machine-safety check, and high-confidence POSIX escaped executable names
+  or quoted raw-device assignments are recognized without treating escaped literal home/glob operands as wipes.
+- **Varying re-inspection loops get an advisory recovery cue.** Eight distinct observation calls returning the
+  same meaningful result add one model-only nudge to synthesize, act, or ask. It never rejects a tool or emits a
+  user-facing policy error.
 
 ## [0.2.0] — 2026-07-10
 

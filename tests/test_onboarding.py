@@ -51,8 +51,6 @@ def registry_groups_are_known():
 # ---- A2: validation ---------------------------------------------------------
 @check
 def validate_flags_bad_enum_and_passes_good():
-    assert any("AGENT_POLICY" in w for w in envspec.validate_env({"AGENT_POLICY": "gaurd"})), "typo not caught"
-    assert envspec.validate_env({"AGENT_POLICY": "allow"}) == [], "valid value should not warn"
     assert envspec.validate_env({"AGENT_ROUTER": "lexical"}) == []
     assert any("AGENT_ROUTER" in w for w in envspec.validate_env({"AGENT_ROUTER": "magic"}))
     # AGENT_TUI accepts bool-ish aliases without warning

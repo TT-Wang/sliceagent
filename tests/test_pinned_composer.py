@@ -28,7 +28,7 @@ def _drive(keys: str):
     from prompt_toolkit.output import DummyOutput
     from sliceagent.tui import TuiInput
 
-    ti = TuiInput({"model": "test-model", "policy": "guard", "topic": "demo"}, root=None)
+    ti = TuiInput({"model": "test-model", "topic": "demo"}, root=None)
     with create_pipe_input() as pinp:
         pinp.send_text(keys)
         app, _ta = ti._build_composer(pt_input=pinp, pt_output=DummyOutput())

@@ -16,19 +16,17 @@ NO-TRANSCRIPT MOAT: lookup() reads from durable/derived sources each turn; it ne
 accumulates state across turns (the only per-instance state is SubdirHints' per-task
 surfaced-subtree set, which is a bounded durable store, not a transcript).
 
-BRAIN-ANALOGY LEGEND (used in this file's section comments — a naming aid, not a new mechanism):
+BRAIN-ANALOGY LEGEND (used in this file's section comments — exactly three memory layers):
   SENSORY CORTEX  — code / project-notes: re-computed live from the filesystem, never persisted;
                     perception of the present, not memory of the past.
-  NEOCORTEX       — memory-lessons: distilled, cross-session, auto-surfaced (like consolidated
-                    semantic memory recalled associatively, with no explicit search).
-  HIPPOCAMPUS     — episode-*: the lossless per-turn log, reached only by an explicit, cue-dependent
-                    recall (recall_history) — like real hippocampal recall, prone to confabulation if
-                    the cue is weak, which the visible-manifest/recall-marker work exists to prevent.
-The Slice's own carried state (findings, conversation ring, plan — see pfc.py) is the
-fourth piece: PREFRONTAL CORTEX / working memory — bounded, actively maintained, free (no lookup()
-call at all), and lost when the task resets. Only 4 of PageTable's 6 kinds fire per turn inside
-build(); the other 2 (episode-xsession, episode-search-thissession) are reached only via the
-recall_history tool (hippocampus.py) — the model's own hippocampal-recall lever.
+  HIPPOCAMPUS/L0  — canonical immutable events and artifact seals. ``episode-*`` backends are only
+                    discovery over the legacy episodic JSONL/FTS compatibility mirror.
+  PFC/L1          — Active Work, derived from L0 and rebuilt without a PageTable lookup.
+  NEOCORTEX/L2    — typed USER/PROJECT/CRAFT knowledge, pushed only after scope/relevance admission.
+
+Memem may extend L2 retrieval as an optional index/legacy bridge; it does not own L2. Roster and skills are
+adjacent capabilities, not additional memory layers. Only four of PageTable's six kinds fire per turn inside
+``build()``; the two episode-search kinds remain explicit compatibility discovery paths.
 
 DEFERRED (next backends to fold in here):
   - per-file code refs (fan-out of the repo map) — kept as the single '(repo map)' page.
@@ -75,14 +73,12 @@ class PageTable:
             return self._code(focus, k)
         if kind == "project-notes":
             return self._project_notes(focus)
-        # — NEOCORTEX (long-term memory): distilled, cross-session, auto-surfaced — like a consolidated
-        # semantic memory that comes to mind associatively, without an effortful, cue-driven search.
+        # — NEOCORTEX / L2: typed native knowledge admitted by scope and relevance. Optional Memem results
+        # are legacy/index candidates and never create authority by ranking highly.
         if kind == "memory-lessons":
             return self._lessons(focus, k, paths)
-        # — HIPPOCAMPUS (episodic memory): the lossless per-turn log. Retrieval is cue-dependent and
-        # EXPLICIT (recall_history) — like real hippocampal recall, it can fail or confabulate if the
-        # retrieval cue is weak, which is exactly the class of bug the cache-manifest/recall-marker work
-        # in seed.py and regions.py exists to prevent.
+        # — HIPPOCAMPUS / L0 compatibility discovery: these episode backends query the legacy JSONL/FTS
+        # mirror. Canonical exact history is served independently from immutable artifact seals.
         if kind == "episode-xsession":
             return self._episodes(focus, k)
         if kind == "episode-thissession":
@@ -118,14 +114,17 @@ class PageTable:
                         score=0.0, untrusted=True)]
 
     def _lessons(self, query: str, k: int, paths=None) -> list[PageRef]:
-        """RELEVANT MEMORY: distilled cross-session LESSONS (memem's relevance-gated retrieve), the
-        always-on per-turn recall — NEOCORTEX in brain terms: consolidated, generalized, auto-surfaced.
-        Distinct from `_episodes` (raw FTS5 episode text) — HIPPOCAMPUS: the lossless, per-session log,
-        reached only by an explicit, cue-dependent recall_history call. Each Snippet -> one PageRef
-        (preview carries the lesson text RAW; the renderer fences it). memory absent / no hits -> []."""
+        """L2 KNOWLEDGE: request-relevant typed records admitted by the memory backend.
+
+        Native USER/PROJECT/CRAFT knowledge is canonical; optional Memem hits are labelled legacy/index
+        candidates. ``_episodes`` is a separate L0-compatibility discovery path, never another knowledge
+        tier. Each snippet becomes one fenced ``PageRef``; unavailable memory or no hits returns ``[]``.
+        """
         if self.memory is None:
             return []
-        snippets = self.memory.recall(query, k=k, paths=paths)   # R1: file-context bonus at topic-start
+        seed_recall = getattr(self.memory, "seed_recall", None)
+        recall = seed_recall if callable(seed_recall) else self.memory.recall
+        snippets = recall(query, k=k, paths=paths)   # R1: file-context bonus at topic-start
         return [PageRef(handle=sn.path, kind="memory-lessons", preview=sn.text,
                         score=sn.score, untrusted=True) for sn in snippets]
 
@@ -157,9 +156,10 @@ class PageTable:
                         untrusted=False) for h in hits]
 
     def _episodes_thissession(self, session_id: str, k: int) -> list[PageRef]:
-        """PAGED-OUT HISTORY manifest: locator-only PageRefs for the last ``k`` turns of THIS session —
-        the TRIGGER that makes the model READ the history/ turn files (it cannot reach for a cache it
-        cannot see; pin/view died because their payoff was invisible). The single this-session episodic
+        """Legacy history manifest: locator-only PageRefs for the last ``k`` compatibility rows in this session.
+
+        This remains the trigger for older ``history/`` locators; new canonical manifests use
+        ``@sliceagent/history/``. The single this-session episodic
         READ entry (mirrors ``_episodes`` for cross-session) so the slice has ONE retrieval seam. Locators
         only — turn/title/breadcrumb, NEVER step bodies; content pages in solely when the model calls
         read_file("history/turn-N.md"). Bounded to ``k``; a trailing '…older' ref flags that more exist."""

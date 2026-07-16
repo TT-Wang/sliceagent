@@ -103,32 +103,6 @@ def code_review_inventory_does_not_hide_ignored_late_effects():
 
 
 @check
-def only_the_explicit_full_workspace_review_can_clear_workspace_reconciliation():
-    if not shutil.which("git"):
-        print("  (skip: git not installed)"); return
-    from types import SimpleNamespace as NS
-    from sliceagent.hooks import ReconciliationHook
-
-    wd = tempfile.mkdtemp(prefix="cr-reconcile-")
-    _git(wd, "init", "-q")
-    _git(wd, "config", "user.email", "t@t.dev")
-    _git(wd, "config", "user.name", "t")
-    open(os.path.join(wd, ".gitignore"), "w").write("*.late\n")
-    _git(wd, "add", "-A"); _git(wd, "commit", "-qm", "init")
-    host = LocalToolHost(root=wd)
-    state = NS(reconciliation_required="uncertain shell", reconciliation_targets=["workspace:*"])
-    hook = ReconciliationHook(lambda: state); hook.reset_for_turn()
-
-    ordinary = host._t_code_review({"ref": "HEAD"})
-    hook.transform_tool_result("code_review", {"ref": "HEAD"}, ordinary)
-    assert not hook.authorize_tool("reconcile_execution", {"resolution": "clean"}).allow
-
-    complete = host._t_code_review({"ref": "HEAD", "include_ignored": True})
-    hook.transform_tool_result("code_review", {"ref": "HEAD", "include_ignored": True}, complete)
-    assert hook.authorize_tool("reconcile_execution", {"resolution": "clean"}).allow
-
-
-@check
 def code_review_errors_outside_a_repo():
     wd = tempfile.mkdtemp(prefix="cr-nogit-")
     host = LocalToolHost(root=wd)
@@ -155,6 +129,10 @@ def cost_accrues_for_known_model_only():
     assert abs(stats["cost"] - 0.60) < 1e-9, stats                 # 1M fresh input × $0.60/1M
     _accrue_cost(stats, {"output": 1_000_000})                     # + 1M output × $2.50/1M
     assert abs(stats["cost"] - (0.60 + 2.50)) < 1e-9, stats
+    created = {"model": "kimi-k2.7-code"}
+    _accrue_cost(created, {"input_cache_creation": 1_000_000})
+    assert abs(created["cost"] - 0.60) < 1e-9, created             # cache writes are billed input, not free
+    assert created["_transcript_tok"] == 1_000_000, created       # and become later transcript history
     unknown = {"model": "mystery-llm"}
     _accrue_cost(unknown, {"input_other": 1_000_000})
     assert "cost" not in unknown                                   # unknown price → no $ shown
@@ -344,15 +322,38 @@ def vision_capability_is_gated_by_model_name():
 # ---- subagent activity → ONE dynamic line (not a line per child tool call) ---
 @check
 def subagent_activity_is_compact_counting_not_json_spam():
-    from sliceagent.events import ToolStarted
+    from sliceagent.events import SubagentProgress, ToolStarted
     from sliceagent.subagent import _nested_sink
-    lines = []
-    sink = _nested_sink(lambda t: lines.append(t), depth=1)
+    updates = []
+    sink = _nested_sink(
+        updates.append, depth=1, agent_id="child-7", parent_turn_id="turn-4",
+        launch_ordinal=2, kind="explorer", name="ui-audit",
+    )
     for i in range(5):
         sink(ToolStarted("read_file", {"path": f"f{i}.py"}))
-    assert all("calls" in ln for ln in lines), lines
-    assert lines[-1].endswith("5 calls") and "f4.py" in lines[-1], lines[-1]
-    assert "{" not in lines[-1], "must show the primary arg, not the full JSON args (the old spam)"
+    assert all(isinstance(update, SubagentProgress) for update in updates), updates
+    latest = updates[-1]
+    assert latest.agent_id == "child-7" and latest.parent_turn_id == "turn-4"
+    assert latest.tool_count == 5 and latest.sequence == 5 and "f4.py" in latest.detail, latest
+    assert "{" not in latest.detail, "must show the primary arg, not raw JSON args"
+
+
+@check
+def subagent_activity_does_not_leave_the_last_tool_pinned_during_report_synthesis():
+    from sliceagent.events import AssistantText, StepBegin, ToolStarted
+    from sliceagent.subagent import _nested_sink
+    updates = []
+    sink = _nested_sink(
+        updates.append, depth=1, agent_id="child-8", parent_turn_id="turn-4",
+        launch_ordinal=3, kind="explorer",
+    )
+    sink(StepBegin(2))
+    sink(ToolStarted("grep", {"pattern": "receipt"}))
+    sink(AssistantText("private child report prose", final=True))
+    assert [update.phase for update in updates] == ["starting", "running_tool", "writing"]
+    assert [update.detail for update in updates] == ["pass 2", "grep receipt", ""]
+    assert updates[1].tool_name == "grep"
+    assert updates[-1].tool_count == 1 and updates[-1].sequence == 3
 
 
 @check

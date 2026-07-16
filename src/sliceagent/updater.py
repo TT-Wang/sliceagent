@@ -97,9 +97,18 @@ def _uv_receipt(prefix: str) -> tuple[str, str, str] | None:
     tool = value.get("tool") if isinstance(value, dict) else None
     if not isinstance(tool, dict):
         return None
-    custom_tool_fields = any(
-        key not in {"requirements", "entrypoints", "options"} and bool(item)
-        for key, item in tool.items()
+    # uv 0.11 records the interpreter request as ``python = "3.12"`` alongside the
+    # requirements and entrypoints, including for the exact canonical installer command.
+    # It is install metadata, not an alternate package source or resolver override.  Keep
+    # failing closed on every unknown truthy field, while accepting only the real scalar
+    # shape for this one standard field.
+    python = tool.get("python")
+    custom_tool_fields = (
+        any(
+            key not in {"requirements", "entrypoints", "options", "python"} and bool(item)
+            for key, item in tool.items()
+        )
+        or ("python" in tool and (not isinstance(python, str) or not python.strip()))
     )
     requirements = tool.get("requirements")
     entrypoints = tool.get("entrypoints")

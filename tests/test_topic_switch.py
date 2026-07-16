@@ -8,8 +8,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent.memory import NullMemory   # noqa: E402
+from sliceagent.execution import ToolStatus  # noqa: E402
 from sliceagent.session import Session     # noqa: E402
-from sliceagent.cli import _RECONCILIATION_BLOCKED_SLASH  # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -34,26 +34,21 @@ def new_topic_is_isolated():
 
 
 @check
-def indeterminate_task_cannot_be_abandoned_before_reconciliation():
+def execution_uncertainty_is_advisory_across_topic_boundaries():
     sess = fresh()
-    active_id = sess.new_topic("task A")
+    original_id = sess.new_topic("task A")
     sess.active().reconciliation_required = "late write may still land"
-    for operation in (lambda: sess.new_topic("task B"), lambda: sess.switch_topic("anything")):
-        try:
-            operation()
-            assert False, "task boundary must remain closed while effects are indeterminate"
-        except RuntimeError as exc:
-            assert "reconcile_execution" in str(exc)
-    assert sess.active_id == active_id
+    next_id = sess.new_topic("task B")
+    assert sess.active_id == next_id and sess.active().goal == "task B"
+    restored = sess.switch_topic(original_id)
+    assert restored.reconciliation_required == "late write may still land", \
+        "uncertainty remains truthful state without becoming an execution blocker"
 
 
 @check
-def reconciliation_blocks_every_effectful_host_command():
-    assert {"/config", "/model", "/mode", "/reasoning", "/undo",
-            "/switch", "/resume", "/learn", "/cwd"} <= _RECONCILIATION_BLOCKED_SLASH
-    from sliceagent.cli import _slash_blocked_by_reconciliation
-    assert not _slash_blocked_by_reconciliation("/cwd"), "the no-argument workspace query stays readable"
-    assert _slash_blocked_by_reconciliation("/cwd", "/tmp/next"), "switching must stay behind the gate"
+def retired_mode_command_is_not_a_topic_boundary_concept():
+    from sliceagent.tui import _SLASH
+    assert "/mode" not in _SLASH
 
 
 @check
@@ -165,7 +160,8 @@ def topic_tools_drive_routing():
     sess.new_topic("task B")                        # B active
     assert "Switched" in by["switch_topic"].handler({"task_id": a_id}) and sess.active_id == a_id
     assert by["new_topic"].handler({"goal": "task C"}) and sess.active().goal == "task C"
-    assert "Error" in by["switch_topic"].handler({"task_id": "t-nope"})   # unknown → no crash
+    missing = by["switch_topic"].handler({"task_id": "t-nope"})
+    assert missing.status is ToolStatus.STEERED and "no open topic" in missing
 
 
 class FakeLLM:

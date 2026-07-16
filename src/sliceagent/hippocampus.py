@@ -1,33 +1,18 @@
-"""HIPPOCAMPUS — the episodic memory: explicit recall of this session's own past turns. Two
-complementary sides live in this one module: the WRITE side (EpisodeSink, buffers one turn's events
-and flushes a lossless record via memory.append_episode when the turn closes) and the READ side (the
-`history/` virtual files + search_history). Neither ever touches the Slice directly — the cache can
-never enter the LLM context except through an explicit read (Markov by construction); this is what
-distinguishes HIPPOCAMPUS from PFC (pfc.py, the carried working memory) and from NEOCORTEX
-(neocortex.py, the auto-surfaced, distilled lessons vault) — episodic recall is precise, verbatim, and
-only happens on request.
+"""Hippocampal compatibility helpers for L0 evidence/history.
 
-WRITE SIDE — episodic cache, the lossless side (MEMORY-SPEC step 1).
-An output-only event sink (sibling of LessonMiner): it buffers one turn's events and flushes ONE
-record via `memory.append_episode` when the turn closes. It NEVER touches the Slice, so the cache
-can never enter the LLM context — Markov by construction. Record shape:
-`{steps: [{slice, action:[{name,args,failing}], observation:[...]}], note, meta}` — the SEED slice is
-captured once (step 1) plus the turn's accumulated (action, observation) units; lossless for turn recall.
+In the canonical architecture, L0 consists of immutable application events and sealed artifacts. The model
+reads those records at ``@sliceagent/evidence/`` and ``@sliceagent/history/``. They remain authoritative even
+when the older storage implemented here is unavailable.
 
-READ SIDE — the episodic cache exposed as READ-ONLY VIRTUAL FILES under `history/` (HistoryFS), which the
-model reads/lists/greps with its ordinary file tools. Measured 2026-07-06: the model reaches for
-read_file/grep (a pretraining reflex) far more readily than a bespoke recall tool, so surfacing sealed
-turns as files converts evicted-fact confabulation 47%->0%. The PAGED-OUT HISTORY manifest in the slice
-lists each earlier turn (turn · title · note) WITH the exact read_file("history/turn-N.md") call.
-  read_file("history/index.md")     -> the full TIMESTAMPED/TITLED index of this session's turns
-  read_file("history/turn-N.md")    -> a specific turn's seal snapshot (actions/observations/note)
-  grep <pat> path=history/          -> content search over this session's turn files
-  search_history("keywords")        -> FTS5 content search: THIS session + PAST sessions (the one thing
-                                       the files can't do — other sessions aren't mounted here)
-Reaching back is expected, not a failure: the slice is bounded, so an earlier turn genuinely is not in
-front of the model. NON-ACCUMULATION (moat): a read turn is TRANSIENT — it enters context for this loop
-only and is never written back into slice state (the slice is rebuilt from the durable stores each turn),
-so reads can never rebuild the transcript. history/ + search_history are registered when memory is durable.
+This module retains two migration surfaces: ``EpisodeSink`` writes a per-turn episodic JSONL compatibility
+mirror, and ``HistoryFS``/``search_history`` read and search that mirror through legacy aliases. The JSONL is
+useful for backward-compatible recall and consolidation input, but it is not the L0 source of truth or the
+response/recovery commit point. Its FTS sidecar is L0 discovery, never an L2 knowledge store.
+
+The non-accumulation invariant still applies: history is faulted into a loop only when selected and is not
+copied into growing transcript state. L1 is PFC Active Work; L2 is typed USER/PROJECT/CRAFT knowledge. Memem
+is only an optional L2 index/legacy bridge. Roster support is co-located in this compatibility module for
+migration, but roster and skills are adjacent capabilities, not memory layers.
 """
 from __future__ import annotations
 
@@ -41,6 +26,7 @@ from collections import deque
 
 from .events import (AssistantText, Event, ModelCallPrepared, SliceBuilt, StepEnd, ToolResult,
                      TurnEnd, TurnInterrupted, TurnStarted)
+from .execution import coerce_tool_status
 from .pfc import edited_paths_in_code, paths_in_code  # noqa: F401  (paths_in_code kept for back-compat callers)
 from .safety import redact_text
 from .text_utils import format_ts, now_iso, one_line
@@ -80,11 +66,21 @@ _MAX_LESSONS = 8
 _EDIT_TOOL_NAMES = ("edit_file", "append_to_file", "str_replace", "write_file")
 
 
+def _tool_status(event: ToolResult) -> str:
+    outcome_status = getattr(getattr(event, "outcome", None), "status", None)
+    explicit = getattr(outcome_status, "value", outcome_status)
+    if explicit in (None, ""):
+        explicit = event.status
+    return coerce_tool_status(
+        explicit if explicit not in (None, "") else not event.failing,
+    ).value
+
+
 def _files_of(event: ToolResult) -> list[str]:
     """CHANGED files for meta['files'] — mirror slice_sink: only SUCCESSFUL edit tools (and the mutated
     paths of a successful execute_code). A read, a dir-scope grep, or a FAILED edit changed nothing, so
     labeling those 'changed/edited' misled recall + mis-classified consolidated lessons (FILE_TOUCHED)."""
-    if event.failing:
+    if _tool_status(event) != "succeeded":
         return []
     out = []
     args = event.args if isinstance(event.args, dict) else {}   # raw model args may be a non-dict (list/str/number)
@@ -118,14 +114,30 @@ def _obs_excerpt(obs: str) -> str:
     return "  " + body.replace("\n", "\n  ")   # indent the excerpt under its "- " trace bullet
 
 
+def _history_action_summary(action: dict, output: str) -> str:
+    """Render stored tool truth without making a benign steer look like an applied edit/read."""
+    from .tool_summary import summarize_tool_result
+
+    name = str(action.get("name") or "")
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    if action.get("status") == "steered":
+        target = next((
+            str(args.get(key)) for key in ("path", "command", "pattern", "name", "task")
+            if args.get(key) not in (None, "")
+        ), "")
+        identity = f" {target[:70]}" if target else ""
+        return f"↷ [{name}]{identity} -> steered"
+    return summarize_tool_result(name, args, output, failing=bool(action.get("failing")))
+
+
 def turn_markdown(title: str, steps: list[dict], note: str, meta: dict, *,
                   request: str = "", assistant: str = "") -> str:
-    """Render a SEALED turn as a clean, self-contained MARKDOWN snapshot — the readable artifact the
-    cache holds and the next loop pages back via recall_history (the slice saved into the cache as
-    markdown). Distilled, not a raw dump: heading, changed files, outcome, the action→result trace WITH
+    """Render a clean, self-contained Markdown snapshot for the episodic compatibility mirror.
+
+    The canonical seal is owned by the core artifact store. This derived view is distilled, not a raw dump:
+    heading, changed files, outcome, the action→result trace with
     a bounded excerpt of each observation (so the data the turn saw is recallable), and the conclusion.
     Built from the buffered turn data alone (no Slice coupling — Markov)."""
-    from .tool_summary import summarize_tool_result
     files = meta.get("files") or []
     out = [f"# {title or '(turn)'}"]
     if request:
@@ -137,8 +149,7 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict, *,
     trace = []
     for st in steps:
         for a, o in zip(st.get("action", []), st.get("observation", [])):
-            trace.append("- " + summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
-                                                       failing=bool(a.get("failing"))))
+            trace.append("- " + _history_action_summary(a, o))
             ex = _obs_excerpt(o)        # keep the actual observed DATA, bounded, so recall is USEFUL
             if ex:
                 trace.append(ex)
@@ -151,7 +162,7 @@ def turn_markdown(title: str, steps: list[dict], note: str, meta: dict, *,
 
 
 class EpisodeSink:
-    """Buffers a turn's events; flushes one lossless record on TurnEnd OR TurnInterrupted."""
+    """Collect a turn for the canonical seal coordinator and the legacy JSONL mirror."""
 
     def __init__(self, memory, *, session_id: str, task_id_fn, title_fn=lambda: "", outcome_fn=lambda: {}):
         self.memory = memory
@@ -225,7 +236,10 @@ class EpisodeSink:
         elif isinstance(event, ToolResult):
             st = self._cur()
             args = event.args if isinstance(event.args, dict) else {}   # coerce: persist a dict so downstream
-            st["action"].append({"name": event.name, "args": args, "failing": event.failing})   # (search_index/consolidate) never read a non-dict from the episode
+            st["action"].append({
+                "name": event.name, "args": args,
+                "status": _tool_status(event), "failing": event.failing,
+            })   # (search_index/consolidate) never read a non-dict from the episode
             st["observation"].append(event.output)        # VERBATIM — lossless (not observe()'d)
             note = args.get("note", "")                   # reasoning models' note (empty content)
             if note:
@@ -269,10 +283,10 @@ class EpisodeSink:
                     "partial_or_note" if self._note else
                     "absent"
                 ),
-                "steps": self._steps,      # lossless raw events (full=true / step recall)
+                "steps": self._steps,      # detailed compatibility trace (full=true / step recall)
                 "note": self._note,
-                # the SEAL artifact: the turn's slice as a clean MARKDOWN snapshot — what history/turn-N.md
-                # serves, so paging a past turn back reads like opening a readable doc.
+                # A readable compatibility snapshot. Canonical @sliceagent/history reads the core artifact
+                # seal; the legacy history/ alias may serve this derived Markdown from episodic JSONL.
                 "markdown": turn_markdown(
                     title, self._steps, self._note, meta,
                     request=self._request, assistant=self._assistant,
@@ -296,7 +310,7 @@ def make_episode_sink(memory, *, session_id: str, task_id_fn, title_fn=lambda: "
     """Build the turn collector.
 
     Historical behavior (``collect=False``) returns ``None`` for non-durable memory. The core runtime uses
-    ``collect=True`` so it can seal to the always-on local store even when semantic memory is unavailable.
+    ``collect=True`` so the canonical artifact coordinator can seal even when L2 knowledge is unavailable.
     """
     durable = bool(getattr(memory, "is_durable", False))
     if not durable and not collect:
@@ -309,11 +323,12 @@ _MAX_RECORD_VALUE_BYTES = 256 * 1024  # per-value disk safety valve (one patholo
 
 
 class HippocampusMixin:
-    """The durable episodic-cache STORAGE side (lossless turn log on disk). Mixed into MememMemory
-    (memory.py) alongside NeocortexMixin (neocortex.py) — `self` at runtime is a concrete MememMemory
-    instance, so `self._vault`/`self._idx_lock` (set by MememMemory.__init__) resolve normally via the
-    MRO. This is the counterpart EpisodeSink (above) writes through and recall_history's handler
-    (below, via `memory.read_episodes`) reads through."""
+    """Storage adapter for the episodic JSONL compatibility mirror and its legacy read surfaces.
+
+    Production mixes this into ``LocalMemory``; ``MememMemory`` is only a deprecated adapter. Canonical L0
+    lives in the event/artifact stores, so failure here may degrade legacy search or consolidation input but
+    must not disable ``@sliceagent/history/`` or Active Work.
+    """
 
     def _clamp(self, v):
         if isinstance(v, str) and len(v.encode("utf-8")) > _MAX_RECORD_VALUE_BYTES:
@@ -340,6 +355,7 @@ class HippocampusMixin:
         return self._clamp(rec)
 
     def append_episode(self, session_id: str, task_id: str, turn: int, record: dict) -> None:
+        report = getattr(self, "_record_compatibility_write", None)
         try:
             d = os.path.join(self._vault, "episodic")
             _priv_dir(d)
@@ -357,11 +373,15 @@ class HippocampusMixin:
                 # and silently drop the whole turn (the except below would eat it = lost episode + index).
                 f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
             _priv_file(_epath)
-        except Exception:
+        except Exception as exc:
+            if callable(report):
+                report("episodic_mirror", succeeded=False, error=exc)
             return  # a cache write must never break a session
+        if callable(report):
+            report("episodic_mirror", succeeded=True)
         self._index_episode(session_id, task_id, turn, ts, clamped)  # additive FTS5 mirror (item 12)
 
-    # --- cross-session FTS5 episode index (item 12; additive, degrades to no-op) ---
+    # --- legacy cross-session L0-discovery sidecar (additive, rebuildable, degrades to no-op) ---
     def _episode_index(self):
         """Lazily open the FTS5 episode index (cached). Returns None if FTS5 is
         unavailable — every caller treats None as 'index off' and falls back."""
@@ -396,13 +416,18 @@ class HippocampusMixin:
         idx = self._episode_index()
         if idx is None:
             return
+        report = getattr(self, "_record_compatibility_write", None)
         try:
             from .search_index import episode_searchable_text
             idx.index_episode(session_id=session_id, task_id=task_id, turn=turn, ts=ts,
                               title=record.get("title", ""), note=record.get("note", ""),
                               text=episode_searchable_text(record))
-        except Exception:
-            pass
+        except Exception as exc:
+            if callable(report):
+                report("legacy_fts", succeeded=False, error=exc)
+        else:
+            if callable(report):
+                report("legacy_fts", succeeded=True)
 
     def search_episodes(self, query: str, *, limit: int = 5,
                         exclude_session: str | None = None,
@@ -420,9 +445,12 @@ class HippocampusMixin:
             return []
 
     def read_episodes(self, session_id: str, *, limit: int | None = None) -> list[dict]:
-        """Read the session's episodic cache (the read side behind the history/ virtual files and
-        search_history). Returns the raw line dicts in turn order; `limit` keeps only the most recent N.
-        Never raises."""
+        """Read one session's episodic JSONL compatibility mirror.
+
+        This backs legacy ``history/`` and ``search_history`` plus consolidation input; canonical
+        ``@sliceagent/history/`` reads artifact seals instead. Returns raw rows in turn order, with ``limit``
+        keeping only the most recent N. Never raises.
+        """
         try:
             path = os.path.join(self._vault, "episodic", f"{session_id}.jsonl")
             if not os.path.exists(path):
@@ -776,7 +804,8 @@ def _receipt_markdown(rec: dict) -> str:
         f"- disposition: {receipt.get('disposition') or 'unknown'}",
         (f"- requested {counts.get('requested', 0)} · started {counts.get('execution_started', 0)} · "
          f"rejected before execution {counts.get('rejected_before_execution', 0)} · "
-         f"succeeded {counts.get('succeeded', 0)} · failed {counts.get('failed', 0)} · "
+         f"succeeded {counts.get('succeeded', 0)} · steered {counts.get('steered', 0)} · "
+         f"failed {counts.get('failed', 0)} · "
          f"indeterminate {counts.get('indeterminate', 0)}"),
     ]
     by_tool = {}
@@ -785,18 +814,21 @@ def _receipt_markdown(rec: dict) -> str:
         if not isinstance(operation, dict):
             continue
         name = str(operation.get("name") or "(unknown tool)")
-        bucket = by_tool.setdefault(name, {"requested": 0, "started": 0, "rejected": 0, "succeeded": 0,
-                                           "failed": 0, "cancelled": 0, "indeterminate": 0})
+        bucket = by_tool.setdefault(name, {
+            "requested": 0, "started": 0, "rejected": 0, "succeeded": 0,
+            "steered": 0, "failed": 0, "cancelled": 0, "indeterminate": 0,
+        })
         bucket["requested"] += int(bool(operation.get("requested")))
         bucket["started"] += int(bool(operation.get("execution_started")))
         bucket["rejected"] += int(bool(operation.get("rejected_before_execution")))
         disposition = str(operation.get("disposition") or "")
-        if disposition in {"succeeded", "failed", "cancelled", "indeterminate"}:
+        if disposition in {"succeeded", "steered", "failed", "cancelled", "indeterminate"}:
             bucket[disposition] += 1
     for name, bucket in sorted(by_tool.items()):
         lines.append(
             f"- {name}: requested {bucket['requested']} · started {bucket['started']} · "
-            f"rejected {bucket['rejected']} · succeeded {bucket['succeeded']} · failed {bucket['failed']} · "
+            f"rejected {bucket['rejected']} · succeeded {bucket['succeeded']} · "
+            f"steered {bucket['steered']} · failed {bucket['failed']} · "
             f"cancelled {bucket['cancelled']} · indeterminate {bucket['indeterminate']}"
         )
     return "\n".join(lines)
@@ -808,7 +840,6 @@ def render_trace(lines: list[dict]) -> str:
     a cap here truncated the distilled conclusion at the markdown tail). Falls back to a computed
     action→result trace for older records that predate the stored markdown (per-observation tail only — a
     legacy raw-obs guard; the conclusion/note is kept whole)."""
-    from .tool_summary import summarize_tool_result   # fallback path only
     out = []
     for ln in lines:
         rec = ln.get("record", {})
@@ -823,8 +854,7 @@ def render_trace(lines: list[dict]) -> str:
                 block.append(receipt)
             for st in rec.get("steps", []):
                 for a, o in zip(st.get("action", []), st.get("observation", [])):
-                    summary = summarize_tool_result(a.get("name", ""), a.get("args", {}), o,
-                                                    failing=bool(a.get("failing")))
+                    summary = _history_action_summary(a, o)
                     block.append(f"  • {summary} → {_tail(o, OBS_TAIL)}")
             if rec.get("note"):
                 block.append(f"  ↳ note: {rec['note']}")     # conclusion in full
@@ -855,13 +885,13 @@ def render_search(mine, cross) -> str:
     return "\n".join(out) if out else "No content matches found."
 
 
-# ── history/ — the episodic archive as a read-only VIRTUAL file namespace ─────────────────────────────
+# ── history/ — legacy read-only alias over the episodic compatibility mirror ──────────────────
 # Measured 2026-07-06 (A/B on the gap-detection matrix): the model reaches for read_file/grep — a deeply
 # grooved pretraining reflex — but RESISTS the bespoke recall tool, wrongly treating the in-context convo as
 # complete. Exposing sealed turns AS files it can read/list/grep converts evicted-fact confabulation 47%→0%
-# (recovery 13%→100%). No files hit disk: HistoryFS serves the SAME episodic cache read_episodes reads,
-# routed by LocalToolHost whenever a tool path targets `history/`. Read-only (writes rejected upstream); a
-# real on-disk file always wins the name (host._history_route), so the virtual view never lies about disk.
+# (recovery 13%→100%). ``HistoryFS`` preserves that older read groove over JSONL. New model-facing code
+# should prefer canonical ``@sliceagent/history/``, which reads immutable core artifact seals and survives a
+# mirror failure. No virtual files hit disk; a real on-disk file wins the legacy alias name.
 HISTORY_MOUNT = "history"
 _TURN_FILE = re.compile(r"^turn-(\d+)\.md$")
 # A history path may carry a leading `<session-id>/` segment to read a PAST session's turns
@@ -886,10 +916,13 @@ def _history_leaf(path: str) -> str:
 
 
 class HistoryFS:
-    """Read-only virtual filesystem over THIS session's sealed turns. `index.md` lists every turn (the
-    manifest-as-file); each `turn-<N>.md` is that turn's markdown snapshot (the seal artifact, in full).
-    Content is served live from the episodic cache (read_episodes) — nothing is written to disk. Duck-typed:
-    the LocalToolHost holds one as `_history` and routes read_file/list_files/grep under `history/` here."""
+    """Legacy read-only virtual alias over one session's episodic JSONL mirror.
+
+    ``index.md`` lists compatibility rows and ``turn-<N>.md`` serves their derived Markdown snapshots.
+    Canonical ``@sliceagent/history/`` is independently backed by immutable artifact seals. ``LocalToolHost``
+    retains this adapter for old locators and cross-session migration; nothing in the virtual view is written
+    to the workspace.
+    """
 
     def __init__(self, memory, session_id: str):
         self._memory = memory
@@ -1031,11 +1064,11 @@ class HistoryFS:
 
 
 def make_search_history_tool(memory, session_id: str):
-    """ToolEntry for search_history: FTS5 content search over PAST sessions AND this session's turns — the
-    one thing the greppable history/ files can't do (other sessions aren't mounted as files). Preserves the
-    cross-session recall the deleted recall_history(search=…) provided. This-session hits come WITH the
-    read_file(\"history/turn-N.md\") call to open them; past-session hits are read-only context. No rein
-    needed — each query is a real search returning new info (unlike the old turn-drill loop)."""
+    """Build the legacy FTS discovery tool over episodic compatibility rows.
+
+    This is an L0 search sidecar, not L2 knowledge. It preserves old locators and can discover past-session
+    rows not mounted by ``HistoryFS``. Canonical history remains ``@sliceagent/history/``.
+    """
     from .pagetable import PageTable
     from .registry import ToolEntry
     # PageTable's episode-xsession backend wraps memory.search_episodes; episode-search-thissession finds
@@ -1110,6 +1143,10 @@ def render_artifact(rec: dict) -> str:
         out.append("read: " + ", ".join(a["files"][:20]))
     if a.get("refs"):   # the seal's refinement map back to its INPUTS (what this work was built on)
         out.append("built on: " + ", ".join(a["refs"]))
+    if a.get("evidence_archive"):
+        archive = str(a["evidence_archive"])
+        artifact_id = archive.removeprefix("artifacts/").removesuffix(".md")
+        out.append(f'full evidence: read_file("artifacts/{artifact_id}/evidence/index.md")')
     brief_task = (a.get("brief") or {}).get("task") or a.get("task", "")
     if brief_task:
         out += ["", "## brief (verbatim task this agent was given)", brief_task]

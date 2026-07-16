@@ -1,10 +1,9 @@
-"""Guarded grep tool — pagination, consecutive-search block, path confinement.
+"""Workspace grep tool — pagination, repeatable live observation, and path confinement.
 No model, no pytest. Run: python tests/test_code_grep.py
 
 Covers sec 5 test_code_grep.py: line-numbered matches; pagination (offset/limit +
-truncation hint); 4th identical-in-a-row BLOCKED; different pattern resets the counter;
-paging (increasing offset) does NOT trip the guard; no-rg degrades quietly; path escaping
-root blocked via host._resolve.
+truncation hint); repeated identical observations remain available; missing/broken rg is
+reported as a real failure; path escaping root is rejected by host._resolve.
 """
 import os
 import shutil
@@ -14,7 +13,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sliceagent import code_grep                               # noqa: E402
-from sliceagent.code_grep import GREP_GUARD, make_grep_tool    # noqa: E402
+from sliceagent.code_grep import make_glob_tool, make_grep_tool  # noqa: E402
+from sliceagent.execution import ToolStatus                   # noqa: E402
 
 CHECKS = []
 def check(fn):
@@ -49,7 +49,6 @@ def _workspace(files: dict):
 
 
 def _fresh_tool(files):
-    GREP_GUARD.clear()
     host = _Host(_workspace(files))
     return make_grep_tool(host).handler, host
 
@@ -59,7 +58,6 @@ _HAS_RG = shutil.which("rg") is not None
 
 @check
 def entry_shape_is_grep():
-    GREP_GUARD.clear()
     host = _Host(tempfile.mkdtemp())
     entry = make_grep_tool(host)
     assert entry.name == "grep"
@@ -97,55 +95,89 @@ def pagination_offset_limit_and_truncation_hint():
 
 
 @check
-def fourth_identical_in_a_row_blocked():
+def repeated_identical_searches_remain_live_observations():
     if not _HAS_RG:
         return
     handler, _ = _fresh_tool({"a.py": "needle\n"})
-    a = handler({"pattern": "needle"})
-    b = handler({"pattern": "needle"})
-    c = handler({"pattern": "needle"})
-    d = handler({"pattern": "needle"})
-    assert "BLOCKED" not in a and "BLOCKED" not in b and "BLOCKED" not in c
-    assert "BLOCKED" in d
+    results = [handler({"pattern": "needle"}) for _ in range(6)]
+    assert all("needle" in result for result in results)
+    assert len(set(results)) == 1
 
 
 @check
-def different_pattern_resets_counter():
-    if not _HAS_RG:
-        return
-    handler, _ = _fresh_tool({"a.py": "needle\nhaystack\n"})
-    handler({"pattern": "needle"})
-    handler({"pattern": "needle"})
-    handler({"pattern": "needle"})  # streak of 3
-    other = handler({"pattern": "haystack"})  # resets
-    assert "BLOCKED" not in other
-    again = handler({"pattern": "needle"})  # streak restarts at 1
-    assert "BLOCKED" not in again
-
-
-@check
-def paging_does_not_trip_guard():
-    if not _HAS_RG:
-        return
-    body = "".join(f"row {i}\n" for i in range(20))
-    handler, _ = _fresh_tool({"big.txt": body})
-    # same pattern/limit but increasing offset each time — key differs, never blocks
-    for off in (0, 2, 4, 6, 8):
-        out = handler({"pattern": "row", "limit": 2, "offset": off})
-        assert "BLOCKED" not in out, f"blocked at offset={off}: {out!r}"
-
-
-@check
-def no_rg_degrades_quietly(monkeypatch_which=None):
+def no_rg_is_a_real_failure(monkeypatch_which=None):
     # force the no-rg path regardless of environment
     orig = code_grep.shutil.which
     code_grep.shutil.which = lambda name: None
     try:
         handler, _ = _fresh_tool({"a.py": "x\n"})
         out = handler({"pattern": "x"})
-        assert "ripgrep" in out and "Error" not in out and "BLOCKED" not in out
+        assert "ripgrep" in out and "not run" in out
+        assert out.status is ToolStatus.FAILED
     finally:
         code_grep.shutil.which = orig
+
+
+@check
+def rg_launch_failure_is_a_real_failure():
+    orig_which = code_grep.shutil.which
+    orig_run = code_grep.subprocess.run
+    code_grep.shutil.which = lambda name: "/usr/bin/rg"
+    code_grep.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(OSError("cannot execute"))
+    try:
+        handler, _ = _fresh_tool({"a.py": "x\n"})
+        out = handler({"pattern": "x"})
+        assert "search failed" in out and out.status is ToolStatus.FAILED
+    finally:
+        code_grep.shutil.which = orig_which
+        code_grep.subprocess.run = orig_run
+
+
+@check
+def rg_exit_two_is_a_real_failure_not_no_matches():
+    class _Proc:
+        returncode = 2
+        stdout = ""
+        stderr = "regex parse error"
+
+    orig_which = code_grep.shutil.which
+    orig_run = code_grep.subprocess.run
+    code_grep.shutil.which = lambda name: "/usr/bin/rg"
+    code_grep.subprocess.run = lambda *a, **kw: _Proc()
+    try:
+        handler, _ = _fresh_tool({"a.py": "x\n"})
+        out = handler({"pattern": "["})
+        assert "exit code 2" in out and "regex parse error" in out
+        assert "no matches" not in out and out.status is ToolStatus.FAILED
+    finally:
+        code_grep.shutil.which = orig_which
+        code_grep.subprocess.run = orig_run
+
+
+@check
+def glob_rg_launch_and_exit_errors_are_real_failures():
+    class _Proc:
+        returncode = 2
+        stdout = ""
+        stderr = "bad glob"
+
+    host = _Host(_workspace({"a.py": "x\n"}))
+    handler = make_glob_tool(host).handler
+    orig_which = code_grep.shutil.which
+    orig_run = code_grep.subprocess.run
+    code_grep.shutil.which = lambda name: "/usr/bin/rg"
+    try:
+        code_grep.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(OSError("cannot execute"))
+        launch = handler({"pattern": "*.py"})
+        assert launch.status is ToolStatus.FAILED and "search failed" in launch
+
+        code_grep.subprocess.run = lambda *a, **kw: _Proc()
+        exit_two = handler({"pattern": "["})
+        assert exit_two.status is ToolStatus.FAILED and "exit code 2" in exit_two
+        assert "bad glob" in exit_two
+    finally:
+        code_grep.shutil.which = orig_which
+        code_grep.subprocess.run = orig_run
 
 
 @check

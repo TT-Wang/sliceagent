@@ -52,24 +52,6 @@ def h13_handles_malformed_tool_calls_without_crashing():
 # ---- H-06: "read-only" git must not auto-approve write/exec options ----------------------------------
 
 @check
-def h06_policy_blocks_git_write_and_exec_options():
-    from sliceagent.policy import _is_readonly_command as ro
-    assert not ro("git diff --ext-diff HEAD")
-    assert not ro("git diff --textconv HEAD")
-    assert not ro("git -c diff.external=/tmp/x diff")
-    assert not ro("git --exec-path=/tmp/evil diff")
-    assert not ro("git diff --output=/tmp/pwned HEAD")
-    assert not ro("git diff -o /tmp/pwned HEAD")
-    # Diff/pager-capable commands prove helper suppression explicitly; bare repo config is executable state.
-    assert not ro("git diff HEAD")
-    assert ro("git --no-pager diff --no-ext-diff --no-textconv HEAD")
-    assert ro("git status")
-    assert ro("git --no-pager log --oneline -5")
-    assert ro("git --no-pager grep -c needle")
-    assert ro("git --no-pager show --no-ext-diff --no-textconv HEAD:file.py")
-
-
-@check
 def h06_code_review_disables_git_helpers():
     import inspect
     from sliceagent.tools import LocalToolHost

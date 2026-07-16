@@ -78,6 +78,22 @@ def terminal_module_imports_even_without_pty():
         t.pty = old
 
 
+@check
+def native_windows_docker_fails_before_building_invalid_mounts():
+    import sliceagent.sandbox as sandbox
+    old = sandbox.IS_WINDOWS
+    try:
+        sandbox.IS_WINDOWS = True
+        try:
+            sandbox.make_sandbox("docker")
+            raise AssertionError("native Windows Docker backend must fail early")
+        except ValueError as exc:
+            message = str(exc)
+            assert "native Windows" in message and "AGENT_SANDBOX=local" in message and "WSL2" in message
+    finally:
+        sandbox.IS_WINDOWS = old
+
+
 if __name__ == "__main__":
     failed = 0
     for fn in CHECKS:

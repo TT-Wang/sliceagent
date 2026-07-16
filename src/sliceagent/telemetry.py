@@ -9,22 +9,23 @@ Signals:
   - re_reads : a read_file on a path ALREADY read within the last `window` steps. Within a turn the prior
     read is still in the accumulated transcript, so a re-read signals the model isn't using its resident
     context; across turns it's the reconstruction-MISS signal (the seed/seal didn't carry what it needed).
-  - recalls  : accesses to the paged-out episodic cache — a read_file/list_files/grep under history/, or a
-    search_history call. Recovery from the cold cache (the model knew it forgot). (Was recall_history, now
-    deleted: the same recovery happens through the history/ virtual files.)
+  - recalls  : accesses through the legacy ``history/``/``search_history`` aliases. This compatibility
+    metric measures deliberate L0 recovery, not L2 knowledge recall; canonical ContextFS reads are not yet
+    included in this counter.
   - reads    : total successful read_file calls on REAL files (the denominator for a re-read RATE; a
     history/ read is a recall, counted above, not a source re-read).
 """
 from __future__ import annotations
 
 from .events import Event, StepEnd, ToolResult
+from .execution import ToolStatus, coerce_tool_status
 
 RE_READ_WINDOW = 6          # a path re-read within this many steps counts as a likely reconstruction miss
 _MAX_TRACKED = 256          # bound the per-path last-seen map (never a transcript)
 
 
 def _is_history_path(path) -> bool:
-    """True if a tool path targets the virtual history/ namespace (recovery from the paged-out cache)."""
+    """True when a tool path targets the legacy L0 ``history/`` alias."""
     if not isinstance(path, str):
         return False
     p = path.strip().replace("\\", "/")
@@ -48,11 +49,21 @@ class Telemetry:
     def __call__(self, e: Event) -> None:
         if isinstance(e, StepEnd):
             self.step += 1
-        elif isinstance(e, ToolResult) and not e.failing:
+        elif isinstance(e, ToolResult):
+            outcome_status = getattr(getattr(e, "outcome", None), "status", None)
+            explicit = getattr(outcome_status, "value", outcome_status)
+            if explicit in (None, ""):
+                explicit = e.status
+            status = coerce_tool_status(
+                explicit if explicit not in (None, "") else not e.failing,
+                legacy_text=str(e.output or ""),
+            )
+            if status is not ToolStatus.SUCCEEDED:
+                return
             path = (e.args or {}).get("path")
             hist = _is_history_path(path)
             if e.name in ("read_file", "list_files", "grep") and hist:
-                self.recalls += 1               # recovery from the paged-out cache via the history/ files
+                self.recalls += 1               # recovery through a legacy history/ compatibility locator
             elif e.name == "search_history":
                 self.recalls += 1               # cross-session content recall (FTS5)
             elif e.name == "read_file":         # a REAL source read (history reads counted above, not here)

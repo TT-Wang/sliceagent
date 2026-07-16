@@ -10,6 +10,7 @@ from sliceagent.context_overflow import (  # noqa: E402
     ContextOverflow,
     classify,
     is_context_overflow,
+    normalize_http_status,
 )
 
 CHECKS = []
@@ -53,6 +54,17 @@ def status_413_true():
     # 413 phrased in the message text (no status attr)
     assert is_context_overflow(Exception("Request Entity Too Large"))
     assert is_context_overflow(Exception("error code: 413"))
+
+
+@check
+def numeric_string_statuses_are_normalized():
+    assert normalize_http_status(" 413 ") == 413
+    assert normalize_http_status("HTTP 413") is None
+    assert normalize_http_status(True) is None
+    assert is_context_overflow(_StatusErr("Bad Request", status_code="413"))
+    assert classify(_StatusErr("upstream", status="503")) == {
+        "retryable": True, "is_context_overflow": False, "status": 503,
+    }
 
 
 @check
@@ -123,6 +135,7 @@ def exception_wraps_original_and_status():
     assert e.status_code == 413
     assert "ctx too big" in str(e)
     assert isinstance(e, Exception)
+    assert ContextOverflow(orig, status_code="413").status_code == 413
 
 
 @check

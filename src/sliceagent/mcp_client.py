@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import re
 import threading
 
 from .registry import ToolEntry, ToolText
+from .safety import wrap_untrusted
 
 _QUALIFY_MAX = 64
 
@@ -46,10 +46,8 @@ def _result_to_text(result) -> str:
     text = "\n".join(parts).strip() or "(no content)"
     if len(text) > _MCP_SAFETY_CAP:           # last-resort OOM guard; page-out (handler) does normal bounding
         text = text[:_MCP_SAFETY_CAP] + f"\n…[truncated {len(text) - _MCP_SAFETY_CAP} chars of MCP output]"
-    # isError must propagate as ok=False so the loop's failing-detection + the anti-loop guardrail
-    # (repeated_exact_failure) actually see the failure — a plain "Error: …" string gets wrapped ok=True.
-    # (MCP results enter as role="tool" messages, which the model already treats as DATA at the protocol
-    #  level — unlike web's slice re-injection channels — so an extra wrap_untrusted fence is low-value here.)
+    # isError must propagate as ok=False so typed execution receipts see the failure — a plain
+    # "Error: …" string would otherwise be wrapped as a successful string result.
     return ToolText(f"Error: {text}", ok=False) if getattr(result, "isError", False) else text
 
 
@@ -58,6 +56,8 @@ def _mcp_handler(server, tool, page_out):
     than inlining the whole payload — browser/DB/Playwright results can be hundreds of KB. The full output
     is preserved on disk and paged back on demand (the moat's L1→L2 page-out), so nothing is lost. With no
     host page_out (eval/headless), returns the raw text (already OOM-capped by _result_to_text)."""
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(tool)).strip(".-")[:80] or "tool"
+
     def _handle(args):
         out = server.call(tool, args)
         status = getattr(out, "status", None)
@@ -67,9 +67,15 @@ def _mcp_handler(server, tool, page_out):
         # the ok=False branch) is what makes run_tool_batch's `getattr(out, "ok", None)` see an explicit
         # flag instead of None — the None case was falling back to prose-matching ("Error"/"Exit code"
         # prefix), which false-flagged a legitimate success result whose text happened to start that way.
+        # MCP servers are an external prompt-injection boundary. Protocol role="tool" is not an instruction
+        # boundary by itself, so fence the payload before either inlining it or persisting a page-out blob.
+        # Persisting the fenced form also keeps a later read_file(blob) from reintroducing raw remote text.
+        out = wrap_untrusted(str(out), kind="mcp-output", verify_against_open_files=False)
         if page_out:
             try:
-                out = page_out(out, label=f"mcp-{tool}")
+                # The remote server controls its protocol tool name. Never let separators/control text from
+                # that metadata become a blob path segment or model-facing page-back banner.
+                out = page_out(out, label=f"mcp-{safe_label}")
             except Exception:  # noqa: BLE001 — paging must never fail the tool call
                 pass
         return ToolText(str(out), status=status) if status is not None else ToolText(str(out), ok=ok)
@@ -98,6 +104,12 @@ class McpRuntime:
         self.loop.run_forever()
 
     def submit(self, coro, timeout):
+        if self._closed:
+            try:
+                coro.close()
+            except (AttributeError, RuntimeError):
+                pass
+            raise RuntimeError("MCP runtime is closed")
         cf = asyncio.run_coroutine_threadsafe(coro, self.loop)
         try:
             return cf.result(timeout)
@@ -106,6 +118,12 @@ class McpRuntime:
             raise
 
     def spawn(self, coro):
+        if self._closed:
+            try:
+                coro.close()
+            except (AttributeError, RuntimeError):
+                pass
+            raise RuntimeError("MCP runtime is closed")
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def shutdown(self):
@@ -150,11 +168,22 @@ class McpServer:
         self.error: str | None = None
         self._queue: asyncio.Queue | None = None
         self._ready: asyncio.Event | None = None
+        self._worker = None
 
     def connect(self, params, timeout: float = 30) -> list:
         self.runtime.submit(self._mk_primitives(), timeout)  # create loop-bound queue/event
-        self.runtime.spawn(self._serve(params))              # start the worker (long-lived)
-        self.runtime.submit(self._wait_ready(), timeout)     # block until tools listed or error
+        self._worker = self.runtime.spawn(self._serve(params))  # start the worker (long-lived)
+        try:
+            self.runtime.submit(self._wait_ready(), timeout)    # block until tools listed or error
+        except BaseException:
+            # A discarded connect attempt must not finish late and leave an untracked stdio process/worker
+            # alive for the rest of the workspace session. Cancellation unwinds both async context managers.
+            self._worker.cancel()
+            try:
+                self._worker.result(timeout=1)
+            except BaseException:  # cancelled/cleanup failure is already represented by the connect error
+                pass
+            raise
         if self.error:
             raise RuntimeError(self.error)
         return self.tools
@@ -214,6 +243,8 @@ class McpServer:
             )
 
     def close(self):
+        if self._queue is None:
+            return
         try:
             self.runtime.submit(self._queue.put(None), 5)
         except Exception:  # noqa: BLE001
@@ -222,11 +253,34 @@ class McpServer:
 
 def _params_from_conf(conf: dict):
     from mcp import StdioServerParameters
-    env = None
-    if conf.get("env"):
-        env = {**os.environ, **conf["env"]}
-    return StdioServerParameters(command=conf["command"], args=list(conf.get("args", [])),
+    command = conf.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("MCP server command must be a non-empty string")
+    configured_args = conf.get("args", [])
+    if (not isinstance(configured_args, (list, tuple))
+            or any(not isinstance(value, str) for value in configured_args)):
+        raise ValueError("MCP server args must be an array of strings")
+    configured_env = conf.get("env")
+    if configured_env is not None and not isinstance(configured_env, dict):
+        raise ValueError("MCP server env must be a table/object")
+    # The MCP SDK already adds its small platform-safe default environment (PATH, HOME, etc.) whenever
+    # ``env`` is supplied. Passing a full os.environ here changes a harmless custom MODE/PORT setting into
+    # ambient access to every LLM key and service token in the SliceAgent process. Forward only values the
+    # user explicitly assigned to this server; an explicitly named secret remains possible by design.
+    env = ({str(key): str(value) for key, value in configured_env.items()}
+           if configured_env is not None else None)
+    return StdioServerParameters(command=command, args=list(configured_args),
                                  env=env, cwd=conf.get("cwd"))
+
+
+def _tool_filter(conf: dict, key: str) -> set[str]:
+    raw = conf.get(key)
+    if raw is None:
+        return set()
+    if (not isinstance(raw, (list, tuple, set, frozenset))
+            or any(not isinstance(value, str) for value in raw)):
+        raise ValueError(f"MCP server {key} must be an array of tool-name strings")
+    return set(raw)
 
 
 def connect_mcp_servers(registry, servers: dict, runtime: McpRuntime | None = None,
@@ -251,27 +305,39 @@ def connect_mcp_servers(registry, servers: dict, runtime: McpRuntime | None = No
             for _b in _bad:
                 log(f"mcp:{name} REFUSED (security) — {_b}")
             continue
+        try:
+            inc, exc = _tool_filter(conf, "include"), _tool_filter(conf, "exclude")
+        except (Exception, SystemExit) as error:
+            log(f"mcp:{name} skipped (invalid config: {error})")
+            continue
         server = McpServer(name, runtime)
         try:
             tools = server.connect(_params_from_conf(conf), timeout)
         except Exception as e:  # noqa: BLE001
             log(f"mcp:{name} connect failed: {e}")
             continue
-        inc, exc = set(conf.get("include") or []), set(conf.get("exclude") or [])
         n = 0
         for tool in tools:
-            if (inc and tool.name not in inc) or tool.name in exc:
-                continue
-            qname = qualify(name, tool.name)
-            if registry.has(qname):
-                log(f"mcp:{name} tool {qname} collides with an existing tool, skipped")
-                continue
-            registry.register(ToolEntry(
-                name=qname, schema=_function_schema(qname, tool),
-                handler=_mcp_handler(server, tool.name, page_out),
-                source="mcp",
-            ))
-            n += 1
+            try:
+                tool_name = getattr(tool, "name", None)
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    raise ValueError("tool name must be a non-empty string")
+                if (inc and tool_name not in inc) or tool_name in exc:
+                    continue
+                qname = qualify(name, tool_name)
+                if registry.has(qname):
+                    log(f"mcp:{name} tool {qname} collides with an existing tool, skipped")
+                    continue
+                registry.register(ToolEntry(
+                    name=qname, schema=_function_schema(qname, tool),
+                    handler=_mcp_handler(server, tool_name, page_out),
+                    source="mcp",
+                ))
+                n += 1
+            except (Exception, SystemExit) as error:
+                # Remote metadata is untrusted protocol data. One malformed descriptor must not abort startup
+                # after earlier tools from this server have already registered; skip only that descriptor.
+                log(f"mcp:{name} ignored malformed tool metadata ({type(error).__name__}: {error})")
         connected.append(server)
         total += n
         log(f"mcp:{name} connected ({n} tools)")

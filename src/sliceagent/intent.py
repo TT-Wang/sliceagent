@@ -274,12 +274,12 @@ def _freeze_arg(value):
 
 @dataclass(frozen=True)
 class EffectGrant:
-    """A turn-local operation/target capability derived from exact user-authored speech.
+    """A turn-local operation/target cue derived from exact user-authored speech.
 
-    ``tools`` is deliberately concrete: the execution gate never guesses that two effectful tools are
-    interchangeable. ``mode=exact`` is used for a confirmed pending action and requires every captured
-    argument to match. ``mode=scoped`` is used for an explicit current-turn directive and may authorize a
-    small tool family, optionally restricted by ``target``/``target_arg``.
+    ``tools`` is deliberately concrete so the TURN CONTRACT does not imply that unrelated actions are
+    interchangeable. ``mode=exact`` preserves every captured argument for a continued pending action;
+    ``mode=scoped`` describes a small likely tool family and optional target. These cues help the model
+    interpret intent; they never allow or deny host execution.
     """
 
     operation: str
@@ -364,13 +364,13 @@ class EffectGrant:
 
 @dataclass(frozen=True)
 class TurnAdmission:
-    """The one immutable host reading of an exact user request.
+    """One immutable orientation record derived from the exact user request.
 
-    The request itself remains the semantic authority.  This record carries only the small facts the host
-    must know *before* allowing side effects or promoting durable clauses: which exact source spans are the
-    user's operative speech, which spans are attributed/reference data, whether effects were authorized,
-    and whether an answer is about sealed past output or live present state.  It is deliberately absent from
-    ``IntentState.to_records`` and is cleared at the turn seal.
+    The request itself remains authoritative. This record helps the model distinguish operative speech from
+    quoted/reference data, resolve short continuations, choose the right evidence source, and shape its
+    response. It does not grant or deny tool execution; ordinary execution follows the user's request directly.
+    Durable intent capture may still use the exact source spans so quoted assistant prose is not promoted into
+    a standing user requirement. The record is absent from ``IntentState.to_records`` and clears at turn seal.
 
     ``referents`` is the integration seam for the discourse resolver. Intent does not invent a competing
     reference model; callers may attach typed resolved-anchor objects here. This object is also the
@@ -395,8 +395,11 @@ class TurnAdmission:
     focus_repairs: tuple[FocusRepair, ...] = ()
     effect_grants: tuple[EffectGrant, ...] = ()
     referents: tuple[object, ...] = ()
+    schema_version: int = 1
 
     def __post_init__(self) -> None:
+        if not isinstance(self.schema_version, int) or self.schema_version < 1:
+            raise ValueError("turn admission schema_version must be a positive integer")
         if self.effect_authority not in ("none", "explicit", "continuation", "uncertain"):
             raise ValueError(f"invalid effect authority {self.effect_authority!r}")
         if self.grounding not in ("sealed_past", "live_present", "both", "none"):
@@ -433,6 +436,7 @@ class TurnAdmission:
 
     def to_dict(self) -> dict:
         return {
+            "v": self.schema_version,
             "request_text": self.request_text,
             "request_source": self.request_source,
             "effect_authority": self.effect_authority,
@@ -520,6 +524,7 @@ class TurnAdmission:
                 focus_repairs=repairs,
                 effect_grants=grants,
                 referents=referents,
+                schema_version=int(value.get("v") or 1),
             )
         except (TypeError, ValueError):
             return None
@@ -609,10 +614,10 @@ _POLITE_DIRECTIVE_QUESTION = re.compile(
     re.IGNORECASE,
 )
 
-# Turn-contract analysis asks only two control-plane questions: whether this exact turn authorizes an effect,
+# Turn-contract analysis asks only two orientation questions: whether this exact turn requests an action,
 # and whether its answer is about the sealed past or live present.  It is intentionally not a general NLU
 # taxonomy.  High-confidence directives pass; questions/corrections/attributed prior speech do not; anything
-# else stays ``uncertain`` for the execution gate to handle conservatively.
+# else stays ``uncertain`` so context selection and the model can preserve that ambiguity without blocking work.
 _EFFECT_VERB_SRC = (
     r"implement|fix(?:ing)?|patch|repair|resolve|address|correct|edit|change|modify|refactor|rewrite|"
     r"replace|simplify|improve|optimize|add|remove|drop|supersede|mark|delete|create|write|build|apply|make|ensure|"
@@ -683,6 +688,18 @@ _BARE_ASSENT = re.compile(
     r"(?:option\s+)?\d+)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
+
+
+def is_bare_assent(text: object) -> bool:
+    """Whether ``text`` is a standalone affirmative/continue reply.
+
+    This is the public projection of the turn-contract grammar.  Entry-point routing uses it only to keep an
+    adjacent proposal reply out of the cheap social-message path; the proposal itself remains the source of
+    any typed continuation scope.
+    """
+    return _BARE_ASSENT.fullmatch(str(text or "")) is not None
+
+
 _OPTION_SELECTION = re.compile(
     r"(?:go\s+with|choose|pick|take|let'?s\s+do|option)\s+(?:option\s+)?(\d{1,3})\b"
     r"|^\s*(\d{1,3})\s*[.!]*\s*$",
@@ -1129,6 +1146,33 @@ def _complement_spans(text: str, excluded: Iterable[SourceSpan]) -> tuple[Source
     return tuple(out)
 
 
+def _subtract_spans(
+    spans: Iterable[SourceSpan], cuts: Iterable[SourceSpan], length: int,
+) -> tuple[SourceSpan, ...]:
+    """Remove exact ``cuts`` from ``spans`` without changing source coordinates.
+
+    A user may deliberately adopt wording that the assistant used previously.  Verbatim overlap is useful
+    evidence that prose was copied, but it is not by itself attribution: an unquoted, high-confidence current
+    imperative remains user-authored speech.  Keeping this as source-range arithmetic lets the ordinary
+    directive reducer remain the sole semantic classifier.
+    """
+    remaining: list[SourceSpan] = []
+    normalized_cuts = _merge_spans(cuts, length)
+    for start, end in _merge_spans(spans, length):
+        cursor = start
+        for cut_start, cut_end in normalized_cuts:
+            if cut_end <= cursor or cut_start >= end:
+                continue
+            if cursor < cut_start:
+                remaining.append((cursor, min(end, cut_start)))
+            cursor = max(cursor, cut_end)
+            if cursor >= end:
+                break
+        if cursor < end:
+            remaining.append((cursor, end))
+    return _merge_spans(remaining, length)
+
+
 def _scan_spans(text: str, spans: Iterable[SourceSpan]) -> str:
     """Same-length projection that exposes only ``spans`` while preserving line boundaries."""
     source = str(text or "")
@@ -1345,6 +1389,16 @@ def _unquoted_attributed_spans(text: str) -> tuple[SourceSpan, ...]:
             start += 1
         if start >= len(text):
             continue
+        # ``As you said, fix the parser`` adopts an earlier recommendation as a present imperative.  The
+        # attribution establishes provenance for the recommendation; it does not quote away the user's own
+        # command.  Limit this exception to the conversational ``you said/wrote/...`` form and require the
+        # immediately following bytes to be a high-confidence directive.  Explicit reference frames such as
+        # ``For reference, Fix: ...`` remain historical data.
+        intro_text = text[intro.start():intro.end()].casefold()
+        if (re.search(r"\b(?:as\s+)?you\s+(?:said|wrote|listed|reported|found|mentioned|described|told\s+me)\b",
+                      intro_text)
+                and _effect_directive_spans(text[start:])):
+            continue
         # Explicit quote syntax is already handled precisely by _mask_quoted_data_with_spans. Extending this
         # prose attribution to the end would incorrectly swallow a later instruction outside the quote.
         if text[start] in "\"'“‘`>":
@@ -1359,8 +1413,15 @@ def _unquoted_attributed_spans(text: str) -> tuple[SourceSpan, ...]:
 
 
 def _validated_contract(request: str, contract: TurnContract) -> TurnContract:
-    attributed = _merge_spans(contract.attributed_spans, len(request))
-    authority = _merge_spans(contract.authority_spans, len(request))
+    def exact(spans: Iterable[SourceSpan]) -> tuple[SourceSpan, ...]:
+        # Persisted legacy records may have been redacted with a length-changing mask. Clipping such a range
+        # silently points it at different words; invalidate it instead. New persistence masks preserve length.
+        return _merge_spans(
+            (span for span in spans if 0 <= span[0] < span[1] <= len(request)), len(request),
+        )
+
+    attributed = exact(contract.attributed_spans)
+    authority = exact(contract.authority_spans)
     # Attributed data always wins an overlap.  This is a fail-closed control projection; it never rewrites the
     # request and the exact original remains available to the model and artifact store.
     if attributed and authority:
@@ -1529,11 +1590,10 @@ def _workspace_target(clause: str) -> str:
 
 
 def _execution_target(clause: str) -> str:
-    """Keep the user-authored command/process hint carried by an execution grant.
+    """Keep the user-authored command/process hint carried by an action cue.
 
-    This is deliberately lexical rather than a miniature planner.  The authority hook later compares the
-    hint with the concrete command; an unnamed ``run/start`` request therefore cannot become ambient shell
-    authority.
+    This is deliberately lexical rather than a miniature planner. The model sees the hint alongside the exact
+    request; the host does not use it as a shell allowlist.
     """
     quoted = re.search(r"`([^`\r\n]+)`", clause)
     if quoted is not None:
@@ -1735,8 +1795,8 @@ def _explicit_effect_grants(source: str, spans: Iterable[SourceSpan]) -> tuple[E
     """Compile high-confidence directive spans into a deliberately small capability set.
 
     This is not a general planner. It prevents one detected verb from becoming ambient authority for every
-    effectful tool while retaining the ordinary coding fast path. Unknown operations get no grant and must be
-    clarified rather than silently widening the turn.
+    effectful tool while retaining the ordinary coding fast path. These are model-facing intent cues only;
+    they are never an execution allowlist.
     """
     grants: list[EffectGrant] = []
     for span in _action_spans(source, spans):
@@ -1784,8 +1844,8 @@ def _explicit_effect_grants(source: str, spans: Iterable[SourceSpan]) -> tuple[E
             continue
         if verb in {"add", "remove", "drop", "delete", "supersede", "replace", "mark", "complete", "finish"} \
                 and re.search(r"\b(?:requirement|constraint)\b", low):
-            # Constraint verbs are not interchangeable.  In particular, permission to add a requirement
-            # must never imply permission to silently drop or supersede one.
+            # Constraint verbs are not interchangeable. A request to add a requirement must never be
+            # represented as a request to silently drop or supersede one.
             if re.search(r"\b(?:drop|remove|delete)\b", low):
                 tools = ("drop_requirement",)
                 operation = "task.requirement.drop"
@@ -1822,7 +1882,7 @@ def _explicit_effect_grants(source: str, spans: Iterable[SourceSpan]) -> tuple[E
             r"\b(?:subagents?|child\s+agents?|explorers?|agents?)\b", low,
         ):
             # The core product exposes read-only explorer delegation. Bind the grant to that exact profile so a
-            # request for parallel review cannot silently authorize a writable/general child in advanced mode.
+            # request for parallel review cannot be portrayed as a request for a writable/general child.
             grants.append(EffectGrant(
                 "task.delegate", ("spawn_agent",), target="explorer", target_arg="agent",
                 source_span=span,
@@ -1898,8 +1958,8 @@ def _explicit_effect_grants(source: str, spans: Iterable[SourceSpan]) -> tuple[E
             ))
             continue
 
-        # A coding/change directive authorizes workspace edits, not navigation, process management, topic
-        # changes, or arbitrary world-state mutation. A named file narrows every file writer to that target.
+        # A coding/change directive describes workspace edits, not navigation, process management, topic
+        # changes, or arbitrary world-state mutation. A named file keeps the model-facing cue target-specific.
         targets = file_targets
         path_scopes = _edit_path_scopes(clause)
         if path_scopes:
@@ -1918,20 +1978,18 @@ def _explicit_effect_grants(source: str, spans: Iterable[SourceSpan]) -> tuple[E
             grants.append(EffectGrant(
                 "workspace.edit", _WORKSPACE_EDIT_TOOLS, source_span=span,
             ))
-            # A broad implementation directive ("build/fix this upgrade") authorizes ordinary local
-            # generators, formatters, migrations, and dependency commands required to carry out that same
-            # workspace change. Named-file directives stay narrow, and the authority hook independently
-            # rejects release/deploy/VCS publication commands that would expand the user's objective.
+            # A broad implementation directive ("build/fix this upgrade") suggests ordinary local generators,
+            # formatters, migrations, and dependency commands needed for that workspace change. Named-file
+            # directives keep a narrower cue; the model still judges concrete actions from the exact request.
             grants.append(EffectGrant(
                 "workspace.implement", ("run_command",), source_span=span,
             ))
             grants.append(EffectGrant(
                 # execute_code remains useful for an atomic multi-file edit, but it receives a separate
-                # syntax-aware matcher instead of inheriting arbitrary Python/subprocess authority.
+                # syntax-aware cue instead of implying arbitrary Python/subprocess intent.
                 "workspace.batch_edit", ("execute_code",), source_span=span,
             ))
-        # Verification and plan/requirement bookkeeping are related implementation effects. The hook admits
-        # only recognizable verification commands for this operation; all other shell effects remain denied.
+        # Verification and plan/requirement bookkeeping are related implementation cues, not execution gates.
         grants.append(EffectGrant(
             "workspace.verify", ("run_command",), source_span=span,
         ))
@@ -2064,13 +2122,21 @@ def analyze_turn(
     """Build the conservative, exact-span contract for one current request.
 
     This deliberately does not decide the user's full semantic intent.  It identifies attributed data, then
-    asks only whether the remaining user-authored surface clearly authorizes effects.  Ambiguity stays explicit
-    instead of being upgraded into permission.
+    asks whether the remaining user-authored surface contains an actionable directive. Ambiguity stays explicit
+    for grounding and response-shaping; it never becomes a host-side execution denial.
     """
     source = str(request or "")
     formal_scan, formal_spans = _mask_quoted_data_with_spans(source)
     copied_spans = _copied_prior_spans(source, prior_texts)
     prose_spans = _unquoted_attributed_spans(source)
+    # A substantial verbatim match against prior assistant prose is a provenance hint, not a speech-act
+    # override.  Preserve any unquoted high-confidence imperative inside that match as current user speech.
+    # Explicit attribution remains authoritative because ``prose_spans`` is merged separately below.
+    copied_spans = _subtract_spans(
+        copied_spans,
+        (*_effect_directive_spans(formal_scan), *_intent_candidate_spans(formal_scan)),
+        len(source),
+    )
     operative_arguments = tuple(
         span for span in _operative_quoted_argument_spans(source, formal_spans)
         if not any(_spans_overlap(span, blocked) for blocked in (*copied_spans, *prose_spans))
@@ -2207,7 +2273,7 @@ def analyze_turn(
     else:
         effect_authority = "uncertain"
 
-    # An authorized effect necessarily acts on present state.  A past-record reference plus a present action
+    # An actionable directive necessarily concerns present state. A past-record reference plus a present action
     # is the mixed case (e.g. "that was finding #2; now fix #3").
     live = live or effect_authority in ("explicit", "continuation")
     grounding: GroundingMode = (

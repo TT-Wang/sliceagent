@@ -6,7 +6,7 @@ messages. Tool results fold into the carried tiers through pfc.slice_sink (an ev
 the NEXT seed — so the loop stays decoupled from slice internals and just dispatches events.
 
 This is a DEMAND-PAGED SNAPSHOT MACHINE: build() = a context switch that faults in exactly the
-regions this turn references. NEOCORTEX (cross-session lessons, via PageTable) is recalled once
+regions this turn references. KNOWLEDGE candidates (cross-session lessons, via PageTable) are recalled once
 per topic-goal (memoized); SENSORY CORTEX (code discovery, git state, repo map — all recomputed
 live, never persisted) is re-derived every turn so the agent perceives the live world, not a
 memory of it.
@@ -18,6 +18,7 @@ import re
 import sys
 
 from .context import SeedPlan
+from .context_compiler import compile_active_context, dependency_resource_paths
 from .pagetable import PageTable
 from .pfc import Slice, _active
 from .regions import (
@@ -90,11 +91,11 @@ def _numbered(lines: list[str], start: int = 1) -> str:
     return "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, start))
 
 
-def physical_active_files(s: Slice, tools) -> list[str]:
+def physical_active_files(s: Slice, tools, paths=None) -> list[str]:
     """Live-classify the working set, preserving real files that shadow reserved archive mounts."""
     classify = getattr(tools, "resource_ref", None)
     physical = []
-    for path in s.active_files:
+    for path in (s.active_files if paths is None else paths):
         try:
             ref = classify(path) if callable(classify) else None
         except Exception:  # a classification failure must not hide a legitimate workspace file
@@ -105,7 +106,7 @@ def physical_active_files(s: Slice, tools) -> list[str]:
 
 
 def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
-                    read_budget: int = READ_BUDGET) -> str:
+                    read_budget: int = READ_BUDGET, selected_paths=None) -> str:
     """Re-read the working-set files FRESH and show them by RELEVANCE, not by a size cap (bound ≠ size).
     The RELEVANCE CLOSURE — edited files (the change set) + protected deps (the dependency closure) — is
     shown IN FULL regardless of length: it is proven-relevant, so no line cap applies. A merely
@@ -115,13 +116,14 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     `read_budget` is the live adaptive VIEW budget: the most-recent N exploratory reads are SHOWN (the
     change set is always shown). SwapManager.evict already enforces it on the durable working set, so this
     is pure presentation — s.active_files is untouched."""
-    if not s.active_files:
+    candidates = list(s.active_files if selected_paths is None else selected_paths)
+    if not candidates:
         return "(no files opened yet)"
     # Old checkpoints may contain archive handles that a previous reducer misclassified as workspace files.
     # Classify through the LIVE host so a real project file shadowing `history/` still wins. Virtual archive
     # content is available through read_file in the within-turn trajectory; it is never physically re-read or
     # presented as OPEN FILES on the next turn.
-    physical_files = physical_active_files(s, tools)
+    physical_files = physical_active_files(s, tools, candidates)
     if not physical_files:
         return "(no workspace files opened yet)"
     # Render-time view cap: SHOW the most-recent read_budget exploratory reads; the change set (edited
@@ -148,7 +150,7 @@ def build_artifacts(s: Slice, tools, *, full_file_lines: int = FULL_FILE_LINES,
     for p in shown:
         try:
             # OPEN FILES re-read goes through the SAME resolution as read_file/edits (resolve_read): prefer
-            # the current-project (focus) copy, else search every authorized root. This keeps the display in
+            # the current-project (focus) copy, else search every reachable root. This keeps the display in
             # agreement with where edits land even when a relative pin collides across roots, and stays
             # truthful after the agent moves projects. Absolute/out-of-reach pins still raise from _resolve.
             _rd = getattr(tools, "resolve_read", None) or getattr(tools, "locate", None)
@@ -294,33 +296,33 @@ def _attach_images(user_text: str, host):
 
 
 def make_build_slice(state, tools, retriever, memory, task: str, session_id: str = "", system_extra: str = "",
-                     model_id: str = ""):
+                     model_id: str = "", event_ledger=None):
     """The reconstruction seam the loop calls ONCE per turn to build the SEED. Returns [system, user]
     messages; within the turn the loop accumulates native messages (no per-step rebuild).
 
     `state` is a Slice (single task) OR a Session (host-side topic manager, has .active()). The
     ACTIVE slice is resolved EACH call, so a topic switch redirects the next turn's seed.
     System (instructions + the active topic's goal) is stable per topic and cacheable; the user
-    message is the volatile slice. NEOCORTEX (cross-session lessons) is recalled once per topic-goal
+    message is the volatile slice. KNOWLEDGE candidates (cross-session lessons) are recalled once per topic-goal
     (memoized); SENSORY CORTEX (code discovery) is re-derived every turn (adapts as the agent works)."""
     is_session = hasattr(state, "active")
+    try:
+        active_kernel = bool(_active(state).active_work.items)
+    except Exception:
+        active_kernel = False
     cwd = ""
     try:
         cwd = tools.root() if hasattr(tools, "root") else ""
     except Exception:  # noqa: BLE001 — cwd is optional; any host error falls back to "" (already set)
         pass
     env_line = (
-        f"\n\n# PROJECT ROOT & BOUNDARY\nYou start in: {cwd} — reference files here by their RELATIVE path "
-        "(e.g. 'pkg/mod.py', 'test_x.py'); run_command already starts here.\n"
-        "Your file tools are confined to your authorized directories — this is the BOUNDARY. To act outside "
-        "it, use run_command/execute_code (the shell is unconfined). Workspace identity moves only through the "
-        "host control plane. When the user explicitly asks to go to another project, locate its exact directory, "
-        "then call change_workspace(path) as your FINAL tool action; the host durably saves this turn, tears "
-        "down every old-workspace owner, and activates the target without reconnecting the interface or model. "
-        "Never claim a shell `cd` changed the workspace. "
-        "You can work on any file "
-        "inside your authorized dirs by its path. If you move into another authorized project it appears under "
-        "CURRENT PROJECT in the context, and bare relative paths resolve THERE — not pinned to the start dir."
+        f"\n\n# CURRENT PROJECT & REACH\nYour primary workspace is: {cwd}. Relative paths and run_command "
+        "start there. The workspace is the default frame, not a prison: exact absolute targets under the user's "
+        "home can become grounded focus roots, and the file tools keep those roots reachable alongside the primary "
+        "workspace. Use change_workspace(path) only when another directory should become the PRIMARY project and "
+        "PROJECT knowledge scope; call it as the final tool action. The host saves the segment and activates the target "
+        "without reconnecting the interface or model, while the same logical request continues. A shell `cd` does "
+        "not change primary workspace identity."
     ) if cwd else ""
     # ITEM 11(B) — git/project snapshot computed ONCE per session (NOT inside build()). It is
     # deterministic per cwd within a session, so the system message stays byte-stable (prompt-cache
@@ -371,7 +373,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         "\n\n# ENVIRONMENT (OBSERVED ground truth at session start — use THESE real values; do NOT "
         "assume a generic sandbox/OS or path)\n" + "\n".join(env_facts)
     )
-    lessons_memo: dict[str, str] = {}   # per-build memo of the NEOCORTEX (memory-lessons) lookup, keyed
+    lessons_memo: dict[str, str] = {}   # per-build memo of the KNOWLEDGE-candidate lookup, keyed
     #                                     by goal — NOT a durable store itself, just avoids repeating the
     #                                     lookup within one build() when the goal is unchanged.
     # ITEM 17 — the subdirectory-hint tracker, constructed ONCE (closure-scoped, like lessons_memo):
@@ -382,7 +384,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     # only at a real task boundary (new session or topic switch), NOT per message — `task` is the per-turn
     # user text and would reset it constantly.
     hints = None
-    if proot and hasattr(tools, "root"):   # the subdir-hint tree-scan is project work — skip outside a project
+    if not active_kernel and proot and hasattr(tools, "root"):
         root_now = tools.root()
         hints = getattr(tools, "_subdir_hints", None)
         if hints is None or str(getattr(hints, "_root", "")) != os.path.realpath(root_now or ""):
@@ -404,15 +406,32 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     _retr = retriever if proot else None
     pages = PageTable(_retr, memory, hints, session_id=session_id or None)
     swap = SwapManager(_retr)   # owns the working-set page lifecycle for this session
+
+    # A settled delegation is reconstructed from immutable ContextFS reports, not from transient tool-message
+    # bodies.  This loader is intentionally read-only and receipt-free: it is part of seed reconstruction, just
+    # like OPEN FILES and history manifests.  The bundle wraps child prose as untrusted testimony before it enters
+    # the model slice.  Hosts without ContextFS simply retain locator-complete fan-in metadata.
+    def fan_in_report_loader(handle: str) -> str:
+        router = getattr(tools, "_history_route", None)
+        if not callable(router):
+            raise FileNotFoundError("host exposes no ContextFS route")
+        provider = router(handle)
+        if provider is None:
+            raise FileNotFoundError(f"no canonical artifact route for {handle}")
+        canonicalize = getattr(tools, "_archive_handle", None)
+        canonical = canonicalize(handle) if callable(canonicalize) else handle
+        return str(provider.read_file(canonical))
     # SENSORY CORTEX tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session
     # (stable → prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/
     # find. A derived view (re-computed from the filesystem), memoized for the session, never a durable
     # store. Lazy import avoids any seed<->sensory_cortex cycle; '' (suppressed) for hosts without root() (stubs).
     try:
         from .sensory_cortex import repo_map as _repo_map
-        # Map the CONFINEMENT root (respects the workspace boundary), but ONLY when we're inside a project —
+        # Map the primary workspace's structural root, but ONLY when we're inside a project —
         # never os.walk a bare HOME. The map output is char-bounded inside repo_map so it can't blow the window.
-        repo_map_text = _repo_map(tools.root()) if (proot and hasattr(tools, "root")) else ""
+        repo_map_text = _repo_map(tools.root()) if (
+            not active_kernel and proot and hasattr(tools, "root")
+        ) else ""
     except Exception:
         repo_map_text = ""
     # DELEGATION (swarm) guidance — included ONLY when spawn_* tools are actually offered (sub_depth>0 and not a
@@ -458,47 +477,75 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # once at recency (see build()). Cache breakpoint now sits cleanly at the end of this prefix.
         return system_prefix
 
-    # Brain-analogy tags below (legend at the top of pfc.py / in pagetable.py): PFC = carried working
-    # memory (free, in-memory, lost on reset); HIPPOCAMPUS = episodic log (explicit recall); NEOCORTEX =
-    # lessons vault (auto-surfaced); SENSORY CORTEX = derived view (recomputed live, never persisted).
+    # Brain-region tags below: PFC = carried Active Work; HISTORY / HIPPOCAMPUS = exact episodic evidence;
+    # KNOWLEDGE = prior lesson candidates; SENSORY CORTEX = fresh derived observations.
     # NOTE: this function's statement ORDER is NOT freely regroupable by tag — swap.prefetch (SENSORY
     # CORTEX) must run before build_artifacts (SENSORY CORTEX) because it populates s.protected_deps/
     # s.hot that build_artifacts reads; a mechanical CARRIED-then-RETRIEVED reorder would break that.
     # The tags are for legibility only; do not reorder these lines by tag.
     def build() -> list[dict]:
         s = _active(state)                                             # PFC: resolve the active slice
-        swap.prefetch(s)   # SENSORY CORTEX: refresh change-set deps from the code graph, BEFORE any eviction
+        current_epoch = int(getattr(state, "workspace_epoch", 0) or 0)
+        graph_active = bool(s.active_work.items)
+        closure = s.active_work.dependency_closure() if graph_active else ()
+        current_resources = tuple(
+            ref for item in closure for ref in item.resource_refs
+            if ref.workspace_epoch == current_epoch
+        )
+        resource_kinds = {ref.kind for ref in current_resources}
+        needs_files = bool(resource_kinds & {"file", "workspace_file", "path", "workspace", "git"})
+        needs_memory = bool(resource_kinds & {"memory", "history"})
+        needs_history = "history" in resource_kinds
+        needs_roster = "roster" in resource_kinds
+        graph_paths = dependency_resource_paths(
+            s.active_work, workspace_epoch=current_epoch,
+        ) if graph_active else None
+        if not graph_active or graph_paths:
+            swap.prefetch(s)   # refresh only a selected live file dependency closure
         # CURRENT REQUEST and the topic/task label are distinct. The typed intent value is the sole
         # rendering authority; `task` is a compatibility fallback for callers constructing an old/empty
         # slice. This matters on resume: the parked topic keeps its goal, but the new resume message is what
         # the user is asking for RIGHT NOW.
         goal = getattr(getattr(s, "intent", None), "current_request", "") or task
-        if goal not in lessons_memo:
-            # NEOCORTEX through the ONE read seam (memory-lessons backend) — no sibling recall.
-            # R1: pass the files in play at topic-recall time so memem bonuses lessons tagged with them.
-            # Snapshot-at-first-recall (memoized by goal) — keeps the per-topic single memem call stable.
+        typed_knowledge_push = callable(getattr(memory, "seed_recall", None))
+        if goal not in lessons_memo and (typed_knowledge_push or not graph_active or needs_memory):
+            # KNOWLEDGE candidates through the ONE read seam (memory-lessons backend) — no sibling recall.
+            # Native L2 applies its own typed admission: a tiny standing USER-preference budget, plus PROJECT
+            # and CRAFT records only when they are relevant to this exact request. Snapshot-at-first-recall
+            # (memoized by goal) keeps the per-request lookup stable. The knowledge backend owns semantic
+            # retrieval/failover; no unscoped Memem tail is appended to the seed.
             _paths = sorted(set(s.edited_files) | set(s.active_files)) or None   # PFC: carried file sets
             lessons_memo[goal] = render_memory(pages.lookup(goal, kind="memory-lessons", k=6, paths=_paths))
+        lessons_memo.setdefault(goal, "")
         # the render view budget tracks the LIVE adaptive budget (s.read_budget, grown on refault by
         # SwapManager); OPEN FILES/RECENT/findings are otherwise UNCAPPED (bound = relevance, not size).
         read_budget = s.read_budget                                    # PFC: carried adaptive budget
-        artifacts = build_artifacts(s, tools, full_file_lines=FULL_FILE_LINES, read_budget=read_budget)
-        open_file_paths = physical_active_files(s, tools)
+        artifacts = build_artifacts(
+            s, tools, full_file_lines=FULL_FILE_LINES, read_budget=read_budget,
+            selected_paths=graph_paths,
+        )
+        open_file_paths = physical_active_files(
+            s, tools, s.active_files if graph_paths is None else graph_paths,
+        )
         # ^ SENSORY CORTEX: fresh re-read of OPEN FILES from disk (depends on swap.prefetch above)
         # PageTable.lookup is the single read path. discovery_query builds the code focus (Markov:
         # latest finding + current error + task).
-        code_refs = pages.lookup(discovery_query(s, goal), kind="code", k=DISCOVERY_K)  # SENSORY CORTEX
+        code_refs = pages.lookup(
+            discovery_query(s, goal), kind="code", k=DISCOVERY_K,
+        ) if (not graph_active or needs_files) else ()
         discovery = render_discovery(code_refs, discovery_chars=DISCOVERY_CHARS)
-        threads = render_threads(state.open_threads()) if is_session else ""  # PFC: other topics' state
-        note_refs = pages.lookup(s.active_files, kind="project-notes", k=1)  # SENSORY CORTEX: subtree notes
+        threads = render_threads(state.open_threads()) if (is_session and not graph_active) else ""
+        note_refs = pages.lookup(s.active_files, kind="project-notes", k=1) \
+            if (not graph_active or needs_files) else ()
         hint_text = note_refs[0].preview if note_refs else ""
         # SENSORY CORTEX — LIVE world-state: re-probe git each build (current branch + changed files), so
         # the slice always carries the up-to-date working-tree state instead of a stale snapshot.
-        worktree = git_worktree_state(cwd) if cwd else ""
-        # PAGED-OUT HISTORY manifest — the HIPPOCAMPUS made VISIBLE so the model READS the history/ turn
+        worktree = git_worktree_state(cwd) if cwd and (not graph_active or needs_files) else ""
+        # PAGED-OUT HISTORY manifest — HISTORY / HIPPOCAMPUS made visible through @sliceagent/history/
         # files (the dead active-ask channel's missing trigger). Same PageTable read seam as code/notes/xsession;
         # bounded to MANIFEST_TURNS locators (moat), self-suppresses with no durable log (NullMemory => []).
-        manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS)  # HIPPOCAMPUS
+        manifest_refs = pages.lookup(session_id, kind="episode-thissession", k=MANIFEST_TURNS) \
+            if (not graph_active or needs_history) else ()
         cache_manifest = render_cache_manifest(manifest_refs)
         # STANDING SPECIALISTS manifest — advertise the durable, cross-session roster so the model uses
         # read_file("roster/index.md") / spawn_agent(name=…) instead of spelunking the raw vault (an
@@ -508,7 +555,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         # without a roster just yields "". Cross-session by design: NOT gated on is_session.
         roster_manifest = ""
         _roster_recent = getattr(memory, "roster_recent", None)
-        if standing_agents_supported and callable(_roster_recent):
+        if standing_agents_supported and callable(_roster_recent) and (not graph_active or needs_roster):
             _profs, _total = _roster_recent(ROSTER_MANIFEST_K)
             roster_manifest = render_roster(_profs, _total)
         # ACTIVE FOCUS — surface the file-tool reach beyond the workspace (auto-granted when the shell
@@ -523,6 +570,7 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
             worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
             roster=roster_manifest, open_file_paths=open_file_paths, max_findings=_NO_CAP,
         )
+        ctx["fan_in_report_loader"] = fan_in_report_loader
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it once from OUTSIDE at RECENCY (below the fence), and the intent-aware NOW footer is the OUTERMOST
         # tail. One exact request avoids turning a user's premise into duplicated pseudo-evidence.
@@ -530,8 +578,34 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
         nowblock = render_now(render_subdir_hints(hint_text))
         attached = _attach_images("", tools)
         media_parts = attached[1:] if isinstance(attached, list) else ()
+        source_texts = {}
+        if event_ledger is not None and callable(getattr(event_ledger, "user_sources", None)):
+            required_source_ids = tuple(dict.fromkeys(
+                ref.event_id
+                for item in s.active_work.dependency_closure()
+                for ref in item.source_refs
+            )) if s.active_work.items else ()
+            resolver = getattr(event_ledger, "resolve_user_sources", None)
+            source_texts.update(
+                resolver(required_source_ids) if callable(resolver)
+                else event_ledger.user_sources()
+            )
+        # Compatibility/direct-test sources.  Production request roots use the application ledger IDs;
+        # artifact IDs here let older callers still validate their exact bounded adjacency.
+        for row in getattr(s, "conversation", ()):
+            if row.get("artifact_id") and isinstance(row.get("user"), str):
+                source_texts.setdefault(str(row["artifact_id"]), str(row["user"]))
+        logical = getattr(state, "logical_turn", None)
+        current_logical_id = str(getattr(logical, "id", "") or "")
+        if not current_logical_id and s.active_work.unresolved_roots:
+            current_logical_id = s.active_work.unresolved_roots[-1].logical_id
+        logical_blocks = compile_active_context(
+            s, build_context_blocks(ctx), source_texts=source_texts,
+            current_logical_id=current_logical_id,
+            workspace_epoch=current_epoch,
+        )
         return SeedPlan(
-            system=_system(), blocks=build_context_blocks(ctx),
+            system=_system(), blocks=logical_blocks,
             render_blocks=render_context_selection,
             request_block=reqblock, now_block=nowblock, media_parts=media_parts,
         )

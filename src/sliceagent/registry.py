@@ -9,44 +9,15 @@ loop already drives.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Callable, Optional
 
 from .access import AllAccess
 from .execution import (ToolEffect, ToolInvocation, ToolOutcome, ToolPurity,
                         ToolStatus, coerce_tool_status)
+from .reach import ReachSteer
 
 Handler = Callable[[dict], str]      # (args) -> result string
-AccessFn = Callable[[dict], list]    # (args) -> list[Access] for the scheduler/permissions
-
-
-class ToolIntentEffect(str, Enum):
-    """Semantic effect of *invoking* a tool for turn-authority decisions.
-
-    This is intentionally separate from :class:`ToolPurity`. Purity answers a scheduler question
-    (can calls overlap / be deduplicated?); intent effect answers an authorization question (did the
-    user authorize this class of action?). A network read can therefore be OBSERVE while still being
-    scheduler-UNKNOWN, and a task-ledger update is TASK_STATE even though it does not touch the workspace.
-    """
-
-    OBSERVE = "OBSERVE"
-    DIALOGUE = "DIALOGUE"
-    TASK_STATE = "TASK_STATE"
-    EXTERNAL = "EXTERNAL"
-    UNKNOWN = "UNKNOWN"
-
-
-IntentEffectFn = Callable[[dict], ToolIntentEffect]
-
-
-def coerce_intent_effect(value) -> ToolIntentEffect:
-    """Conservatively normalize extension-provided intent-effect metadata."""
-    if isinstance(value, ToolIntentEffect):
-        return value
-    try:
-        return ToolIntentEffect(str(value or "").strip().upper())
-    except (TypeError, ValueError):
-        return ToolIntentEffect.UNKNOWN
+AccessFn = Callable[[dict], list]    # (args) -> list[Access] for scheduler conflict detection
 
 
 class ToolText(str):
@@ -85,9 +56,40 @@ def _all_access(_args: dict) -> list:
 def _missing_required(schema: dict, args: dict) -> list:
     """Required parameters the tool schema declares that are absent (or None) in the call. Present-but-
     empty (e.g. content="") counts as supplied; only truly-missing args are flagged."""
-    params = (schema.get("function") or {}).get("parameters") or {}
-    a = args or {}
+    params = schema["function"].get("parameters", {})
+    a = args if isinstance(args, dict) else {}
     return [r for r in (params.get("required") or []) if a.get(r) is None]
+
+
+def _validate_entry_schema(entry: "ToolEntry") -> None:
+    """Reject malformed extension schemas before they can enter the shared registry."""
+    if not isinstance(entry.name, str) or not entry.name.strip():
+        raise ValueError("tool name must be a non-empty string")
+    for field_name in ("handler", "accesses"):
+        if not callable(getattr(entry, field_name, None)):
+            raise ValueError(f"tool {entry.name!r} {field_name} must be callable")
+    for field_name in ("check", "effect_factory"):
+        value = getattr(entry, field_name, None)
+        if value is not None and not callable(value):
+            raise ValueError(f"tool {entry.name!r} {field_name} must be callable when provided")
+    schema = entry.schema
+    if not isinstance(schema, dict):
+        raise ValueError(f"tool {entry.name!r} schema must be a mapping")
+    function = schema.get("function")
+    if not isinstance(function, dict):
+        raise ValueError(f"tool {entry.name!r} schema.function must be a mapping")
+    declared = function.get("name")
+    if not isinstance(declared, str) or declared != entry.name:
+        raise ValueError(f"tool {entry.name!r} schema name must match the registry name")
+    parameters = function.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise ValueError(f"tool {entry.name!r} schema parameters must be a mapping")
+    properties = parameters.get("properties", {})
+    if not isinstance(properties, dict):
+        raise ValueError(f"tool {entry.name!r} schema properties must be a mapping")
+    required = parameters.get("required", [])
+    if not isinstance(required, (list, tuple)) or not all(isinstance(item, str) for item in required):
+        raise ValueError(f"tool {entry.name!r} schema required must be a list of strings")
 
 
 @dataclass
@@ -104,10 +106,17 @@ class ToolEntry:
     effect_factory: Optional[
         Callable[[ToolInvocation, ToolStatus, str], tuple[ToolEffect, ...]]
     ] = None
-    # Turn-level semantic authorization metadata. A callable supports argument-sensitive tools such as
-    # run_command (a plain `ls` observes; an arbitrary command may change external state). UNKNOWN is the
-    # extension-safe default and is blocked when a turn has no explicit action authority.
-    intent_effect: ToolIntentEffect | IntentEffectFn = ToolIntentEffect.UNKNOWN
+
+
+@dataclass(frozen=True)
+class ToolAdmission:
+    """One-shot proof that a specific registry entry passed pre-handler validation.
+
+    Availability checks can be volatile.  The scheduler must therefore carry the admitted entry across the
+    durable ``ToolStarted`` boundary instead of checking it a second time after claiming execution started.
+    """
+    name: str
+    entry: ToolEntry
 
 
 def tool_result_text(value) -> str:
@@ -132,7 +141,7 @@ def finalize_tool_outcome(
     entry: ToolEntry | None = None,
     default_effect_id: str | None = None,
 ) -> ToolOutcome:
-    """Build the one canonical typed outcome from a completed/blocked handler result.
+    """Build the one canonical typed outcome from a completed or pre-execution-cancelled result.
 
     Execution remains host-owned: wrappers such as ``SubagentHost`` must enforce their restrictions before
     this boundary. This function exclusively owns status projection, effect construction, effect-factory
@@ -151,7 +160,7 @@ def finalize_tool_outcome(
     if factory is not None:
         try:
             effects = tuple(factory(invocation, status, text) or ())
-        except Exception as error:  # tool may have run, but its required semantic effects are now unknown
+        except (Exception, SystemExit) as error:  # tool may have run; extension exit is not host process exit
             status = ToolStatus.INDETERMINATE
             text = f"Error: tool effect construction failed ({type(error).__name__}: {error})"
             effects = ()
@@ -170,50 +179,6 @@ _PURE_READ_BUILTINS = frozenset({
 })
 _DEDUPLICABLE_BUILTINS = frozenset({"read_file", "list_files", "grep", "glob", "search_history"})
 
-# Central semantic metadata for built-ins registered across tools.py, code_grep.py, web.py, memory.py,
-# hippocampus.py, and session.py. This deliberately does NOT infer from ToolPurity: task-state mutations and
-# externally-observing network reads need different intent semantics despite having similar scheduler purity.
-_OBSERVE_BUILTINS = frozenset({
-    "read_file", "list_files", "grep", "glob", "search_history", "code_review",
-    "proc_poll", "proc_tail", "proc_wait", "terminal_read", "terminal_wait",
-    "fetch_url", "web_search",
-})
-_DIALOGUE_BUILTINS = frozenset({"ask_user"})
-_TASK_STATE_BUILTINS = frozenset({
-    "world_set", "world_clear", "reconcile_execution",
-    "require", "requirement_done", "supersede_requirement", "drop_requirement", "update_plan",
-    "new_topic", "switch_topic",
-})
-_EXTERNAL_BUILTINS = frozenset({
-    "change_workspace", "edit_file", "append_to_file", "str_replace", "execute_code",
-    "proc_start", "proc_kill", "terminal_open", "terminal_send", "terminal_close", "write_skill",
-})
-
-
-def _builtin_intent_effect(name: str) -> ToolIntentEffect | IntentEffectFn:
-    if name == "run_command":
-        def command_effect(args: dict) -> ToolIntentEffect:
-            # Reuse the permission layer's existing deny-by-default parser rather than growing a second shell
-            # classifier. The deferred import avoids registry -> policy -> hooks -> registry import cycles.
-            try:
-                from .policy import _is_readonly_command
-                command = str((args or {}).get("command") or "")
-                return (ToolIntentEffect.OBSERVE if _is_readonly_command(command)
-                        else ToolIntentEffect.EXTERNAL)
-            except Exception:  # classifier unavailable/errored means the command is not proven observational
-                return ToolIntentEffect.UNKNOWN
-        return command_effect
-    if name in _OBSERVE_BUILTINS:
-        return ToolIntentEffect.OBSERVE
-    if name in _DIALOGUE_BUILTINS:
-        return ToolIntentEffect.DIALOGUE
-    if name in _TASK_STATE_BUILTINS:
-        return ToolIntentEffect.TASK_STATE
-    if name in _EXTERNAL_BUILTINS:
-        return ToolIntentEffect.EXTERNAL
-    return ToolIntentEffect.UNKNOWN
-
-
 class ToolRegistry:
     """A name->ToolEntry map with a generation counter (for downstream schema caching)
     and a per-tool availability gate. Robust by construction: a flaky check or handler
@@ -224,15 +189,12 @@ class ToolRegistry:
         self.generation = 0
 
     def register(self, entry: ToolEntry, *, override: bool = False) -> None:
+        _validate_entry_schema(entry)
         if entry.name in self._tools and not override:
             raise ValueError(f"tool {entry.name!r} already registered (pass override=True to replace)")
         if entry.source == "builtin" and entry.purity is ToolPurity.UNKNOWN:
             entry.purity = (ToolPurity.PURE_READ if entry.name in _PURE_READ_BUILTINS
                             else ToolPurity.EFFECTFUL)
-        if (entry.source == "builtin"
-                and coerce_intent_effect(entry.intent_effect) is ToolIntentEffect.UNKNOWN
-                and not callable(entry.intent_effect)):
-            entry.intent_effect = _builtin_intent_effect(entry.name)
         if entry.source == "builtin" and entry.name in _DEDUPLICABLE_BUILTINS:
             entry.deduplicable = True
         self._tools[entry.name] = entry
@@ -258,7 +220,7 @@ class ToolRegistry:
             try:
                 if e.check is None or e.check():
                     out.append(e)
-            except Exception:
+            except (Exception, SystemExit):
                 pass  # a flaky availability check hides that tool, never crashes the registry
         return out
 
@@ -271,26 +233,68 @@ class ToolRegistry:
             return [AllAccess()]
         try:
             return e.accesses(args)
-        except Exception:
+        except (Exception, SystemExit):
             return [AllAccess()]
 
-    def resolve_intent_effect(self, name: str, args: dict) -> ToolIntentEffect:
-        """Resolve semantic turn-authority metadata for one exact call.
-
-        Unknown names, missing declarations, invalid extension values, and resolver failures all remain
-        UNKNOWN. Callers may therefore fail closed without conflating this semantic contract with scheduler
-        purity or filesystem access inference.
-        """
+    def admit(self, name: str, args: dict) -> tuple[ToolAdmission | None, ToolText | None]:
+        """Validate once and return either an executable admission or a conclusive failure."""
         entry = self._tools.get(name)
         if entry is None:
-            return ToolIntentEffect.UNKNOWN
-        effect = entry.intent_effect
-        if callable(effect):
+            return None, ToolText(f'Error: unknown tool "{name}"', ok=False)
+        if entry.check is not None:
             try:
-                effect = effect(args or {})
-            except Exception:
-                return ToolIntentEffect.UNKNOWN
-        return coerce_intent_effect(effect)
+                available = bool(entry.check())
+            except (Exception, SystemExit):
+                available = False
+            if not available:
+                return None, ToolText(f'Error: tool "{name}" is currently unavailable', ok=False)
+        missing = _missing_required(entry.schema, args)
+        if missing:
+            return None, ToolText(
+                f'Error: {name} missing required argument(s): {", ".join(missing)}', ok=False,
+            )
+        return ToolAdmission(name, entry), None
+
+    def preflight(self, name: str, args: dict) -> ToolText | None:
+        """Return a conclusive pre-handler failure, or ``None`` when execution may start.
+
+        The ordered loop calls this before publishing ToolExecutionStarted. ``run`` repeats it for direct
+        callers and for availability gates that can change between admission and handler entry.
+        """
+        _, failure = self.admit(name, args)
+        return failure
+
+    @staticmethod
+    def _run_admitted(admission: ToolAdmission, args: dict) -> ToolText:
+        """Enter an already-admitted handler without repeating its volatile availability check."""
+        e = admission.entry
+        try:
+            out = e.handler(args)
+            if isinstance(out, ToolText):
+                return out
+            return ToolText(tool_result_text(out), ok=True)
+        except ReachSteer as ex:
+            # Only the built-in resolver can prove this exception happened before
+            # an effect. Extensions retain the conservative failure/uncertainty rule.
+            if e.source == "builtin":
+                return ToolText(str(ex), status=ToolStatus.STEERED)
+            uncertain_extension = e.purity is not ToolPurity.PURE_READ
+            status = ToolStatus.INDETERMINATE if uncertain_extension else ToolStatus.FAILED
+            suffix = (" (the extension may have applied side effects before raising)"
+                      if uncertain_extension else "")
+            return ToolText(f"Error: {ex}{suffix}", status=status)
+        except (Exception, SystemExit) as ex:
+            uncertain_extension = (e.source != "builtin" and e.purity is not ToolPurity.PURE_READ)
+            status = ToolStatus.INDETERMINATE if uncertain_extension else ToolStatus.FAILED
+            suffix = (" (the extension may have applied side effects before raising)"
+                      if uncertain_extension else "")
+            return ToolText(f"Error: {ex}{suffix}", status=status)
+
+    def run_admitted(self, admission: ToolAdmission, args: dict) -> ToolText:
+        """Execute a token returned by :meth:`admit`; intended for ordered host/scheduler integration."""
+        if not isinstance(admission, ToolAdmission):
+            return ToolText("Error: invalid tool admission", ok=False)
+        return self._run_admitted(admission, args)
 
     def run(self, name: str, args: dict) -> ToolText:
         """The single tool choke point. Returns ToolText (a str carrying .ok) so the loop reads an
@@ -302,28 +306,14 @@ class ToolRegistry:
 
         An extension handler may mutate before it raises. For UNKNOWN/EFFECTFUL plugin, MCP, or skill
         entries, a raised exception therefore means INDETERMINATE rather than FAILED; the ordered scheduler
-        will stop every later barrier until live reconciliation. A declared PURE_READ extension has no side
-        effects to leave unresolved, so its exception remains a normal failure.
+        cancels later operations in that provider batch so they cannot overtake an unknown effect. The receipt
+        then carries that uncertainty as advisory evidence. A declared PURE_READ extension has no side effects
+        to leave unresolved, so its exception remains a normal failure.
         """
-        e = self._tools.get(name)
-        if e is None:
-            return ToolText(f'Error: unknown tool "{name}"', ok=False)
-        # Validate the call against the tool's declared required args (JSON-schema-style) — a clear
-        # "missing required argument" lets a no-transcript model self-correct, vs an opaque KeyError.
-        missing = _missing_required(e.schema, args)
-        if missing:
-            return ToolText(f'Error: {name} missing required argument(s): {", ".join(missing)}', ok=False)
-        try:
-            out = e.handler(args)
-        except Exception as ex:
-            uncertain_extension = (e.source != "builtin" and e.purity is not ToolPurity.PURE_READ)
-            status = ToolStatus.INDETERMINATE if uncertain_extension else ToolStatus.FAILED
-            suffix = (" (the extension may have applied side effects before raising)"
-                      if uncertain_extension else "")
-            return ToolText(f"Error: {ex}{suffix}", status=status)
-        if isinstance(out, ToolText):
-            return out  # handler already declared ok/not-ok (e.g. a nonzero exit code)
-        return ToolText("" if out is None else str(out), ok=True)  # normal return = success
+        admission, failure = self.admit(name, args)
+        if failure is not None:
+            return failure
+        return self._run_admitted(admission, args)
 
     def invoke(self, invocation: ToolInvocation, *, call_args: dict | None = None,
                default_effect_id: str | None = None) -> ToolOutcome:
@@ -334,8 +324,14 @@ class ToolRegistry:
         same :func:`finalize_tool_outcome` helper so wrapper-level restrictions are never bypassed.
         """
         args = dict(invocation.args) if call_args is None else dict(call_args)
-        out = self.run(invocation.name, args)
+        admission, failure = self.admit(invocation.name, args)
+        if failure is not None:
+            # No handler boundary was crossed, so an execution-only effect factory must not run.
+            return finalize_tool_outcome(
+                invocation, failure, entry=None, default_effect_id=default_effect_id,
+            )
+        out = self._run_admitted(admission, args)
         return finalize_tool_outcome(
-            invocation, out, entry=self._tools.get(invocation.name),
+            invocation, out, entry=admission.entry,
             default_effect_id=default_effect_id,
         )

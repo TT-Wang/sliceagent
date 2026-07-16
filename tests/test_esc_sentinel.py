@@ -3,7 +3,7 @@ bytes (same pattern as test_tui_widgets.py, which regressed 3 times without one)
 a real SIGINT (interrupting even a simulated hung blocking call, which an Event-only design would miss); an
 arrow/CSI sequence must NOT false-fire; physical Ctrl-C must still work while the sentinel holds raw mode
 (tty.setraw disables ISIG, so the sentinel must re-implement Ctrl-C detection itself or it goes silent —
-caught by this suite during development); confirm()'s arrow-key selector must be unaffected by a paused
+caught by this suite during development); the arrow-key selector must be unaffected by a paused
 sentinel; termios/threads must be fully cleaned up on stop().
 
 Run: PYTHONPATH=src python tests/test_esc_sentinel.py   (skips cleanly where no pty is available)
@@ -102,10 +102,16 @@ def _skip_if_no_pty() -> bool:
 
 
 # ── bare Esc delivers SIGINT, promptly, even during a simulated blocking call ──────────────────────────
+# MARK_ARMED gates the keypress on the sentinel actually holding raw mode: start() returns only after the
+# ready handshake (raw + type-ahead flushed), so a marker-gated byte can never land pre-arm. A byte written
+# on the blind fixed settle raced child IMPORT time under suite load — and a pre-arm byte is silently EATEN
+# (cooked-mode \x03 is discarded by the line discipline with no controlling terminal; \x1b dies in the
+# raw-entry TCIFLUSH), timing the child out. Same determinism pattern as the pause/resume test's markers.
 _CODE_ESC_ABORTS = (
     "import time, os\n"
     "from sliceagent.tui import make_esc_sentinel\n"
     "s = make_esc_sentinel(); s.start()\n"
+    "print('MARK_ARMED', flush=True)\n"
     "t0 = time.monotonic()\n"
     "try:\n"
     "    time.sleep(20)\n"          # simulates a long blocking LLM/tool call
@@ -121,7 +127,7 @@ _CODE_ESC_ABORTS = (
 def bare_esc_delivers_sigint_promptly_even_mid_blocking_call():
     if _skip_if_no_pty():
         return
-    rc = _run_child(_CODE_ESC_ABORTS, [b"\x1b"])
+    rc = _run_child(_CODE_ESC_ABORTS, ["MARK_ARMED", b"\x1b"])
     assert rc == 42, f"expected prompt SIGINT-abort (42), got {rc} (43=too slow, 1=never interrupted)"
 
 
@@ -156,23 +162,23 @@ _CODE_CTRLC_STILL_WORKS = _CODE_ESC_ABORTS  # identical child; only the driven b
 def physical_ctrl_c_still_aborts_while_sentinel_holds_raw_mode():
     if _skip_if_no_pty():
         return
-    rc = _run_child(_CODE_CTRLC_STILL_WORKS, [b"\x03"])   # real Ctrl-C byte
+    rc = _run_child(_CODE_CTRLC_STILL_WORKS, ["MARK_ARMED", b"\x03"])   # real Ctrl-C byte, armed-gated
     assert rc == 42, (f"Ctrl-C must still abort promptly while the sentinel is active (raw mode disables "
                       f"the tty driver's own SIGINT-on-Ctrl-C — the sentinel must handle \\x03 itself), "
                       f"got {rc}")
 
 
-# ── confirm()'s arrow-key selector is UNAFFECTED by a paused sentinel: pause -> _arrow_select (real arrow
+# ── the arrow-key selector is UNAFFECTED by a paused sentinel: pause -> _arrow_select (real arrow
 # keys) -> resume -> a LATER bare Esc still aborts. This is the central "UX preserved, not traded" claim ──
 _CODE_PAUSE_RESUME_ROUNDTRIP = (
     "import time, os\n"
     "from sliceagent.tui import make_esc_sentinel, _arrow_select\n"
     "s = make_esc_sentinel(); s.start()\n"
     "time.sleep(0.3)\n"
-    "s.pause()\n"                                  # mirrors _pause_active_live() before a confirm() prompt
+    "s.pause()\n"                                  # mirrors _pause_active_live() before a synchronous prompt
     "print('MARK_SELECT_READY', flush=True)\n"     # handshake: selector owns the tty from here
     "idx = _arrow_select(['Yes', 'No', 'Always'], default=0)\n"
-    "s.resume()\n"                                  # mirrors _resume_active_esc_sentinel() after confirm()
+    "s.resume()\n"                                  # mirrors _resume_active_esc_sentinel() after the prompt
     "print('MARK_RESUMED', flush=True)\n"          # handshake: sentinel re-armed, Esc may fire now
     "if idx != 1:\n"
     "    os._exit(60 + (idx if isinstance(idx, int) else 9))\n"   # arrow-select result wrong -> sentinel interfered
@@ -186,7 +192,7 @@ _CODE_PAUSE_RESUME_ROUNDTRIP = (
 
 
 @check
-def confirm_arrow_select_unaffected_by_a_paused_sentinel_and_resumes_after():
+def arrow_select_unaffected_by_a_paused_sentinel_and_resumes_after():
     if _skip_if_no_pty():
         return
     # drive, handshake-gated: wait for the selector to own the tty -> right-arrow (default=0 -> idx=1) ->

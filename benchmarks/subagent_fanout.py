@@ -26,10 +26,8 @@ Run (needs the Codex CLI installed + logged in, and an LLM configured — `slice
   ARCH_MODE=humansim PYTHONPATH=src python benchmarks/subagent_fanout.py
   # knobs: ARCH_RUNS=3 (repeat + aggregate) · ARCH_ONLY=slice|codex · ARCH_TURNS=N · CODEX_BIN=codex
 """
-import glob
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -435,15 +433,14 @@ def gate(turn_idx: int, answer: str) -> bool | None:
 # sliceagent driver — in-process, the CLI's real path: Session + SEAL between turns + DELEGATION.
 # ---------------------------------------------------------------------------------------------------
 def run_sliceagent(repo: str) -> list[dict]:
-    from sliceagent.pfc import slice_sink, record_user, _active
+    from sliceagent.pfc import record_user, slice_sink
     from sliceagent.seed import make_build_slice
     from sliceagent.text_utils import one_line
     from sliceagent.loop import run_turn
     from sliceagent.tools import LocalToolHost
     from sliceagent.code_index import make_code_index
     from sliceagent.events import ToolResult, make_dispatcher
-    from sliceagent.hooks import BudgetHook, CompositeHooks, PermissionHook
-    from sliceagent.policy import make_policy
+    from sliceagent.hooks import BudgetHook, CatastrophicSafeguardHook, CompositeHooks
     from sliceagent.llm import OpenAILLM
     from sliceagent.session import Session, make_topic_tools
     from sliceagent.memory import make_memory
@@ -461,8 +458,7 @@ def run_sliceagent(repo: str) -> list[dict]:
     spawn_ctr = {"n": 0}
     child_tap = _UsageTap(OpenAILLM(model=MODEL, timeout=90.0))   # SEPARATE tap → delegated work isolated
     child_tap.set_cache_key(sid + "-child")
-    tools = SubagentHost(base_tools, llm=child_tap, retriever=retriever, memory=memory,
-                         policy=make_policy("guard"), max_depth=1,
+    tools = SubagentHost(base_tools, llm=child_tap, retriever=retriever, memory=memory, max_depth=1,
                          agents=load_agents([repo, os.path.join(repo, ".sliceagent")]), session_id=sid)
     for t in make_topic_tools(session):
         base_tools.registry.register(t)
@@ -482,7 +478,7 @@ def run_sliceagent(repo: str) -> list[dict]:
         if isinstance(e, ToolResult) and getattr(e, "name", "") in ("spawn_agent", "spawn_explore", "spawn_subagent"):
             spawn_ctr["n"] += 1
     dispatch = make_dispatcher(slice_sink(session), episodic, cap, spawn_count)
-    hooks = CompositeHooks(PermissionHook(make_policy("guard"), auto_approve=["*"]), BudgetHook(4_000_000))
+    hooks = CompositeHooks(CatastrophicSafeguardHook(), BudgetHook(4_000_000))
 
     sim = OpenAILLM(model=MODEL, timeout=90.0) if ARCH_MODE == "humansim" else None   # the human simulator (uncounted)
     if sim is not None:

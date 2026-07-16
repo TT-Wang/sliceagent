@@ -54,6 +54,7 @@ class ResourceKind(str, Enum):
     SUBAGENT = "subagent"
     ROSTER = "roster"
     SKILL = "skill"
+    INTERNAL_CONTEXT = "internal_context"
 
 
 _VIRTUAL_MOUNTS = {
@@ -61,6 +62,7 @@ _VIRTUAL_MOUNTS = {
     "history": ResourceKind.HISTORY,
     "subagents": ResourceKind.SUBAGENT,
     "roster": ResourceKind.ROSTER,
+    "@sliceagent": ResourceKind.INTERNAL_CONTEXT,
 }
 
 

@@ -1,6 +1,6 @@
-"""Keyboard-MENU selection tests — drive run_selector (the picker behind /model and /mode) headlessly with
+"""Keyboard-menu selection tests — drive run_selector (the picker behind /model) headlessly with
 a prompt_toolkit pipe input, feeding real arrow/Enter/Esc key bytes and asserting the chosen index. Together
-with test_tui_widgets (the arrow permission-confirm) this covers every keyboard-selection surface offline.
+and cover its keyboard behavior offline.
 
 No model, no pty. Run: PYTHONPATH=src python tests/test_tui_menus.py
 """

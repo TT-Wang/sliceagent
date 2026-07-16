@@ -228,7 +228,7 @@ def later_same_turn_calls_get_their_own_step_scoped_observation():
 
 
 @check
-def sdk_retry_attempts_are_observed_before_each_provider_io():
+def sliceagent_retry_attempts_are_observed_before_each_provider_io():
     from sliceagent import errors
 
     plan = _plan(_block("workspace", "small live context"))
@@ -263,6 +263,64 @@ def sdk_retry_attempts_are_observed_before_each_provider_io():
     retries = [event for event in events if isinstance(event, ApiRetry)]
     assert len(retries) == 1
     assert retries[0].delay_s > 0 and retries[0].max_attempts == 3, retries[0]
+
+
+@check
+def required_attempt_publication_failure_prevents_provider_io():
+    """An unjournaled ModelCallPrepared must never be followed by a physical provider request."""
+    from sliceagent.model_runner import complete_model_call
+
+    class LLM:
+        model = "uncatalogued-observability-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, _messages, _schemas):
+            self.calls += 1
+            return NS(content="must not run", tool_calls=[], finish_reason="stop", usage={})
+
+    llm = LLM()
+    failure = RuntimeError("required event journal unavailable")
+
+    def publish(_attempt, _messages, _report):
+        raise failure
+
+    try:
+        complete_model_call(
+            llm, [{"role": "user", "content": "observe before sending"}], [],
+            on_attempt=publish,
+        )
+        assert False, "required publication failure must propagate"
+    except RuntimeError as error:
+        assert error is failure
+    assert llm.calls == 0, "the provider must remain unopened when required publication fails"
+
+
+@check
+def provider_sdk_is_one_shot_across_construction_and_live_switch():
+    """The app-level seam above is authoritative only when the SDK cannot retry underneath it."""
+    from sliceagent.llm import OpenAILLM
+
+    keys = ("AGENT_PROXY", "HTTPS_PROXY", "HTTP_PROXY")
+    saved = {key: os.environ.pop(key, None) for key in keys}
+    try:
+        llm = OpenAILLM(
+            model="diagnostic-model", api_key="test-key",
+            base_url="http://provider-one.invalid/v1", timeout=0.01,
+        )
+        assert llm.client.max_retries == 0
+        first = llm.client
+        llm.switch(
+            model="diagnostic-model-2", api_key="test-key-2",
+            base_url="http://provider-two.invalid/v1",
+        )
+        assert llm.client is not first
+        assert llm.client.max_retries == 0, "a provider switch must not restore hidden SDK retries"
+    finally:
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
 
 
 def main():

@@ -12,6 +12,7 @@ from sliceagent.events import ToolResult  # noqa: E402
 from sliceagent.code_grep import make_grep_tool  # noqa: E402
 from sliceagent.agents import BUILTIN_AGENTS  # noqa: E402
 from sliceagent.discourse import (_deterministic_response_constraint_mismatches,  # noqa: E402
+                                  _subagent_grounding_envelope,
                                   interpret_turn, make_evidence_snapshot)
 from sliceagent.execution import ToolInvocation  # noqa: E402
 from sliceagent.pfc import Slice, slice_sink  # noqa: E402
@@ -101,7 +102,12 @@ def virtual_artifact_read_stays_typed_and_never_enters_open_files():
     host._artifacts = _ArtifactView()
     outcome = _invoke_read(host, "artifacts/turn-1.md")
     resource = next(effect for effect in outcome.effects if effect.kind == "resource_observed")
-    assert resource.payload == {"resource_kind": "artifact", "handle": "artifacts/turn-1.md"}
+    assert resource.payload["resource_kind"] == "artifact"
+    assert resource.payload["handle"] == "artifacts/turn-1.md"
+    assert resource.payload["artifact_id"] == "turn-1"
+    assert resource.payload["read_coverage"] == "complete"
+    assert len(resource.payload["content_sha256"]) == 64
+    assert resource.payload["content_bytes"] == len(outcome.text.encode("utf-8"))
 
     state = Slice(); state.reset("recall")
     slice_sink(state)(ToolResult(
@@ -117,6 +123,76 @@ def virtual_artifact_read_stays_typed_and_never_enters_open_files():
 
 
 @check
+def child_evidence_page_read_keeps_root_artifact_provenance_but_is_not_a_report_read():
+    from sliceagent.persistence import Artifact, ArtifactStore
+
+    store = ArtifactStore(tempfile.mkdtemp(prefix="projection-child-evidence-"))
+    view = "     1\treturn verified_value"
+    encoded = view.encode()
+    store.put(Artifact(
+        id="subagent-evidence-root", kind="subagent", workspace_id="workspace",
+        session_id="session", task_id="task", status="ok",
+        structured_body={
+            "report": "verified_value is returned",
+            "observations": [{
+                "v": 1, "tool": "read_file", "args": {"path": "value.py"},
+                "status": "succeeded", "view": view,
+                "raw_sha256": hashlib.sha256(encoded).hexdigest(),
+                "view_sha256": hashlib.sha256(encoded).hexdigest(),
+                "raw_bytes": len(encoded), "view_bytes": len(encoded),
+                "redacted": False, "truncated": False,
+            }],
+        },
+    ))
+    host = LocalToolHost(tempfile.mkdtemp(prefix="projection-child-workspace-"))
+    host._artifacts = CoreArtifactFS(store)
+    path = "artifacts/subagent-evidence-root/evidence/obs-001-page-001.md"
+    outcome = _invoke_read(host, path, "read-child-evidence")
+    resource = next(effect for effect in outcome.effects if effect.kind == "resource_observed")
+    assert resource.payload["artifact_id"] == "subagent-evidence-root"
+    assert resource.payload["artifact_view"] == "evidence"
+    assert resource.payload["read_coverage"] == "complete"
+
+    state = Slice(); state.reset("verify child evidence")
+    slice_sink(state)(ToolResult(
+        "read_file", {"path": path}, outcome.text, outcome.failing,
+        status=outcome.status.value, invocation_id=outcome.invocation.id, outcome=outcome,
+    ))
+    assert state.active_files == []
+    assert state.runtime.recent_calls[-1]["observed_artifact_id"] == "subagent-evidence-root"
+    assert state.runtime.recent_calls[-1]["observed_artifact_view"] == "evidence"
+
+
+@check
+def quality_grounding_uses_only_the_bounded_preview_not_the_full_evidence_archive():
+    full = ("FULL-ARCHIVE-ONLY\n" * 10_000) + "ARCHIVE-TAIL-SENTINEL"
+    preview = "bounded preview bytes"
+
+    def row(text, *, truncated):
+        encoded = text.encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        return {
+            "v": 1, "tool": "read_file", "args": {"path": "large.py"},
+            "status": "succeeded", "view": text,
+            "raw_sha256": digest, "view_sha256": digest,
+            "raw_bytes": len(encoded), "view_bytes": len(encoded),
+            "redacted": False, "truncated": truncated,
+        }
+
+    envelope = _subagent_grounding_envelope({
+        "status": "ok",
+        "structured_body": {
+            "brief": {"objective": "inspect large.py", "scope": ["large.py"]},
+            "report": "child conclusion", "claims": [],
+            "observations": [row(full, truncated=False)],
+            "observation_preview": [row(preview, truncated=True)],
+        },
+    })
+    assert envelope["observations"][0]["view"] == preview
+    assert "ARCHIVE-TAIL-SENTINEL" not in json.dumps(envelope)
+
+
+@check
 def absolute_artifact_paths_share_the_canonical_virtual_handle_for_read_list_and_grep():
     root = tempfile.mkdtemp()
     host = LocalToolHost(root)
@@ -128,9 +204,10 @@ def absolute_artifact_paths_share_the_canonical_virtual_handle_for_read_list_and
     outcome = _invoke_read(host, absolute_file, "read-absolute")
     assert "canonical virtual needle" in outcome.text
     resource = next(effect for effect in outcome.effects if effect.kind == "resource_observed")
-    assert resource.payload == {
-        "resource_kind": "artifact", "handle": "artifacts/turn-absolute.md",
-    }
+    assert resource.payload["resource_kind"] == "artifact"
+    assert resource.payload["handle"] == "artifacts/turn-absolute.md"
+    assert resource.payload["artifact_id"] == "turn-absolute"
+    assert resource.payload["read_coverage"] == "complete"
     assert "turn-absolute.md" in host.run("list_files", {"path": absolute_mount})
     grep = host.run("grep", {"pattern": "canonical virtual needle", "path": absolute_file})
     assert "artifacts/turn-absolute.md:" in grep
@@ -165,7 +242,7 @@ def child_isolation_and_observation_capsules_follow_canonical_host_routing():
     absolute_mount = os.path.join(root, "artifacts")
     absolute_file = os.path.join(absolute_mount, "turn-absolute.md")
     child = SubagentHost(
-        host, llm=None, retriever=None, memory=None, policy=None,
+        host, llm=None, retriever=None, memory=None,
         max_depth=1, depth=1, spec=BUILTIN_AGENTS["explorer"],
     )
 
@@ -249,7 +326,7 @@ class _Inner:
 
 @check
 def delegation_guidance_is_compiled_from_core_and_advanced_schemas():
-    core = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
+    core = SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                         max_depth=1, core_mode=True)
     core_schema = next(s for s in core.schemas() if s["function"]["name"] == "spawn_agent")
     props = core_schema["function"]["parameters"]["properties"]
@@ -258,8 +335,15 @@ def delegation_guidance_is_compiled_from_core_and_advanced_schemas():
     core_text = render_delegation_guidance(core.schemas())
     assert "Available agent kinds: explorer" in core_text
     assert "standing specialist" not in core_text and "grants field" not in core_text
+    assert "ignore-aware source map" in core_text
+    assert "20-30k source tokens" in core_text and "80-120 KB" in core_text
+    assert "typed scope field" in core_text
+    assert "waves of 2-3" in core_text
+    assert "user explicitly requests a child count" in core_text
+    assert "blindly reading every file in full" in core_text
+    assert "coverage gaps" in core_text and "cite the sources" in core_text
 
-    advanced = SubagentHost(_Inner(), llm=None, retriever=None, memory=None, policy=None,
+    advanced = SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                             max_depth=1, core_mode=False)
     advanced_text = render_delegation_guidance(advanced.schemas())
     assert "general" in advanced_text and "standing specialist" in advanced_text
@@ -414,13 +498,18 @@ def self_audit_projects_exact_paged_exchange_pairs_and_a_mandatory_quality_gate(
     assert "three-line summary" in full.content and "1. app issue" in full.content
     assert "four fields" in by_id["region:quality_evidence_result"][0].content
     assert "NOT proof that every response was correct" in by_id["region:quality_evidence_result"][0].content
-    assert "I audited all <N> exact request/response pairs" \
-        in by_id["region:quality_evidence_result"][0].content
+    quality_protocol = by_id["region:quality_evidence_result"][0].content
+    assert "source-complete audit: examine every exact request/response pair" in quality_protocol
+    assert "private coverage certificate" in quality_protocol
+    for stale_host_promise in (
+        "host checks", "host strips", "host replaces", "before publication", "before publishing",
+    ):
+        assert stale_host_promise not in quality_protocol
     assert "Grounding exact: <JSON string copied verbatim" \
         in by_id["region:quality_evidence_result"][0].content
     assert "report prose alone proves only that the child said it" \
         in by_id["region:quality_evidence_result"][0].content
-    assert "verbatim-indexed child testimony" in by_id["region:quality_evidence_result"][0].content
+    assert "legacy/explicit `claims`" in by_id["region:quality_evidence_result"][0].content
     assert "redacted or truncated" in by_id["region:quality_evidence_result"][0].content
     assert "open the exact immutable turn" in locator.content
 

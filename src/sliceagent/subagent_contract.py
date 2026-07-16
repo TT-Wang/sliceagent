@@ -25,8 +25,32 @@ from .workspace_revision import PathRevision, WorkspaceRevision, fingerprint_pat
 CONTRACT_VERSION = 1
 OBSERVATION_VERSION = 1
 CLAIM_VERSION = 1
+EXPLORER_EVIDENCE_VERSION = 1
 DriftPolicy = Literal["report", "fail", "ignore"]
-_CANONICAL_REF = re.compile(r"^subagents/sub-\d+\.md$")
+IntegrationPolicy = Literal["digest_ok", "report_required"]
+SourceCoverageStatus = Literal[
+    "source_complete", "source_partial", "source_unsupported", "not_assessed",
+]
+ExplorerEvidenceStatus = Literal[
+    "not_assessed", "none", "navigation_only", "content_partial", "content_retained",
+]
+ReportCompletion = Literal["complete", "partial", "absent", "unknown"]
+_EXPLORER_EVIDENCE_PATH_LIMIT = 32
+_EXPLORER_EVIDENCE_COUNT_LIMIT = 1_000_000
+_OBSERVATION_PREVIEW_COUNT_LIMIT = 20
+_OBSERVATION_PREVIEW_BYTES_LIMIT = 24 * 1024
+_LEGACY_SOURCE_COVERAGE = {
+    "grounded": "source_complete",
+    "partial": "source_partial",
+    "unsupported": "source_unsupported",
+}
+# Immutable fan-in inputs have two compatible addresses. ``subagents/sub-N.md`` is the
+# legacy per-session archive handle; ``artifacts/<id>.md`` is the canonical local-store
+# handle returned by current child tool results. Mutable identity aliases never enter a
+# typed brief.
+_CANONICAL_REF = re.compile(
+    r"^(?:subagents/sub-\d+|artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,159})\.md$"
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -50,13 +74,33 @@ def _unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+def normalize_source_coverage_status(value: object) -> SourceCoverageStatus:
+    """Read the current source-coverage vocabulary plus legacy v1 artifact values.
+
+    Source coverage is deliberately mechanical: it says whether a synthesiser completely read and path-cited
+    every granted report. It is never a claim-correctness or verification verdict.
+    """
+    status = str(value or "not_assessed").strip().casefold()
+    status = _LEGACY_SOURCE_COVERAGE.get(status, status)
+    if status not in {"source_complete", "source_partial", "source_unsupported", "not_assessed"}:
+        raise ValueError("subagent artifact source_coverage_status is invalid")
+    return status  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class SubagentObservation:
-    """One bounded, persisted view returned by a successful read-only child tool.
+    """One persisted view returned by a determinate read-only child tool.
 
-    ``raw_sha256`` binds the exact view delivered to the child before persistence redaction/capping;
-    ``view_sha256`` binds the text that is actually retained.  A redacted or truncated view is useful evidence
-    for its visible bytes, but never proof about omitted bytes.
+    In ``SubagentArtifact.observations`` this is the complete redacted tool result delivered to the child;
+    ``truncated`` then means the source tool itself returned a page/partial view. The separate
+    ``observation_preview`` may contain presentation-bounded copies for model context. Immutable legacy v1
+    records whose view contains the old capsule-budget marker remain archive-partial and are rendered as such;
+    their flag must not be reinterpreted as source paging.
+
+    ``raw_sha256`` binds the exact view delivered to the child before persistence redaction;
+    ``view_sha256`` binds the text that is actually retained. A redacted or source-truncated view is useful
+    evidence for its visible bytes, but never proof about hidden or unobserved bytes. A failed row records
+    attempted scope and a gap; it never supports source claims.
     """
 
     tool: str
@@ -74,6 +118,10 @@ class SubagentObservation:
     def __post_init__(self) -> None:
         _text(self.tool, "subagent observation tool")
         _text(self.status, "subagent observation status")
+        if self.status not in {"succeeded", "failed", "steered", "cancelled"}:
+            raise ValueError(
+                "subagent observation status must be succeeded, failed, steered, or cancelled"
+            )
         _text(self.view, "subagent observation view", empty=True)
         if not isinstance(self.args, Mapping):
             raise ValueError("subagent observation args must be an object")
@@ -142,6 +190,136 @@ class SubagentObservation:
             redacted=bool(value.get("redacted", False)),
             truncated=bool(value.get("truncated", False)),
             version=int(value.get("v") or OBSERVATION_VERSION),
+        )
+
+
+@dataclass(frozen=True)
+class ExplorerEvidenceAccount:
+    """Host-derived account of an explorer's physical workspace evidence.
+
+    This records durable evidence retention, not task completion or claim correctness. Navigation means only
+    ``list_files``/``glob`` discovery; content means ``read_file``/``grep``/``code_review`` output. A partial
+    status now means the child received a source-paged view or a determinate observation failed—not that an
+    inline prompt/digest projection was bounded. Counts remain exact while path samples are deliberately capped.
+    """
+
+    status: ExplorerEvidenceStatus = "not_assessed"
+    scope_path_count: int = 0
+    navigation_success_count: int = 0
+    content_success_count: int = 0
+    gap_observation_count: int = 0
+    retained_navigation_view_count: int = 0
+    retained_content_view_count: int = 0
+    omitted_navigation_view_count: int = 0
+    omitted_content_view_count: int = 0
+    truncated_content_view_count: int = 0
+    scope_paths: tuple[str, ...] = ()
+    navigation_paths: tuple[str, ...] = ()
+    content_paths: tuple[str, ...] = ()
+    gap_paths: tuple[str, ...] = ()
+    version: int = EXPLORER_EVIDENCE_VERSION
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            "not_assessed", "none", "navigation_only", "content_partial", "content_retained",
+        }:
+            raise ValueError("explorer evidence status is invalid")
+        count_names = (
+            "scope_path_count", "navigation_success_count", "content_success_count",
+            "gap_observation_count", "retained_navigation_view_count",
+            "retained_content_view_count", "omitted_navigation_view_count",
+            "omitted_content_view_count", "truncated_content_view_count",
+        )
+        for name in count_names:
+            value = getattr(self, name)
+            if (not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    or value > _EXPLORER_EVIDENCE_COUNT_LIMIT):
+                raise ValueError(f"explorer evidence {name} must be a bounded non-negative integer")
+        for name in ("scope_paths", "navigation_paths", "content_paths", "gap_paths"):
+            paths = _unique(_strings(getattr(self, name), f"explorer evidence {name}"))
+            if len(paths) > _EXPLORER_EVIDENCE_PATH_LIMIT:
+                raise ValueError(f"explorer evidence {name} exceeds its bounded path limit")
+            if any(len(path.encode("utf-8")) > 400 for path in paths):
+                raise ValueError(f"explorer evidence {name} contains an overlong path")
+            object.__setattr__(self, name, paths)
+        for count_name, paths_name in (
+            ("scope_path_count", "scope_paths"),
+            ("navigation_success_count", "navigation_paths"),
+            ("content_success_count", "content_paths"),
+            ("gap_observation_count", "gap_paths"),
+        ):
+            if getattr(self, count_name) < len(getattr(self, paths_name)):
+                raise ValueError(f"explorer evidence {count_name} cannot be smaller than retained metadata")
+        if self.retained_navigation_view_count + self.omitted_navigation_view_count \
+                != self.navigation_success_count:
+            raise ValueError("explorer navigation retained/omitted counts must close")
+        if self.retained_content_view_count + self.omitted_content_view_count != self.content_success_count:
+            raise ValueError("explorer content retained/omitted counts must close")
+        if self.truncated_content_view_count > self.retained_content_view_count:
+            raise ValueError("explorer truncated content count exceeds retained content views")
+        if self.status == "none" and (self.navigation_success_count or self.content_success_count):
+            raise ValueError("explorer evidence status none cannot contain successful observations")
+        if self.status == "navigation_only" and (
+                not self.navigation_success_count or self.content_success_count):
+            raise ValueError("explorer navigation_only status requires navigation and no content")
+        if self.status == "content_retained" and (
+                not self.retained_content_view_count or self.omitted_content_view_count
+                or self.truncated_content_view_count):
+            # Legacy v1 writers described retention only and could therefore pair this status with a non-zero
+            # gap count. Continue reading those immutable records; current writers conservatively emit
+            # content_partial when a determinate inspection failed.
+            raise ValueError("explorer content_retained status requires every content view retained whole")
+        if self.status == "content_partial" and (
+                not self.content_success_count
+                or not (self.omitted_content_view_count or self.truncated_content_view_count
+                        or not self.retained_content_view_count or self.gap_observation_count)):
+            raise ValueError("explorer content_partial status requires source partialness or an observation gap")
+        if self.version != EXPLORER_EVIDENCE_VERSION:
+            raise ValueError(f"unsupported explorer evidence version: {self.version}")
+
+    def to_dict(self) -> dict:
+        return {
+            "v": self.version,
+            "status": self.status,
+            "scope_path_count": self.scope_path_count,
+            "navigation_success_count": self.navigation_success_count,
+            "content_success_count": self.content_success_count,
+            "gap_observation_count": self.gap_observation_count,
+            "retained_navigation_view_count": self.retained_navigation_view_count,
+            "retained_content_view_count": self.retained_content_view_count,
+            "omitted_navigation_view_count": self.omitted_navigation_view_count,
+            "omitted_content_view_count": self.omitted_content_view_count,
+            "truncated_content_view_count": self.truncated_content_view_count,
+            "scope_paths": list(self.scope_paths),
+            "navigation_paths": list(self.navigation_paths),
+            "content_paths": list(self.content_paths),
+            "gap_paths": list(self.gap_paths),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any] | None) -> "ExplorerEvidenceAccount":
+        if value is None:
+            return cls()
+        if not isinstance(value, Mapping):
+            raise ValueError("explorer evidence account must be an object")
+        return cls(
+            status=str(value.get("status") or "not_assessed"),
+            scope_path_count=int(value.get("scope_path_count") or 0),
+            navigation_success_count=int(value.get("navigation_success_count") or 0),
+            content_success_count=int(value.get("content_success_count") or 0),
+            gap_observation_count=int(value.get("gap_observation_count") or 0),
+            retained_navigation_view_count=int(value.get("retained_navigation_view_count") or 0),
+            retained_content_view_count=int(value.get("retained_content_view_count") or 0),
+            omitted_navigation_view_count=int(value.get("omitted_navigation_view_count") or 0),
+            omitted_content_view_count=int(value.get("omitted_content_view_count") or 0),
+            truncated_content_view_count=int(value.get("truncated_content_view_count") or 0),
+            scope_paths=_strings(value.get("scope_paths") or (), "explorer evidence scope_paths"),
+            navigation_paths=_strings(
+                value.get("navigation_paths") or (), "explorer evidence navigation_paths",
+            ),
+            content_paths=_strings(value.get("content_paths") or (), "explorer evidence content_paths"),
+            gap_paths=_strings(value.get("gap_paths") or (), "explorer evidence gap_paths"),
+            version=int(value.get("v") or EXPLORER_EVIDENCE_VERSION),
         )
 
 
@@ -253,6 +431,9 @@ def exact_intent_clauses(values: object) -> tuple[IntentClause, ...]:
 @dataclass(frozen=True)
 class SubagentBrief:
     objective: str
+    # Optional immutable binding to the parent's model-maintained work item.  Empty preserves old artifacts;
+    # new Active Work-aware launches carry it through brief, seal, receipt, and fan-in.
+    work_item_id: str = ""
     intent_clauses: tuple[IntentClause, ...] = ()
     scope: tuple[str, ...] = ()
     # Host-minted from the parent's typed DelegationRequirement, never inferred by the child. This is the
@@ -260,14 +441,17 @@ class SubagentBrief:
     delegation_target: str = ""
     exclusions: tuple[str, ...] = ()
     report_shape: str = (
-        "Return status, scope covered, findings with evidence, files examined, gaps, uncertainty, and conflicts."
+        "Return status, scope covered, findings with evidence, content paths actually inspected, "
+        "navigation-only paths, gaps, uncertainty, and conflicts."
     )
     canonical_refs: tuple[str, ...] = ()
     drift_policy: DriftPolicy = "report"
+    integration_policy: IntegrationPolicy = "digest_ok"
     contract_version: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         _text(self.objective, "subagent objective")
+        _text(self.work_item_id, "subagent work_item_id", empty=True)
         object.__setattr__(self, "intent_clauses", tuple(
             clause if isinstance(clause, IntentClause) else IntentClause.from_value(clause)
             for clause in self.intent_clauses))
@@ -279,33 +463,41 @@ class SubagentBrief:
         _text(self.report_shape, "subagent report_shape")
         refs = _unique(_strings(self.canonical_refs, "subagent canonical_refs"))
         if any(not _CANONICAL_REF.fullmatch(ref) for ref in refs):
-            raise ValueError("subagent refs must be immutable subagents/sub-N.md handles")
+            raise ValueError(
+                "subagent refs must be immutable subagents/sub-N.md or artifacts/<id>.md handles"
+            )
         object.__setattr__(self, "canonical_refs", refs)
         if self.drift_policy not in ("report", "fail", "ignore"):
             raise ValueError("drift_policy must be report, fail, or ignore")
+        if self.integration_policy not in ("digest_ok", "report_required"):
+            raise ValueError("integration_policy must be digest_ok or report_required")
         if self.contract_version != CONTRACT_VERSION:
             raise ValueError(f"unsupported subagent brief version: {self.contract_version}")
 
     @classmethod
     def create(cls, objective: str, *, intent_entries: object = (), scope: object = (),
+               work_item_id: str = "",
                delegation_target: str = "",
                exclusions: object = (), report_shape: str | None = None,
-               canonical_refs: object = (), drift_policy: DriftPolicy = "report") -> "SubagentBrief":
+               canonical_refs: object = (), drift_policy: DriftPolicy = "report",
+               integration_policy: IntegrationPolicy = "digest_ok") -> "SubagentBrief":
         fields = {}
         if report_shape is not None:
             fields["report_shape"] = report_shape
-        return cls(objective=objective, intent_clauses=exact_intent_clauses(intent_entries),
+        return cls(objective=objective, work_item_id=str(work_item_id or ""),
+                   intent_clauses=exact_intent_clauses(intent_entries),
                    scope=_strings(scope, "subagent scope"), exclusions=_strings(exclusions, "subagent exclusions"),
                    delegation_target=str(delegation_target or ""),
                    canonical_refs=_strings(canonical_refs, "subagent canonical_refs"),
-                   drift_policy=drift_policy, **fields)
+                   drift_policy=drift_policy, integration_policy=integration_policy, **fields)
 
     def to_dict(self) -> dict:
         # task/grants are compatibility aliases consumed by existing renderers and roster tests.
-        return {
+        record = {
             "v": self.contract_version,
             "objective": self.objective,
             "task": self.objective,
+            "work_item_id": self.work_item_id,
             "intent_clauses": [clause.to_dict() for clause in self.intent_clauses],
             "scope": list(self.scope),
             "delegation_target": self.delegation_target,
@@ -315,6 +507,10 @@ class SubagentBrief:
             "grants": list(self.canonical_refs),
             "drift_policy": self.drift_policy,
         }
+        # Retired from the live contract. Preserve a non-default value only when round-tripping an old artifact.
+        if self.integration_policy != "digest_ok":
+            record["integration_policy"] = self.integration_policy
+        return record
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "SubagentBrief":
@@ -329,6 +525,7 @@ class SubagentBrief:
                              if _CANONICAL_REF.fullmatch(ref))
         return cls(
             objective=str(value.get("objective") or value.get("task") or ""),
+            work_item_id=str(value.get("work_item_id") or ""),
             intent_clauses=tuple(clause for row in (value.get("intent_clauses") or ())
                                  if (clause := IntentClause.from_value(row)) is not None),
             scope=_strings(value.get("scope") or (), "subagent scope"),
@@ -337,11 +534,14 @@ class SubagentBrief:
             report_shape=str(value.get("report_shape") or cls.__dataclass_fields__["report_shape"].default),
             canonical_refs=_strings(raw_refs, "subagent canonical_refs"),
             drift_policy=str(value.get("drift_policy") or "report"),
+            integration_policy=str(value.get("integration_policy") or "digest_ok"),
             contract_version=int(value.get("v") or CONTRACT_VERSION),
         )
 
     def render(self) -> str:
         lines = ["DELEGATED OBJECTIVE (exact)", self.objective]
+        if self.work_item_id:
+            lines += ["", "PARENT ACTIVE WORK ITEM (immutable binding)", self.work_item_id]
         user_clauses = [clause for clause in self.intent_clauses
                         if clause.authority == "user" and clause.kind == "constraint"]
         corrections = [clause for clause in self.intent_clauses
@@ -387,9 +587,12 @@ class SubagentBrief:
             "and name that gap. Never silently strengthen possible/could/may into is/does/will.",
             "- When the objective asks for one top bug/finding, end with exactly one physical line under 800 "
             "characters: 'TOP CLAIM: <the finding and every material qualifier/prerequisite>'. This line is "
-            "indexed as your testimony, not certified as workspace fact.",
+            "a stable synthesis target in the sealed report, not certified as workspace fact.",
             "", f"WORKSPACE DRIFT POLICY: {self.drift_policy}",
         ]
+        # Compatibility-only: new live briefs use the default and no longer teach the model an integration dial.
+        if self.integration_policy != "digest_ok":
+            lines.append(f"PARENT INTEGRATION POLICY (legacy): {self.integration_policy}")
         if self.canonical_refs:
             lines += ["", "INPUT REPORTS (immutable sealed inputs)"]
             lines += [f'- read_file("{ref}")' for ref in self.canonical_refs]
@@ -482,12 +685,32 @@ class SubagentArtifact:
     status: str
     coverage: str
     report: str
+    # The report bytes are the authoritative child testimony.  Hash/size are always derived from those bytes
+    # on construction/reload so stale metadata cannot make the envelope unreadable. ``report_completion`` says
+    # whether the provider completed that testimony; it is deliberately independent of the child's operational
+    # status (a writable worker can finish its prose while still reporting failed work).
+    report_sha256: str = ""
+    report_bytes: int = 0
+    report_completion: ReportCompletion = "unknown"
+    report_stop_reason: str = ""
+    explorer_evidence: ExplorerEvidenceAccount = field(default_factory=ExplorerEvidenceAccount)
+    # Operational completion and source coverage are orthogonal. ``status`` answers whether the child ran and
+    # sealed. This field proves only whether a fan-in child completely read and path-cited its granted reports;
+    # it does not establish that the report's claims are correct.
+    source_coverage_status: SourceCoverageStatus = "not_assessed"
+    consumed_refs: tuple[str, ...] = ()
+    cited_refs: tuple[str, ...] = ()
+    covered_refs: tuple[str, ...] = ()
+    source_gaps: tuple[str, ...] = ()
     # Stable sibling identity assigned synchronously when spawn_agent is accepted. Archive handles are
     # intentionally completion-ordered for backward compatibility, so they cannot answer "the first
     # subagent" when children run concurrently. Default preserves direct-constructor compatibility.
     launch_ordinal: int = 0
     findings: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
+    # Full redacted child-visible tool results live in ``observations`` and are exposed as page-backed evidence.
+    # This independent bounded copy is the only observation payload eligible for automatic model projection.
+    observation_preview: tuple[SubagentObservation, ...] = ()
     observations: tuple[SubagentObservation, ...] = ()
     claims: tuple[SubagentClaim, ...] = ()
     files: tuple[str, ...] = ()
@@ -497,6 +720,9 @@ class SubagentArtifact:
     gaps: tuple[str, ...] = ()
     uncertainty: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
+    # Optional/legacy indexes are conveniences over the raw report + observations.  Invalid entries are dropped
+    # independently and recorded here; they never make the canonical evidence envelope unreadable.
+    projection_gaps: tuple[str, ...] = ()
     error: str = ""
     steps: int = 0
     usage: Mapping[str, Any] = field(default_factory=dict)
@@ -507,10 +733,25 @@ class SubagentArtifact:
     def __post_init__(self) -> None:
         for name in ("kind", "workspace_id", "session_id", "task_id", "status", "coverage"):
             _text(getattr(self, name), f"subagent artifact {name}")
-        for name in ("name", "parent_id", "report", "error", "trace", "lesson"):
+        for name in ("name", "parent_id", "report", "report_stop_reason", "error", "trace", "lesson"):
             _text(getattr(self, name), f"subagent artifact {name}", empty=True)
+        report_encoded = self.report.encode("utf-8")
+        object.__setattr__(self, "report_sha256", hashlib.sha256(report_encoded).hexdigest())
+        object.__setattr__(self, "report_bytes", len(report_encoded))
+        completion = str(self.report_completion or "unknown")
+        if completion not in {"complete", "partial", "absent", "unknown"}:
+            completion = "unknown"
+        if not self.report:
+            completion = "absent"
+        object.__setattr__(self, "report_completion", completion)
         if not isinstance(self.brief, SubagentBrief):
             raise ValueError("subagent artifact brief must be a SubagentBrief")
+        if isinstance(self.explorer_evidence, Mapping):
+            object.__setattr__(
+                self, "explorer_evidence", ExplorerEvidenceAccount.from_dict(self.explorer_evidence),
+            )
+        elif not isinstance(self.explorer_evidence, ExplorerEvidenceAccount):
+            raise ValueError("subagent artifact explorer_evidence must be an ExplorerEvidenceAccount")
         if not isinstance(self.workspace_revision, WorkspaceRevision):
             raise ValueError("subagent artifact workspace_revision must be a WorkspaceRevision")
         if not isinstance(self.steps, int) or self.steps < 0:
@@ -519,33 +760,88 @@ class SubagentArtifact:
             raise ValueError("subagent artifact launch_ordinal must be non-negative")
         if not isinstance(self.usage, Mapping):
             raise ValueError("subagent artifact usage must be an object")
-        parsed_observations = []
-        for observation in self.observations:
-            if isinstance(observation, SubagentObservation):
-                parsed_observations.append(observation)
-            elif isinstance(observation, Mapping):
-                parsed_observations.append(SubagentObservation.from_dict(observation))
-            else:
-                raise ValueError("subagent artifact observations must contain typed observation objects")
-        object.__setattr__(self, "observations", tuple(parsed_observations))
+        object.__setattr__(
+            self, "source_coverage_status", normalize_source_coverage_status(self.source_coverage_status),
+        )
+        def parse_observations(values, field_name):
+            parsed = []
+            for observation in values:
+                if isinstance(observation, SubagentObservation):
+                    parsed.append(observation)
+                elif isinstance(observation, Mapping):
+                    parsed.append(SubagentObservation.from_dict(observation))
+                else:
+                    raise ValueError(
+                        f"subagent artifact {field_name} must contain typed observation objects"
+                    )
+            return tuple(parsed)
+
+        parsed_observations = parse_observations(self.observations, "observations")
+        parsed_preview = parse_observations(self.observation_preview, "observation_preview")
+        # Legacy artifacts stored only the already-bounded observation capsule. Reuse it as the preview when it
+        # still satisfies today's explicit projection bound; a large third-party record is never auto-injected.
+        if not parsed_preview and parsed_observations \
+                and len(parsed_observations) <= _OBSERVATION_PREVIEW_COUNT_LIMIT \
+                and sum(item.view_bytes for item in parsed_observations) <= _OBSERVATION_PREVIEW_BYTES_LIMIT:
+            parsed_preview = parsed_observations
+        if len(parsed_preview) > _OBSERVATION_PREVIEW_COUNT_LIMIT \
+                or sum(item.view_bytes for item in parsed_preview) > _OBSERVATION_PREVIEW_BYTES_LIMIT:
+            raise ValueError("subagent artifact observation_preview exceeds its bounded projection budget")
+        object.__setattr__(self, "observations", parsed_observations)
+        object.__setattr__(self, "observation_preview", parsed_preview)
+        try:
+            projection_gaps = list(_unique(_strings(
+                self.projection_gaps, "subagent artifact projection_gaps",
+            )))
+        except ValueError:
+            projection_gaps = ["discarded malformed projection_gaps metadata"]
         parsed_claims = []
-        for claim in self.claims:
-            if isinstance(claim, SubagentClaim):
-                parsed_claims.append(claim)
-            elif isinstance(claim, Mapping):
-                parsed_claims.append(SubagentClaim.from_dict(claim))
-            else:
-                raise ValueError("subagent artifact claims must contain typed claim objects")
-        if any(claim.report_exact not in self.report for claim in parsed_claims):
-            raise ValueError("subagent artifact claim report_exact must occur verbatim in the sealed report")
-        if any(any(item not in self.report for item in claim.prerequisites) for claim in parsed_claims):
-            raise ValueError("subagent artifact claim prerequisites must occur verbatim in the sealed report")
-        observation_hashes = {observation.view_sha256 for observation in parsed_observations}
-        if any(not set(claim.observation_refs).issubset(observation_hashes) for claim in parsed_claims):
-            raise ValueError("subagent artifact claim observation_refs must resolve within the artifact")
+        observation_hashes = {
+            observation.view_sha256
+            for observation in parsed_observations if observation.status == "succeeded"
+        }
+        for index, raw_claim in enumerate(self.claims, start=1):
+            try:
+                claim = (
+                    raw_claim if isinstance(raw_claim, SubagentClaim)
+                    else SubagentClaim.from_dict(raw_claim) if isinstance(raw_claim, Mapping)
+                    else (_ for _ in ()).throw(ValueError("claim is not an object"))
+                )
+                if claim.report_exact not in self.report:
+                    raise ValueError("report_exact is absent from the sealed report")
+                if any(item not in self.report for item in claim.prerequisites):
+                    raise ValueError("a prerequisite is absent from the sealed report")
+                if not set(claim.observation_refs).issubset(observation_hashes):
+                    raise ValueError("observation_refs do not resolve to successful observations")
+            except (TypeError, ValueError) as exc:
+                projection_gaps.append(
+                    f"discarded invalid legacy claim #{index}: {type(exc).__name__}: {exc}"
+                )
+                continue
+            parsed_claims.append(claim)
         object.__setattr__(self, "claims", tuple(parsed_claims))
-        for name in ("findings", "evidence_refs", "files", "change_set", "gaps", "uncertainty", "conflicts"):
+        object.__setattr__(self, "projection_gaps", _unique(projection_gaps))
+        for name in (
+            "findings", "evidence_refs", "consumed_refs", "cited_refs", "covered_refs", "source_gaps",
+            "files", "change_set", "gaps", "uncertainty", "conflicts",
+        ):
             object.__setattr__(self, name, _unique(_strings(getattr(self, name), f"subagent artifact {name}")))
+        required_refs = set(self.brief.canonical_refs)
+        valid_consumed = tuple(ref for ref in self.consumed_refs if ref in required_refs)
+        valid_cited = tuple(ref for ref in self.cited_refs if ref in required_refs)
+        valid_covered = tuple(
+            ref for ref in self.covered_refs if ref in set(valid_consumed) & set(valid_cited)
+        )
+        if valid_consumed != self.consumed_refs:
+            projection_gaps.append("discarded consumed_refs outside brief canonical_refs")
+        if valid_cited != self.cited_refs:
+            projection_gaps.append("discarded cited_refs outside brief canonical_refs")
+        if valid_covered != self.covered_refs:
+            projection_gaps.append("discarded covered_refs not both consumed and cited")
+        object.__setattr__(self, "consumed_refs", valid_consumed)
+        object.__setattr__(self, "cited_refs", valid_cited)
+        object.__setattr__(self, "covered_refs", valid_covered)
+        object.__setattr__(self, "projection_gaps", _unique(projection_gaps))
         object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
         if self.contract_version != CONTRACT_VERSION:
             raise ValueError(f"unsupported subagent artifact version: {self.contract_version}")
@@ -565,7 +861,8 @@ class SubagentArtifact:
                    gaps=_unique((*gaps, *fingerprint_gaps)), uncertainty=_unique(uncertainty), **fields)
 
     def to_record(self) -> dict:
-        # Every v1 key stays present. New readers use the explicit identity/evidence/revision fields.
+        # New records use the precise source-coverage vocabulary. ``from_record`` remains able to read the
+        # old v1 epistemic/grounding keys, but we do not perpetuate that over-claiming vocabulary in new seals.
         return {
             "contract_v": self.contract_version,
             "kind": self.kind,
@@ -578,10 +875,23 @@ class SubagentArtifact:
             "task": self.brief.objective,
             "brief": self.brief.to_dict(),
             "status": self.status,
+            "explorer_evidence": self.explorer_evidence.to_dict(),
+            "source_coverage_status": self.source_coverage_status,
             "coverage": self.coverage,
             "report": self.report,
+            "report_sha256": self.report_sha256,
+            "report_bytes": self.report_bytes,
+            "report_completion": self.report_completion,
+            "report_stop_reason": self.report_stop_reason,
             "findings": list(self.findings),
             "evidence_refs": list(self.evidence_refs),
+            "consumed_refs": list(self.consumed_refs),
+            "cited_refs": list(self.cited_refs),
+            "covered_refs": list(self.covered_refs),
+            "source_gaps": list(self.source_gaps),
+            "observation_preview": [
+                observation.to_dict() for observation in self.observation_preview
+            ],
             "observations": [observation.to_dict() for observation in self.observations],
             "claims": [claim.to_dict() for claim in self.claims],
             "refs": list(self.brief.canonical_refs),
@@ -591,6 +901,7 @@ class SubagentArtifact:
             "gaps": list(self.gaps),
             "uncertainty": list(self.uncertainty),
             "conflicts": list(self.conflicts),
+            "projection_gaps": list(self.projection_gaps),
             "error": self.error,
             "steps": self.steps,
             "usage": dict(self.usage),
@@ -608,9 +919,40 @@ class SubagentArtifact:
         revision = (WorkspaceRevision.from_dict(dict(revision_data)) if isinstance(revision_data, Mapping)
                     else WorkspaceRevision(os.path.realpath("."), ()))
         raw_claims = value.get("claims") or ()
-        if not isinstance(raw_claims, (list, tuple)) or any(
-                not isinstance(row, Mapping) for row in raw_claims):
-            raise ValueError("subagent artifact claims must be an array of objects")
+        try:
+            projection_gaps = list(_strings(
+                value.get("projection_gaps") or (), "projection_gaps",
+            ))
+        except ValueError:
+            projection_gaps = ["discarded malformed projection_gaps metadata"]
+        if not isinstance(raw_claims, (list, tuple)):
+            projection_gaps.append("discarded malformed legacy claims projection: expected an array")
+            raw_claims = ()
+
+        def optional_strings(key: str, *, legacy_key: str = "") -> tuple[str, ...]:
+            raw = value.get(key)
+            if raw is None and legacy_key:
+                raw = value.get(legacy_key)
+            try:
+                return _strings(raw or (), key)
+            except ValueError:
+                projection_gaps.append(f"discarded malformed {key} projection")
+                return ()
+
+        try:
+            source_coverage_status = normalize_source_coverage_status(
+                value.get("source_coverage_status") or value.get("epistemic_status") or "not_assessed"
+            )
+        except ValueError:
+            source_coverage_status = "not_assessed"
+            projection_gaps.append("discarded malformed source_coverage_status projection")
+        try:
+            explorer_evidence = ExplorerEvidenceAccount.from_dict(
+                value.get("explorer_evidence") if isinstance(value.get("explorer_evidence"), Mapping) else None
+            )
+        except (TypeError, ValueError):
+            explorer_evidence = ExplorerEvidenceAccount()
+            projection_gaps.append("discarded malformed explorer_evidence projection")
         return cls(
             kind=str(value.get("kind") or "subagent"), name=str(value.get("name") or ""),
             workspace_id=str(value.get("workspace_id") or revision.root),
@@ -619,19 +961,36 @@ class SubagentArtifact:
             parent_id=str(value.get("parent_id") or ""),
             launch_ordinal=int(value.get("launch_ordinal") or 0), brief=brief,
             status=str(value.get("status") or "unknown"),
+            explorer_evidence=explorer_evidence,
+            source_coverage_status=source_coverage_status,
             coverage=str(value.get("coverage") or "coverage not recorded"),
-            report=str(value.get("report") or ""), findings=_strings(value.get("findings") or (), "findings"),
-            evidence_refs=_strings(value.get("evidence_refs") or (), "evidence_refs"),
+            report=str(value.get("report") or ""),
+            # Hash and size are derived from report bytes in __post_init__; never parse stale metadata as
+            # authority or let a malformed legacy counter erase the envelope.
+            report_sha256="", report_bytes=0,
+            report_completion=str(value.get("report_completion") or "unknown"),
+            report_stop_reason=str(value.get("report_stop_reason") or ""),
+            findings=optional_strings("findings"),
+            evidence_refs=optional_strings("evidence_refs"),
+            consumed_refs=optional_strings("consumed_refs"),
+            cited_refs=optional_strings("cited_refs"),
+            covered_refs=optional_strings("covered_refs", legacy_key="grounding_refs"),
+            source_gaps=optional_strings("source_gaps", legacy_key="grounding_gaps"),
+            observation_preview=tuple(
+                SubagentObservation.from_dict(row) for row in (value.get("observation_preview") or ())
+                if isinstance(row, Mapping)
+            ),
             observations=tuple(
                 SubagentObservation.from_dict(row) for row in (value.get("observations") or ())
                 if isinstance(row, Mapping)
             ),
-            claims=tuple(SubagentClaim.from_dict(row) for row in raw_claims),
-            files=_strings(value.get("files") or (), "files"),
-            change_set=_strings(value.get("change_set") or (), "change_set"),
-            workspace_revision=revision, gaps=_strings(value.get("gaps") or (), "gaps"),
-            uncertainty=_strings(value.get("uncertainty") or (), "uncertainty"),
-            conflicts=_strings(value.get("conflicts") or (), "conflicts"),
+            # Parse claim rows inside __post_init__, where each malformed optional row can be dropped without
+            # making the report/observation envelope unreadable.
+            claims=tuple(raw_claims),
+            files=optional_strings("files"), change_set=optional_strings("change_set"),
+            workspace_revision=revision, gaps=optional_strings("gaps"),
+            uncertainty=optional_strings("uncertainty"), conflicts=optional_strings("conflicts"),
+            projection_gaps=tuple(projection_gaps),
             error=str(value.get("error") or ""), steps=int(value.get("steps") or 0),
             usage=value.get("usage") or {}, trace=str(value.get("trace") or ""),
             lesson=str(value.get("lesson") or ""),
@@ -641,5 +1000,7 @@ class SubagentArtifact:
 
 __all__ = [
     "IntentClause", "SubagentBrief", "SubagentArtifact", "SubagentObservation", "SubagentClaim", "DriftPolicy",
+    "IntegrationPolicy", "ExplorerEvidenceAccount", "ExplorerEvidenceStatus", "ReportCompletion",
+    "SourceCoverageStatus", "normalize_source_coverage_status",
     "exact_intent_clauses", "capture_workspace_revision",
 ]
