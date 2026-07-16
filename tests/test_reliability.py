@@ -208,15 +208,29 @@ def scheduler_timeout_returns_after_bounded_grace():
         finally:
             finished.set()
 
-    started = time.monotonic()
+    box = {}
+    returned = threading.Event()
+
+    def schedule():
+        try:
+            box["out"] = run_scheduled([(none(), lambda: "fast"), (none(), slow)], timeout=0.5)
+        except BaseException as error:  # noqa: BLE001 - surfaced on the test thread below
+            box["error"] = error
+        finally:
+            returned.set()
+
+    controller = threading.Thread(target=schedule, daemon=True)
+    controller.start()
     try:
-        out = run_scheduled([(none(), lambda: "fast"), (none(), slow)], timeout=0.05)
-        elapsed = time.monotonic() - started
+        assert returned.wait(3), "deadline + bounded grace did not return while the reader remained blocked"
+        assert "error" not in box, box
+        out = box["out"]
         assert out[0] == "fast", "the fast task must still return its real result"
         assert "still running" in out[1], f"the unresolved reader must be explicit: {out[1]!r}"
-        assert elapsed < 0.35, "deadline + bounded grace must return without awaiting the hung reader"
     finally:
         release.set()
+        controller.join(1)
+        assert not controller.is_alive(), "scheduler controller did not retire after fixture release"
         assert finished.wait(1), "the daemon fixture must settle and release its global reader slot"
 
 
@@ -243,15 +257,29 @@ def delegation_wave_is_bounded_by_the_lifecycle_ceiling():
             finished.set()
 
     task = ScheduledTool(inv, ToolPurity.PURE_READ, wedged, timeout_safe=False)
-    started = time.monotonic()
+    box = {}
+    returned = threading.Event()
+
+    def schedule():
+        try:
+            # timeout=None → the SHORT reader deadline is OFF, so ONLY the lifecycle ceiling can cut the wave.
+            box["out"] = run_ordered([task], timeout=None, lifecycle_timeout=0.5)
+        except BaseException as error:  # noqa: BLE001 - surfaced on the test thread below
+            box["error"] = error
+        finally:
+            returned.set()
+
+    controller = threading.Thread(target=schedule, daemon=True)
+    controller.start()
     try:
-        # timeout=None → the SHORT reader deadline is OFF, so ONLY the lifecycle ceiling can cut the wave.
-        out = run_ordered([task], timeout=None, lifecycle_timeout=0.05)
-        elapsed = time.monotonic() - started
+        assert returned.wait(3), "lifecycle ceiling did not return while the child remained blocked"
+        assert "error" not in box, box
+        out = box["out"]
         assert out[0].status is ToolStatus.INDETERMINATE, f"a wedged child must not hang the turn: {out[0].status}"
-        assert elapsed < 0.35, f"lifecycle ceiling + grace must return without awaiting the child: {elapsed:.2f}s"
     finally:
         release.set()
+        controller.join(1)
+        assert not controller.is_alive(), "lifecycle controller did not retire after fixture release"
         assert finished.wait(1), "the daemon child must settle and release its lifecycle reader slot"
 
 

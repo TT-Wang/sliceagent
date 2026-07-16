@@ -33,8 +33,8 @@ from .text_utils import format_ts, now_iso, one_line
 
 # Serializes the count-then-append id assignment in append_subagent_artifact ACROSS THREADS — parallel
 # explorers run as threads in ONE process (the scheduler's ThreadPoolExecutor), which is where the id race
-# actually happens. FileLock adds cross-PROCESS safety on POSIX, but flock is a no-op on Windows; this
-# in-process lock makes the sequential ids collision-proof regardless of flock availability.
+# actually happens. FileLock adds cross-PROCESS safety on POSIX and Windows; this in-process lock also keeps
+# sequential id assignment explicit and collision-proof if the advisory OS primitive is unavailable.
 _SUBAGENT_APPEND_LOCK = threading.Lock()
 
 
@@ -366,7 +366,7 @@ class HippocampusMixin:
             from .platform_compat import FileLock
             # FileLock serializes concurrent appenders to this session file (a resumed session reusing its
             # session_id, or a future off-thread writer) so their lines can't interleave into a torn record.
-            # Best-effort (real on POSIX, no-op elsewhere); reads already skip an unparsable line either way.
+            # Best-effort (flock on POSIX, a kernel mutex on Windows); reads also skip an unparsable line.
             _epath = os.path.join(d, f"{session_id}.jsonl")
             with open(_epath, "a", encoding="utf-8") as f, FileLock(f):
                 # #36: default=str — a non-serializable value in a tool output must STRINGIFY, never raise
@@ -516,7 +516,7 @@ class HippocampusMixin:
             path = os.path.join(d, f"{session_id}.jsonl")
             from .platform_compat import FileLock
             with _SUBAGENT_APPEND_LOCK:                                   # serialize same-process explorer threads
-                with open(path, "a+", encoding="utf-8") as f, FileLock(f):   # + cross-process on POSIX
+                with open(path, "a+", encoding="utf-8") as f, FileLock(f):   # + cross-process OS lock
                     f.seek(0)
                     n = sum(1 for ln in f if ln.strip()) + 1             # count-then-append atomic under both locks
                     sid = f"sub-{n}"

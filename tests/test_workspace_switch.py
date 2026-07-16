@@ -947,11 +947,15 @@ def _run_cli_workspace_continuation(
     from sliceagent import llm as llm_mod
     from sliceagent import tui as tui_mod
 
-    source = tempfile.mkdtemp(prefix="cli-segment-source-")
-    target = tempfile.mkdtemp(prefix="cli-segment-target-")
-    second_target = tempfile.mkdtemp(prefix="cli-segment-second-target-")
-    cache = tempfile.mkdtemp(prefix="cli-segment-cache-")
-    home = tempfile.mkdtemp(prefix="cli-segment-home-")
+    # Windows may return a short/junction-backed spelling from tempfile while
+    # the workspace boundary intentionally publishes canonical real paths.
+    # Keep the fixture on that same identity surface so path assertions test
+    # continuation content rather than an OS-specific alias spelling.
+    source = os.path.realpath(tempfile.mkdtemp(prefix="cli-segment-source-"))
+    target = os.path.realpath(tempfile.mkdtemp(prefix="cli-segment-target-"))
+    second_target = os.path.realpath(tempfile.mkdtemp(prefix="cli-segment-second-target-"))
+    cache = os.path.realpath(tempfile.mkdtemp(prefix="cli-segment-cache-"))
+    home = os.path.realpath(tempfile.mkdtemp(prefix="cli-segment-home-"))
     request = "go to target workspace and tell me its end-game architecture"
     _CrossWorkspaceLLM.instances = []
     _CrossWorkspaceLLM.target = target
@@ -1063,25 +1067,28 @@ def _run_cli_workspace_continuation(
 @check
 def inline_flow_automatically_continues_the_exact_request_and_delivers_once():
     result = _run_cli_workspace_continuation(live=False)
-    assert len(result["calls"]) == 3
+    assert len(result["calls"]) == 3, len(result["calls"])
     target_prompt = json.dumps(result["calls"][2], ensure_ascii=False)
-    assert result["request"] in target_prompt
+    assert result["request"] in target_prompt, target_prompt
     # json.dumps escapes Windows backslashes; compare against the target's JSON spelling rather than a raw
     # host path substring so this still proves the exact target entered the provider prompt.
-    assert json.dumps(result["target"], ensure_ascii=False)[1:-1] in target_prompt
+    target_json = json.dumps(result["target"], ensure_ascii=False)[1:-1]
+    assert target_json in target_prompt, (target_json, target_prompt)
     assert "TRANSPORT ONLY" not in target_prompt, "source transport prose must not become target continuity"
-    assert "TARGET FINAL" in result["output"]
-    assert "TRANSPORT ONLY" not in result["output"]
+    assert "TARGET FINAL" in result["output"], result["output"]
+    assert "TRANSPORT ONLY" not in result["output"], result["output"]
     kinds = [row["kind"] for row in result["ledger"]]
     assert kinds == ["user_utterance", "context_transition", "response_delivered"], kinds
-    assert len({row["logical_turn_id"] for row in result["ledger"]}) == 1
-    assert [row["workspace_epoch"] for row in result["ledger"]] == [0, 1, 1]
+    logical_ids = {row["logical_turn_id"] for row in result["ledger"]}
+    assert len(logical_ids) == 1, logical_ids
+    epochs = [row["workspace_epoch"] for row in result["ledger"]]
+    assert epochs == [0, 1, 1], epochs
     source_root = result["source_graph"].request_roots[0]
     target_root = result["target_graph"].request_roots[0]
-    assert source_root.logical_id == target_root.logical_id
-    assert source_root.status == "in_progress" and not source_root.output_refs
-    assert target_root.status == "delivered"
-    assert target_root.output_refs[0].kind == "turn_artifact"
+    assert source_root.logical_id == target_root.logical_id, (source_root, target_root)
+    assert source_root.status == "in_progress" and not source_root.output_refs, source_root
+    assert target_root.status == "delivered", target_root
+    assert target_root.output_refs and target_root.output_refs[0].kind == "turn_artifact", target_root
 
 
 @check
@@ -1131,10 +1138,10 @@ def restart_in_either_endpoint_reuses_the_transition_event_ledger_namespace():
     from sliceagent import cli as cli_mod
     from sliceagent import llm as llm_mod
 
-    source = tempfile.mkdtemp(prefix="boot-transition-source-")
-    target = tempfile.mkdtemp(prefix="boot-transition-target-")
-    cache = tempfile.mkdtemp(prefix="boot-transition-cache-")
-    home = tempfile.mkdtemp(prefix="boot-transition-home-")
+    source = os.path.realpath(tempfile.mkdtemp(prefix="boot-transition-source-"))
+    target = os.path.realpath(tempfile.mkdtemp(prefix="boot-transition-target-"))
+    cache = os.path.realpath(tempfile.mkdtemp(prefix="boot-transition-cache-"))
+    home = os.path.realpath(tempfile.mkdtemp(prefix="boot-transition-home-"))
     store = WorkspaceTransitionStore(os.path.join(cache, "workspace-transitions"))
     pending = store.prepare(
         session_id="recovered-app-session", logical_turn_id="logical-boot", task_id="task-boot",
@@ -1180,17 +1187,19 @@ def restart_in_either_endpoint_reuses_the_transition_event_ledger_namespace():
             cli_mod.main()
     finally:
         os.chdir(old_cwd)
-    assert _CrossWorkspaceLLM.instances[0].cache_keys[0] == "recovered-app-session"
+    cache_keys = _CrossWorkspaceLLM.instances[0].cache_keys
+    assert cache_keys and cache_keys[0] == "recovered-app-session", cache_keys
     output = stdout.getvalue()
-    assert "recovered interrupted workspace continuation (continuing)" in output
-    assert source in output and target in output
+    assert "recovered interrupted workspace continuation (continuing)" in output, output
+    assert source in output and target in output, (source, target, output)
     ledger_path = os.path.join(cache, "event-ledger", "recovered-app-session.jsonl")
     with open(ledger_path, encoding="utf-8") as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
-    assert [row["kind"] for row in rows] == ["context_transition", "response_delivered"]
-    assert rows[0]["payload"]["target_artifact_id"] == "target-artifact"
-    assert rows[0]["workspace_id"] == root_key(target)
-    assert rows[1]["payload"]["artifact_id"] == "target-artifact"
+    kinds = [row["kind"] for row in rows]
+    assert kinds == ["context_transition", "response_delivered"], kinds
+    assert rows[0]["payload"]["target_artifact_id"] == "target-artifact", rows
+    assert rows[0]["workspace_id"] == root_key(target), rows[0]
+    assert rows[1]["payload"]["artifact_id"] == "target-artifact", rows[1]
 
 
 @check

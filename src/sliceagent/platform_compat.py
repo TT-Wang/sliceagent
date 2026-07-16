@@ -284,24 +284,73 @@ def is_win_abs(path: str) -> bool:
 
 
 class FileLock:
-    """Best-effort EXCLUSIVE advisory lock on an already-open file, held for a `with` block. Real on POSIX
-    (`fcntl.flock`); a graceful no-op where flock is unavailable (Windows / odd filesystem) — cache reads
-    already tolerate a torn line, so the no-lock case degrades to today's behavior, never worse. Serializes
-    concurrent APPENDERS to the SAME file (e.g. a resumed session that reuses its session_id, or a future
-    off-thread writer) so their lines can't interleave into a corrupt record. Advisory: every writer of the
-    file must go through here to get the guarantee. Never raises — a locking failure downgrades to unlocked."""
+    """Best-effort EXCLUSIVE advisory lock on an already-open file, held for a ``with`` block.
+
+    POSIX uses ``fcntl.flock``. Windows uses a path-keyed kernel mutex because ``msvcrt.locking`` locks a
+    byte range relative to each handle's file position and has a bounded retry loop; neither property is a
+    sound fit for independently opened append handles. The named mutex covers threads *and* processes in
+    the current Windows session without moving the caller's file position. Serializes concurrent APPENDERS
+    to the SAME file (e.g. a resumed session that reuses its session_id, or a future off-thread writer) so
+    their lines can't interleave or overwrite one another. Advisory: every writer of the file must go
+    through here to get the guarantee. Never raises — a locking failure downgrades to unlocked."""
 
     def __init__(self, fileobj):
         self._f = fileobj
         self._locked = False
+        self._win_handle = None
+        self._win_kernel32 = None
+
+    def _enter_windows(self) -> None:
+        """Acquire one process-shared mutex for the file's canonical path.
+
+        ``Local\\`` is intentionally scoped to the interactive Windows session: SliceAgent is a local
+        single-user application, and using ``Global\\`` would require privileges that ordinary installs do
+        not have. ``WAIT_ABANDONED`` still transfers ownership after a crashed writer, matching flock's
+        process-death recovery.
+        """
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+
+        raw_path = os.fspath(self._f.name)
+        if not isinstance(raw_path, (str, bytes)):
+            return
+        canonical = os.fsdecode(os.path.normcase(os.path.realpath(os.path.abspath(raw_path))))
+        digest = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
+        mutex_name = f"Local\\SliceAgentFileLock-{digest}"
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateMutexW(None, False, mutex_name)
+        if not handle:
+            return
+        wait_result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)  # INFINITE
+        if wait_result not in (0x00000000, 0x00000080):  # WAIT_OBJECT_0, WAIT_ABANDONED
+            kernel32.CloseHandle(handle)
+            return
+        self._win_handle = handle
+        self._win_kernel32 = kernel32
+        self._locked = True
 
     def __enter__(self):
         try:
-            import fcntl
-            fcntl.flock(self._f.fileno(), fcntl.LOCK_EX)   # blocks until acquired; auto-released on fd close / process death
-            self._locked = True
+            if IS_WINDOWS:
+                self._enter_windows()
+            else:
+                import fcntl
+                # Blocks until acquired; automatically released on fd close or process death.
+                fcntl.flock(self._f.fileno(), fcntl.LOCK_EX)
+                self._locked = True
         except Exception:
-            self._locked = False                           # no flock here → proceed unlocked (reads tolerate torn lines)
+            self._locked = False  # unavailable lock primitive → proceed unlocked (reads tolerate torn lines)
         return self
 
     def __exit__(self, *exc):
@@ -309,10 +358,24 @@ class FileLock:
             self._f.flush()   # flush BEFORE releasing so the NEXT locker sees a complete file — otherwise a
         except Exception:     # count-then-append (read the file under the lock, then write) races the buffer.
             pass
-        if self._locked:
+        if self._locked and IS_WINDOWS:
+            try:
+                self._win_kernel32.ReleaseMutex(self._win_handle)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self._win_kernel32.CloseHandle(self._win_handle)
+                except Exception:
+                    pass
+                self._win_handle = None
+                self._win_kernel32 = None
+                self._locked = False
+        elif self._locked:
             try:
                 import fcntl
                 fcntl.flock(self._f.fileno(), fcntl.LOCK_UN)
             except Exception:
                 pass
+            self._locked = False
         return False

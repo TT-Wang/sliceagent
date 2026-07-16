@@ -1,6 +1,6 @@
 """Cross-process advisory FileLock for the episode writer (#2). Serializes concurrent appenders to the same
-session JSONL so their lines can't interleave into a torn record. Real on POSIX (fcntl.flock), graceful no-op
-elsewhere. No model, no network. Run: PYTHONPATH=src python tests/test_file_lock.py
+session JSONL so their lines can't interleave into a torn record. Uses flock on POSIX and a path-keyed kernel
+mutex on Windows. No model, no network. Run: PYTHONPATH=src python tests/test_file_lock.py
 """
 import json
 import os

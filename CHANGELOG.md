@@ -110,6 +110,9 @@ this project aims for [Semantic Versioning](https://semver.org/).
   transitions compare case-insensitive canonical identities without changing display paths. Git-Bash live
   composition reuses the application-selected terminal I/O, while POSIX-only PTY eval support is loaded only
   when a live eval actually runs.
+- **Concurrent evidence appends are serialized on Windows too.** The JSONL `FileLock` now uses a
+  canonical-path-keyed Windows kernel mutex with abandoned-owner recovery, matching the existing POSIX `flock`
+  guarantee instead of allowing independently opened append handles to overwrite records.
 - **Private state modes do not leak into shared skills.** Personal vault/config/default-skill files remain
   owner-only, while an explicitly selected project/shared skill directory creates collaborator-readable
   `SKILL.md` files and preserves an existing file mode across atomic rewrites.

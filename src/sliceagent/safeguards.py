@@ -398,7 +398,10 @@ def _recursive_rm_reason(tokens: tuple[str, ...], index: int) -> str | None:
         # those same root operands remain visible when the classifier itself runs on Windows.
         host_root = os.path.isabs(expanded) and os.path.realpath(expanded) == "/"
         posix_root = posixpath.isabs(expanded) and posixpath.normpath(expanded) == "/"
-        if host_root or posix_root:
+        # posixpath intentionally preserves exactly two leading slashes as an implementation-defined network
+        # root. Git Bash still treats a slash-only operand as the filesystem root for rm, so classify it too.
+        slash_root = bool(expanded) and not expanded.strip("/")
+        if host_root or posix_root or slash_root:
             if preserve_root:
                 continue
             return "recursive deletion of root or home"
