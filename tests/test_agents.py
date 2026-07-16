@@ -76,10 +76,14 @@ def spawn_agent_schema_lists_the_roster():
     d = sa["function"]["description"]
     assert "explorer" in d and "general" in d            # kinds still enumerated
     assert "name" in d and "HIRE" in d                   # the identity/hire dial is taught in-schema
+    assert "complete normalized report" in d and "directly in this tool result" in d
+    assert "archive locator is optional" in d
     assert "20–30k source tokens" in d and "Waves of 2–3" in d
-    assert "complete declared coverage frontier" in d and "fixed future wave" in d
+    assert "later-wave partitions must actually be launched" in d and "fixed future wave" in d
     assert "one child per directory" in d and "exact child count" in d
     assert "one per area/module/question" not in d, "schema must not contradict bounded-wave guidance"
+    assert "work_item_id" not in sa["function"]["parameters"]["properties"], \
+        "delegation must not couple scheduler lifecycle to Active Work"
     scope = sa["function"]["parameters"]["properties"]["scope"]["description"]
     assert "source-weight-bounded" in scope
 

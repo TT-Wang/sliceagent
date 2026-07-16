@@ -140,7 +140,9 @@ def live_fanout_matrix_heartbeats_and_transitions_once_to_results():
             invocation_id="spawn-3", request_ordinal=3,
         ))
         for index, invocation in enumerate(invocations, 1):
-            effect = ToolEffect(f"effect-{index}", "child_artifact", {"artifact_id": f"child-{index}"})
+            effect = ToolEffect(f"effect-{index}", "child_outcome", {
+                "artifact_id": f"child-{index}", "report_completion": "complete",
+            })
             outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "report ready", (effect,))
             sink(ToolResult(
                 invocation.name, dict(invocation.args), outcome.text, False,
@@ -182,10 +184,10 @@ def live_fanout_matrix_heartbeats_and_transitions_once_to_results():
 
     first, second, height = observations
     assert height >= 5 and all(name in first for name in ("ui", "memory", "scheduler")), first
-    assert "2 sealed" in first and "1 working" in first, first
+    assert "2 reports ready" in first and "1 working" in first, first
     assert first != second and "00:01" in second, (first, second)
     rendered = buf.getvalue()
-    assert rendered.count("agents · 3/3 sealed") == 1, rendered
+    assert rendered.count("agents · 3/3 reports ready") == 1, rendered
     assert "done" in rendered and state["running"] is False
 
 
@@ -254,7 +256,9 @@ def replayed_terminal_tool_result_does_not_duplicate_the_agent_group():
         "report_ready", "report ready", 2, 2,
         invocation_id=invocation.id, request_ordinal=1,
     ))
-    effect = ToolEffect("child-one:effect", "child_artifact", {"artifact_id": "child-one"})
+    effect = ToolEffect("child-one:effect", "child_outcome", {
+        "artifact_id": "child-one", "report_completion": "complete",
+    })
     outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "report", (effect,))
     event = ToolResult(
         invocation.name, dict(invocation.args), "report", False,
@@ -264,7 +268,7 @@ def replayed_terminal_tool_result_does_not_duplicate_the_agent_group():
     sink(event)  # dispatcher interruption recovery is deliberately at-least-once
     sink(StepEnd(1, {}, "tool_use"))
     rendered = buf.getvalue()
-    assert rendered.count("agents · 1/1 sealed") == 1, rendered
+    assert rendered.count("agents · 1/1 reports ready") == 1, rendered
     assert rendered.count("1 explorer — audit") == 1, rendered
 
 
@@ -314,7 +318,9 @@ def rejected_terminal_callback_cannot_poison_agent_duration():
         "report_ready", "wrong turn", 0, 1,
         invocation_id=invocation.id, request_ordinal=1,
     ))
-    effect = ToolEffect("duration:effect", "child_artifact", {"artifact_id": "child-duration"})
+    effect = ToolEffect("duration:effect", "child_outcome", {
+        "artifact_id": "child-duration", "report_completion": "complete",
+    })
     outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "report", (effect,))
     sink(ToolResult(
         invocation.name, dict(invocation.args), outcome.text, False,

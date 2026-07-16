@@ -19,9 +19,8 @@ from sliceagent.execution import ToolStatus  # noqa: E402
 from sliceagent.intent import IntentEntry  # noqa: E402
 from sliceagent.memory import NullMemory  # noqa: E402
 from sliceagent.retriever import NullRetriever  # noqa: E402
-from sliceagent.subagent import (SubagentHost, _ObservationSink, _parent_observation_excerpt,
+from sliceagent.subagent import (SubagentHost, _ObservationSink,
                                  _canonical_artifact_for_seal,
-                                 _parent_report_excerpt,
                                  _explorer_navigation_steps,
                                  _task_mentions_exact_target,
                                  run_subagent)  # noqa: E402
@@ -40,6 +39,25 @@ CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
+
+
+def _child_outcome(result):
+    effects = [effect for effect in result.effects if effect.kind == "child_outcome"]
+    assert len(effects) == 1, "each terminal child report must carry one child_outcome effect"
+    return effects[0].payload
+
+
+def _assert_child_envelope(result, status: str, report: str = ""):
+    assert str(result).startswith("[child"), result
+    assert f"· {status}" in str(result).splitlines()[0], result
+    assert "BEGIN CHILD REPORT" in result and "END CHILD REPORT" in result
+    outcome = _child_outcome(result)
+    assert outcome["status"] == status
+    if report:
+        assert report in result, "the accepted canonical report must return directly and in full"
+        assert outcome["report_bytes"] == len(report.encode("utf-8"))
+        assert outcome["report_sha256"] == hashlib.sha256(report.encode("utf-8")).hexdigest()
+    return outcome
 
 
 class _Archive(HippocampusMixin, NullMemory):
@@ -538,32 +556,6 @@ def target_binding_accepts_sentence_punctuation_without_basename_collisions():
 
 
 @check
-def parent_evidence_excerpts_preserve_lines_and_mark_every_presentation_cut():
-    view = "     1\tstart\n" + ("x" * 580) + "\n     3\tTAIL_QUALIFIER"
-    body = view.encode("utf-8")
-    observation = SubagentObservation(
-        tool="read_file", args={"path": "app.py"}, status="succeeded", view=view,
-        raw_sha256=hashlib.sha256(body).hexdigest(), view_sha256=hashlib.sha256(body).hexdigest(),
-        raw_bytes=len(body), view_bytes=len(body), redacted=False, truncated=False,
-    )
-    shown = _parent_observation_excerpt((observation,), SubagentBrief.create(
-        "inspect app.py", scope=("app.py",),
-    ))
-    assert "presentation-truncated retained view" in shown
-    assert "presentation chars=0:346" in shown
-    assert "1\tstart\n" in shown, "line structure must not be flattened"
-    assert "TAIL_QUALIFIER" in shown
-    assert "primary presentation omitted" in shown
-
-    report = ("claim\n" * 80) + "QUALIFIER_IN_OMITTED_TAIL"
-    report_shown = _parent_report_excerpt(report, limit=300)
-    assert "presentation-truncated" in report_shown
-    assert "chars=0:200" in report_shown
-    assert "presentation omitted" in report_shown
-    assert "QUALIFIER_IN_OMITTED_TAIL" in report_shown
-
-
-@check
 def successful_child_read_is_sealed_into_the_canonical_artifact():
     from sliceagent.persistence import ArtifactStore
     from sliceagent.intent import IntentState, analyze_turn
@@ -613,12 +605,13 @@ def successful_child_read_is_sealed_into_the_canonical_artifact():
             intent_provider=lambda _task: intent,
         )
         result = host.run("spawn_agent", {"agent": "explorer", "task": "inspect auth.py"})
-        assert not result.startswith("Error:"), result
-        assert "child report (complete interpretation; preserve its qualifiers)" in result
-        assert "primary observation [obs:" in result
-        assert "complete retained view" in result
-        assert "stored = get_password(username)" in result
-        assert 'full evidence index: read_file("artifacts/' in result
+        report = "TOP CLAIM: password equality may be risky if the unseen storage and caller assumptions hold."
+        outcome = _assert_child_envelope(result, "succeeded", report)
+        assert result.status is ToolStatus.SUCCEEDED
+        assert outcome["report_completion"] == "complete"
+        assert outcome["explorer_evidence_status"] == "content_retained"
+        assert "primary observation" not in result, \
+            "evidence bytes stay behind their locator instead of duplicating the child report"
         artifact = store.list_all()[0]
         observations = artifact.structured_body["observations"]
         assert len(observations) == 1
@@ -638,6 +631,9 @@ def successful_child_read_is_sealed_into_the_canonical_artifact():
         assert child_effect.payload["explorer_evidence_status"] == "content_retained"
         assert child_effect.payload["explorer_evidence"]["content_success_count"] == 1
         assert child_effect.payload["claims"] == []
+        assert outcome["artifact_id"] == artifact.id
+        assert outcome["report_handle"] == f"artifacts/{artifact.id}.md"
+        assert outcome["evidence_index_handle"] == f"artifacts/{artifact.id}/evidence/index.md"
         virtual = CoreArtifactFS(store)
         report_page = virtual.read_file(f"artifacts/{artifact.id}.md")
         assert "TOP CLAIM:" in report_page
@@ -769,7 +765,9 @@ def host_threads_selected_intent_and_typed_identity_into_seal():
             "exclusions": ["no edits"], "report_shape": "status + evidenced findings",
             "drift_policy": "report",
         })
-        assert out.startswith("[explore ok") and 'read_file("subagents/sub-1.md")' in out
+        outcome = _assert_child_envelope(out, "succeeded", "found parser issue")
+        assert "Archive: subagents/sub-1.md" in out
+        assert outcome["report_handle"] == "subagents/sub-1.md"
         record = memory.read_subagent_artifacts("session-9")[-1]["artifact"]
         assert record["contract_v"] == 1
         assert record["workspace_id"] == "workspace-9" and record["session_id"] == "session-9"
@@ -850,34 +848,35 @@ def null_semantic_memory_still_seals_to_canonical_local_artifact():
 
 
 @check
-def canonical_child_failure_cannot_be_masked_by_semantic_mirror():
+def canonical_artifact_store_failure_returns_the_full_grounded_report_fail_soft():
     from sliceagent.persistence import ArtifactStore, PendingTurnJournal
 
     class FailingStore(ArtifactStore):
         def put(self, _artifact):
             raise OSError("core disk full")
 
-    class Mirror(NullMemory):
-        is_durable = True
-
-        def __init__(self):
-            self.calls = 0
-
-        def append_subagent_artifact(self, _session_id, _artifact):
-            self.calls += 1
-            return "sub-1"
-
     with tempfile.TemporaryDirectory() as root:
-        store, mirror = FailingStore(os.path.join(root, "core")), Mirror()
+        store = FailingStore(os.path.join(root, "core"))
+        report = "LONG-REPORT-BEGIN\n" + ("full canonical evidence-backed analysis\n" * 40) \
+            + "LONG-REPORT-END"
+        assert len(report.encode()) > 800
         host = SubagentHost(
-            _Tools(root), llm=_LLM("report"), retriever=NullRetriever(), memory=mirror,
+            _GroundedTools(root), llm=_GroundedLLM(report),
+            retriever=NullRetriever(), memory=NullMemory(),
             max_depth=1, session_id="session-1", workspace_id="workspace-1",
             task_id_fn=lambda: "task-1", parent_id_fn=lambda: "turn-parent",
             artifact_store=store,
         )
-        out = host.run("spawn_agent", {"agent": "explorer", "task": "inspect"})
-        assert out.startswith("Error: subagent result is indeterminate")
-        assert mirror.calls == 0, "derived memory must not create a competing successful truth"
+        out = host.run("spawn_agent", {"agent": "explorer", "task": "inspect fixture.py"})
+        outcome = _assert_child_envelope(out, "succeeded", report)
+        assert out.status is ToolStatus.SUCCEEDED
+        assert "Persistence warning: canonical artifact was not stored (OSError: core disk full)" in out
+        assert outcome["artifact_id"] == "" and outcome["report_handle"] == ""
+        assert outcome["persistence_warnings"] == [
+            "canonical artifact was not stored (OSError: core disk full)"
+        ]
+        assert not [effect for effect in out.effects if effect.kind == "child_artifact"], \
+            "optional persistence failure cannot mint an artifact effect"
         assert len(PendingTurnJournal.pending(store.root)) == 1
 
 
@@ -913,7 +912,7 @@ def canonical_child_archive_and_pending_header_are_redacted():
 
 
 @check
-def failed_parent_ref_handoff_keeps_child_unaccepted_and_recoverable():
+def failed_parent_ref_handoff_is_fail_soft_and_never_claims_a_committed_locator():
     from sliceagent.persistence import ArtifactStore, PendingTurnJournal
 
     with tempfile.TemporaryDirectory() as root:
@@ -923,14 +922,55 @@ def failed_parent_ref_handoff_keeps_child_unaccepted_and_recoverable():
             raise OSError("parent journal unavailable")
 
         host = SubagentHost(
-            _Tools(root), llm=_LLM("report"), retriever=NullRetriever(), memory=NullMemory(),
+            _GroundedTools(root), llm=_GroundedLLM("reference-safe report"),
+            retriever=NullRetriever(), memory=NullMemory(),
             max_depth=1, session_id="session-1", workspace_id="workspace-1",
             task_id_fn=lambda: "task-1", parent_id_fn=lambda: "turn-parent",
             artifact_store=store, artifact_ref_sink=fail_ref,
         )
-        out = host.run("spawn_agent", {"agent": "explorer", "task": "inspect"})
-        assert out.startswith("Error: subagent result is indeterminate")
+        out = host.run("spawn_agent", {"agent": "explorer", "task": "inspect fixture.py"})
+        outcome = _assert_child_envelope(out, "succeeded", "reference-safe report")
+        assert out.status is ToolStatus.SUCCEEDED
+        assert "Persistence warning: canonical artifact was not stored " \
+               "(OSError: parent journal unavailable)" in out
+        assert outcome["artifact_id"] == "" and outcome["report_handle"] == ""
+        assert not [effect for effect in out.effects if effect.kind == "child_artifact"]
         assert len(store.list_all()) == 1 and len(PendingTurnJournal.pending(store.root)) == 1
+
+
+@check
+def launch_ref_binding_failure_runs_and_returns_full_report_without_artifact():
+    from sliceagent.persistence import ArtifactStore
+
+    class SinkOwner:
+        def record(self, _artifact_id):
+            return None
+
+        def bind_artifact_ref_sink(self, **_kwargs):
+            raise OSError("launch journal unavailable")
+
+    with tempfile.TemporaryDirectory() as root:
+        store = ArtifactStore(os.path.join(root, "core"))
+        owner = SinkOwner()
+        full_report = "HEADLESS DELIVERY\n" + ("verified detail\n" * 100)
+        host = SubagentHost(
+            _GroundedTools(root), llm=_GroundedLLM(full_report), retriever=NullRetriever(),
+            memory=NullMemory(), max_depth=1, session_id="session-1",
+            workspace_id="workspace-1", task_id_fn=lambda: "task-1",
+            parent_id_fn=lambda: "turn-parent", artifact_store=store,
+            artifact_ref_sink=owner.record,
+        )
+
+        out = host.run("spawn_agent", {"agent": "explorer", "task": "inspect fixture.py"})
+        outcome = _assert_child_envelope(out, "succeeded", full_report)
+        assert out.status is ToolStatus.SUCCEEDED
+        assert full_report in out
+        assert "Persistence warning: canonical artifact was not stored " \
+               "(launch-turn artifact reference allocation failed: OSError: " \
+               "launch journal unavailable)" in out
+        assert outcome["artifact_id"] == "" and outcome["report_handle"] == ""
+        assert not any(effect.kind == "child_artifact" for effect in out.effects)
+        assert not store.list_all()
 
 
 @check
@@ -943,7 +983,9 @@ def mutable_name_grant_resolves_once_to_canonical_job_handle():
                             memory=memory, max_depth=1, session_id="s1")
         out = host.run("spawn_agent", {"agent": "synthesiser", "task": "use auth survey",
                                        "grants": ["subagents/auth.md"]})
-        assert 'read_file("subagents/sub-2.md")' in out
+        outcome = _assert_child_envelope(out, "succeeded", "synthesis")
+        assert "Archive: subagents/sub-2.md" in out
+        assert outcome["report_handle"] == "subagents/sub-2.md"
         synthesis = memory.read_subagent_artifacts("s1")[-1]["artifact"]
         assert synthesis["brief"]["grants"] == ["subagents/sub-1.md"]
         assert synthesis["refs"] == ["subagents/sub-1.md"]
@@ -999,16 +1041,20 @@ def unscoped_external_dependency_becomes_an_explicit_gap():
 
 
 @check
-def durable_archive_failure_is_indeterminate_and_never_accepted_inline():
+def durable_mirror_failure_is_fail_soft_and_keeps_the_full_report_inline():
     with tempfile.TemporaryDirectory() as root:
         for memory in (_DurableFailure(), _DurableRaise()):
+            report = f"authoritative grounded child report from {type(memory).__name__}"
             result = run_subagent(
-                "inspect", tools=_Tools(root), llm=_LLM("authoritative-looking child claim"),
-                retriever=NullRetriever(), memory=memory, max_steps=2,
+                "inspect fixture.py", tools=_GroundedTools(root), llm=_GroundedLLM(report),
+                retriever=NullRetriever(), memory=memory, max_steps=3,
                 read_only=True, session_id="s1")
-            assert result.startswith("Error: subagent result is indeterminate"), result
-            assert "durable report could not be sealed" in result
-            assert "authoritative-looking child claim" not in result
+            outcome = _assert_child_envelope(result, "succeeded", report)
+            assert result.status is ToolStatus.SUCCEEDED
+            assert outcome["artifact_id"] == ""
+            assert outcome["persistence_warnings"]
+            assert "Persistence warning: memory mirror was not stored" in result
+            assert not [effect for effect in result.effects if effect.kind == "child_artifact"]
 
 
 @check
@@ -1017,7 +1063,9 @@ def intentional_non_durable_mode_keeps_inline_compatibility_fallback():
         result = run_subagent(
             "inspect", tools=_GroundedTools(root), llm=_GroundedLLM("ephemeral result"), retriever=NullRetriever(),
             memory=NullMemory(), max_steps=2, read_only=True, session_id="")
-        assert result.startswith("[explore ok") and "ephemeral result" in result
+        outcome = _assert_child_envelope(result, "succeeded", "ephemeral result")
+        assert result.status is ToolStatus.SUCCEEDED
+        assert outcome["artifact_id"] == "" and outcome["persistence_warnings"] == []
         assert "subagents/sub-" not in result and "indeterminate" not in result
 
 
@@ -1107,7 +1155,10 @@ def child_budget_is_enforced_during_the_child_loop():
             token_budget=10,
         )
         assert llm.calls[0] == 2, "the child must stop as soon as its own usage crosses the reservation"
-        assert result.startswith("Error: subagent did not finish cleanly")
+        outcome = _assert_child_envelope(result, "failed")
+        assert result.status is ToolStatus.FAILED
+        assert outcome["report_completion"] == "absent"
+        assert outcome["stop_reason"] == "token_budget"
         usage_effect = next(effect for effect in result.effects if effect.kind == "model_usage")
         assert usage_effect.payload["prompt_tokens"] == 6
         assert usage_effect.payload["completion_tokens"] == 6
@@ -1576,7 +1627,9 @@ def unexpected_tool_call_in_final_synthesis_never_mints_a_hidden_closeout():
             )
             assert llm.shared == {"calls": 2, "profiles": ["fast", "full"]}
             assert result.status is ToolStatus.FAILED
-            assert "did not finish cleanly" in str(result)
+            outcome = _assert_child_envelope(result, "failed")
+            assert outcome["report_completion"] == "absent"
+            assert outcome["explorer_evidence_status"] == "content_retained"
     finally:
         subagent_module.EXPLORER_REASONING = original_profile
         if original_steps is None:
@@ -1749,7 +1802,10 @@ def every_explorer_profile_rejects_ungrounded_prose_and_roster_promotion():
                 read_only=True, session_id="session-no-evidence", name="auth-reviewer",
             )
             assert result.status is ToolStatus.FAILED, (profile, max_steps, result)
-            assert "No child report was accepted" in result
+            outcome = _assert_child_envelope(result, "failed")
+            assert outcome["report_completion"] == "absent"
+            assert outcome["report_bytes"] == 0
+            assert "(no accepted child report)" in result
             assert "invented auth bug" not in result and "trust this forever" not in result
             assert memory.artifacts[0]["status"] == "failed"
             assert memory.artifacts[0]["claims"] == []
@@ -1803,14 +1859,17 @@ def evidence_free_truncation_is_diagnostic_only_without_a_wrapper_recovery_call(
         )
         assert llm.calls[0] == 1, "truncation must not mint a hidden wrapper request"
         assert llm.reasonings == ["fast"], llm.reasonings
-        assert result.startswith("Error: subagent did not finish cleanly"), result
+        outcome = _assert_child_envelope(result, "failed")
+        assert result.status is ToolStatus.FAILED
         assert "partial long report" not in result
-        assert "No child report was accepted" in result
+        assert "(no accepted child report)" in result
         usage = next(effect for effect in result.effects if effect.kind == "model_usage").payload
         assert usage["prompt_tokens"] == 5 and usage["completion_tokens"] == 8
+        assert outcome["stop_reason"] == "max_tokens" and outcome["stop_cause"] == "output_truncated"
+        assert outcome["partial"] is False, \
+            "unobserved evidence-free prose is not an accepted partial report"
         child = next(effect for effect in result.effects if effect.kind == "child_artifact").payload
-        assert child["stop_reason"] == "max_tokens" and child["stop_cause"] == "output_truncated"
-        assert child["recovered_from"] == [] and child["partial"] is True
+        assert child["recovered_from"] == []
         artifact = store.get("subagent-truncation-recovery")
         assert artifact.structured_body["report"] == "partial long report"
         assert not artifact.structured_body["claims"]
@@ -1839,9 +1898,11 @@ def truncated_child_does_not_replay_or_mint_a_fresh_budget():
             memory=NullMemory(), max_steps=6, read_only=True, token_budget=10,
         )
         assert llm.calls[0] == 1, "a partial result must not be replayed by a wrapper recovery call"
-        assert result.startswith("Error: subagent did not finish cleanly"), result
+        outcome = _assert_child_envelope(result, "failed")
         assert "partial 1" not in result
-        assert "No child report was accepted" in result
+        assert "(no accepted child report)" in result
+        assert outcome["report_completion"] == "absent" and outcome["report_bytes"] == 0
+        assert outcome["stop_reason"] == "max_tokens"
         usage = next(effect for effect in result.effects if effect.kind == "model_usage").payload
         assert usage["prompt_tokens"] == 3 and usage["completion_tokens"] == 3
 
@@ -1874,12 +1935,12 @@ def provider_timeout_is_not_replayed_by_the_child_wrapper():
             artifact_id="subagent-timeout-recovery",
         )
         assert llm.calls[0] == 1, "provider retry policy has one owner; the child wrapper cannot replay it"
-        assert result.startswith("Error: subagent did not finish cleanly"), result
+        outcome = _assert_child_envelope(result, "failed")
         usage = next(effect for effect in result.effects if effect.kind == "model_usage").payload
         assert usage["prompt_tokens"] == 0 and usage["completion_tokens"] == 0
+        assert outcome["stop_reason"] == "error" and outcome["partial"] is False
         child = next(effect for effect in result.effects if effect.kind == "child_artifact").payload
-        assert child["stop_reason"] == "error"
-        assert child["recovered_from"] == [] and child["partial"] is False
+        assert child["recovered_from"] == []
 
 
 @check
@@ -1917,12 +1978,12 @@ def watchdog_abandonment_never_launches_overlapping_child_recovery():
         assert llm.calls[0] == 1, (
             f"a still-live provider socket must not overlap a recovery model call (got {llm.calls[0]})"
         )
-        assert result.startswith("Error: subagent did not finish cleanly"), result
+        outcome = _assert_child_envelope(result, "indeterminate")
         assert result.status is ToolStatus.INDETERMINATE, (
             "a watchdog-abandoned provider request must remain uncertain at the parent boundary"
         )
+        assert outcome["stop_cause"] == "indeterminate_model_call"
         child = next(effect for effect in result.effects if effect.kind == "child_artifact").payload
-        assert child["stop_cause"] == "indeterminate_model_call"
         assert child["recovered_from"] == []
 
 
@@ -1979,13 +2040,14 @@ def timeout_after_evidence_seals_only_observed_partial_without_a_fallback_namesp
             artifact_id="subagent-timeout-tool-namespace",
         )
         assert llm.calls[0] == 2
-        assert result.startswith("Error: subagent did not finish cleanly"), result
+        outcome = _assert_child_envelope(result, "failed")
         artifact = store.get("subagent-timeout-tool-namespace")
         assert "read_file a.py" in artifact.structured_body["trace"]
         assert "read_file b.py" not in artifact.structured_body["trace"]
         assert tools.ran == ["a.py"], "an unoffered recovery call must not reach the real tool host"
+        assert outcome["partial"] is True and outcome["report_completion"] == "absent"
         child = next(effect for effect in result.effects if effect.kind == "child_artifact").payload
-        assert child["recovered_from"] == [] and child["partial"] is True
+        assert child["recovered_from"] == []
 
 
 @check
@@ -2153,9 +2215,12 @@ def cancellation_after_parent_ref_publication_preserves_committed_child_truth():
         assert result.status is ToolStatus.SUCCEEDED, result
         assert refs == ["subagent-committed-race"]
         assert store.exists("subagent-committed-race")
+        outcome = _assert_child_envelope(result, "succeeded", "committed report")
+        assert outcome["artifact_id"] == "subagent-committed-race"
         child = next(effect for effect in result.effects if effect.kind == "child_artifact")
         assert child.payload["artifact_id"] == "subagent-committed-race"
-        assert child.payload["status"] == "ok" and child.payload["operational_status"] == "ok"
+        assert child.payload["status"] == "ok"
+        assert child.payload["operational_status"] == "succeeded"
         assert mirror.append_calls == mirror.index_calls == 0, \
             "post-commit cancellation may skip optional mirrors without rewriting canonical truth"
         assert PendingTurnJournal.pending(store.root) == []
@@ -2169,6 +2234,12 @@ def host_binds_child_reference_to_the_launch_turn_before_the_child_runs():
     class BlockingLLM(_LLM):
         def complete(self, _messages, _schemas):
             self.calls[0] += 1
+            if self.calls[0] == 1:
+                return NS(
+                    content="", finish_reason="tool_calls",
+                    tool_calls=[NS(name="read_file", args={"path": "fixture.py"}, id="read")],
+                    usage={"prompt_tokens": 1, "completion_tokens": 1},
+                )
             entered.set()
             assert release.wait(2)
             return _Response("late but otherwise complete report")
@@ -2183,7 +2254,8 @@ def host_binds_child_reference_to_the_launch_turn_before_the_child_runs():
             task_id="task-A", logical_id="turn-A", user_request="inspect A",
         )
         host = SubagentHost(
-            _Tools(root), llm=BlockingLLM(), retriever=NullRetriever(), memory=NullMemory(),
+            _GroundedTools(root), llm=BlockingLLM(),
+            retriever=NullRetriever(), memory=NullMemory(),
             max_depth=1, session_id="session-bound-child", workspace_id=turn_store.workspace_id,
             task_id_fn=lambda: "task-A", parent_id_fn=lambda: active_a.artifact_id,
             artifact_store=turn_store.coordinator.artifacts,
@@ -2202,7 +2274,15 @@ def host_binds_child_reference_to_the_launch_turn_before_the_child_runs():
         release.set()
         thread.join(2)
         assert not thread.is_alive()
-        assert str(box["result"]).startswith("Error: subagent result is indeterminate"), box["result"]
+        result = box["result"]
+        outcome = _assert_child_envelope(
+            result, "succeeded", "late but otherwise complete report",
+        )
+        assert result.status is ToolStatus.SUCCEEDED
+        assert outcome["artifact_id"] == "" and outcome["report_handle"] == ""
+        assert "Persistence warning: canonical artifact was not stored " \
+               "(RuntimeError: child launch turn is no longer active)" in result
+        assert not [effect for effect in result.effects if effect.kind == "child_artifact"]
         assert active_b.journal.snapshot().artifact_refs == ()
         turn_store.seal(state={}, record={}, status="end_turn")
         assert "subagent" not in " ".join(
@@ -2228,8 +2308,10 @@ def setup_timeout_is_not_misclassified_as_a_recoverable_model_timeout():
             memory=NullMemory(), max_steps=4, read_only=True,
         )
         assert llm.calls[0] == 0
-        assert result.startswith("Error: subagent did not finish cleanly"), result
-        assert "setup timed out" in result
+        outcome = _assert_child_envelope(result, "failed")
+        assert result.status is ToolStatus.FAILED
+        assert outcome["stop_reason"] == "error"
+        assert outcome["report_completion"] == "absent"
 
 
 @check

@@ -124,7 +124,7 @@ def test_benign_subagent_rejections_are_steered_before_start_without_a_matrix_ro
     assert getattr(host.inner, "ran", []) == []
 
 
-def test_capability_escalation_and_missing_work_binding_stay_loud_but_do_not_launch():
+def test_capability_escalation_stays_loud_and_does_not_launch():
     explorer = SubagentHost(
         _Inner(), llm=None, retriever=None, memory=None,
         spec=BUILTIN_AGENTS["explorer"], depth=0, max_depth=2,
@@ -132,19 +132,37 @@ def test_capability_escalation_and_missing_work_binding_stay_loud_but_do_not_lau
     escalation, escalation_events, _ = _settle(
         explorer, "spawn_agent", {"agent": "general", "task": "write files"},
     )
+
+    assert escalation.status is ToolStatus.FAILED
+    assert not any(isinstance(event, (ToolExecutionStarted, ToolStarted))
+                   for event in escalation_events)
+
+
+def test_active_work_binding_is_not_a_delegation_admission_gate(monkeypatch):
+    import sliceagent.subagent as module
+
+    monkeypatch.setattr(
+        module, "run_subagent",
+        lambda *_args, **_kwargs: ToolText("complete child report", status=ToolStatus.SUCCEEDED),
+    )
     bound = SubagentHost(
         _Inner(), llm=None, retriever=None, memory=None,
         active_work_provider=_MissingWork(),
     )
+    spawn_schema = next(
+        item["function"] for item in bound.schemas()
+        if item.get("function", {}).get("name") == "spawn_agent"
+    )
+    assert "work_item_id" not in spawn_schema["parameters"]["properties"]
+
     missing, missing_events, _ = _settle(
         bound, "spawn_agent",
         {"agent": "explorer", "task": "inspect", "work_item_id": "missing"},
     )
 
-    assert escalation.status is ToolStatus.FAILED
-    assert missing.status is ToolStatus.FAILED
-    assert not any(isinstance(event, (ToolExecutionStarted, ToolStarted))
-                   for event in escalation_events + missing_events)
+    assert missing.status is ToolStatus.SUCCEEDED
+    assert any(isinstance(event, ToolExecutionStarted) for event in missing_events)
+    assert any(isinstance(event, ToolStarted) for event in missing_events)
 
 
 def test_runtime_child_failure_is_loud_and_occurs_after_started(monkeypatch):
@@ -192,7 +210,20 @@ def test_unexpected_child_crash_is_typed_by_effect_risk(monkeypatch, agent, expe
         assert "may have applied task-local effects" in outcome.text
 
 
-def test_result_sink_binding_failure_is_a_typed_started_failure():
+def test_result_sink_binding_failure_runs_child_headless(monkeypatch):
+    import sliceagent.subagent as module
+
+    seen = {}
+
+    def run_headless(*_args, **kwargs):
+        seen.update(kwargs)
+        return ToolText(
+            "FULL CHILD REPORT\nPersistence warning: " + kwargs["artifact_setup_warning"],
+            status=ToolStatus.SUCCEEDED,
+        )
+
+    monkeypatch.setattr(module, "run_subagent", run_headless)
+
     class SinkOwner:
         def record(self, _artifact_id):
             return None
@@ -209,8 +240,43 @@ def test_result_sink_binding_failure_is_a_typed_started_failure():
         host, "spawn_agent", {"agent": "explorer", "task": "inspect"},
     )
 
-    assert outcome.status is ToolStatus.FAILED
-    assert "could not bind subagent result" in outcome.text
+    assert outcome.status is ToolStatus.SUCCEEDED
+    assert "FULL CHILD REPORT" in outcome.text
+    assert "launch-turn artifact reference allocation failed: OSError: turn seal unavailable" \
+           in outcome.text
+    assert seen["artifact_id"] == "" and seen["artifact_ref_sink"] is None
+    assert any(isinstance(event, ToolExecutionStarted) for event in events)
+
+
+def test_artifact_identity_failure_runs_child_headless(monkeypatch):
+    import sliceagent.subagent as module
+
+    seen = {}
+
+    def run_headless(*_args, **kwargs):
+        seen.update(kwargs)
+        return ToolText(
+            "FULL CHILD REPORT\nPersistence warning: " + kwargs["artifact_setup_warning"],
+            status=ToolStatus.SUCCEEDED,
+        )
+
+    monkeypatch.setattr(module, "run_subagent", run_headless)
+    host = SubagentHost(
+        _Inner(), llm=None, retriever=None, memory=None, artifact_store=object(),
+    )
+    monkeypatch.setattr(
+        host, "_artifact_identity",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("artifact id unavailable")),
+    )
+
+    outcome, events, _ = _settle(
+        host, "spawn_agent", {"agent": "explorer", "task": "inspect"},
+    )
+
+    assert outcome.status is ToolStatus.SUCCEEDED
+    assert "FULL CHILD REPORT" in outcome.text
+    assert "artifact identity allocation failed: OSError: artifact id unavailable" in outcome.text
+    assert seen["artifact_id"] == "" and seen["artifact_store"] is None
     assert any(isinstance(event, ToolExecutionStarted) for event in events)
 
 
@@ -239,8 +305,8 @@ if __name__ == "__main__":
                 ),
         ))
     checks.append((
-        "capability_escalation_and_missing_work_binding",
-        test_capability_escalation_and_missing_work_binding_stay_loud_but_do_not_launch,
+        "capability_escalation",
+        test_capability_escalation_stays_loud_and_does_not_launch,
     ))
 
     def runtime_failure():
@@ -259,7 +325,23 @@ if __name__ == "__main__":
             finally:
                 patch.undo()
         checks.append((f"unexpected_{agent}_crash", crash_case))
-    checks.append(("result_sink_binding_failure", test_result_sink_binding_failure_is_a_typed_started_failure))
+    def result_sink_binding_failure():
+        patch = _StandaloneMonkeyPatch()
+        try:
+            test_result_sink_binding_failure_runs_child_headless(patch)
+        finally:
+            patch.undo()
+
+    checks.append(("result_sink_binding_failure", result_sink_binding_failure))
+
+    def artifact_identity_failure():
+        patch = _StandaloneMonkeyPatch()
+        try:
+            test_artifact_identity_failure_runs_child_headless(patch)
+        finally:
+            patch.undo()
+
+    checks.append(("artifact_identity_failure", artifact_identity_failure))
 
     passed = 0
     for name, check in checks:

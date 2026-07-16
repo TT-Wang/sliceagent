@@ -15,8 +15,9 @@ def test_kernel_keeps_exact_request_above_derived_state():
     low = SYSTEM_PROMPT.lower()
     assert "current request is the user's exact text" in low
     assert "the exact request wins" in low
-    assert "typed active-work delta" in low
-    assert "working state, not a second user and not an autobiography" in low
+    assert "active work is optional source-linked working state" in low
+    assert "not a second user, a scheduler, a transcript, or a prerequisite for tool use" in low
+    assert "do not create work items merely to launch children" in low
 
 
 def test_context_is_dependency_first_and_elastic_without_transcript_growth():
@@ -33,7 +34,8 @@ def test_proof_families_are_not_interchangeable():
     assert "fresh observations" in contract and "current world state" in contract
     assert "execution receipts prove only" in contract
     assert "response artifacts" in contract and "what text was delivered" in contract
-    assert "child artifacts are attributed testimony" in contract
+    assert "child outcomes are attributed testimony" in contract
+    assert "an optional child artifact is only their durable locator" in contract
     assert "never use one proof family as another" in contract
 
 
@@ -49,7 +51,7 @@ def test_brain_regions_have_distinct_authority_and_memory_never_outranks_now():
     prompt = (SYSTEM_PROMPT + MEMORY_ACCUMULATE).lower()
     assert "sensory cortex" in prompt and "fresh derived view of the live world" in prompt
     assert "history / hippocampus" in prompt and "canonical evidence of what happened" in prompt
-    assert "pfc / active work" in prompt and "open commitments" in prompt
+    assert "pfc / active work" in prompt and "unresolved commitments" in prompt
     assert "knowledge" in prompt and "user, project, and craft leads" in prompt
     assert "current request and fresh world observations" in prompt
     assert "outrank every memory or knowledge record" in prompt

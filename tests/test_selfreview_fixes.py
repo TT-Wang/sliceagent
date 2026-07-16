@@ -80,11 +80,12 @@ def m29_unknown_access_type_serializes_no_crash():
     assert _pair_conflict(FileAccess("read", "a.py"), FileAccess("read", "b.py")) is False   # normal path intact
 
 
-# ---- H2: a SIGALRM hard-deadline is re-raised, not downgraded to a partial "length" stop ---------------
+# ---- H2: a transport timeout is never downgraded to a partial "length" stop ----------------------------
 
 @check
 def h2_stream_timeout_is_reraised_not_salvaged():
     from sliceagent.llm import OpenAILLM, _import_api_timeout_error
+    from sliceagent.errors import IndeterminateModelCallError
     TimeoutErr = _import_api_timeout_error()
     llm = OpenAILLM.__new__(OpenAILLM)           # bypass __init__ (no network/key)
     llm.reasoning = "fast"; llm._base_url = "http://local"; llm._delta = None; llm.model = "deepseek-chat"
@@ -110,10 +111,13 @@ def h2_stream_timeout_is_reraised_not_salvaged():
 
     try:
         llm._stream_assemble({})
-        raised = False
+        raised = None
     except Exception as e:  # noqa: BLE001
-        raised = isinstance(e, TimeoutErr)
-    assert raised, "the hard-deadline timeout must propagate, not be salvaged as a partial 'length' stop"
+        raised = e
+    assert isinstance(raised, IndeterminateModelCallError), (
+        "a timeout after semantic output begins must be indeterminate, not a partial 'length' response"
+    )
+    assert isinstance(raised.__cause__, TimeoutErr), "the provider timeout must remain chained as the cause"
 
 
 # ---- the calibrated reviewer kind (the cry-wolf counterweight) -----------------------------------------

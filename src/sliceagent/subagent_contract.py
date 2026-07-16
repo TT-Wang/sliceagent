@@ -431,8 +431,8 @@ def exact_intent_clauses(values: object) -> tuple[IntentClause, ...]:
 @dataclass(frozen=True)
 class SubagentBrief:
     objective: str
-    # Optional immutable binding to the parent's model-maintained work item.  Empty preserves old artifacts;
-    # new Active Work-aware launches carry it through brief, seal, receipt, and fan-in.
+    # Retired live field retained only to deserialize pre-0.3 artifacts. New launches always leave it empty:
+    # delegation lifecycle is execution state, not a mutation of the user's Active Work graph.
     work_item_id: str = ""
     intent_clauses: tuple[IntentClause, ...] = ()
     scope: tuple[str, ...] = ()
@@ -610,6 +610,109 @@ def capture_workspace_revision(root: str, paths: Iterable[str]) -> tuple[Workspa
         except (OSError, ValueError) as exc:
             gaps.append(f"could not fingerprint {path}: {exc}")
     return WorkspaceRevision(root_real, tuple(dependencies)), tuple(gaps)
+
+
+@dataclass(frozen=True)
+class ChildOutcome:
+    """The one child-to-parent return value.
+
+    A report is computation, so it returns directly in the tool result.  Archive and UI metadata are
+    projections of this value; neither is allowed to decide whether the parent receives it.
+    """
+
+    status: Literal["succeeded", "failed", "cancelled", "indeterminate"]
+    report: str
+    kind: str
+    name: str = ""
+    launch_ordinal: int = 0
+    report_completion: ReportCompletion = "unknown"
+    stop_reason: str = ""
+    stop_cause: str = ""
+    error: str = ""
+    partial: bool = False
+    evidence_status: ExplorerEvidenceStatus = "not_assessed"
+    evidence_account: Mapping[str, Any] = field(default_factory=dict)
+    source_coverage_status: SourceCoverageStatus = "not_assessed"
+    report_locator: str = ""
+    evidence_locator: str = ""
+    artifact_id: str = ""
+    persistence_warnings: tuple[str, ...] = ()
+    usage: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.status not in {"succeeded", "failed", "cancelled", "indeterminate"}:
+            raise ValueError("child outcome status is invalid")
+        _text(self.report, "child outcome report", empty=True)
+        _text(self.kind, "child outcome kind")
+        if self.launch_ordinal < 0:
+            raise ValueError("child outcome launch_ordinal cannot be negative")
+        if self.report_completion not in {"complete", "partial", "absent", "unknown"}:
+            raise ValueError("child outcome report_completion is invalid")
+        evidence_status = str(self.evidence_status or "not_assessed")
+        if evidence_status not in {
+            "not_assessed", "none", "navigation_only", "content_partial", "content_retained",
+        }:
+            raise ValueError("child outcome evidence_status is invalid")
+        source_status = normalize_source_coverage_status(self.source_coverage_status)
+        object.__setattr__(self, "evidence_status", evidence_status)
+        object.__setattr__(self, "source_coverage_status", source_status)
+        object.__setattr__(self, "persistence_warnings", _unique(_strings(
+            self.persistence_warnings, "child outcome persistence_warnings",
+        )))
+        object.__setattr__(self, "evidence_account", MappingProxyType(dict(self.evidence_account or {})))
+        object.__setattr__(self, "usage", MappingProxyType(dict(self.usage or {})))
+
+    @property
+    def report_sha256(self) -> str:
+        return hashlib.sha256(self.report.encode("utf-8")).hexdigest()
+
+    @property
+    def report_bytes(self) -> int:
+        return len(self.report.encode("utf-8"))
+
+    def to_effect(self) -> dict[str, Any]:
+        """Small model-external metadata; the report body stays in the tool result exactly once."""
+        return {
+            "status": self.status,
+            "operational_status": self.status,
+            "kind": self.kind,
+            "name": self.name,
+            "launch_ordinal": self.launch_ordinal,
+            "report_completion": self.report_completion,
+            "report_sha256": self.report_sha256,
+            "report_bytes": self.report_bytes,
+            "stop_reason": self.stop_reason,
+            "stop_cause": self.stop_cause,
+            "partial": self.partial,
+            "explorer_evidence_status": self.evidence_status,
+            "explorer_evidence": dict(self.evidence_account),
+            "source_coverage_status": self.source_coverage_status,
+            "report_handle": self.report_locator,
+            "evidence_index_handle": self.evidence_locator,
+            "artifact_id": self.artifact_id,
+            "persistence_warnings": list(self.persistence_warnings),
+        }
+
+    def render(self) -> str:
+        identity = self.name or self.kind
+        ordinal = f"child {self.launch_ordinal}" if self.launch_ordinal else "child"
+        labels = [ordinal, identity, self.status]
+        if self.report_completion not in {"unknown", "complete"}:
+            labels.append(f"report {self.report_completion}")
+        if self.evidence_status != "not_assessed":
+            labels.append(f"evidence {self.evidence_status.replace('_', ' ')}")
+        lines = ["[" + " · ".join(labels) + "]", "", "BEGIN CHILD REPORT"]
+        lines.append(self.report if self.report else "(no accepted child report)")
+        lines.append("END CHILD REPORT")
+        if self.error:
+            lines += ["", "Error: " + self.error]
+        if self.report_locator:
+            lines.append("Archive: " + self.report_locator)
+        if self.evidence_locator:
+            lines.append("Evidence: " + self.evidence_locator)
+        for warning in self.persistence_warnings:
+            lines.append("Persistence warning: " + warning)
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -999,7 +1102,8 @@ class SubagentArtifact:
 
 
 __all__ = [
-    "IntentClause", "SubagentBrief", "SubagentArtifact", "SubagentObservation", "SubagentClaim", "DriftPolicy",
+    "IntentClause", "SubagentBrief", "ChildOutcome", "SubagentArtifact", "SubagentObservation",
+    "SubagentClaim", "DriftPolicy",
     "IntegrationPolicy", "ExplorerEvidenceAccount", "ExplorerEvidenceStatus", "ReportCompletion",
     "SourceCoverageStatus", "normalize_source_coverage_status",
     "exact_intent_clauses", "capture_workspace_revision",

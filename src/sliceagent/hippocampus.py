@@ -1102,10 +1102,10 @@ def make_search_history_tool(memory, session_id: str):
     return ToolEntry(name="search_history", schema=schema, handler=_handler, source="builtin")
 
 
-# ── SUBAGENTS/ virtual namespace — the parent's read-only view of its children's sealed artifacts ──────
+# ── SUBAGENTS/ virtual namespace — optional archive view of child reports ──────────────────
 # Mirrors HistoryFS (history/), but over read_subagent_artifacts instead of turns. `index.md` is the
-# DELEGATED WORK manifest; each `sub-<n>.md` is a child's FULL sealed report — the refinement handle behind
-# the bounded digest the spawn tool returned. Served live from the archive; nothing new is written here.
+# DELEGATED WORK manifest; each `sub-<n>.md` is an archived full report. Since 0.3 the same full report is
+# returned directly to the parent; this mount is a refinement/recovery surface, not the delivery channel.
 SUBAGENT_MOUNT = "subagents"
 _SUB_FILE = re.compile(r"^(sub-\d+)\.md$")
 # INSTANCE-NAME alias: subagents/<name>.md resolves to the LATEST artifact sealed under that identity

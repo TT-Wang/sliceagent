@@ -249,8 +249,8 @@ class ActiveWorkContinuationHook(Hooks):
     child records; the host only performs arithmetic over their typed lifecycle.  One unchanged frontier is
     nudged once, so a stale record cannot spin the turn forever. Metadata-only graph revisions do not re-arm the
     hook; adding/removing a child or changing its lifecycle does. ``ready`` is intentionally deliverable, while
-    ``waiting_user`` is a legitimate dialogue boundary. Child report fan-in is automatic context material and
-    never a continuation/advisory gate here.
+    ``waiting_user`` is a legitimate dialogue boundary. This compatibility hook is not installed by the 0.3
+    runtime: Active Work tracks user commitments, not child execution lifecycle.
     """
 
     def __init__(self, provider):

@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict
 from types import SimpleNamespace
 
 from sliceagent.active_work import ResourceRef, WorkDelta, WorkItem
 from sliceagent.cli import _hydrate_workspace_tasks, _use_chitchat_fast_path
 from sliceagent.context_compiler import compile_active_context, dependency_resource_paths
+from sliceagent.events import ToolResult
+from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus
+from sliceagent.intent import TurnAdmission
 from sliceagent.memory import NullMemory
 from sliceagent.persistence import Artifact, ArtifactStore, Checkpoint
 from sliceagent.pfc import Slice, record_user
+from sliceagent.runtime_persistence import CoreArtifactFS, LocalTurnStore
+from sliceagent.seed import make_build_slice
 from sliceagent.session import Session
 from sliceagent.taskstate import slice_to_task_state
+from sliceagent.tools import LocalToolHost
 
 
 def test_latest_compact_receipt_is_reconstructed_from_artifacts_after_restart(tmp_path):
@@ -51,6 +58,96 @@ def test_latest_compact_receipt_is_reconstructed_from_artifacts_after_restart(tm
     assert restored.last_receipt_artifact_id == artifact.id
     assert restored.last_receipt["counts"]["failed"] == 1
     assert restored.last_receipt["warning_count"] == 1
+
+
+def test_crash_recovery_exposes_journaled_child_report_to_real_resumed_seed(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = LocalTurnStore(
+        str(workspace), "session-before-crash", store_root=str(tmp_path / "core"),
+    )
+    active = store.begin(
+        task_id="task-review", logical_id="logical-crash", user_request="Review the project.",
+    )
+    admission = TurnAdmission(request_text="Review the project.")
+    store.record_admission({
+        "action": "continue", "task_id": "task-review", "logical_turn_id": "logical-crash",
+        "source_event_id": "event-crash", "source_event_text": "Review the project.",
+        "workspace_epoch": 0, "admission": admission.to_dict(),
+    })
+    report = "REPORT-FIRST " + ("full-child-evidence " * 90) + "REPORT-LAST"
+    invocation = ToolInvocation(
+        "spawn-crash", "spawn_agent", {"agent": "explorer", "task": "review core"}, 0,
+    )
+    effect = ToolEffect("child-outcome-crash", "child_outcome", {
+        "status": "succeeded", "operational_status": "succeeded", "kind": "explorer",
+        "launch_ordinal": 1, "report_completion": "complete",
+        "report_bytes": len(report.encode("utf-8")),
+        "report_sha256": hashlib.sha256(report.encode("utf-8")).hexdigest(),
+    })
+    text = (
+        "[child 1 · explorer · succeeded]\n\nBEGIN CHILD REPORT\n"
+        + report + "\nEND CHILD REPORT"
+    )
+    outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, text, (effect,))
+    # This is the audited crash window: the complete ToolResult is fsynced, but the process dies before the
+    # reducer transition or the parent's next model call can synthesize it.
+    store.observe_event(ToolResult(
+        invocation.name, dict(invocation.args), text, False,
+        status="succeeded", invocation_id=invocation.id, outcome=outcome,
+    ))
+    store.close()
+
+    recovered = LocalTurnStore(
+        str(workspace), "session-after-crash", store_root=str(tmp_path / "core"),
+    )
+    result = recovered.recover_pending()[0]
+    assert result.status == "attached"
+    recovered_artifact = recovered.coordinator.artifacts.get(active.artifact_id)
+    assert recovered_artifact.status == "interrupted"
+
+    session = Session(NullMemory(), "session-after-crash")
+    _hydrate_workspace_tasks(recovered, session, lambda _message: None)
+    state = session.active()
+    assert state.continuity.recovery_child_artifact_id == active.artifact_id
+    assert state.continuity.recovery_child_report_count == 1
+
+    record_user(
+        state, "Continue and synthesize the review.", source_event_id="event-resume",
+        source_text="Continue and synthesize the review.", logical_id="logical-resume",
+    )
+
+    class Ledger:
+        @staticmethod
+        def resolve_user_sources(ids):
+            sources = {
+                "event-crash": "Review the project.",
+                "event-resume": "Continue and synthesize the review.",
+            }
+            return {event_id: sources[event_id] for event_id in ids if event_id in sources}
+
+    host = LocalToolHost(str(workspace))
+    host._artifacts = CoreArtifactFS(recovered.coordinator.artifacts)
+    messages = make_build_slice(
+        session, host, None, NullMemory(), "Continue and synthesize the review.",
+        session.session_id, event_ledger=Ledger(), model_id="test-model",
+    )()
+    provider_text = "\n".join(
+        str(message.get("content") or "") for message in messages if message.get("role") == "user"
+    )
+    locator = f'artifacts/{active.artifact_id}.md'
+    assert "crash recovery: 1 returned child report" in provider_text
+    assert f'read_file("{locator}")' in provider_text
+    assert "HOST FAN-IN" not in provider_text
+    assert "REPORT-FIRST" not in provider_text, \
+        "recovery should advertise canonical evidence, not reload report bodies into every seed"
+
+    archived = host.run("read_file", {"path": locator})
+    assert report in archived, "the advertised immutable locator must retain the full child result"
+    state.seal()
+    assert state.continuity.recovery_child_artifact_id == "", \
+        "the recovery locator is a one-turn repair seam, not recurring context"
+    recovered.close()
 
 
 def test_latest_seed_keeps_operational_success_and_source_coverage_separate_without_gap_prose():

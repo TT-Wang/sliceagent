@@ -129,7 +129,7 @@ def agent_groups_and_busy_meter_are_width_safe_with_wide_text():
         status="failed" if index == 2 else "succeeded",
         stop_cause="provider_timeout" if index == 2 else "complete",
         recovered_from=(), artifact_id=f"child-{index}", detail="详细错误" * 30,
-        duration_s=12.4,
+        duration_s=12.4, report_completion="complete",
     ) for index in range(1, 5)]
     for width in (60, 80, 120):
         buf = io.StringIO()
@@ -144,7 +144,7 @@ def agent_groups_and_busy_meter_are_width_safe_with_wide_text():
 
 
 @check
-def live_agent_matrix_keeps_operational_seal_separate_from_source_partial():
+def live_agent_matrix_keeps_report_readiness_separate_from_source_partial():
     machine = TurnProgress(await_commit=True)
     machine.reduce(TurnStarted("merge reports", turn_id="turn-source"))
     machine.reduce(StepBegin(1))
@@ -152,19 +152,25 @@ def live_agent_matrix_keeps_operational_seal_separate_from_source_partial():
         "synth-1", "spawn_agent", {"agent": "synthesiser", "task": "merge reports"}, 0,
     )
     machine.reduce(ToolStarted(invocation.name, dict(invocation.args), invocation))
-    effect = ToolEffect("child-source", "child_artifact", {
-        "artifact_id": "child-source", "kind": "synthesiser", "status": "ok",
+    outcome_effect = ToolEffect("child-source:outcome", "child_outcome", {
+        "kind": "synthesiser", "status": "ok",
+        "report_completion": "complete",
         "source_coverage_status": "source_partial",
     })
-    outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "report", (effect,))
+    artifact_effect = ToolEffect("child-source:artifact", "child_artifact", {
+        "artifact_id": "child-source",
+    })
+    outcome = ToolOutcome(
+        invocation, ToolStatus.SUCCEEDED, "report", (outcome_effect, artifact_effect),
+    )
     machine.reduce(ToolResult(
         invocation.name, dict(invocation.args), outcome.text, False,
         status="succeeded", invocation_id=invocation.id, outcome=outcome,
     ))
 
     rendered = "\n".join(line for _, line in _agent_matrix_plain_lines(machine.snapshot(), 120))
-    assert "1 sealed" in rendered and "1 source partial" in rendered, rendered
-    assert "✓ sealed" in rendered and "source partial" in rendered, rendered
+    assert "1 ready" in rendered and "1 source partial" in rendered, rendered
+    assert "✓ ready" in rendered and "source partial" in rendered, rendered
     assert "ground" not in rendered and "verified" not in rendered, rendered
 
 
@@ -263,6 +269,7 @@ def narrow_single_agent_uses_a_complete_manifest_handle():
         invocation_id="agent-1", launch_ordinal=1, kind="explorer", name="", task="audit",
         status="succeeded", stop_cause="complete", recovered_from=(),
         artifact_id="subagent-" + ("a" * 32), detail="report", request_ordinal=1,
+        report_completion="complete",
     )
     buf = io.StringIO()
     console = Console(file=buf, width=58, force_terminal=False, color_system=None, soft_wrap=False)

@@ -1,11 +1,8 @@
-"""Bounded, derived truth about delegated work consumed by the parent.
+"""Legacy derived truth about delegated work consumed by the parent.
 
-The child artifact and the parent's use of it are different facts.  A successful
-delegation normally delivers a bounded digest in the tool result; opening the sealed
-artifact is an optional refinement unless the child explicitly declares
-``integration_policy=report_required``.  This module projects those facts from the
-append-only runtime call ledger (and, after a seal, from Active Work evidence refs).
-It owns no mutable state and therefore cannot perturb WorkGraph CAS revisions.
+Since 0.3 the runtime returns complete child reports directly and never calls this fan-in projection. These
+readers remain for pre-0.3 checkpoints, artifacts, and migration diagnostics. They own no mutable state and
+therefore cannot perturb WorkGraph CAS revisions.
 """
 from __future__ import annotations
 

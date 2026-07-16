@@ -335,13 +335,16 @@ def delegation_guidance_is_compiled_from_core_and_advanced_schemas():
     core_text = render_delegation_guidance(core.schemas())
     assert "Available agent kinds: explorer" in core_text
     assert "standing specialist" not in core_text and "grants field" not in core_text
+    assert "complete normalized report directly as this tool result" in core_text
+    assert "archive and evidence locators" in core_text and "not required for delivery" in core_text
     assert "ignore-aware source map" in core_text
     assert "20-30k source tokens" in core_text and "80-120 KB" in core_text
     assert "typed scope field" in core_text
-    assert "waves of 2-3" in core_text
+    assert "scheduler owns those physical waves" in core_text
     assert "user explicitly requests a child count" in core_text
     assert "blindly reading every file in full" in core_text
     assert "coverage gaps" in core_text and "cite the sources" in core_text
+    assert "work_item_id" not in core_text and "DELEGATION FAN-IN" not in core_text
 
     advanced = SubagentHost(_Inner(), llm=None, retriever=None, memory=None,
                             max_depth=1, core_mode=False)

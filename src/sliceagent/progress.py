@@ -33,6 +33,7 @@ from .events import (
     TurnStarted,
 )
 from .regions import MAX_PLAN_CHARS, MAX_PLAN_ITEMS
+from .tui_projection import child_incompleteness_label, normalized_report_completion
 
 
 class ProgressPhase(str, Enum):
@@ -206,6 +207,7 @@ class ActiveSubagent:
     tool_name: str = ""
     terminal_reason: str = ""
     partial: bool = False
+    report_completion: str = "unknown"
 
 
 _ACTIVE_AGENT_PHASES = frozenset({
@@ -214,7 +216,7 @@ _ACTIVE_AGENT_PHASES = frozenset({
     "running",  # compatibility for older structured callbacks
 })
 _TERMINAL_AGENT_PHASES = frozenset({
-    "report_ready", "steered", "failed", "timed_out", "cancelled", "indeterminate",
+    "report_ready", "completed", "steered", "failed", "timed_out", "cancelled", "indeterminate",
 })
 _AGENT_PHASES = _ACTIVE_AGENT_PHASES | _TERMINAL_AGENT_PHASES
 # Within one physical model response these are refinements of the same fact, so a
@@ -274,10 +276,16 @@ def _agent_phase_detail(
     tool_name: object = "",
     terminal_reason: object = "",
     partial: bool = False,
+    report_completion: object = "unknown",
 ) -> str:
     """Build bounded display text from typed child activity without inferring state from prose."""
     if phase == "report_ready":
-        return "sealed"
+        return "report ready"
+    if phase == "completed":
+        completion = normalized_report_completion(report_completion)
+        return "completed · no report" if completion == "absent" else "completed · report status unknown"
+    if phase == "settling":
+        return "finalizing outcome"
     explicit = _one_line(detail, 80)
     if explicit:
         return explicit
@@ -301,11 +309,10 @@ def _agent_phase_detail(
         if retry_delay_s > 0:
             parts.append(f"{retry_delay_s:.1f}s")
         return " · ".join(parts)
-    if phase == "settling":
-        return "sealing partial outcome"
     if phase in _TERMINAL_AGENT_PHASES:
         reason = _one_line(terminal_reason, 60) or phase.replace("_", " ")
-        return reason + (" · partial report" if partial else "")
+        qualifier = child_incompleteness_label(report_completion, partial)
+        return reason + (f" · {qualifier}" if qualifier else "")
     return phase.replace("_", " ")
 
 
@@ -512,7 +519,8 @@ class TurnProgress:
                 self._agent_unlinked_outcomes.get(status, 0), terminal,
             )
 
-        sealed = settled_count("succeeded", "report_ready")
+        ready = settled_count("succeeded", "report_ready")
+        completed = settled_count("completed", "completed")
         steered = settled_count("steered", "steered")
         failed = settled_count("failed", "failed")
         timed_out = settled_count("timed_out", "timed_out")
@@ -528,8 +536,10 @@ class TurnProgress:
             parts.append(f"{active} agent{'s' if active != 1 else ''} running")
         if queued:
             parts.append(f"{len(queued)} agent{'s' if len(queued) != 1 else ''} queued")
-        if sealed:
-            parts.append(f"{sealed} sealed")
+        if ready:
+            parts.append(f"{ready} report{'s' if ready != 1 else ''} ready")
+        if completed:
+            parts.append(f"{completed} completed without report")
         if steered:
             parts.append(f"{steered} steered")
         if failed:
@@ -554,13 +564,14 @@ class TurnProgress:
 
     @staticmethod
     def _child_payload(event: ToolResult) -> Mapping[str, object]:
+        merged: dict[str, object] = {}
         for effect in (getattr(getattr(event, "outcome", None), "effects", ()) or ()):
-            if str(getattr(effect, "kind", "") or "") != "child_artifact":
+            if str(getattr(effect, "kind", "") or "") not in {"child_outcome", "child_artifact"}:
                 continue
             payload = getattr(effect, "payload", None)
             if isinstance(payload, Mapping):
-                return payload
-        return {}
+                merged.update(payload)
+        return merged
 
     @classmethod
     def _child_artifact_id(cls, event: ToolResult) -> str:
@@ -590,12 +601,15 @@ class TurnProgress:
         payload = self._child_payload(event)
         stop_cause = str(payload.get("stop_cause") or "").strip().casefold()
         stop_reason = str(payload.get("stop_reason") or "").strip().casefold()
+        report_completion = normalized_report_completion(payload.get("report_completion"))
         terminal_phase = {
-            "succeeded": "report_ready", "steered": "steered",
+            "succeeded": (
+                "report_ready" if report_completion in {"complete", "partial"} else "completed"
+            ), "steered": "steered",
             "failed": "failed", "cancelled": "cancelled",
             "indeterminate": "indeterminate",
         }.get(status, "indeterminate")
-        # Timeout is a child terminal cause, not a sixth tool status. Only typed artifact fields may refine a
+        # Timeout is a child terminal cause, not a sixth tool status. Only typed outcome fields may refine a
         # FAILED row into timed_out; prose such as "timeout handling looks correct" must never change state.
         if status == "failed" and (_timeout_cause(stop_cause) or _timeout_cause(stop_reason)):
             terminal_phase = "timed_out"
@@ -605,9 +619,10 @@ class TurnProgress:
         explicit_partial = payload.get("partial")
         partial = bool(explicit_partial) if isinstance(explicit_partial, bool) else False
         terminal_detail = (
-            "sealed" if terminal_phase == "report_ready"
+            "report ready" if terminal_phase == "report_ready"
             else _agent_phase_detail(
                 terminal_phase, detail="", terminal_reason=terminal_reason or raw_detail, partial=partial,
+                report_completion=report_completion,
             )
         )
         source_coverage_status = self._child_source_coverage(event)
@@ -638,6 +653,9 @@ class TurnProgress:
                     matched = True
                     self._subagent_update_seq += 1
                     row_partial = partial or item.partial
+                    row_report_completion = (
+                        report_completion if report_completion != "unknown" else item.report_completion
+                    )
                     if current == root_id:
                         phase = terminal_phase
                         detail = (
@@ -645,6 +663,7 @@ class TurnProgress:
                             _agent_phase_detail(
                                 terminal_phase, terminal_reason=terminal_reason or raw_detail,
                                 partial=row_partial,
+                                report_completion=row_report_completion,
                             )
                         ) or item.detail or phase.replace("_", " ")
                     elif item.phase in _ACTIVE_AGENT_PHASES:
@@ -671,6 +690,9 @@ class TurnProgress:
                             terminal_reason if current == root_id else item.terminal_reason
                         ),
                         partial=(row_partial if current == root_id else item.partial),
+                        report_completion=(
+                            row_report_completion if current == root_id else item.report_completion
+                        ),
                     )
                     if item.invocation_id:
                         self._retired_subagent_invocation_ids.add((item.parent_agent_id, item.invocation_id))
@@ -867,6 +889,9 @@ class TurnProgress:
                     matched_row = self._settle_subagent(event, status, now)
                     outcome_status = status
                     payload = self._child_payload(event)
+                    report_completion = normalized_report_completion(payload.get("report_completion"))
+                    if status == "succeeded" and report_completion not in {"complete", "partial"}:
+                        outcome_status = "completed"
                     if status == "failed" and (
                         _timeout_cause(payload.get("stop_cause"))
                         or _timeout_cause(payload.get("stop_reason"))
@@ -1099,6 +1124,7 @@ class TurnProgress:
                 tool_name=tool_name,
                 terminal_reason=terminal_reason,
                 partial=partial,
+                report_completion=(previous.report_completion if previous is not None else "unknown"),
             )
             finished_at = now if phase in _TERMINAL_AGENT_PHASES else None
             if previous_key and previous_key != agent_id:
@@ -1130,6 +1156,7 @@ class TurnProgress:
                 evidence_account=(previous.evidence_account if previous is not None else ()),
                 attempt=attempt, max_attempts=max_attempts, retry_delay_s=retry_delay_s,
                 tool_name=tool_name, terminal_reason=terminal_reason, partial=partial,
+                report_completion=(previous.report_completion if previous is not None else "unknown"),
             )
             self._replace()
             self._transition(ProgressPhase.DELEGATING, self._agent_activity_detail(), now=now)

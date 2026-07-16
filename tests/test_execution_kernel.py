@@ -14,14 +14,15 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sliceagent.events import ApiRetry, ToolResult, TurnEnd, TurnInterrupted  # noqa: E402
+from sliceagent.events import (ApiRetry, AssistantText, ToolResult, TurnEnd,
+                               TurnInterrupted)  # noqa: E402
 from sliceagent.execution import (CHILD_INVOCATION_ID_ARG, CHILD_REQUEST_ORDINAL_ARG,
                                   CHILD_TOKEN_BUDGET_ARG, PreflightOverflow, ToolEffect,
                                   ToolInvocation, ToolOutcome, ToolPurity, ToolStatus, TurnOutcome,
                                   Usage, preflight_model_call, reconciliation_targets)  # noqa: E402
 from sliceagent.hooks import BudgetHook, Hooks  # noqa: E402
-from sliceagent.loop import (_delegation_batch_receipt, _delegation_fan_in_bundle,
-                             _delegation_timeout, run_tool_batch, run_turn)  # noqa: E402
+from sliceagent.loop import (_assistant_message, _delegation_timeout, run_tool_batch,
+                             run_turn)  # noqa: E402
 from sliceagent.model_runner import complete_model_call  # noqa: E402
 from sliceagent.registry import ToolEntry, ToolRegistry, ToolText  # noqa: E402
 from sliceagent.scheduler import ScheduledTool, run_ordered  # noqa: E402
@@ -40,84 +41,20 @@ def _tc(name, args, call_id):
 
 
 @check
-def delegation_batch_receipt_gives_the_model_exact_child_arithmetic_and_causes():
-    rows = []
-    for index, (tool_status, child_stop, detail) in enumerate((
-        (ToolStatus.SUCCEEDED, "end_turn", "recovered-output"),
-        (ToolStatus.FAILED, "max_tokens", "output was cut off"),
-        (ToolStatus.FAILED, "error", "APITimeoutError: Request timed out"),
-    )):
-        invocation = ToolInvocation(
-            f"child-{index}", "spawn_agent",
-            ({"work_item_id": "wave-1-core", "scope": ["lib/", "config/"]}
-             if index == 0 else {}), index,
-        )
-        outcome = ToolOutcome(invocation, tool_status, "child result", (ToolEffect(
-            f"artifact-{index}:child", "child_artifact", {
-                "artifact_id": f"artifact-{index}", "status": child_stop,
-                "stop_reason": child_stop,
-                "stop_cause": ("provider_timeout" if "Timeout" in detail else
-                               "output_truncated" if child_stop == "max_tokens" else "complete"),
-                "recovered_from": (["output_truncated"] if detail == "recovered-output" else []),
-                "source_coverage_status": "source_partial" if index == 0 else "not_assessed",
-            },
-        ),))
-        rows.append(outcome.as_legacy())
-    receipt = _delegation_batch_receipt(rows)
-    assert "requested=3; succeeded=1; failed=2; steered=0; cancelled=0; indeterminate=0" in receipt
-    assert "child_stop=max_tokens" in receipt
-    assert "cause=provider_timeout" in receipt
-    assert "recovered_from=output_truncated" in receipt
-    assert "source_coverage=source_partial" in receipt
-    assert "work_item=wave-1-core" in receipt
-    assert "declared_scope=lib/,config/" in receipt
-    assert "no parent-task coverage outside" in receipt
-    assert "does not establish claim correctness" in receipt
-    assert "Count only tool_status=succeeded" in receipt
+def tool_bearing_assistant_prose_is_presentation_only():
+    response = NS(
+        content="I will do two waves and the report is above.",
+        reasoning_content="provider replay token",
+        tool_calls=[_tc("spawn_agent", {"agent": "explorer", "task": "one"}, "child-1")],
+    )
+    message = _assistant_message(response)
+    assert message["content"] == ""
+    assert message["reasoning_content"] == "provider replay token"
+    assert message["tool_calls"][0]["id"] == "child-1"
 
 
 @check
-def delegation_fan_in_reloads_complete_reports_from_canonical_contextfs():
-    rows = []
-    reports = {}
-    for index in range(2):
-        artifact_id = f"artifact-{index}"
-        invocation = ToolInvocation(f"child-{index}", "spawn_agent", {}, index)
-        outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "presentation excerpt", (ToolEffect(
-            f"{artifact_id}:child", "child_artifact", {
-                "artifact_id": artifact_id,
-                "operational_status": "ok",
-                "source_coverage_status": "source_complete",
-                "explorer_evidence_status": "content_retained",
-            },
-        ),))
-        rows.append(outcome.as_legacy())
-        reports[f"@sliceagent/evidence/children/{artifact_id}.md"] = (
-            f"complete sealed report {index} with middle evidence"
-        )
-
-    class Provider:
-        def read_file(self, handle):
-            return reports[handle]
-
-    class Tools:
-        @staticmethod
-        def _history_route(_handle):
-            return Provider()
-
-        @staticmethod
-        def _archive_handle(handle):
-            return handle
-
-    bundle = _delegation_fan_in_bundle(rows, Tools())
-    assert "complete sealed report 0 with middle evidence" in bundle
-    assert "complete sealed report 1 with middle evidence" in bundle
-    assert "reports_resident=2" in bundle
-    assert "@sliceagent/evidence/children/artifact-0/evidence/index.md" in bundle
-
-
-@check
-def settled_multi_child_batch_enters_a_clean_full_report_synthesis_slice():
+def settled_multi_child_batch_returns_ordered_full_reports_directly():
     class LLM:
         def __init__(self):
             self.calls = 0
@@ -127,7 +64,7 @@ def settled_multi_child_batch_enters_a_clean_full_report_synthesis_slice():
             self.calls += 1
             if self.calls == 1:
                 return NS(
-                    content="launching",
+                    content="launching two waves; preliminary findings above",
                     tool_calls=[
                         _tc("spawn_agent", {"agent": "explorer", "task": "one"}, "child-1"),
                         _tc("spawn_agent", {"agent": "explorer", "task": "two"}, "child-2"),
@@ -136,15 +73,6 @@ def settled_multi_child_batch_enters_a_clean_full_report_synthesis_slice():
                 )
             self.synthesis_messages = list(messages)
             return NS(content="final synthesis", tool_calls=[], finish_reason="stop", usage={})
-
-    reports = {
-        "@sliceagent/evidence/children/artifact-1.md": "FULL CHILD ONE MIDDLE",
-        "@sliceagent/evidence/children/artifact-2.md": "FULL CHILD TWO MIDDLE",
-    }
-
-    class Provider:
-        def read_file(self, handle):
-            return reports[handle]
 
     class Host:
         def schemas(self):
@@ -157,37 +85,119 @@ def settled_multi_child_batch_enters_a_clean_full_report_synthesis_slice():
         def run(self, _name, args):
             index = 1 if args["task"] == "one" else 2
             artifact_id = f"artifact-{index}"
+            report = f"BEGIN CHILD REPORT {index}\n" + ("x" * 1200) + f"\nFULL CHILD {index} MIDDLE"
             return ToolText(
-                f"presentation excerpt {index}",
+                report,
                 effects=(ToolEffect(
-                    f"{artifact_id}:child", "child_artifact", {
+                    f"{artifact_id}:outcome", "child_outcome", {
                         "artifact_id": artifact_id,
-                        "operational_status": "ok",
+                        "operational_status": "succeeded",
                         "source_coverage_status": "source_complete",
                         "explorer_evidence_status": "content_retained",
                     },
                 ),),
             )
 
-        @staticmethod
-        def _history_route(_handle):
-            return Provider()
-
-        @staticmethod
-        def _archive_handle(handle):
-            return handle
-
     llm = LLM()
+    events = []
     result = run_turn(
         build_slice=lambda: [{"role": "user", "content": "review everything"}],
-        llm=llm, tools=Host(), dispatch=lambda _event: None, hooks=Hooks(), max_steps=3,
+        llm=llm, tools=Host(), dispatch=events.append, hooks=Hooks(), max_steps=3,
     )
     assert result.stop_reason == "end_turn" and llm.calls == 2
-    rendered = "\n".join(str(message.get("content") or "") for message in llm.synthesis_messages)
-    assert "HOST FAN-IN SYNTHESIS SLICE" in rendered
-    assert "FULL CHILD ONE MIDDLE" in rendered and "FULL CHILD TWO MIDDLE" in rendered
-    assert "presentation excerpt" not in rendered
-    assert not any(message.get("role") == "tool" for message in llm.synthesis_messages)
+    trajectory = llm.synthesis_messages[1:]
+    assert [message["role"] for message in trajectory] == ["assistant", "tool", "tool"]
+    assert trajectory[0]["content"] == ""
+    assistant_ids = [call["id"] for call in trajectory[0]["tool_calls"]]
+    assert [message["tool_call_id"] for message in trajectory[1:]] == assistant_ids
+    assert "FULL CHILD 1 MIDDLE" in trajectory[1]["content"]
+    assert "FULL CHILD 2 MIDDLE" in trajectory[2]["content"]
+    rendered = "\n".join(str(message.get("content") or "") for message in trajectory)
+    assert "HOST FAN-IN" not in rendered and "preliminary findings above" not in rendered
+    finals = [event for event in events if isinstance(event, AssistantText) and event.final]
+    assert len(finals) == 1 and finals[0].content == "final synthesis"
+
+
+@check
+def indeterminate_child_does_not_hide_settled_sibling_report():
+    class LLM:
+        def __init__(self):
+            self.calls = 0
+            self.closeout_messages = []
+
+        def complete(self, messages, schemas):
+            self.calls += 1
+            if self.calls == 1:
+                return NS(
+                    content="",
+                    tool_calls=[
+                        _tc("spawn_agent", {"agent": "explorer", "task": "settled"}, "child-ok"),
+                        _tc("spawn_agent", {"agent": "explorer", "task": "uncertain"}, "child-unknown"),
+                    ],
+                    finish_reason="tool_calls", usage={},
+                )
+            self.closeout_messages = list(messages)
+            assert schemas == [], "an indeterminate wave permits synthesis, not another effectful tool"
+            return NS(
+                content="Child one found the retained issue; child two remains indeterminate.",
+                tool_calls=[], finish_reason="stop", usage={},
+            )
+
+    class Host:
+        def schemas(self):
+            return []
+
+        def accesses(self, _name, _args):
+            from sliceagent.access import ReadAllAccess
+            return [ReadAllAccess()]
+
+        def run(self, _name, args):
+            if args["task"] == "settled":
+                report = "BEGIN CHILD REPORT\nCONFIRMED SETTLED FINDING\nEND CHILD REPORT"
+                return ToolText(report, effects=(ToolEffect(
+                    "settled:outcome", "child_outcome", {
+                        "status": "succeeded",
+                        "operational_status": "succeeded",
+                        "kind": "explorer",
+                        "launch_ordinal": 1,
+                        "report_completion": "complete",
+                        "report_bytes": len("CONFIRMED SETTLED FINDING"),
+                        "report_sha256": "a" * 64,
+                        "report_handle": "artifacts/settled.md",
+                    },
+                ),))
+            return ToolText(
+                "Error: child provider state is unresolved",
+                status=ToolStatus.INDETERMINATE,
+                effects=(ToolEffect(
+                    "unknown:outcome", "child_outcome", {
+                        "status": "indeterminate",
+                        "operational_status": "indeterminate",
+                        "kind": "explorer",
+                        "launch_ordinal": 2,
+                        "report_completion": "absent",
+                        "report_bytes": 0,
+                    },
+                ),),
+            )
+
+    llm, events = LLM(), []
+    result = run_turn(
+        build_slice=lambda: [{"role": "user", "content": "review both areas"}],
+        llm=llm, tools=Host(), dispatch=events.append, hooks=Hooks(), max_steps=3,
+    )
+    assert result.stop_reason == "indeterminate"
+    assert llm.calls == 2, "the only follow-up is one synthesis-only closeout"
+    assert any(
+        "CONFIRMED SETTLED FINDING" in str(message.get("content") or "")
+        for message in llm.closeout_messages
+    ), "the settled sibling's full direct report must reach synthesis"
+    updates = [event.content for event in events
+               if isinstance(event, AssistantText) and not event.final]
+    assert "Child one found the retained issue; child two remains indeterminate." in updates
+    assert not any(isinstance(event, TurnEnd) for event in events)
+    interrupts = [event for event in events if isinstance(event, TurnInterrupted)]
+    assert len(interrupts) == 1 and "artifacts/settled.md" in (interrupts[0].message or "")
 
 
 @check

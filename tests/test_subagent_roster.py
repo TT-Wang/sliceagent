@@ -145,11 +145,16 @@ def host_rejects_invalid_names_and_threads_valid_ones():
     r = host.run("spawn_explore", {"task": "t", "name": "sub-7"})    # canonical-handle spoof
     assert r.status is ToolStatus.STEERED and "invalid subagent name" in r, r
     out = host.run("spawn_explore", {"task": "investigate x", "name": "auth-explorer"})
-    assert "[auth-explorer (explore) ok" in out, out                              # identity leads the digest
-    # S11: the returned handle is the CANONICAL immutable sub-N.md (not the subagents/<name>.md alias, which
-    # retargets to the latest same-name job). The "who" is still in the digest head; the alias still resolves
-    # via SubagentFS (tested above) — only the sealed handle the parent stores is now immutable.
-    assert 'read_file("subagents/sub-1.md")' in out, out
+    assert out.startswith("[child 1 · auth-explorer · succeeded"), out
+    assert "BEGIN CHILD REPORT\nchild report\nEND CHILD REPORT" in out
+    # The direct child_outcome is the lifecycle authority. The canonical immutable archive is optional
+    # refinement metadata; the mutable name alias still resolves via SubagentFS (tested above).
+    effects = {effect.kind: effect.payload for effect in out.effects}
+    assert effects["child_outcome"]["status"] == "succeeded"
+    assert effects["child_outcome"]["name"] == "auth-explorer"
+    assert effects["child_outcome"]["report_completion"] == "complete"
+    assert effects["child_outcome"]["report_bytes"] == len("child report")
+    assert "Archive: subagents/sub-1.md" in out, out
     art = mem.read_subagent_artifacts("s1")[-1]["artifact"]
     assert art["name"] == "auth-explorer" and art["brief"]["task"] == "investigate x"
 
@@ -159,7 +164,9 @@ def unnamed_spawn_is_unchanged_backcompat():
     mem = _mem()
     out = run_subagent("do x", tools=_ToolsHost(), llm=_FakeLLM("done"), retriever=NullRetriever(),
                        memory=mem, max_steps=2, read_only=True, session_id="s1")
-    assert out.startswith("[explore ok") and 'read_file("subagents/sub-1.md")' in out, out
+    assert out.startswith("[child · explorer · succeeded"), out
+    assert "BEGIN CHILD REPORT\ndone\nEND CHILD REPORT" in out
+    assert "Archive: subagents/sub-1.md" in out
     assert mem.read_subagent_artifacts("s1")[-1]["artifact"]["name"] == ""
 
 
@@ -221,7 +228,8 @@ def spawn_validates_grants_against_existing_seals():
     # valid: canonical handle, name alias, and a bare leaf all normalize + pass
     out = host.run("spawn_explore", {"task": "use the input", "name": "synth",
                                      "grants": ["subagents/sub-1.md", "auth-explorer.md"]})
-    assert "[synth (explore) ok" in out, out
+    assert out.startswith("[child 1 · synth · succeeded"), out
+    assert "BEGIN CHILD REPORT\nsynth\nEND CHILD REPORT" in out
     art = mem.read_subagent_artifacts("s1")[-1]["artifact"]
     # Mutable aliases resolve ONCE at grant validation; the brief/refinement map stores only the immutable
     # canonical job handle. Both requested paths named sub-1 here, so they dedupe to one dependency.
@@ -275,7 +283,7 @@ def explorer_prompt_separates_primary_observation_from_inference():
 
 
 @check
-def synthesis_seal_ships_its_refinement_map():
+def synthesis_direct_report_and_optional_archive_ship_the_refinement_map():
     mem = _mem()
     mem.append_subagent_artifact("s1", _art("explorer", "auth findings", name="auth-explorer"))
     mem.append_subagent_artifact("s1", _art("explorer", "db findings"))
@@ -283,7 +291,9 @@ def synthesis_seal_ships_its_refinement_map():
                         memory=mem, max_depth=1, session_id="s1")
     out = host.run("spawn_agent", {"agent": "synthesiser", "task": "merge the two surveys",
                                    "grants": ["subagents/sub-1.md", "subagents/sub-2.md"]})
-    assert "[synthesiser" in out and 'read_file("subagents/sub-3.md")' in out, out
+    assert out.startswith("[child 1 · synthesiser · succeeded"), out
+    assert "BEGIN CHILD REPORT\nmerged synthesis\nEND CHILD REPORT" in out
+    assert "Archive: subagents/sub-3.md" in out, out
     rec = mem.read_subagent_artifacts("s1")[-1]
     art = rec["artifact"]
     assert art["refs"] == ["subagents/sub-1.md", "subagents/sub-2.md"], art["refs"]   # drillable to inputs
@@ -431,7 +441,9 @@ def roster_storage_edges():
     host = SubagentHost(_ToolsHost(), llm=_FakeLLM("d"), retriever=NullRetriever(),
                         memory=NullMemory(), max_depth=1, session_id="")
     out = host.run("spawn_explore", {"task": "t", "name": "auth-explorer"})
-    assert "[auth-explorer (explore) ok" in out and "hired" not in out, out
+    assert out.startswith("[child 1 · auth-explorer · succeeded"), out
+    assert "BEGIN CHILD REPORT\nd\nEND CHILD REPORT" in out and "hired" not in out, out
+    assert "Archive:" not in out, "archive persistence is optional and NullMemory is inert"
 
 
 # ---- W5': lessons — seal-time reflection + curated tier + seed injection -----------------------------
@@ -730,8 +742,8 @@ def corrupt_null_date_fields_do_not_crash_render_or_roster():
 
 @check
 def hire_suffix_not_appended_to_a_failed_childs_error():
-    # LOW (r3 #2): a freshly-hired child that FAILS returns 'Error: ...'; the hire announcement must not be
-    # concatenated onto it (garbled error tier). The hire still really happened (career accrues).
+    # LOW (r3 #2): a freshly-hired failed outcome must not concatenate a success-shaped hire announcement.
+    # The framed partial/absent report and typed child_outcome still make the failure machine-readable.
     class _TC:
         def __init__(self): self.name, self.args, self.id = "read_file", {"path": "x.py"}, "1"
     class _LoopLLM:                                 # never yields end_turn → the writable child fails
@@ -742,7 +754,11 @@ def hire_suffix_not_appended_to_a_failed_childs_error():
     host = SubagentHost(_ToolsHost(), llm=_LoopLLM(), retriever=NullRetriever(),
                         memory=mem, max_depth=1, max_steps=1, session_id="s1")
     out = host.run("spawn_agent", {"agent": "general", "task": "do x", "name": "flaky"})
-    assert out.startswith("Error:") and "hired standing specialist" not in out, out
+    assert out.startswith("[child 1 · flaky · failed · report absent]"), out
+    assert "BEGIN CHILD REPORT\n(no accepted child report)\nEND CHILD REPORT" in out
+    assert "hired standing specialist" not in out, out
+    effect = next(effect for effect in out.effects if effect.kind == "child_outcome")
+    assert effect.payload["status"] == "failed" and effect.payload["report_completion"] == "absent"
     assert mem.roster_get("flaky") is not None                      # the hire is real regardless of outcome
 
 

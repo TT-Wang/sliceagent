@@ -686,10 +686,10 @@ def crash_between_child_put_and_parent_ref_recovers_downward_dependency():
 
 
 @check
-def crash_replay_preserves_child_artifact_active_work_binding():
+def crash_replay_does_not_attach_child_lifecycle_to_active_work():
     from dataclasses import asdict
 
-    from sliceagent.active_work import EvidenceRef, ResourceRef, WorkDelta, WorkGraph, WorkItem
+    from sliceagent.active_work import WorkDelta, WorkGraph, WorkItem
     from sliceagent.intent import TurnAdmission
     from sliceagent.persistence import Artifact
     from sliceagent.pfc import Slice, record_user
@@ -733,37 +733,50 @@ def crash_replay_preserves_child_artifact_active_work_binding():
     )
     store.coordinator.artifacts.put(artifact)
     invocation = ToolInvocation(
-        "spawn-1", "spawn_agent", {"task": "review", "work_item_id": "review"}, 0,
+        "spawn-1", "spawn_agent", {"agent": "explorer", "task": "review"}, 0,
     )
-    effect = ToolEffect(
-        "child-effect", "child_artifact",
+    outcome_effect = ToolEffect(
+        "child-outcome", "child_outcome",
         {
-            "artifact_id": artifact.id, "work_item_id": "review",
+            "artifact_id": artifact.id, "status": "succeeded",
+            "operational_status": "succeeded", "kind": "explorer",
+            "report_completion": "complete", "report_sha256": "a" * 64,
+            "report_bytes": len("child returned"),
+            "source_coverage_status": "source_partial",
+            "explorer_evidence_status": "content_retained",
+        },
+    )
+    artifact_effect = ToolEffect(
+        "child-artifact", "child_artifact",
+        {
+            "artifact_id": artifact.id,
             "source_coverage_status": "source_partial",
             "required_ref_count": 2, "consumed_refs": ["subagents/sub-1.md"],
             "cited_refs": ["subagents/sub-1.md"], "covered_refs": ["subagents/sub-1.md"],
             "source_gaps": ["raw source gap must remain in the sealed child artifact"],
         },
     )
-    outcome = ToolOutcome(invocation, ToolStatus.SUCCEEDED, "child returned", (effect,))
+    outcome = ToolOutcome(
+        invocation, ToolStatus.SUCCEEDED,
+        "[child · explorer · succeeded]\n\nBEGIN CHILD REPORT\nchild returned\nEND CHILD REPORT",
+        (outcome_effect, artifact_effect),
+    )
     result = ToolResult(
         "spawn_agent", dict(invocation.args), outcome.text, False,
         status="succeeded", invocation_id=invocation.id, outcome=outcome,
     )
     store.observe_event(result)
     store.observe_reduction(result)
-    store.close()  # crash before the normal turn seal attaches child testimony to Active Work
+    store.close()  # crash before the normal turn seal; recovery replays observations, not scheduler policy
 
     recovered = LocalTurnStore(workspace, "session-new", store_root=store_root)
     assert recovered.recover_pending()[0].status == "attached"
     checkpoint = recovered.coordinator.checkpoints.load(recovered.workspace_id, "task-A")
     graph = WorkGraph.from_records(checkpoint.thawed_state()["active_work"])
     restored = graph.get("review")
-    assert restored.evidence_refs == (
-        EvidenceRef("child_artifact", artifact.id, qualifier="source_partial"),
-        EvidenceRef("child_digest_delivered", artifact.id),
-    )
-    assert restored.resource_refs == (ResourceRef("subagent", artifact.id, workspace_epoch=0),)
+    assert restored.status == "in_progress"
+    assert restored.evidence_refs == () and restored.resource_refs == (), \
+        "child lifecycle must not auto-mutate a user commitment during replay"
     assert artifact.id in checkpoint.artifact_refs
     recovered.close()
 

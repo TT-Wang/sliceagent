@@ -5,6 +5,8 @@ this project aims for [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-17
+
 ### Added
 - **Intent Fidelity v2.** One shared, ephemeral turn contract now separates user-authorized action spans
   from quoted/reported prior output, grounds historical references in sealed responses, resolves numbered
@@ -29,6 +31,19 @@ this project aims for [Semantic Versioning](https://semver.org/).
   directly against sealed receipts.
 
 ### Changed
+- **Subagents now return direct, ordered outcomes.** Every completed child contributes its full normalized
+  report to the parent as an ordinary tool result in launch order. The parent continues its normal loop and
+  owns synthesis; there is no synthetic fan-in packet, transcript reset, child-lifecycle mutation of Active
+  Work, or hidden terminal-delivery enforcement. Active Work is reserved for genuine cross-turn user
+  commitments rather than acting as a second scheduler.
+- **Subagent persistence is optional and fail-soft.** Once a safe child report exists, artifact-store,
+  reference-publication, or memory-mirror failures are retained as warnings instead of discarding useful
+  evidence or making the child indeterminate. Truly unresolved execution remains indeterminate; optional
+  artifacts remain durable locators, not a prerequisite for parent delivery.
+- **Subagent progress uses truthful readiness language.** The live matrix distinguishes running, queued,
+  failed, completed-without-report, and report-ready children without describing a report as sealed merely
+  because it is ready for the parent. “Partial report” is reserved for actually partial report bytes;
+  operationally incomplete work and persistence status stay separate from report completeness.
 - **One typed memory model, with Memem as retrieval rather than authority.** L0 remains canonical sealed
   evidence, L1 remains rebuildable Active Work, and native SQLite owns provenance-linked USER/PROJECT/CRAFT
   L2 records. Memem 2.10's structured external-index protocol is the primary semantic ranker when available:
@@ -65,15 +80,18 @@ this project aims for [Semantic Versioning](https://semver.org/).
   ordinary advisory behavior belongs in tool results or skills, not hidden host-side action gates.
 
 ### Fixed
-- **Repository-review placeholders receive one response-only correction.** Skills may declare a typed terminal
-  deliverable contract; the review contract persists in PFC across recovery and workspace handoff, distinguishes
-  consumed child evidence from user-visible synthesis, and gives an obvious private-output placeholder one
-  unpublished response nudge. It does not enforce headings, grade report quality, or block a later terminal answer;
-  ordinary tasks and workspace transport remain outside this narrow reminder.
-- **Child reports and parent seals now publish as one logical fact.** Canonical child artifact writes and
-  launch-turn references are linearized against parent sealing. Cancellation may stop a child before
-  publication, but can no longer arrive between the immutable write and required reference to create an
-  accepted orphan; crash recovery retains the existing parent-lineage repair path.
+- **Delegated results can no longer disappear behind a synthetic delivery gate.** Successful child reports
+  reach the next parent model call in full and in order, so a stale deliverable contract, revision mismatch,
+  or missing heading cannot replace the requested final answer with a host-authored interruption. The model
+  remains responsible for synthesizing and delivering the user-visible result.
+- **Useful child reports survive optional publication failures.** A completed, normalized report is returned
+  directly even when its artifact, reference, or memory mirror cannot be written. Those failures remain
+  visible as persistence warnings; they no longer erase child evidence or turn a known report into an
+  indeterminate execution outcome.
+- **Child reports are not silently lost at lifecycle edges.** A mixed indeterminate batch gets one
+  synthesis-only closeout over settled siblings before the turn parks; deadline-grace completion retains the
+  full direct report without requiring an artifact; context overflow parks instead of evicting an unseen
+  report; and crash recovery advertises the exact interrupted-turn artifact for one resumed seed.
 - **Broad subagent reviews no longer collapse into timeout cascades.** Repository audits use ignore-aware,
   source-weighted scopes and staged 2–3-child waves instead of one exhaustive child per directory. Every child
   drains and assembles SSE off the main thread even without a UI sink, so an ordinary long reasoning response
@@ -120,10 +138,11 @@ this project aims for [Semantic Versioning](https://semver.org/).
   max-step closeout, avoiding a redundant billed call, while cancellation, uncertainty, fatal provider/tool
   stops, token exhaustion, truncation, and evidence-free runs never synthesize. The live matrix is driven by typed
   queued/starting/model-active/reasoning/writing/tool/
-  retry/terminal phases rather than detail-string inference. Exhausted attempts, truncated output, cancellation,
-  or a final-synthesis failure start no wrapper-level recovery call: usable report text, observations, trace,
-  usage, and WorkGraph binding seal as an explicitly partial artifact, while cancellation still wakes retry
-  backoff and prevents late publication into a replacement task.
+  retry/terminal phases rather than detail-string inference. Exhausted attempts, truncated output,
+  cancellation, or a final-synthesis failure start no wrapper-level recovery call. Usable partial report text,
+  observations, trace, and usage return directly as an explicitly partial outcome; optional artifact
+  persistence does not create an Active Work dependency or gate delivery. Cancellation still wakes retry
+  backoff and prevents a late outcome from publishing into a replacement task.
 - **Hung read deadlines stay live.** Timeout-enabled pure reads use bounded daemon workers and a short grace
   period; unresolved readers become typed indeterminate outcomes, later barriers are cancelled, Ctrl-C remains
   responsive, and a permanently stuck reader no longer freezes the turn or process exit.

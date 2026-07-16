@@ -1405,7 +1405,6 @@ REGION_ORDER = (
     # # REPEATED/FAILING ACTIONS header (always present; body says "(nothing…)" when empty) closes slot 3.
     ("action_header",  VOLATILE, lambda c: "# REPEATED/FAILING ACTIONS", 3),
     ("action_history", VOLATILE, lambda c: render_action_history(c["s"].action_log), 4),  # body — own part
-    ("fan_in",         VOLATILE, _render_delegation_fan_in_region, 5),
     # Evidence is epistemic data, not mutation control. The constant-size result is mandatory when selected;
     # matched operation detail is independently elastic and can page to the canonical artifact/history views.
     ("evidence_result", VOLATILE, lambda c: (
@@ -1462,7 +1461,6 @@ def render_regions(ctx: dict) -> str:
 _REGION_META = {
     "intent": (100, InstructionClass.USER, FreshnessClass.LIVE, True),
     "turn_contract": (100, InstructionClass.USER, FreshnessClass.LIVE, True),
-    "fan_in": (100, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, True),
     "evidence_result": (100, InstructionClass.DATA, FreshnessClass.DERIVED, True),
     "evidence_detail": (96, InstructionClass.DATA, FreshnessClass.DERIVED, False),
     "quality_evidence_result": (100, InstructionClass.TASK_STATE, FreshnessClass.DERIVED, True),
@@ -1632,7 +1630,6 @@ def _locator_region(name: str, ctx: dict) -> tuple[str, tuple[str, ...], bool] |
 _REGION_ROLES = {
     "intent": EpistemicRole.DIRECTIVE,
     "turn_contract": EpistemicRole.CONTROL_STATE,
-    "fan_in": EpistemicRole.CONTROL_STATE,
     "evidence_result": EpistemicRole.OBSERVATION,
     "evidence_detail": EpistemicRole.OBSERVATION,
     "quality_evidence_result": EpistemicRole.CONTROL_STATE,
@@ -1661,7 +1658,7 @@ _SEALED_SOURCE_REGIONS = frozenset({
     "intent", "task_objective", "corrections", "task_constraints", "conversation",
     # Exact/archive recovery and the canonical execution projection.
     "cache_manifest", "evidence_result", "evidence_detail", "quality_evidence_result",
-    "quality_evidence_detail", "turn_contract", "fan_in",
+    "quality_evidence_detail", "turn_contract",
     # Subject continuity plus explicit user reports/execution uncertainty remain visible.
     "focus", "user_report", "reconciliation",
 })
@@ -1750,24 +1747,6 @@ def _region_provenance(name: str, ctx: dict) -> tuple[EpistemicRole, tuple[str, 
                 if grounding_id:
                     sources.append(SourceRef("sealed_grounding_artifact", grounding_id))
         resources.append(reserved_resource_ref(index_handle))
-    elif name == "fan_in":
-        from .fan_in import build_fan_in_manifest, canonical_report_handle
-        graph = getattr(s, "active_work", None)
-        roots = tuple(getattr(graph, "unresolved_roots", ()) or ())
-        root_id = str(getattr(roots[-1], "id", "") or "") if roots else ""
-        manifest = build_fan_in_manifest(
-            getattr(getattr(s, "runtime", None), "recent_calls", ()) or (),
-            graph=graph, root_id=root_id,
-        )
-        scope = ("turn", "task")
-        for child in manifest.children:
-            if not child.artifact_id:
-                continue
-            handle = canonical_report_handle(child.artifact_id)
-            sources.append(SourceRef("artifact", child.artifact_id))
-            resources.append(reserved_resource_ref(handle))
-        if not sources:
-            sources.append(SourceRef("task_state", "delegation-fan-in"))
     elif name == "task_objective":
         handle = str(getattr(getattr(s, "task", None), "goal_source", "") or "task-objective")
         sources.append(SourceRef("user_utterance", handle))

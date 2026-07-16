@@ -76,6 +76,8 @@ REGISTRY: list[EnvVar] = [
            "a provider-agnostic ceiling from the completion-token budget (minimum 180 seconds).", ""),
     EnvVar("LLM_STREAM_CLOSE_GRACE_SEC", "provider", "Seconds to confirm SSE connection closure after "
            "cancellation/deadline before reporting an indeterminate call.", "2"),
+    EnvVar("LLM_STREAM_HEARTBEAT_SEC", "provider", "Low-rate child-stream activity heartbeat interval in "
+           "seconds; presentation and metrics only, never a timeout or retry policy.", "5"),
     EnvVar("LLM_PROVIDER_MAX_INFLIGHT", "provider", "Process-wide physical request ceiling per provider "
            "account. Timed-out calls retain a slot until their transport actually closes; invalid or "
            "non-positive values use the default.", "4"),

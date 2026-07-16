@@ -2,7 +2,7 @@
 
 _Auto-generated from `src/sliceagent/envspec.py` — do not edit by hand (`python scripts/gen_config_reference.py`)._
 
-sliceagent reads **58** environment variables across **6** groups; every value is validated at startup (a misspelled enum warns instead of silently defaulting). Run `sliceagent config --list` to see the resolved value of each on your machine. Secrets (🔒) are read from the environment / config and never printed.
+sliceagent reads **59** environment variables across **6** groups; every value is validated at startup (a misspelled enum warns instead of silently defaulting). Run `sliceagent config --list` to see the resolved value of each on your machine. Secrets (🔒) are read from the environment / config and never printed.
 
 ## agent
 
@@ -78,6 +78,7 @@ sliceagent reads **58** environment variables across **6** groups; every value i
 | `LLM_HARD_TIMEOUT_SEC` | — | Absolute whole-request watchdog in seconds; unset derives a provider-agnostic ceiling from the completion-token budget (minimum 180 seconds). |
 | `LLM_PROVIDER_MAX_INFLIGHT` | `4` | Process-wide physical request ceiling per provider account. Timed-out calls retain a slot until their transport actually closes; invalid or non-positive values use the default. |
 | `LLM_STREAM_CLOSE_GRACE_SEC` | `2` | Seconds to confirm SSE connection closure after cancellation/deadline before reporting an indeterminate call. |
+| `LLM_STREAM_HEARTBEAT_SEC` | `5` | Low-rate child-stream activity heartbeat interval in seconds; presentation and metrics only, never a timeout or retry policy. |
 | `LLM_TIMEOUT` | — | Per-request timeout in seconds. |
 | `LLM_TIMEOUT_SEC` | — | Alias for LLM_TIMEOUT. |
 | `MOONSHOT_API_KEY` 🔒 | — | Legacy alias for LLM_API_KEY (Moonshot). |

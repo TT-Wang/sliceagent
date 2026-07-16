@@ -1,6 +1,6 @@
-# SliceAgent — End-Game Context Architecture (v3)
+# SliceAgent — End-Game Context Architecture (v3.1)
 
-> Status: implemented kernel and migration path · 2026-07-12
+> Status: implemented kernel and migration path · corrected 2026-07-17
 
 ## Thesis
 
@@ -21,7 +21,7 @@ The application event ledger sits above workspace-local journals. It records imm
 - one `user_utterance` for one logical request;
 - accepted `work_delta` effects;
 - each `context_transition` between workspace epochs;
-- sealed `child_artifact` effects;
+- optional sealed `child_artifact` effects (child computation itself returns directly in its tool outcome);
 - the one terminal `response_delivered` event.
 
 Persistence redacts secrets without changing source positions. Active Work binds to those canonical persisted
@@ -44,11 +44,10 @@ appended only after that commit, so it cannot claim a rolled-back delta. Convers
 a missing `response_delivered` projection from an already-sealed terminal response artifact after a crash gap.
 
 The graph rejects stale revisions, dependency and supersession cycles, erased provenance, unknown roots, and
-illegal transitions. The model can maintain child work through the small `update_work` API; it cannot forge
-`delivered` or `verified`. `ready` means a child contribution is prepared for the final response. Only the host
-can turn it into `delivered` by attaching the real sealed response artifact. `verified` remains a compatible
-host-owned state for embedding hosts; production does not manufacture it from generic tool success, and keeps
-verification truth in typed observations/receipts until an explicit work binding exists.
+illegal transitions. It is optional working state for user-relevant commitments that must survive turns—not a
+scheduler and not a prerequisite for tools. `update_work` never mirrors child launch, settlement, or one-turn
+synthesis. The model cannot forge `delivered` or `verified`; only the host can attach the real sealed response
+artifact. Verification truth remains in typed observations and receipts.
 
 ## Logical turns and runtime segments
 
@@ -77,7 +76,7 @@ retires the recovered transport ticket.
 
 Each provider seed is compiled in this order:
 
-1. Start from every unresolved Active Work item, including unresolved children beneath a progress response.
+1. Start from the exact current request and any unresolved user-relevant Active Work commitments.
 2. Add request-root ownership and transitive dependency edges.
 3. Expand exact user sources and typed evidence/resource/output references.
 4. Deduplicate by semantic identity and workspace epoch.
@@ -119,50 +118,59 @@ The compiler and prompt keep these non-interchangeable:
 | Fresh observation / OPEN FILES | Current visible world state | Omitted bytes or future behavior |
 | Canonical execution receipt | Requested, started, rejected, settled, failed, or indeterminate execution | That the desired end-state holds |
 | Sealed response artifact | The text delivered to the user | That the answer was correct or acted upon |
-| Child artifact | What a particular child observed/reported, with qualifiers | Parent-certified workspace truth |
+| Child outcome / optional artifact | What a particular child reported, with qualifiers | Parent-certified workspace truth |
 
 Notes and retrieved memories are leads. A receipt cannot prove a file is correct; a response cannot prove a
 command ran; a child summary cannot silently become a direct observation.
 
 ## Delegation
 
-`spawn_agent` carries a `work_item_id`; it is required on the production Active-Work-bound parent and remains
-optional only for compatibility hosts without that state seam. The ID must already name a nonterminal child of the
-current request. That immutable binding travels through the child brief, sealed artifact, typed effect, application
-ledger, parent receipt, and checkpoint. A missing, nonexistent, cross-request, request-root, or terminal binding is
-rejected before launch. Child testimony is attached to that work item only after the artifact seals, avoiding
-mid-turn graph-revision races.
+Delegation is an ordinary tool path:
 
-For staged breadth, the full currently promised coverage frontier is created in Active Work before the first
-delegation wave launches. A wave is only a concurrency window: later partitions remain `open` rather than living
-in progress prose. On a clean model stop, the host gives current-root `open`/`in_progress` children one bounded
-reconciliation pass; `ready` work may be delivered and `waiting_user` may yield. The same unchanged frontier is
-never retried indefinitely. This is typed lifecycle arithmetic, not a semantic quality or permission gate.
+```text
+spawn_agent call
+  → child runs in an isolated slice
+  → ChildOutcome(full normalized report, status, evidence metadata, optional locators)
+  → parent receives that tool result and continues once
 
-Children receive their self-contained objective and scoped sources, not the parent transcript. A parent still
-synthesizes and independently verifies load-bearing claims.
+             ├─ TUI observes lifecycle events
+             └─ artifact store persists opportunistically
+```
 
-Delegation fan-in has three orthogonal host-derived dimensions. **Operational status** says whether a child ran and
-sealed. **Explorer evidence** says whether the bounded child artifact retained content observations rather than only
-navigation, and records omitted/truncated views without pretending to judge claim correctness. **Parent use** says
-whether the bounded digest was delivered and whether the exact sealed report was opened completely. These dimensions
-must never collapse into a single “agent succeeded” bit. Each child also declares `digest_ok` or `report_required` in
-its brief. The latter gets one non-blocking completion advisory when its report remains unread; after that the model
-may either consume it or finish with an explicit partial-scope limitation. Ordinary delegation is never held behind a
-semantic quality gate.
+The scheduler already returns parallel calls in provider-call order. In normal execution there is no host fan-in
+state machine, synthetic user message, report reopening, transcript reset, or WorkGraph transition for child lifecycle.
+The first ordinary tool-free parent response is the answer; the host does not reject it with phrase classifiers or
+force a second “response-only” model pass.
 
-The volatile `DELEGATION FAN-IN` region is the bounded live projection of those facts. On seal, the same relations are
-folded into Active Work evidence references so a restart can reconstruct them without persisting a rival mutable
-manifest. Exact report reads emit typed artifact identity and complete/partial read coverage. This keeps the parent
-slice bounded while making “requested, launched, sealed, evidence retained, digest delivered, report consumed”
-separately answerable.
+Children receive a self-contained objective and scoped sources, not the parent transcript. Their private trajectory
+never enters the parent. The complete canonical, redacted report does. This preserves the recursive slice thesis:
+context grows with reports relevant to the live task, not with child reasoning history. A failed child may return an
+explicitly partial report; an evidence-free explorer returns no accepted testimony.
+
+`ChildOutcome` is the computational truth. It carries operational status, report completion/hash/size, stop cause,
+evidence account, source coverage, usage, and optional report/evidence locators. Its report body appears exactly once,
+in the tool result. A small `child_outcome` effect drives receipts and the TUI without duplicating prose. A
+`child_artifact` effect exists only when persistence commits. Artifact, index, roster, or memory-mirror failure after
+a safe report exists adds a persistence warning; it cannot turn completed computation into an indeterminate child.
+Actual unresolved provider or writable execution remains indeterminate.
+
+Active Work records only real user commitments that need cross-turn continuity. It is never required before
+delegation and never advances merely because a child started or settled. This separation removes the stale-revision
+race while keeping launch/queued/running/failed/ready telemetry mechanically answerable from receipts.
+
+The parent synthesizes every returned report, preserves failed/partial coverage gaps, and independently verifies
+load-bearing claims against live source. An optional artifact is a later refinement/recovery handle, not the delivery
+channel and not a correctness certificate.
+
+If the process dies after a child ToolResult is journaled but before the parent model call, recovery keeps those
+bytes in the immutable interrupted-turn artifact and advertises that exact locator for one resumed seed. This is a
+crash-only repair seam, not a second fan-in path; the pointer clears after the next successful seal.
 
 ## Simplified model surface
 
-When Active Work is bound, the production model sees one semantic state tool: `update_work`. The older
-requirements, plan, world-scratchpad, and generic per-tool `note` channels remain readable/executable only for
-legacy checkpoints and embedding hosts; they are hidden from the production schema and excluded from the new
-compiler. This prevents multiple state APIs from competing to describe the same task.
+The production model sees `update_work` only as an optional cross-turn commitment tool. It is not needed for an
+ordinary turn, tool call, delegation, or response. Older requirements, plan, world-scratchpad, and generic per-tool
+`note` channels remain compatibility surfaces while migrations run; they do not gate publication.
 
 The stable prompt is an operating kernel rather than an autobiography. It states request authority, Active Work,
 dependency-first context, proof-family rules, autonomy, verification, workspace continuation, and concise user
@@ -209,7 +217,7 @@ See `MEMORY-LAYERS-DESIGN.md` for scope, lifecycle, physical storage, and failur
 - One logical request has one user event and one request root.
 - The current request is exact and appears once per seed.
 - No host paraphrase can outrank its source.
-- A root cannot disappear while a required child remains unresolved.
+- Scheduler lifecycle cannot mutate or gate user-commitment state.
 - Model deltas cannot manufacture delivery or verification.
 - A workspace transition is transport, never task completion.
 - Old-epoch resources are locators, never current-world observations.
@@ -230,9 +238,9 @@ the behavioral corpus passes on both the reasoner and weakest supported model ti
 The end state is one unified loop:
 
 ```text
-immutable events → Active Work frontier → dependency closure → selective fetch → elastic seed
-       ↑                                                        ↓
- sealed evidence/output ← typed effects and host verification ← model/tool trajectory
+immutable events → request + optional Active Work → dependency closure → selective fetch → elastic seed
+       ↑                                                                   ↓
+ sealed evidence/output ← optional observer projections ← ordinary model/tool trajectory
 ```
 
 That is SliceAgent’s thesis in operational form: retain exactly what the live work depends on, preserve exact

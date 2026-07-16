@@ -162,9 +162,10 @@ def procedures_dedup_by_shape_repeated_first():
 def consolidate_routes_facts_and_procedures_if_memem():
     try:
         from sliceagent.memory import MememMemory
+        m = MememMemory()
     except Exception:
         print("  (skip: memem not importable)"); return
-    m = MememMemory(); m._vault = tempfile.mkdtemp()
+    m._vault = tempfile.mkdtemp()
     sk = tempfile.mkdtemp(); os.environ["SLICEAGENT_SKILLS_DIR"] = sk
     captured = []
     m.remember = lambda content, *, title="", scope="default", tags="", paths=None: captured.append(title)

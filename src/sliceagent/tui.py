@@ -49,7 +49,7 @@ from .receipts import (receipt_completion_label, receipt_has_adverse_lifecycle,
                        receipt_summary_parts)
 from .slash import PUBLIC_SLASH_COMMANDS
 from .tui_projection import (DELEGATION_TOOLS, QUIET_OUTPUT_TOOLS, AgentResultView,
-                             invocation_id, normalized_tool_status, output_preview,
+                             child_incompleteness_label, invocation_id, normalized_tool_status, output_preview,
                              project_agent_result, project_tool_result, safe_terminal_text)
 
 # ── theme (semantic tokens; one place to retheme) ───────────────────────────────────────────
@@ -380,7 +380,10 @@ def _render_agent_batch(agents: list[AgentResultView], width: int = 100) -> Grou
 
     ordered = sorted(enumerate(agents), key=lambda pair: (display_ordinal(pair), pair[0]))
     total = len(ordered)
-    succeeded = sum(view.status == "succeeded" for _, view in ordered)
+    ready = sum(view.report_ready for _, view in ordered)
+    completed_without_report = sum(
+        view.status == "succeeded" and not view.report_ready for _, view in ordered
+    )
     steered = sum(view.status == "steered" for _, view in ordered)
     timed_out = sum(view.status == "failed" and view.timed_out for _, view in ordered)
     failed = sum(view.status == "failed" and not view.timed_out for _, view in ordered)
@@ -388,9 +391,10 @@ def _render_agent_batch(agents: list[AgentResultView], width: int = 100) -> Grou
     indeterminate = sum(view.status == "indeterminate" for _, view in ordered)
     rows = [_fit_line(Text.assemble(
         Text("│ ", style=TH["gutter"]), Text("agents", style=f"bold {TH['accent']}"),
-        Text(f" · {succeeded}/{total} sealed", style=TH["dim"]),
+        Text(f" · {ready}/{total} reports ready", style=TH["dim"]),
     ), width)]
     for count, label, style in (
+        (completed_without_report, "completed without report", TH["warn"]),
         (steered, "steered", TH["dim"]), (failed, "failed", TH["fail"]),
         (timed_out, "timed out", TH["warn"]),
         (cancelled, "cancelled", TH["dim"]),
@@ -477,8 +481,16 @@ def _render_agent_batch(agents: list[AgentResultView], width: int = 100) -> Grou
             suffix.append(view.terminal_reason.replace("_", " "))
         elif view.recovered_from:
             suffix.append("recovered from " + ", ".join(item.replace("_", " ") for item in view.recovered_from))
-        if view.partial:
-            suffix.append("partial report")
+        if view.status == "succeeded" and not view.report_ready:
+            suffix.append(
+                "completed · no report"
+                if view.report_completion == "absent"
+                else "completed · report status unknown"
+            )
+        else:
+            incompleteness = child_incompleteness_label(view.report_completion, view.partial)
+            if incompleteness:
+                suffix.append(incompleteness)
         row = Text.assemble(
             Text("│   ", style=TH["gutter"]), Text(glyph + " ", style=f"bold {style}"),
             Text(f"{ordinal} {identity}"), Text(" — ", style=TH["dim"]), Text(task),
@@ -548,7 +560,8 @@ def _accepted_agent_finished_at(snapshot, view: AgentResultView) -> float | None
             and item.invocation_id == view.invocation_id
         )
         if (matches_artifact or matches_invocation) and item.phase in {
-            "report_ready", "steered", "failed", "timed_out", "cancelled", "indeterminate",
+            "report_ready", "completed", "steered", "failed", "timed_out", "cancelled",
+            "indeterminate",
         }:
             return item.finished_at
     return None
@@ -945,6 +958,7 @@ class _AgentMatrixRow:
     tool_name: str = ""
     terminal_reason: str = ""
     partial: bool = False
+    report_completion: str = "unknown"
 
 
 _AGENT_PHASE_VIEW = {
@@ -956,9 +970,10 @@ _AGENT_PHASE_VIEW = {
     "writing": ("◌", "writing", "accent"),
     "running_tool": ("◌", "tool", "accent"),
     "retry_wait": ("↻", "retry", "warn"),
-    "settling": ("◌", "sealing", "accent"),
+    "settling": ("◌", "finalizing", "accent"),
     "running": ("◌", "working", "accent"),
-    "report_ready": ("✓", "sealed", "ok"),
+    "report_ready": ("✓", "ready", "ok"),
+    "completed": ("✓", "completed", "warn"),
     "steered": ("↷", "steered", "dim"),
     "failed": ("✗", "failed", "fail"),
     "timed_out": ("!", "timed out", "warn"),
@@ -1033,6 +1048,7 @@ def _agent_matrix_rows(snap, *, now: float | None = None) -> list[_AgentMatrixRo
             getattr(item, "terminal_reason", ""), multiline=False,
         )
         partial = bool(getattr(item, "partial", False))
+        report_completion = getattr(item, "report_completion", "unknown")
         attempt_text = (
             f"attempt {attempt}/{max_attempts}" if attempt and max_attempts else
             f"attempt {attempt}" if attempt else ""
@@ -1059,13 +1075,20 @@ def _agent_matrix_rows(snap, *, now: float | None = None) -> list[_AgentMatrixRo
                 bits.append(f"{retry_delay_s:.1f}s")
             activity = " · ".join(bits)
         elif phase == "settling":
-            activity = item.detail or "sealing partial outcome"
+            activity = item.detail or "finalizing outcome"
         elif phase == "report_ready":
-            activity = "sealed"
+            activity = "report ready"
+        elif phase == "completed":
+            activity = (
+                "completed · no report"
+                if report_completion == "absent"
+                else "completed · report status unknown"
+            )
         elif phase in {"steered", "failed", "timed_out", "cancelled", "indeterminate"}:
             activity = terminal_reason or item.detail or phase.replace("_", " ")
-            if partial:
-                activity += " · partial report"
+            incompleteness = child_incompleteness_label(report_completion, partial)
+            if incompleteness:
+                activity += f" · {incompleteness}"
         else:  # legacy structured callbacks carry only ``running`` + detail
             activity = item.detail or item.objective or "working"
         return activity, attempt, max_attempts, retry_delay_s, tool_name, terminal_reason, partial
@@ -1097,6 +1120,7 @@ def _agent_matrix_rows(snap, *, now: float | None = None) -> list[_AgentMatrixRo
             evidence_account=getattr(item, "evidence_account", ()),
             attempt=attempt, max_attempts=max_attempts, retry_delay_s=retry_delay_s,
             tool_name=tool_name, terminal_reason=terminal_reason, partial=partial,
+            report_completion=getattr(item, "report_completion", "unknown"),
         ))
         used_child_ids: set[int] = set()
         child_fallback = 0
@@ -1133,9 +1157,10 @@ def _select_agent_matrix_rows(rows: list[_AgentMatrixRow], cap: int = _AGENT_MAT
     adverse = [row for row in rows if row.phase in {"failed", "timed_out", "cancelled", "indeterminate"}]
     steered = [row for row in rows if row.phase == "steered"]
     active = [row for row in rows if row.phase in _ACTIVE_AGENT_MATRIX_PHASES]
+    completed = [row for row in rows if row.phase == "completed"]
     ready = [row for row in rows if row.phase == "report_ready"]
     selected = []
-    for group in (adverse, steered, active, ready):
+    for group in (adverse, completed, steered, active, ready):
         for row in group:
             if row not in selected and len(selected) < cap:
                 selected.append(row)
@@ -1159,8 +1184,9 @@ def _agent_matrix_plain_lines(snap, width: int, *, now: float | None = None,
         ("queued", "queued"), ("starting", "starting"), ("awaiting_model", "model wait"),
         ("model_active", "responding"),
         ("reasoning", "reasoning"), ("writing", "writing"), ("running_tool", "using tool"),
-        ("retry_wait", "retrying"), ("settling", "sealing"), ("running", "working"),
-        ("report_ready", "sealed"), ("steered", "steered"),
+        ("retry_wait", "retrying"), ("settling", "finalizing"), ("running", "working"),
+        ("report_ready", "ready"), ("completed", "completed, no report"),
+        ("steered", "steered"),
         ("failed", "failed"), ("timed_out", "timed out"),
         ("cancelled", "cancelled"), ("indeterminate", "unknown"),
     ):
@@ -1177,7 +1203,7 @@ def _agent_matrix_plain_lines(snap, width: int, *, now: float | None = None,
     ):
         if source_counts[status]:
             summary.append(f"{source_counts[status]} {label}")
-    # Active children have not sealed their evidence account yet. Keep the header focused on settled facts;
+    # Active children have not produced their evidence account yet. Keep the header focused on settled facts;
     # their column still truthfully shows ``not assessed`` until an authoritative ToolResult arrives.
     evidence_counts = Counter(
         _evidence_key(row.evidence_status)
@@ -1292,10 +1318,11 @@ def _agent_matrix_plain_lines(snap, width: int, *, now: float | None = None,
         for phase, label in (("awaiting_model", "model wait"), ("model_active", "responding"),
                              ("reasoning", "reasoning"),
                              ("writing", "writing"), ("running_tool", "using tool"),
-                             ("retry_wait", "retrying"), ("settling", "sealing"),
+                             ("retry_wait", "retrying"), ("settling", "finalizing"),
                              ("running", "working"),
                              ("starting", "starting"), ("queued", "queued"),
-                             ("report_ready", "sealed"), ("steered", "steered"),
+                             ("report_ready", "ready"), ("completed", "completed, no report"),
+                             ("steered", "steered"),
                              ("failed", "failed"), ("timed_out", "timed out"),
                              ("cancelled", "cancelled"), ("indeterminate", "unknown")):
             if hidden_counts[phase]:

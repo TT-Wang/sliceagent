@@ -1,11 +1,11 @@
-"""Read-only EXPLORE child (W6) — schema filtering + bounded summary.
+"""Read-only EXPLORE child (W6) — schema filtering + direct ChildOutcome report.
 No model, no pytest. Run: python tests/test_readonly_subagent.py
 
 Asserts the moat-safe read-only delegation contract:
   * read_only_schemas drops edit/shell/spawn tools, keeps read/search/recall.
   * SubagentHost(read_only=True).schemas() exposes NO spawn/edit even when depth<max_depth.
   * read_only=False schemas are unchanged (inner tools + spawn_subagent + spawn_explore).
-  * run_subagent(read_only=True) still returns a bounded one-line summary string.
+  * run_subagent(read_only=True) returns the complete normalized report in a framed tool result.
 """
 import os
 import sys
@@ -147,7 +147,7 @@ def host_writable_no_spawn_at_depth_floor():
     assert "spawn_agent" not in names, names
 
 
-# ---- run_subagent(read_only=True) returns a bounded summary -----------------
+# ---- run_subagent(read_only=True) returns a complete normalized report -----------------
 
 class _Resp:
     def __init__(self, content):
@@ -200,7 +200,7 @@ class _Tools:
 
 
 @check
-def run_subagent_read_only_returns_bounded_summary():
+def run_subagent_read_only_returns_complete_report():
     import sliceagent.subagent as subagent_module
 
     class GroundedLLM(_FakeLLM):
@@ -232,20 +232,21 @@ def run_subagent_read_only_returns_bounded_summary():
         subagent_module.EXPLORER_REASONING = original
     assert isinstance(out, str) and out, repr(out)
     assert llm.calls >= 1                                   # the child actually ran
-    assert out.startswith("[explore "), out                # labelled as a read-only run
-    assert "parser entry point" in out or "parse.py" in out, out
-    assert len(out) < 600, len(out)                         # bounded — not a transcript
+    assert out.startswith("[child · explorer · succeeded"), out
+    assert "BEGIN CHILD REPORT" in out and "END CHILD REPORT" in out
+    assert "Found the parser entry point in pkg/parse.py" in out, out
 
 
 @check
 def run_subagent_writable_label_distinct_from_explore():
-    # regression: a writable run is labelled [subagent ...], not [explore ...]
+    # regression: the direct outcome names the writable general kind, not explorer.
     llm = _FakeLLM("done")
     child_tools = SubagentHost(_Tools(), llm=llm, retriever=_Retriever(), memory=None,
                                max_depth=1, depth=1, read_only=False)
     out = run_subagent("do a thing", tools=child_tools, llm=llm, retriever=_Retriever(),
                        memory=None, max_steps=3, depth=1, read_only=False)
-    assert out.startswith("[subagent "), out
+    assert out.startswith("[child · general · succeeded"), out
+    assert "BEGIN CHILD REPORT\ndone\nEND CHILD REPORT" in out
 
 
 @check
@@ -456,7 +457,8 @@ def truncated_child_output_is_preserved_without_wrapper_recovery_call():
     finally:
         subagent_module.EXPLORER_REASONING = original
     assert llm.shared["calls"] == 2, "max_tokens must not trigger a wrapper-level model recovery"
-    assert out.startswith("Error: subagent did not finish cleanly:")
+    assert out.startswith("[child · explorer · failed · report partial")
+    assert "BEGIN CHILD REPORT" in out and "END CHILD REPORT" in out
     assert "partial evidence-backed report" in out
 
 
@@ -495,7 +497,8 @@ def exhausted_provider_attempts_do_not_start_a_fourth_report_recovery_call():
         subagent_module.EXPLORER_REASONING = original_profile
         errors_module.jittered_backoff = original_backoff
     assert llm.shared["calls"] == 3, "the shared retry owner gets 3 attempts; wrapper must not add a fourth"
-    assert out.startswith("Error: subagent did not finish cleanly:")
+    assert out.startswith("[child · explorer · failed · report absent")
+    assert "BEGIN CHILD REPORT\n(no accepted child report)\nEND CHILD REPORT" in out
 
 
 def main():

@@ -128,21 +128,24 @@ def render_findings_frames_by_source_no_re_derive():
 
 
 @check
-def delegated_fan_in_remains_recallable_without_becoming_observed_workspace_truth():
+def delegated_tool_result_is_not_copied_into_pfc_or_promoted_to_workspace_truth():
     s = Slice(); s.reset("review the project")
     sink = slice_sink(s)
-    mixed = (
-        "child report: review completed; parser.py is unsafe | primary observation [obs:abc123]: return value | "
-        'full report: read_file("subagents/sub-1.md")'
-    )
+    mixed = """[child · explorer · succeeded]
+
+BEGIN CHILD REPORT
+parser.py is unsafe; verify the cited return path
+END CHILD REPORT
+Archive: subagents/sub-1.md"""
     sink(ToolResult(
         "spawn_agent", {"agent": "explorer", "task": "inspect parser.py"}, mixed, False,
     ))
-    assert mixed in s.findings, "bounded child fan-in must remain available for cross-turn recall"
-    assert s.finding_source[mixed] == "delegated"
-    rendered = render_findings(s.findings, s.finding_source)
-    assert "delegated testimony" in rendered and "UNVERIFIED" in rendered
-    assert 'read_file("subagents/sub-1.md")' in rendered, "the refinement handle must survive"
+    assert mixed not in s.findings, \
+        "the complete report already lives in the tool trajectory/ledger and must not be duplicated into PFC"
+    assert not s.finding_source
+    assert render_findings(s.findings, s.finding_source) == ""
+    assert s.runtime.recent_calls[-1]["name"] == "spawn_agent", \
+        "execution telemetry remains observable without becoming model-authored workspace evidence"
 
 
 @check

@@ -121,12 +121,12 @@ def _lifecycle_timeout_effects(task: ScheduledTool, settled: ToolOutcome) -> tup
     uncertain = task.purity is not ToolPurity.PURE_READ
     operational_status = "indeterminate" if uncertain else "failed"
     effects: list[ToolEffect] = []
-    found_child = False
+    found_outcome = False
     for effect in settled.effects:
-        if effect.kind != "child_artifact":
+        if effect.kind not in {"child_outcome", "child_artifact"}:
             effects.append(effect)
             continue
-        found_child = True
+        found_outcome = found_outcome or effect.kind == "child_outcome"
         payload = dict(effect.payload or {})
         payload.update({
             "status": operational_status,
@@ -136,10 +136,10 @@ def _lifecycle_timeout_effects(task: ScheduledTool, settled: ToolOutcome) -> tup
             "partial": bool(payload.get("partial") or payload.get("artifact_id")),
         })
         effects.append(ToolEffect(effect.id, effect.kind, payload))
-    if not found_child:
+    if not found_outcome:
         effects.append(ToolEffect(
             f"{task.invocation.id}:delegation-timeout",
-            "child_artifact",
+            "child_outcome",
             {
                 "artifact_id": "",
                 "kind": str(task.invocation.args.get("agent") or ""),
@@ -154,6 +154,28 @@ def _lifecycle_timeout_effects(task: ScheduledTool, settled: ToolOutcome) -> tup
     return tuple(effects)
 
 
+def _has_direct_child_report(settled: ToolOutcome) -> bool:
+    """Whether a settled child outcome carries model-visible report bytes.
+
+    The report body lives in ``ToolOutcome.text``; the typed effect deliberately carries only its digest and
+    lifecycle metadata.  Persistence is orthogonal, so a missing ``child_artifact`` must never make the
+    scheduler discard a report that safely crossed the child boundary during close grace.
+    """
+    for effect in settled.effects:
+        if effect.kind != "child_outcome":
+            continue
+        payload = effect.payload or {}
+        try:
+            report_bytes = int(payload.get("report_bytes") or 0)
+        except (TypeError, ValueError):
+            report_bytes = 0
+        if report_bytes > 0 and str(payload.get("report_completion") or "") in {
+            "complete", "partial", "unknown",
+        }:
+            return True
+    return False
+
+
 def _closed_lifecycle_timeout(
     task: ScheduledTool, settled: ToolOutcome, timeout: float | None,
 ) -> ToolOutcome:
@@ -163,11 +185,21 @@ def _closed_lifecycle_timeout(
         "; the writable child may have applied workspace effects before cancellation"
         if uncertain else ""
     )
+    timeout_text = (
+        f"Error: subagent exceeded its {timeout:g}s delegation deadline; cancellation closed the child "
+        f"before the bounded grace expired{suffix}"
+    )
+    if _has_direct_child_report(settled):
+        classification = "indeterminate" if uncertain else "failed"
+        timeout_text = (
+            f"{settled.text}\n\nLifecycle warning: the delegation exceeded its {timeout:g}s deadline and "
+            f"closed during bounded grace; the full safe child report above was retained, while the "
+            f"delegation lifecycle is classified {classification}{suffix}."
+        )
     return ToolOutcome(
         task.invocation,
         ToolStatus.INDETERMINATE if uncertain else ToolStatus.FAILED,
-        (f"Error: subagent exceeded its {timeout:g}s delegation deadline; cancellation closed the child "
-         f"before the bounded grace expired{suffix}"),
+        timeout_text,
         _lifecycle_timeout_effects(task, settled),
     )
 

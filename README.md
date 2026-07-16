@@ -28,8 +28,8 @@ sliceagent's memory is organized like a brain: fast, lossy **perception** of the
 | Region | Role |
 |---|---|
 | **Sensory cortex** — live perception | Re-derives only live resources named by the active dependency closure; unrelated repo maps, history, and memory are not eagerly injected. |
-| **Prefrontal cortex** — working memory | Immutable, source-linked **Active Work**: unresolved request roots, child work, dependencies, resources, evidence, and delivery state. |
-| **Hippocampus** — episodic memory | Seals each turn or child report into the always-on local artifact store; pages a specific record back in on demand. |
+| **Prefrontal cortex** — working memory | Source-linked **Active Work** for genuine unresolved, cross-turn user commitments; it is not a shadow scheduler for tools or subagents. |
+| **Hippocampus** — episodic memory | Seals every turn into the always-on local artifact store; optional child-report artifacts add re-readable locators without gating direct report delivery. |
 | **Neocortex** — long-term memory | Stores scoped, provenance-linked USER, PROJECT, and CRAFT records in one typed model; Memem provides primary semantic retrieval when available, with native search as failover. |
 
 The implementation contracts are documented in [End-game context design](docs/ENDGAME-CONTEXT-DESIGN.md) and
@@ -157,7 +157,7 @@ Per turn (mean of 3 runs) — the orchestrator's context is what caps how large 
 | 5 · follow-up | 41,447 | 338,507 |
 | 6 · follow-up | 31,963 | 362,595 |
 
-In these runs, sliceagent's orchestrator peak stayed roughly flat because each turn retained active digests and handles rather than child trajectories; its largest single request averaged **~17k** across the six-turn workload. A transcript orchestrator **re-carries the whole session every turn**, so the same delegation-heavy session reached a **~21× larger orchestrator peak and ~3.7× more total tokens** once both agents' children were counted. Parent context does not grow with child trajectory length, though it may still grow when more delegated results are genuinely relevant. Delegation is table stakes; the architectural advantage is durable, re-readable child artifacts plus a history-bounded parent.
+In these runs, sliceagent's orchestrator peak stayed roughly flat because it carried child results rather than child trajectories; its largest single request averaged **~17k** across the six-turn workload. A transcript orchestrator **re-carries the whole session every turn**, so the same delegation-heavy session reached a **~21× larger orchestrator peak and ~3.7× more total tokens** once both agents' children were counted. Parent context does not grow with child trajectory length, though it may still grow when more delegated results are genuinely relevant. Delegation is table stakes; the architectural advantage is direct child outcomes, optional re-readable artifacts, and a history-bounded parent.
 
 *N = 3 runs, single model, one opponent, needs the Codex CLI installed. A value-recall sub-check varied wildly run-to-run (sliceagent 1–3 / 3, Codex 0–2 / 3) — it turns on a behavioral re-read choice, so it is within noise and **not** part of the claim. The defensible result is the orchestrator-context and total-token gap, which is structural and held across all three runs (orchestrator 8.8–14.3×, total 3.2–4.3×).*
 
@@ -260,7 +260,10 @@ Self-managed installs stay self-managed: `uv tool upgrade sliceagent`, `pipx upg
 `python -m pip install --upgrade "sliceagent[tui]"` (or `sliceagent[tui,memory]` when using Memem). Source checkouts should pull first, then run
 `uv sync --all-extras`.
 
-Footprint is light (no torch). `pip install -e .` works for a clone. Homebrew / Docker arrive in v0.2. → Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)**.
+Footprint is light (no torch), and `pip install -e .` works for a clone. Distribution is currently through
+the one-line installers and PyPI; no Homebrew formula or prebuilt SliceAgent container image is advertised.
+Docker is available separately as the optional POSIX/WSL2 command-sandbox backend. → Full walkthrough in
+**[QUICKSTART.md](QUICKSTART.md)**.
 
 ## Usage
 
@@ -318,7 +321,14 @@ guess.
 
 It can edit code in the primary workspace and grounded focus roots (reversible with `/undo`), run regular shell commands through a sandbox (`local` by default, `docker` for container isolation on POSIX/WSL2), search the tree and the web, and delegate decomposable research to a fresh one-shot read-only explorer (each child gets its own history-bounded, task-elastic slice). Native Windows uses the local backend; run SliceAgent inside WSL2 if you want the Docker backend. That narrow surface is the demo default. Set `AGENT_ADVANCED_AGENTS=1` to expose writable and named specialist delegation (and nested delegation when `AGENT_SUBAGENT_DEPTH` is raised above its default of `1`), or `AGENT_ADVANCED_TOOLS=1` to expose persistent process and interactive terminal tools. The flags are independent. Ordinary work runs directly from the user's request; the host retains only a narrow safeguard against high-confidence catastrophic shell commands. Secrets are scrubbed from anything persisted or logged.
 
-Every clean or interrupted agent task turn and every subagent report is sealed into the always-on local artifact/checkpoint path. The model reads exact evidence, project history, Active Work, and typed knowledge through the permanent read-only `@sliceagent/` namespace in every workspace. `@sliceagent/memory/status.md` is the bounded general summary; raw host-counted inventory lives separately at `@sliceagent/memory/diagnostics.md` for explicit diagnostic requests. Compatibility counts are not layer sizes or an L2 backlog. Memem is primary semantic retrieval when enabled; task recovery and typed record truth do not depend on it.
+Every clean or interrupted agent task turn is sealed into the always-on local artifact/checkpoint path.
+Subagent reports return directly to the parent in launch order; when optional artifact persistence succeeds,
+they also gain durable re-readable locators. The model reads exact evidence, project history, Active Work, and
+typed knowledge through the permanent read-only `@sliceagent/` namespace in every workspace.
+`@sliceagent/memory/status.md` is the bounded general summary; raw host-counted inventory lives separately at
+`@sliceagent/memory/diagnostics.md` for explicit diagnostic requests. Compatibility counts are not layer sizes
+or an L2 backlog. Memem is primary semantic retrieval when enabled; task recovery and typed record truth do
+not depend on it.
 
 Automatic knowledge push is lifecycle- and revision-aware: stale or dependency-drifted PROJECT observations and
 resolved diagnostic reports remain explicitly searchable, but do not reappear as if they described the current

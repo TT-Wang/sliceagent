@@ -19,6 +19,7 @@ QUIET_OUTPUT_TOOLS = frozenset({"read_file", "list_files", *EDIT_TOOLS})
 EVIDENCE_STATUSES = frozenset({
     "not_assessed", "none", "navigation_only", "content_partial", "content_retained",
 })
+REPORT_COMPLETIONS = frozenset({"complete", "partial", "absent", "unknown"})
 EVIDENCE_COUNT_FIELDS = (
     "scope_path_count", "navigation_success_count", "content_success_count",
     "gap_observation_count", "retained_navigation_view_count",
@@ -66,6 +67,19 @@ def normalized_evidence_status(value: object) -> str:
     """Normalize only the typed explorer-evidence vocabulary; malformed input stays unassessed."""
     status = str(value or "not_assessed").strip().casefold().replace("-", "_").replace(" ", "_")
     return status if status in EVIDENCE_STATUSES else "not_assessed"
+
+
+def normalized_report_completion(value: object) -> str:
+    """Normalize report-byte completeness independently of child execution state."""
+    completion = str(value or "unknown").strip().casefold().replace("-", "_").replace(" ", "_")
+    return completion if completion in REPORT_COMPLETIONS else "unknown"
+
+
+def child_incompleteness_label(report_completion: object, operational_partial: bool) -> str:
+    """Keep report truncation distinct from an operationally incomplete child run."""
+    if normalized_report_completion(report_completion) == "partial":
+        return "partial report"
+    return "work incomplete" if operational_partial else ""
 
 
 def evidence_account_counts(value: object) -> tuple[tuple[str, int], ...]:
@@ -186,13 +200,14 @@ def output_preview(value: object, *, max_rows: int = 3, max_chars: int = 320) ->
 
 
 def _child_payload(event: object) -> Mapping[str, object]:
+    merged: dict[str, object] = {}
     for effect in (getattr(getattr(event, "outcome", None), "effects", ()) or ()):
-        if str(getattr(effect, "kind", "") or "") != "child_artifact":
+        if str(getattr(effect, "kind", "") or "") not in {"child_outcome", "child_artifact"}:
             continue
         payload = getattr(effect, "payload", None)
         if isinstance(payload, Mapping):
-            return payload
-    return {}
+            merged.update(payload)
+    return merged
 
 
 @dataclass(frozen=True)
@@ -215,19 +230,21 @@ class AgentResultView:
     stop_reason: str = ""
     terminal_reason: str = ""
     partial: bool = False
+    report_completion: str = "unknown"
 
     @property
     def sealed(self) -> bool:
-        return self.status == "succeeded"
+        """Whether optional canonical artifact persistence actually committed."""
+        return bool(self.artifact_id)
 
     @property
     def report_ready(self) -> bool:
-        """Compatibility alias; user-facing successful terminal state is ``sealed``."""
-        return self.sealed
+        """Whether successful computation actually returned report bytes to the parent."""
+        return self.status == "succeeded" and self.report_completion in {"complete", "partial"}
 
     @property
     def timed_out(self) -> bool:
-        """Timeout is a typed child-artifact fact, never an inference from rendered prose."""
+        """Timeout is a typed child-outcome fact, never an inference from rendered prose."""
         causes = {self.stop_cause.strip().casefold(), self.stop_reason.strip().casefold()}
         return any(cause.endswith("_timeout") for cause in causes if cause)
 
@@ -298,13 +315,15 @@ def project_agent_result(event: object, *, duration_s: float | None = None) -> A
         stop_reason=stop_reason,
         terminal_reason=stop_cause or stop_reason,
         partial=partial,
+        report_completion=normalized_report_completion(payload.get("report_completion")),
     )
 
 
 __all__ = [
     "DELEGATION_TOOLS", "EDIT_TOOLS", "EVIDENCE_COUNT_FIELDS", "EVIDENCE_STATUSES",
-    "QUIET_OUTPUT_TOOLS", "AgentResultView", "OutputPreview", "ToolResultView",
-    "evidence_account_counts", "invocation_id", "normalized_evidence_status",
+    "QUIET_OUTPUT_TOOLS", "REPORT_COMPLETIONS", "AgentResultView", "OutputPreview", "ToolResultView",
+    "child_incompleteness_label", "evidence_account_counts", "invocation_id", "normalized_evidence_status",
+    "normalized_report_completion",
     "normalized_tool_status", "output_preview", "project_agent_result", "project_tool_result",
     "safe_terminal_text",
 ]

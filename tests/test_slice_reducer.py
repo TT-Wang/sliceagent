@@ -1,8 +1,8 @@
 import pytest
 
-from sliceagent.events import ToolResult, TurnStarted
+from sliceagent.events import AssistantText, ToolResult, TurnStarted
 from sliceagent.execution import ToolEffect, ToolInvocation, ToolOutcome, ToolStatus
-from sliceagent.pfc import Slice, slice_sink
+from sliceagent.pfc import Slice, record_user, slice_sink
 from sliceagent.slice_reducer import SliceReducer
 
 
@@ -79,12 +79,24 @@ def test_partial_effect_replay_fails_before_a_new_runtime_row_is_created():
     assert [call["id"] for call in state.runtime.recent_calls] == ["call:1"]
 
 
-def test_child_claims_remain_delegated_testimony_with_artifact_provenance():
+def test_child_outcome_metadata_is_retained_without_copying_report_prose_into_findings():
     state = Slice()
     state.reset("inspect CI")
     reducer = slice_sink(state)
-    child = ToolEffect(
-        "effect:child",
+    outcome = ToolEffect(
+        "effect:child-outcome",
+        "child_outcome",
+        {
+            "artifact_id": "child:sealed-report",
+            "kind": "explorer",
+            "status": "succeeded",
+            "operational_status": "succeeded",
+            "stop_reason": "end_turn",
+            "stop_cause": "complete",
+        },
+    )
+    artifact = ToolEffect(
+        "effect:child-artifact",
         "child_artifact",
         {
             "artifact_id": "child:sealed-report",
@@ -102,15 +114,32 @@ def test_child_claims_remain_delegated_testimony_with_artifact_provenance():
         "call:child",
         "spawn_agent",
         {"agent": "explorer", "task": "inspect CI"},
-        effects=(child,),
+        effects=(outcome, artifact),
         output="A CI workflow exists",
     ))
 
     call = state.runtime.recent_calls[-1]
     assert call["child_artifact_id"] == "child:sealed-report"
+    assert call["child_operational_status"] == "succeeded"
+    assert call["child_digest_delivered"] is True
     assert call["child_scope"] == [".github/workflows"]
     assert call["child_claims"][0]["observation_refs"] == ["0" * 64]
-    assert state.finding_source["A CI workflow exists"] == "delegated"
+    assert "A CI workflow exists" not in state.finding_source
+    assert state.findings == []
+
+
+def test_progress_assistant_text_is_presentation_only_until_a_final_response():
+    state = Slice()
+    state.reset("inspect CI")
+    record_user(state, "inspect CI")
+    reducer = slice_sink(state)
+
+    reducer(AssistantText("I will inspect that now.", final=False))
+    assert state.conversation[-1]["assistant"] == ""
+    assert state.findings == []
+
+    reducer(AssistantText("The inspection is complete.", final=True))
+    assert state.conversation[-1]["assistant"] == "The inspection is complete."
 
 
 def test_malformed_third_party_args_reduce_to_an_empty_mapping():

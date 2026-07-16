@@ -71,6 +71,56 @@ def _confirmed_transition_ids(snapshot) -> tuple[str, ...]:
     return tuple(dict.fromkeys(confirmed))
 
 
+def recoverable_child_report_count(artifact: Artifact) -> int:
+    """Count full child tool results retained by an interrupted turn artifact.
+
+    This recognizes only the recovery artifact written from an unprepared parent journal.  Ordinary turns
+    keep child reports solely in their native tool trajectory.  Requiring both the typed ``child_outcome``
+    metadata and the report envelope prevents a metadata-only or torn result from being advertised as
+    readable synthesis evidence.
+    """
+    if not isinstance(artifact, Artifact) or artifact.kind != "turn" or artifact.status != "interrupted":
+        return 0
+    body = artifact.structured_body if isinstance(artifact.structured_body, Mapping) else {}
+    events = body.get("journal_events") if isinstance(body, Mapping) else None
+    if not isinstance(events, (list, tuple)):
+        return 0
+    found: set[str] = set()
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping) or event.get("type") != "tool-outcome":
+            continue
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        outcome = payload.get("outcome")
+        outcome = outcome if isinstance(outcome, Mapping) else {}
+        status = outcome.get("status")
+        if not (isinstance(status, bool) or (
+                isinstance(status, str)
+                and status in {"succeeded", "steered", "failed", "cancelled"})):
+            continue
+        text = str(outcome.get("text") or "")
+        if "BEGIN CHILD REPORT" not in text or "END CHILD REPORT" not in text:
+            continue
+        effects = outcome.get("effects")
+        if not isinstance(effects, (list, tuple)):
+            continue
+        for effect in effects:
+            if not isinstance(effect, Mapping) or effect.get("kind") != "child_outcome":
+                continue
+            child = effect.get("payload")
+            child = child if isinstance(child, Mapping) else {}
+            try:
+                report_bytes = int(child.get("report_bytes") or 0)
+            except (TypeError, ValueError, OverflowError):
+                report_bytes = 0
+            if report_bytes <= 0 or str(child.get("report_completion") or "") == "absent":
+                continue
+            invocation_id = str(payload.get("invocation_id") or f"journal-event-{index}")
+            found.add(invocation_id)
+            break
+    return len(found)
+
+
 @dataclass(frozen=True)
 class ActiveTurn:
     task_id: str
@@ -835,7 +885,7 @@ class LocalTurnStore:
         from .execution import (ToolEffect, ToolInvocation, ToolOutcome, ToolStatus,
                                 coerce_tool_status, reconciliation_targets)
         from .intent import TurnAdmission
-        from .active_work import WorkGraph, attach_child_artifacts
+        from .active_work import WorkGraph
         from .pfc import Slice, record_user, slice_sink
         from .session import apply_turn_continuation
         from .taskstate import (slice_to_task_state, task_state_from_checkpoint,
@@ -1010,9 +1060,6 @@ class LocalTurnStore:
                 *state.reconciliation_targets, *uncertainty_targets,
             )))
 
-        state.active_work = attach_child_artifacts(
-            state.active_work, state.runtime.recent_calls, workspace_epoch=workspace_epoch,
-        )
         state.seal()
         task_state = slice_to_task_state(
             state, task_id, session_id=str(header.get("session_id") or self.session_id),

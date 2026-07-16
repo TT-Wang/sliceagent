@@ -23,11 +23,9 @@ from .context import (
 from .receipts import receipt_summary_parts
 
 
-# These are host-owned live control surfaces, not optional topical furniture. In particular, ``fan_in`` is
-# reconstructed from immutable child seals and is the only complete map→reduce handoff after a resume or
-# crash. Dropping it merely because ACTIVE WORK is present leaves the model with green lifecycle rows but no
-# report material—the exact failure this compiler is supposed to prevent.
-_ALWAYS = frozenset({"focus", "reconciliation", "convergence", "fan_in"})
+# These are host-owned live control surfaces, not optional topical furniture. Child outcomes are ordinary
+# current-turn tool results; they deliberately do not become a second cross-turn context region.
+_ALWAYS = frozenset({"focus", "reconciliation", "convergence"})
 _INTENT_FALLBACK = frozenset({"intent", "task_objective", "corrections", "task_constraints"})
 _FILE_KINDS = frozenset({"file", "workspace_file", "path", "workspace", "git"})
 _EVIDENCE_REGIONS = frozenset({
@@ -253,6 +251,24 @@ def _receipt_block(s, *, order: int = 2) -> ContextBlock | None:
     warning_count = int(receipt.get("warning_count") or 0)
     if warning_count:
         lines.append(f"- {warning_count} warning(s); open the artifact for exact detail")
+    recovery_artifact_id = str(
+        getattr(s.continuity, "recovery_child_artifact_id", "") or ""
+    )
+    recovery_report_count = max(0, int(
+        getattr(s.continuity, "recovery_child_report_count", 0) or 0
+    ))
+    if recovery_artifact_id and recovery_report_count:
+        noun = "report" if recovery_report_count == 1 else "reports"
+        verb = "is" if recovery_report_count == 1 else "are"
+        lines.append(
+            f"- crash recovery: {recovery_report_count} returned child {noun} {verb} retained in the "
+            "interrupted turn's journal, but process death may have preceded parent synthesis"
+        )
+        lines.append(
+            f'- if the current request resumes that work, read_file("artifacts/{recovery_artifact_id}.md") '
+            "before synthesizing or claiming completion; use the journaled tool-outcome text, not receipt "
+            "counts, as the report evidence"
+        )
     if artifact_id:
         lines.append(f'- exact receipt: read_file("artifacts/{artifact_id}.md")')
     return ContextBlock(

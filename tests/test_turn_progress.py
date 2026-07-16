@@ -347,7 +347,7 @@ def parallel_subagents_are_identity_safe_and_terminal_state_is_monotonic():
         "child-1", "turn-1", 1, "explorer", "storage", 1,
         "report_ready", "report ready", 3, 999,
     ))
-    assert "1 sealed" in settled.detail
+    assert "1 report ready" in settled.detail
     # A late callback cannot resurrect a terminal child, even with a later sequence.
     late = machine.subagent_activity(SubagentProgress(
         "child-1", "turn-1", 1, "explorer", "storage", 1,
@@ -356,19 +356,21 @@ def parallel_subagents_are_identity_safe_and_terminal_state_is_monotonic():
     child_one = next(item for item in late.subagents if item.agent_id == "child-1")
     assert child_one.phase == "report_ready" and "late stale" not in late.detail
 
-    first_effect = ToolEffect("child-1:effect", "child_artifact", {"artifact_id": "child-1"})
+    first_effect = ToolEffect("child-1:effect", "child_outcome", {
+        "artifact_id": "child-1", "report_completion": "complete",
+    })
     first_outcome = ToolOutcome(first, ToolStatus.SUCCEEDED, "report", (first_effect,))
     after_parent_result = machine.reduce(ToolResult(
         "spawn_agent", dict(first.args), "report", False, status="succeeded",
         invocation_id=first.id, outcome=first_outcome,
     ))
-    assert "1 sealed" in after_parent_result.detail and "agents running" in after_parent_result.detail
+    assert "1 report ready" in after_parent_result.detail and "agents running" in after_parent_result.detail
     retired = machine.subagent_activity(SubagentProgress(
         "child-1", "turn-1", 1, "explorer", "storage", 1,
         "report_ready", "late terminal callback", 3, 2_000,
     ))
     retained = next(item for item in retired.subagents if item.agent_id == "child-1")
-    assert retained.phase == "report_ready" and retained.detail == "sealed", \
+    assert retained.phase == "report_ready" and retained.detail == "report ready", \
         "settled calls must tombstone callbacks while retaining the terminal matrix row through StepEnd"
     integrated = machine.reduce(StepEnd(1, {}, "tool_use"))
     assert integrated.subagents == (), "the durable settled group replaces the transient matrix at StepEnd"
@@ -509,7 +511,9 @@ def malformed_nested_cycle_settles_once_instead_of_freezing_the_ui():
         "B", "turn-1", 1, "explorer", "B", 2, "running", "B", 0, 1,
         parent_agent_id="A",
     ))
-    effect = ToolEffect("cycle:effect", "child_artifact", {"artifact_id": "A"})
+    effect = ToolEffect("cycle:effect", "child_outcome", {
+        "artifact_id": "A", "report_completion": "complete",
+    })
     outcome = ToolOutcome(call, ToolStatus.SUCCEEDED, "report", (effect,))
     settled = machine.reduce(ToolResult(
         call.name, dict(call.args), "report", False, status="succeeded",
@@ -530,7 +534,9 @@ def authoritative_result_rekeys_a_missing_callback_and_settles_its_nested_tree()
         "nested", "turn-1", 1, "explorer", "nested", 2,
         "running", "nested work", 1, 1, parent_agent_id="child-A",
     ))
-    effect = ToolEffect("A:effect", "child_artifact", {"artifact_id": "child-A"})
+    effect = ToolEffect("A:effect", "child_outcome", {
+        "artifact_id": "child-A", "report_completion": "complete",
+    })
     outcome = ToolOutcome(call, ToolStatus.SUCCEEDED, "report", (effect,))
     settled = machine.reduce(ToolResult(
         call.name, dict(call.args), "report", False, status="succeeded",
@@ -575,7 +581,9 @@ def invocation_identity_wins_over_a_contradictory_artifact_or_callback_alias():
             "running", f"work {name}", 1, 1, invocation_id=name, request_ordinal=index,
         ))
     # A malformed artifact payload points A's result at B. Exact physical invocation A remains authoritative.
-    effect = ToolEffect("bad", "child_artifact", {"artifact_id": "child-B"})
+    effect = ToolEffect("bad", "child_outcome", {
+        "artifact_id": "child-B", "report_completion": "complete",
+    })
     outcome = ToolOutcome(calls["A"], ToolStatus.SUCCEEDED, "report", (effect,))
     settled = machine.reduce(ToolResult(
         "spawn_agent", dict(calls["A"].args), "report", False, status="succeeded",
@@ -611,13 +619,13 @@ def report_ready_children_are_not_also_counted_as_running():
         "child-1", "turn-1", 1, "explorer", "area-1", 1,
         "report_ready", "report ready", 1, 2,
     ))
-    assert "1 agent running" in one_ready.detail and "1 sealed" in one_ready.detail
+    assert "1 agent running" in one_ready.detail and "1 report ready" in one_ready.detail
     assert "2 agents running" not in one_ready.detail, one_ready.detail
     all_ready = machine.subagent_activity(SubagentProgress(
         "child-2", "turn-1", 2, "explorer", "area-2", 1,
         "report_ready", "report ready", 1, 2,
     ))
-    assert "agents running" not in all_ready.detail and "2 sealed" in all_ready.detail
+    assert "agents running" not in all_ready.detail and "2 reports ready" in all_ready.detail
 
 
 @check
@@ -653,7 +661,7 @@ def unknown_explicit_spawn_status_is_live_uncertainty_not_success():
         first.name, dict(first.args), "provider extension", False,
         status="timed_out", invocation_id=first.id,
     ))
-    assert "1 state unknown" in uncertain.detail and "sealed" not in uncertain.detail, uncertain.detail
+    assert "1 state unknown" in uncertain.detail and "report ready" not in uncertain.detail, uncertain.detail
 
 
 def main():

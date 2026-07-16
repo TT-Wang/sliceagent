@@ -625,7 +625,7 @@ def grep_dir_path_not_pinned():
 @check
 def episode_manifest_tail_only():
     import json
-    from sliceagent.memory import MememMemory
+    from sliceagent.memory import LocalMemory
     v = tempfile.mkdtemp(prefix="vault-")
     os.environ["SLICEAGENT_VAULT"] = v
     try:
@@ -633,7 +633,9 @@ def episode_manifest_tail_only():
         with open(os.path.join(d, "s1.jsonl"), "w") as f:
             for i in range(40):
                 f.write(json.dumps({"turn": i, "title": f"t{i}"}) + "\n")
-        shown, total = MememMemory().episode_manifest("s1", 8)
+        # The episode tape is canonical native memory.  Optional Memem is only an
+        # L2 search projection and must not be required to exercise this path.
+        shown, total = LocalMemory(prefer_memem=False).episode_manifest("s1", 8)
         assert total == 40 and len(shown) == 8 and shown[-1]["turn"] == 39, (total, len(shown))
     finally:
         os.environ.pop("SLICEAGENT_VAULT", None)

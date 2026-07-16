@@ -407,20 +407,6 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
     pages = PageTable(_retr, memory, hints, session_id=session_id or None)
     swap = SwapManager(_retr)   # owns the working-set page lifecycle for this session
 
-    # A settled delegation is reconstructed from immutable ContextFS reports, not from transient tool-message
-    # bodies.  This loader is intentionally read-only and receipt-free: it is part of seed reconstruction, just
-    # like OPEN FILES and history manifests.  The bundle wraps child prose as untrusted testimony before it enters
-    # the model slice.  Hosts without ContextFS simply retain locator-complete fan-in metadata.
-    def fan_in_report_loader(handle: str) -> str:
-        router = getattr(tools, "_history_route", None)
-        if not callable(router):
-            raise FileNotFoundError("host exposes no ContextFS route")
-        provider = router(handle)
-        if provider is None:
-            raise FileNotFoundError(f"no canonical artifact route for {handle}")
-        canonicalize = getattr(tools, "_archive_handle", None)
-        canonical = canonicalize(handle) if callable(canonicalize) else handle
-        return str(provider.read_file(canonical))
     # SENSORY CORTEX tier B — RESIDENT REPO MAP: the project's structural map, built ONCE per session
     # (stable → prompt-cache warm) so a broad task navigates from a resident map instead of re-listing/
     # find. A derived view (re-computed from the filesystem), memoized for the session, never a durable
@@ -570,7 +556,6 @@ def make_build_slice(state, tools, retriever, memory, task: str, session_id: str
             worktree, "", cache_manifest, focus_text,  # repo_map rides the cacheable SYSTEM prefix
             roster=roster_manifest, open_file_paths=open_file_paths, max_findings=_NO_CAP,
         )
-        ctx["fan_in_report_loader"] = fan_in_report_loader
         # 2B + review fix: the <workspace_context> envelope wraps reference STATE only. The live request frames
         # it once from OUTSIDE at RECENCY (below the fence), and the intent-aware NOW footer is the OUTERMOST
         # tail. One exact request avoids turning a user's premise into duplicated pseudo-evidence.

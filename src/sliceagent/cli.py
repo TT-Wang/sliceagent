@@ -29,9 +29,8 @@ from .events import (
     TurnStarted,
     make_dispatcher,
 )
-from .hooks import (ActiveWorkContinuationHook, BudgetHook, CatastrophicSafeguardHook,
-                    CompositeHooks, DeliverableCompletionHook, Hooks, OracleHook,
-                    ToolPreflight)
+from .hooks import (BudgetHook, CatastrophicSafeguardHook, CompositeHooks, Hooks,
+                    OracleHook, ToolPreflight)
 from .execution import ToolStatus
 from .mentions import workspace_mentions
 from .receipts import (compact_receipt_projection, receipt_completion_label,
@@ -552,6 +551,7 @@ def _hydrate_workspace_tasks(store, session, on_log: Callable[[str], None]) -> N
     """Restore only the selected workspace's checkpoints into its fresh session."""
     from .persistence import artifact_order_key
     from .receipts import compact_receipt_projection
+    from .runtime_persistence import recoverable_child_report_count
     from .taskstate import task_state_from_checkpoint, task_state_to_slice
 
     restored = []
@@ -598,6 +598,14 @@ def _hydrate_workspace_tasks(store, session, on_log: Callable[[str], None]) -> N
         body = artifact.structured_body if isinstance(artifact.structured_body, dict) else dict(
             artifact.structured_body,
         )
+        recovered_child_reports = recoverable_child_report_count(artifact)
+        if recovered_child_reports:
+            # The report text itself remains canonical only in the immutable interrupted-turn artifact.
+            # Advertise that exact readable source for one resumed turn; do not copy it into TaskState,
+            # Active Work, findings, or every later seed.
+            continuity = session.tasks[task_id].continuity
+            continuity.recovery_child_artifact_id = artifact.id
+            continuity.recovery_child_report_count = recovered_child_reports
         meta = body.get("meta")
         meta = meta if isinstance(meta, dict) else dict(meta or {})
         provenance = str(body.get("assistant_provenance") or "")
@@ -759,10 +767,6 @@ def _prepare_workspace_resources(
                 max_depth=sub_depth if advanced_agents else 1, notify=notify_subagent,
                 agents=agents, session_id=session.session_id,
                 intent_provider=lambda _task, s=session: s.active().intent,
-                active_work_provider=lambda s=session: (
-                    s.active().active_work,
-                    str(getattr(s.logical_turn, "id", "") or ""),
-                ),
                 task_id_fn=lambda s=session: s.active_id or "t-none",
                 parent_id_fn=lambda st=store: (
                     st.active.artifact_id if st.active is not None else ""
@@ -1497,14 +1501,6 @@ def main() -> None:
         # so a storage failure cannot half-seal working memory and then let a newer turn overtake it.
         import copy
         sealed_target = copy.deepcopy(target)
-        # Bind sealed child testimony to the exact Active Work item named at launch.  This happens after the
-        # model segment (so it cannot invalidate an update_work CAS mid-trajectory) and before the task
-        # checkpoint, using only canonical artifact IDs emitted by typed child effects.
-        from .active_work import attach_child_artifacts
-        sealed_target.active_work = attach_child_artifacts(
-            sealed_target.active_work, sealed_target.runtime.recent_calls,
-            workspace_epoch=active.workspace_epoch,
-        )
         sealed_target.seal()
         # Active Work owns semantic request lifecycle; receipts own only execution. A source workspace seal
         # keeps the same root in progress, while the one user-visible terminal response cites the artifact this
@@ -2034,21 +2030,11 @@ def main() -> None:
                 _console.print(f"  🖼  skipped (needs a vision-capable AGENT_MODEL): {', '.join(skipped)}", markup=False)
 
     def _make_workspace_hooks_for(hook_root, hook_cfg, hook_session):
-        # Smart-kernel boundary: the model owns semantic judgment and ordinary action choice. The host keeps
-        # workspace lifecycle integrity, one bounded reconciliation of the model's own typed unfinished child
-        # work, a narrow catastrophic-command floor, and resource controls. Receipts, child claims, and quality
-        # evidence remain model-visible grounding; none is a semantic publication or permission gate.
+        # Smart-kernel boundary: the model owns semantic judgment, ordinary action choice, and response
+        # completion. The host keeps workspace lifecycle integrity, a narrow catastrophic-command floor, and
+        # explicit resource controls. Active Work and deliverable metadata are context—not publication gates.
         hook_list = [
             _WorkspaceHandoffHook(_workspace_handoff),
-            ActiveWorkContinuationHook(lambda: (
-                hook_session.active().active_work,
-                str(getattr(hook_session.logical_turn, "id", "") or ""),
-                hook_session.active().runtime.recent_calls,
-            )),
-            DeliverableCompletionHook(lambda: (
-                hook_session.active().task.deliverable_requirement,
-                str(getattr(hook_session.logical_turn, "id", "") or ""),
-            )),
             CatastrophicSafeguardHook(),
         ]
         if hook_cfg.verify_cmd:

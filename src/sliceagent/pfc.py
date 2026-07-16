@@ -19,8 +19,9 @@ stable SYSTEM prompt text lives in prompt.py.
 
 PROVENANCE (Invariant 1): a finding is tagged by where it came from, and generic model prose is never
 promoted into evidence. Each explicit finding carries a `source`: a direct tool result is "observed"; the
-`note` arg on a non-failing call is "tool-note"; child fan-in is "delegated" testimony; an unsupported tool
-note is a "claim". Assistant replies remain verbatim only in bounded continuity and immutable turn artifacts.
+`note` arg on a non-failing call is "tool-note"; legacy child projections may be "delegated" testimony; an
+unsupported tool note is a "claim". New child reports remain ordinary tool results instead of being copied
+into PFC findings. Assistant replies remain verbatim only in bounded continuity and immutable turn artifacts.
 Load-bearing conclusions therefore cross turns through typed evidence rather than a shadow transcript.
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
-"""Subagent artifact archive + recall (subagents/ virtual FS). A child seals a structured artifact; the
-parent recalls its FULL detail via read_file("subagents/sub-N.md") — the refinement handle behind the
-bounded digest. Race-safe sequential ids (parallel explorers archive concurrently). No model, no network.
+"""Direct child reports plus optional subagent artifact archive/recall (subagents/ virtual FS). A child
+returns its complete normalized report to the parent; when archival succeeds, the same report remains
+available through subagents/sub-N.md. Race-safe sequential ids. No model, no network.
 Run: PYTHONPATH=src python tests/test_subagent_artifacts.py
 """
 import os
@@ -122,7 +122,7 @@ def nullmemory_is_inert():
     assert n.read_subagent_artifacts("s1") == []
 
 
-# ---- end-to-end: bounded return AND full recall (the moat + no-detail-loss, in one check) --------------
+# ---- end-to-end: direct full return AND optional durable recall ---------------------------------------
 
 class _Resp:
     def __init__(self, content):
@@ -159,7 +159,7 @@ class _ToolsHost:
 
 
 @check
-def run_subagent_returns_bounded_digest_and_archives_FULL_report():
+def run_subagent_returns_full_report_and_archives_the_same_bytes():
     # a LONG child report with a distinctive TAIL conclusion (~800 chars)
     report = ("Detailed step-by-step analysis of the outreach flow. " * 15
               + "FINAL CONCLUSION: the bug is at feishu.ts:109 (falsy timestamp).")
@@ -170,18 +170,15 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
                        retriever=NullRetriever(), memory=mem, max_steps=2,
                        read_only=True, session_id="s1")
 
-    # (1) MOAT: the parent's tool result is a BOUNDED digest + a recall handle — NOT the full transcript.
-    assert 'read_file("subagents/sub-1.md")' in out, out
-    # The digest now carries two explicitly distinct layers: a bounded child-interpretation excerpt and one
-    # bounded primary observation (or an explicit unavailable marker). The larger ceiling buys provenance at
-    # synthesis time while remaining O(1) per child; the full report still stays behind the handle.
-    assert len(out) < 1400, f"parent return not bounded: {len(out)}"
-    assert "presentation-truncated" in out
-    assert "primary observation" in out and "observed outreach implementation" in out
-    assert "FINAL CONCLUSION" in out, "the bounded head+tail view must preserve the report's conclusion"
-    assert "presentation omitted" in out, "the missing middle must be explicit and refinable"
+    # The report itself is the ordinary tool result. No digest/fan-in reconstruction sits between the child
+    # and parent, and the complete middle and tail are both present.
+    assert out.startswith("[child · explorer · succeeded")
+    assert f"BEGIN CHILD REPORT\n{report}\nEND CHILD REPORT" in out
+    assert "presentation-truncated" not in out and "presentation omitted" not in out
+    assert "Archive: subagents/sub-1.md" in out, out
 
-    # (2) NO DETAIL LOSS: the FULL report is archived and recallable — the tail survives the seal.
+    # Archival is a refinement surface, not the delivery mechanism. When available it preserves identical
+    # canonical report bytes and the tail survives the archive round trip.
     arts = mem.read_subagent_artifacts("s1")
     assert len(arts) == 1 and arts[0]["artifact"]["report"] == report
     full = SubagentFS(mem, "s1").read_file("subagents/sub-1.md")
@@ -189,12 +186,14 @@ def run_subagent_returns_bounded_digest_and_archives_FULL_report():
 
 
 @check
-def run_subagent_without_session_stays_inline_backcompat():
-    # no session_id → not archived; falls back to the pre-artifact inline summary (no recall handle).
+def run_subagent_without_session_still_returns_the_complete_report_without_archive():
+    # No session_id means no archive, but delivery is unchanged because the direct report is authoritative.
     out = run_subagent("do a thing", tools=_ToolsHost(), llm=_FakeLLM("did the thing"),
                        retriever=NullRetriever(), memory=_mem(), max_steps=2,
                        read_only=True, session_id="")
-    assert "read_file(\"subagents/" not in out and out.startswith("[explore "), out
+    assert out.startswith("[child · explorer · succeeded"), out
+    assert "BEGIN CHILD REPORT\ndid the thing\nEND CHILD REPORT" in out
+    assert "Archive:" not in out
 
 
 @check

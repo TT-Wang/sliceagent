@@ -19,6 +19,7 @@ import math
 import threading
 import time
 from collections import Counter, deque
+from collections.abc import Mapping
 
 from .access import AllAccess, FileAccess, ReadAllAccess
 from .context_overflow import ContextOverflow
@@ -281,17 +282,98 @@ MICRO_MARKER = ("[old tool result cleared to fit the window — use its artifact
                 "emitted, otherwise re-observe the source]")
 
 
-def _micro_compact(messages: list, *, floor: int, keep_recent: int = MICRO_KEEP_RECENT) -> bool:
+def _micro_compact(
+    messages: list,
+    *,
+    floor: int,
+    keep_recent: int = MICRO_KEEP_RECENT,
+    preserve_tool_call_ids: frozenset[str] = frozenset(),
+) -> bool:
     """Clear the bodies of OLD tool-result messages between `floor` and the recent window (last
-    `keep_recent` messages). Returns True if it cleared at least one (the caller retries the LLM call
-    before resorting to dropping whole exchanges)."""
+    `keep_recent` messages). Direct child reports named in ``preserve_tool_call_ids`` are never cleared:
+    they are computation returned to the parent, not disposable observation bulk. Returns True if it cleared
+    at least one (the caller retries the LLM call before resorting to dropping whole exchanges)."""
     cleared = False
     for i in range(floor, max(floor, len(messages) - keep_recent)):
         m = messages[i]
-        if m.get("role") == "tool" and m.get("content") and m["content"] != MICRO_MARKER:
+        if (
+            m.get("role") == "tool"
+            and str(m.get("tool_call_id") or "") not in preserve_tool_call_ids
+            and m.get("content")
+            and m["content"] != MICRO_MARKER
+        ):
             m["content"] = MICRO_MARKER
             cleared = True
     return cleared
+
+
+def _direct_child_reports(results: list[dict]) -> list[dict]:
+    """Extract small, trusted-shape metadata for direct child reports in one settled tool batch.
+
+    The report body intentionally remains only in the ordinary tool result. This projection exists solely so
+    overflow and indeterminate-stop handling cannot accidentally discard that result without either giving the
+    parent a synthesis-only call or naming the retained source truthfully.
+    """
+    reports = []
+    for result in results:
+        outcome = result.get("outcome") if isinstance(result, dict) else None
+        for effect in (getattr(outcome, "effects", ()) or ()):
+            if effect.kind != "child_outcome" or not isinstance(effect.payload, Mapping):
+                continue
+            payload = effect.payload
+            try:
+                report_bytes = max(0, int(payload.get("report_bytes") or 0))
+            except (TypeError, ValueError, OverflowError):
+                report_bytes = 0
+            try:
+                ordinal = max(0, int(payload.get("launch_ordinal") or 0))
+            except (TypeError, ValueError, OverflowError):
+                ordinal = 0
+            if report_bytes <= 0 or str(payload.get("report_completion") or "") == "absent":
+                continue
+            status = str(
+                payload.get("operational_status") or payload.get("status") or result.get("status") or ""
+            ).strip().casefold()
+            locator = str(payload.get("report_handle") or "").strip()
+            artifact_id = str(payload.get("artifact_id") or "").strip()
+            if not locator and artifact_id:
+                locator = f"artifacts/{artifact_id}.md"
+            reports.append({
+                "tool_call_id": str(result.get("id") or ""),
+                "status": status,
+                "kind": str(payload.get("name") or payload.get("kind") or "child"),
+                "ordinal": ordinal,
+                "report_bytes": report_bytes,
+                "report_sha256": str(payload.get("report_sha256") or ""),
+                "locator": locator,
+            })
+            break
+    return reports
+
+
+def _one_line(value: object, limit: int = 120) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _child_report_sources(reports: list[dict]) -> str:
+    """Bounded human/model-readable identities for reports retained by the current turn."""
+    sources = []
+    for report in reports[:12]:
+        ordinal = report.get("ordinal")
+        label = f"child {ordinal}" if ordinal else _one_line(report.get("kind"), 60) or "child"
+        locator = _one_line(report.get("locator"), 180)
+        if locator:
+            source = locator
+        else:
+            call_id = _one_line(report.get("tool_call_id"), 100) or "unknown-call"
+            digest = _one_line(report.get("report_sha256"), 64)
+            source = f"tool result {call_id} in this turn's sealed history"
+            if digest:
+                source += f" (sha256 {digest})"
+        sources.append(f"{label}: {source}")
+    if len(reports) > len(sources):
+        sources.append(f"and {len(reports) - len(sources)} more child report(s) in this turn")
+    return "; ".join(sources)
 
 
 def _complete_preflighted(
@@ -1184,7 +1266,10 @@ def _assistant_message(resp, *, step: int = 0, call_namespace: str = "") -> dict
     """Reconstruct the OpenAI assistant message (with native tool_calls) for the accumulated transcript.
     ids are synthesized index-based when absent (matching run_tool_batch's scheme) so the assistant's
     tool_calls and the following tool messages reference the SAME ids."""
-    msg: dict = {"role": "assistant", "content": resp.content or ""}
+    # Tool-bearing prose is a presentation update, not a delivered answer.  Keep it out of the semantic
+    # trajectory so a provider cannot later mistake an early draft ("I'll do two waves…") for completed
+    # work.  Hidden reasoning is retained below because some providers require it when replaying tool calls.
+    msg: dict = {"role": "assistant", "content": "" if resp.tool_calls else (resp.content or "")}
     if resp.tool_calls:
         # DeepSeek V4 thinking mode requires the exact assistant reasoning_content to accompany every
         # accumulated tool-call message. Omitting it makes the following tool-result request fail with 400.
@@ -1213,153 +1298,6 @@ def _model_usage_from_tool_results(results: list[dict]) -> Usage:
             if effect.kind == "model_usage":
                 total = total + Usage.from_value(effect.payload)
     return total
-
-
-_DELEGATION_TOOLS = frozenset({"spawn_agent", "spawn_explore", "spawn_subagent"})
-
-
-def _delegation_batch_receipt(results: list[dict]) -> str:
-    """Project one provider batch into a small model-visible child lifecycle receipt.
-
-    The sealed receipt is the durable authority after the turn, but synthesis happens *before* that seal. A
-    parent previously had to count several long child prose results itself and turned an observed 3-success /
-    4-failure batch into "4 ok / 3 errors". Keep the result bodies for evidence, then append this deterministic
-    control projection so status arithmetic and truncation/timeout labels never depend on model narration.
-    """
-    def bounded_field(value: object, limit: int = 120) -> str:
-        return " ".join(str(value or "").split())[:limit]
-
-    children = [row for row in results if str(row.get("name") or "") in _DELEGATION_TOOLS]
-    if len(children) < 2:
-        return ""
-
-    counts = {status.value: 0 for status in ToolStatus}
-    facts = []
-    for row in children:
-        status = str(row.get("status") or "").casefold()
-        if status not in counts:
-            status = ToolStatus.INDETERMINATE.value
-        counts[status] += 1
-        child_stop = ""
-        child_cause = ""
-        recovered_from: tuple[str, ...] = ()
-        artifact_id = ""
-        source_coverage_status = ""
-        outcome = row.get("outcome")
-        for effect in (getattr(outcome, "effects", ()) or ()):
-            if getattr(effect, "kind", "") != "child_artifact":
-                continue
-            payload = getattr(effect, "payload", {}) or {}
-            child_stop = str(payload.get("stop_reason") or payload.get("status") or "")
-            child_cause = str(payload.get("stop_cause") or "")
-            raw_recovery = payload.get("recovered_from") or ()
-            if isinstance(raw_recovery, (list, tuple)):
-                recovered_from = tuple(str(item) for item in raw_recovery if item)
-            artifact_id = str(payload.get("artifact_id") or "")
-            source_coverage_status = str(payload.get("source_coverage_status") or "")
-            break
-        parts = [f"tool_status={status}"]
-        if child_stop:
-            parts.append(f"child_stop={child_stop}")
-        if child_cause:
-            parts.append(f"cause={child_cause}")
-        if recovered_from:
-            parts.append("recovered_from=" + ",".join(recovered_from))
-        if artifact_id:
-            parts.append(f"sealed={artifact_id}")
-        if source_coverage_status and source_coverage_status != "not_assessed":
-            parts.append(f"source_coverage={source_coverage_status}")
-        args = row.get("args") if isinstance(row.get("args"), dict) else {}
-        work_item_id = bounded_field(args.get("work_item_id"))
-        if work_item_id:
-            parts.append(f"work_item={work_item_id}")
-        raw_scope = args.get("scope") or ()
-        if isinstance(raw_scope, (list, tuple)):
-            scope = tuple(bounded_field(value) for value in raw_scope if bounded_field(value))
-            if scope:
-                shown = scope[:6]
-                parts.append("declared_scope=" + ",".join(shown)
-                             + (f",+{len(scope) - len(shown)}" if len(scope) > len(shown) else ""))
-        facts.append(f"- {row.get('id') or '(unknown call)'}: " + "; ".join(parts))
-
-    return (
-        "# HOST DELEGATION RECEIPT (authoritative lifecycle facts; not a new user request)\n"
-        f"requested={len(children)}; succeeded={counts['succeeded']}; failed={counts['failed']}; "
-        f"steered={counts['steered']}; cancelled={counts['cancelled']}; "
-        f"indeterminate={counts['indeterminate']}\n"
-        + "\n".join(facts)
-        + "\nCount only tool_status=succeeded as complete accepted child results. A failed child's sealed "
-          "report may contain partial leads, but label them incomplete and never include them in the success "
-          "count. Use the typed cause/recovered_from fields; do not infer a different cause from report prose. "
-          "For a synthesiser, source_coverage=source_complete means only that every granted report was "
-          "completely read and path-cited. It does not establish claim correctness, entailment, agreement, or "
-          "independent verification. source_partial/source_unsupported remains orthogonal to operational success. "
-          "This receipt establishes no parent-task coverage outside each child's declared_scope. The host has "
-          "already projected each bound terminal child lifecycle into ACTIVE WORK: succeeded becomes ready for "
-          "parent synthesis; a determinate failure becomes cancelled with its gap preserved. Do not call "
-          "update_work merely to mirror those lifecycle facts. Continue only genuinely open partitions before "
-          "claiming broad coverage."
-    )
-
-
-def _delegation_fan_in_bundle(results: list[dict], tools) -> str:
-    """Reconstruct complete sealed child reports for the next parent synthesis call.
-
-    The provider transcript is deliberately not the authority here: child tool results contain presentation
-    excerpts and may later be compacted.  Join the typed child-artifact effects to the canonical ContextFS reports
-    instead.  Loading is per-child fail-soft; the bundle always retains exact locators and lifecycle metadata.
-    """
-    from .fan_in import build_fan_in_bundle
-
-    calls = []
-    for result in results:
-        if str(result.get("name") or "") not in _DELEGATION_TOOLS:
-            continue
-        row = {
-            "id": str(result.get("id") or ""),
-            "status": str(result.get("status") or "unknown"),
-        }
-        outcome = result.get("outcome")
-        for effect in (getattr(outcome, "effects", ()) or ()):
-            if getattr(effect, "kind", "") != "child_artifact":
-                continue
-            payload = getattr(effect, "payload", {}) or {}
-            artifact_id = str(payload.get("artifact_id") or "")
-            if artifact_id:
-                row["child_artifact_id"] = artifact_id
-            row["child_work_item_id"] = str(payload.get("work_item_id") or "")
-            row["child_operational_status"] = str(
-                payload.get("operational_status") or payload.get("status") or row["status"]
-            )
-            row["child_source_coverage_status"] = str(
-                payload.get("source_coverage_status") or ""
-            )
-            if "explorer_evidence_status" in payload or "evidence_status" in payload:
-                row["child_evidence_declared"] = True
-                row["child_evidence_status"] = str(
-                    payload.get("explorer_evidence_status") or payload.get("evidence_status") or ""
-                )
-            account = payload.get("explorer_evidence") or payload.get("evidence_account")
-            if isinstance(account, dict):
-                row["child_evidence_account"] = account
-            break
-        calls.append(row)
-
-    if not any(str(row.get("child_artifact_id") or "") for row in calls):
-        return ""
-
-    def load(handle: str) -> str:
-        router = getattr(tools, "_history_route", None)
-        if not callable(router):
-            raise FileNotFoundError("host exposes no ContextFS route")
-        provider = router(handle)
-        if provider is None:
-            raise FileNotFoundError(f"no canonical artifact route for {handle}")
-        canonicalize = getattr(tools, "_archive_handle", None)
-        canonical = canonicalize(handle) if callable(canonicalize) else handle
-        return str(provider.read_file(canonical))
-
-    return build_fan_in_bundle(calls, report_loader=load, max_children=None).render()
 
 
 def _prepared(hooks, msgs: list) -> list:
@@ -1398,8 +1336,11 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
     model_attempts: dict[int, int] = {}
     repeated_observation = _ObservationRepeatAdvisory()
     failure_origin = ""
-    response_only_next = False
     should_cancel = signal.is_set if signal is not None else None
+    # Direct child reports are ordinary tool-result messages, but unlike reconstructible reads they are the
+    # result of expensive delegated computation. Keep only their small identities here so overflow handling
+    # can protect the corresponding message bodies without creating a second report store or fan-in packet.
+    protected_child_reports: dict[str, dict] = {}
 
     def _model_attempt_observer(step: int):
         """Build one observer shared by retries/re-projections for this semantic step."""
@@ -1474,8 +1415,7 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                 return _park("max_steps", BUDGET_EXHAUSTED("max_steps"))
 
             steps += 1
-            call_schemas = [] if response_only_next else schemas
-            response_only_next = False
+            call_schemas = schemas
             before = _safe_advisory("before_step", lambda: hooks.before_step(steps))
             if before and before.get("stop_turn"):
                 # The built-in producer is the explicit token ceiling. Tool preflight stops belong to typed
@@ -1579,7 +1519,11 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                         # MICRO-COMPACTION FIRST: clear OLD tool-result BODIES — keeping the
                         # assistant reasoning, the recent window, and valid tool pairings — before resorting
                         # to dropping a whole exchange. Lossless-by-default (full content in the episode cache).
-                        micro = _micro_compact(messages, floor=floor)
+                        micro = _micro_compact(
+                            messages,
+                            floor=floor,
+                            preserve_tool_call_ids=frozenset(protected_child_reports),
+                        )
                         if not micro and len(messages) <= floor:
                             # micro-clear exhausted AND nothing left to drop (even the seed overflows).
                             # SECONDARY net: if a bigger-context model is configured (AGENT_MODEL_FALLBACK),
@@ -1601,6 +1545,23 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                             end = floor + 1
                             while end < len(messages) and messages[end].get("role") == "tool":
                                 end += 1
+                            protected = [
+                                protected_child_reports[str(message.get("tool_call_id") or "")]
+                                for message in messages[floor:end]
+                                if str(message.get("tool_call_id") or "") in protected_child_reports
+                            ]
+                            if protected:
+                                # Never turn a successfully returned child report into a clean final that did
+                                # not see it. The full result has already crossed ToolResult and the per-step
+                                # checkpoint, so parking keeps it in this turn's canonical history; the message
+                                # names its archive when available and otherwise its exact tool-result identity.
+                                return _park(
+                                    "overflow",
+                                    "The context overflowed before the parent could synthesize returned child "
+                                    "report(s). No final synthesis was produced, and the reports were not "
+                                    "discarded. Retained sources: " + _child_report_sources(protected),
+                                    closeout=False,
+                                )
                             del messages[floor:end]
                         overflow_tries += 1
                         if not has_crumb:   # breadcrumb ONCE PER TURN, carrying the distilled CHECKPOINT (F2)
@@ -1644,26 +1605,6 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     if cont and cont.get("continue"):
                         messages.append({"role": "user", "content": cont.get("feedback") or "Continue."})
                         continue
-                    # Lifecycle completion and response delivery are distinct.  Only procedures that explicitly
-                    # declared a typed output envelope participate here; ordinary turns remain untouched. An
-                    # exclusive lifecycle edge (notably workspace transport) owns this segment and defers the
-                    # logical request's deliverable to the resumed target workspace.
-                    candidate_check = None
-                    if stop == "end_turn" and not (cont and cont.get("exclusive")):
-                        candidate_check = _safe_advisory(
-                            "assess_terminal_candidate",
-                            lambda: hooks.assess_terminal_candidate(stop, candidate),
-                        )
-                    if candidate_check and candidate_check.get("continue"):
-                        # A response nudge is optional presentation help, never a reason to replace the ordinary
-                        # max-step boundary with an interruption. If no pass remains, publish the model's candidate.
-                        if steps < max_steps:
-                            response_only_next = bool(candidate_check.get("response_only"))
-                            messages.append({
-                                "role": "user",
-                                "content": candidate_check.get("feedback") or "Answer the user's request now.",
-                            })
-                            continue
                     if stop in ("max_tokens", "filtered"):
                         # #11: a truncated (length) or content-filtered response is INCOMPLETE — park it as
                         # interrupted instead of sealing a partial answer as a clean turn. Surface any partial
@@ -1697,37 +1638,12 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     if r.get("rejection_kind") == "catastrophic" and catastrophic_stop is None:
                         catastrophic_stop = str(r.get("rejection_reason") or r.get("output") or
                                                 "Safety stop: potentially catastrophic command refused")
-                delegation_receipt = _delegation_batch_receipt(results)
-                fan_in_bundle = _delegation_fan_in_bundle(results, tools)
-                if fan_in_bundle:
-                    synthesis_packet = (
-                        "# HOST FAN-IN SYNTHESIS SLICE (typed host state; not a new user request)\n"
-                        "The delegation batch has settled. Use every complete child report below as attributed "
-                        "testimony, preserve failed/partial coverage gaps, verify load-bearing claims against live "
-                        "source when needed, and answer the CURRENT REQUEST directly. Bound child lifecycle has "
-                        "already been projected into ACTIVE WORK; do not call update_work merely to mark these "
-                        "children ready. If verification still needs tools, keep pre-tool prose to a brief factual "
-                        "update. Only the later tool-free terminal response is delivered as the answer, so it must "
-                        "contain the requested synthesis itself and must never point to a report 'above'.\n\n"
-                        + (delegation_receipt + "\n\n" if delegation_receipt else "")
-                        + fan_in_bundle
-                    )
-                    delegation_count = sum(
-                        str(row.get("name") or "") in _DELEGATION_TOOLS for row in results
-                    )
-                    delegation_only = delegation_count == len(results)
-                    if delegation_only and delegation_count >= 2:
-                        # Clean map→reduce boundary: the durable ledger already owns the noisy exploration
-                        # trajectory.  The parent synthesis call needs the current request plus complete reports,
-                        # not several pages of spawn progress, excerpts, retries, and update chatter.
-                        messages[seed_len:] = [{"role": "user", "content": synthesis_packet}]
-                    else:
-                        messages.append({"role": "user", "content": synthesis_packet})
-                elif delegation_receipt:
-                    # Tool messages preserve each report/excerpt. This host-derived control projection gives
-                    # the next model step exact batch arithmetic before it synthesizes or reconciles anything;
-                    # the canonical durable receipt will independently project the same typed outcomes at seal.
-                    messages.append({"role": "user", "content": delegation_receipt})
+                batch_child_reports = _direct_child_reports(results)
+                protected_child_reports.update({
+                    report["tool_call_id"]: report
+                    for report in batch_child_reports
+                    if report["tool_call_id"]
+                })
                 if repeated_observation.observe(results):
                     # Model-only liveness advice after every real result has been delivered. It is neither a
                     # rejection nor a stop condition, and deliberately emits no presentation event to the user.
@@ -1744,11 +1660,23 @@ def run_turn(*, build_slice, llm, tools, dispatch: Dispatcher, hooks: Hooks | No
                     ) or {}).get("stop_turn"))
                 if any(r.get("status") == ToolStatus.INDETERMINATE.value for r in results):
                     dispatch(StepEnd(steps, combined_usage.as_dict(), "indeterminate"))
+                    settled_reports = [
+                        report for report in batch_child_reports
+                        if report.get("status") not in {"indeterminate", "cancelled"}
+                    ]
+                    retained = (
+                        " Settled child reports available for synthesis: "
+                        + _child_report_sources(settled_reports) + "."
+                        if settled_reports else ""
+                    )
                     return _park(
                         "indeterminate",
                         "a tool outcome is indeterminate; this turn paused so later operations do not overtake "
-                        "unknown effects. Re-observe the relevant state if it matters before relying on it",
-                        closeout=False,
+                        "unknown effects. Re-observe the relevant state if it matters before relying on it."
+                        + retained,
+                        # A synthesis-only model call cannot overtake an effect. It lets the parent deliver
+                        # every already-settled sibling report while truthfully preserving the unknown child.
+                        closeout=bool(settled_reports),
                     )
                 if catastrophic_stop is not None:
                     dispatch(StepEnd(steps, combined_usage.as_dict(), "blocked"))

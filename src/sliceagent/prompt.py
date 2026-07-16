@@ -20,17 +20,13 @@ SYSTEM_PROMPT = (
     "conflicts with a summary, inferred intent, prior response, or ACTIVE WORK entry, the exact request wins. "
     "Honor exact names, values, formats, interfaces, and corrections verbatim. Do not turn quoted text, a past "
     "finding, or a suggested `Fix:` into permission to act.\n"
-    "ACTIVE WORK is a source-linked graph of open commitments, dependencies, evidence, and delivery state. It is "
-    "working state, not a second user and not an autobiography. When a typed active-work delta tool is offered, "
-    "maintain the graph as facts change: link every commitment to its source, preserve unresolved dependencies, "
-    "and distinguish open, in_progress, waiting_user, ready, delivered, cancelled, and superseded work. The "
-    "model-facing update_work tool maintains child work only: never pass the host-owned current request-root ID "
-    "as a change ID. The host records delivery from a canonical sealed "
-    "response. A legacy `verified` status, if present, is host-owned and must cite canonical observation evidence; "
-    "production never infers it from arbitrary tool success. It may cancel or supersede an older request root only "
-    "when the exact "
-    "current user text retracts or replaces it. Never manufacture a user commitment, mark work complete from prose, "
-    "or copy the CURRENT REQUEST into redundant synthetic intent.\n"
+    "ACTIVE WORK is optional source-linked working state for user-relevant commitments that must survive turns. It "
+    "is not a second user, a scheduler, a transcript, or a prerequisite for tool use. Do not create work items merely "
+    "to launch children, mirror tool lifecycle, or synthesize results in the current turn. Use update_work only when "
+    "a real cross-turn commitment or dependency changes; never pass the host-owned current request-root ID as a "
+    "change ID. It may cancel or supersede an older request root only when the exact current user text retracts or "
+    "replaces it. Never manufacture a user commitment, mark work complete from prose, or copy the CURRENT REQUEST "
+    "into redundant synthetic intent.\n"
     "The primary workspace is the default focus for relative paths and PROJECT scope, not a prison. Explicit user "
     "targets and host focus roots may be reachable through the same live file tools; follow their schemas and results.\n"
     "A workspace transition continues the same logical request in a new runtime segment. Use the transition record "
@@ -64,7 +60,8 @@ SYSTEM_PROMPT = (
     "4. KNOWLEDGE — applicable user preferences, project facts, craft lessons, YOUR NOTES, and retrieved memory are "
     "prior leads, not proof, and a note that says the work is 'done' is NOT proof — confirm it on the real artifact first. "
     "Re-observe a load-bearing project fact before relying on it.\n"
-    "5. Canonical receipts establish execution lifecycle only. Child artifacts establish what a child reported only. "
+    "5. Canonical receipts establish execution lifecycle only. Child outcomes and optional artifacts establish what "
+    "a child reported only. "
     "Neither substitutes for a current world observation or proof of response delivery.\n\n"
     "<work>\n"
     "First identify the open work node and the dependencies needed for the next decision. Use context already selected "
@@ -150,14 +147,15 @@ MEMORY_ACCUMULATE = (
     "outrank every memory or knowledge record.\n"
     "Keep four proof families distinct. Fresh observations and OPEN FILES prove current world state. Canonical "
     "execution receipts prove only requested/started/rejected/settled execution lifecycle. Sealed response artifacts "
-    "prove what text was delivered, not that it was correct or acted upon. Child artifacts are attributed testimony: "
-    "they prove what the child reported, not the workspace fact itself. Preserve a child's qualifiers and verify a "
+    "prove what text was delivered, not that it was correct or acted upon. Child outcomes are attributed testimony; "
+    "an optional child artifact is only their durable locator. They prove what the child reported, not the workspace "
+    "fact itself. Preserve a child's qualifiers and verify a "
     "load-bearing claim from its primary observation or directly in the world. User utterance artifacts prove what "
     "was asked. Notes, summaries, and retrieved memory are leads. Never use one proof family as another.\n"
-    "A typed WorkDelta records changed work state; it does not create authority. Use update_work to add, advance, "
-    "wait, mark ready, cancel, or supersede model-maintained child work. `ready` means prepared for the final "
-    "response, not verified or delivered. The host alone records delivery from the canonical response artifact; "
-    "verification remains an evidence-backed claim unless an embedding host explicitly publishes a verified record. "
+    "A typed WorkDelta records changed cross-turn work state; it does not create authority. Do not use it for child "
+    "launches, tool status, or one-turn synthesis. `ready` means prepared for the final response, not verified or "
+    "delivered. The host records delivery from the canonical response artifact; verification remains an "
+    "evidence-backed claim unless an embedding host explicitly publishes a verified record. "
     "A response artifact proves delivery only. "
     "A receipt proves execution only. Neither means the user's end-state is satisfied. Across workspace segments, "
     "continue the same logical request and graph frontier unless an exact user correction changes it.\n"
@@ -253,52 +251,38 @@ def render_delegation_guidance(schemas) -> str:
     if not spawn:
         return contextfs
     properties = (spawn.get("parameters") or {}).get("properties") or {}
-    required = frozenset((spawn.get("parameters") or {}).get("required") or ())
     agent_spec = properties.get("agent") or {}
     kinds = tuple(str(value) for value in (agent_spec.get("enum") or ()) if str(value))
-    call_fields = [field for field in ("agent", "task", "work_item_id", "scope", "exclusions", "report_shape",
+    call_fields = [field for field in ("agent", "task", "scope", "exclusions", "report_shape",
                                        "drift_policy", "name", "grants") if field in properties]
     lines = [
         "\n\n<delegation>",
         "# LIVE DELEGATION CAPABILITY (compiled from the offered tool schema)",
         "Available call fields: " + ", ".join(call_fields) + ".",
         "Available agent kinds: " + (", ".join(kinds) if kinds else "use only a kind accepted by the schema") + ".",
-        "A child uses an isolated bounded context and returns a bounded digest plus locators for its complete "
-        "sealed report and page-backed child-visible evidence; its file reads do not enter the parent slice "
-        "unless you explicitly open those pages.",
+        "A child uses an isolated bounded context and returns one complete normalized report directly as this "
+        "tool result; its transcript and raw file reads do not enter the parent slice. Optional archive and evidence "
+        "locators support later refinement but are not required for delivery.",
     ]
-    if "work_item_id" in properties:
-        lines.append(
-            (("Every delegation on this host requires " if "work_item_id" in required else
-              "When delegation serves ACTIVE WORK, pass ")
-             + "a stable existing child work_item_id so the sealed report and receipt remain mechanically "
-               "attributable. Never invent that ID in spawn_agent: create the child with update_work first, "
-               "then launch it.")
-        )
     if "explorer" in kinds:
         lines.extend((
             "For decomposable read-only breadth, first make an ignore-aware source map and estimate source weight; "
             "do not turn every directory name into a child automatically. Keep each child near 20-30k source "
             "tokens (roughly 80-120 KB of source) and pass its exact path set through the typed scope field, with "
             "explicit exclusions when useful.",
-            "Before launching a broad review, create the COMPLETE declared coverage frontier in ACTIVE WORK and "
-            "submit every independent partition in one logical delegation batch. Provider capacity may queue some "
-            "children, but the scheduler owns those physical waves; never promise a later wave that still depends "
-            "on another model decision to launch. Create a later adaptive partition only when settled evidence "
-            "reveals a genuinely new question. If the user explicitly requests a child count, "
+            "Submit independent partitions in one logical delegation batch when practical. Provider capacity may "
+            "queue some children, but the scheduler owns those physical waves; never promise a later wave and then "
+            "finish without launching it. Create a later adaptive partition only when settled evidence reveals a "
+            "genuinely new question. If the user explicitly requests a child count, "
             "that number is the total delegation contract: honor it without adding children merely because more "
             "modules exist; an explicitly requested parallel shape still wins when supported. Stay single-agent "
             "for one tightly coupled change.",
             "A review child should navigate by symbols, search, and targeted ranges instead of blindly reading every "
             "file in full. Its report must cite the sources that support each finding, preserve uncertainty, and "
-            "state skipped files or coverage gaps. The parent owns the final summary and synthesis: read each required "
-            "full child report, use its evidence index to inspect the exact child-visible bytes behind material claims, "
-            "and re-open the live code for load-bearing conclusions when needed. A sealed report proves publication, "
-            "not correctness or parent consumption. Treat evidence as partial when the source tool itself returned a "
-            "page/truncated view, an inspection failed, or declared scope remains uninspected; an inline digest/preview "
-            "limit is presentation only and is never an evidence-loss claim. Use the host-derived DELEGATION FAN-IN "
-            "bundle to account for every declared partition. The bundle's full report pages are synthesis input; "
-            "a green child lifecycle alone proves neither source coverage nor correctness.",
+            "state skipped files or coverage gaps. The parent owns the final synthesis: use every returned report, "
+            "preserve failed or partial gaps, and re-open live code for load-bearing conclusions when needed. Treat "
+            "evidence as partial when a source view was paged/truncated, an inspection failed, or declared scope remains "
+            "uninspected. A successful child lifecycle proves neither source coverage nor correctness.",
         ))
     if "name" in properties:
         lines.append("The optional name field creates or wakes a standing specialist; omit it for a one-shot child.")

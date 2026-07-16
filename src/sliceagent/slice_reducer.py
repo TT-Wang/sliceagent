@@ -221,13 +221,14 @@ class SliceReducer:
     @reduce.register
     def _(self, event: AssistantText) -> None:
         s = self._slice()
-        if not s.conversation or not (event.content or "").strip():
+        # Tool-bearing/progress prose is presentation state, not conversation truth.  Only the one response
+        # actually delivered to the user becomes cross-turn continuity.
+        if not event.final or not s.conversation or not (event.content or "").strip():
             return
         s.conversation[-1]["assistant"] = str(event.content)
-        if event.final:
-            from .discourse import extract_pending_proposal
+        from .discourse import extract_pending_proposal
 
-            s.continuity.pending_proposal = extract_pending_proposal(event.content)
+        s.continuity.pending_proposal = extract_pending_proposal(event.content)
 
     @reduce.register
     def _(self, event: ToolResult) -> None:
@@ -290,10 +291,10 @@ class SliceReducer:
         call["status"] = event.status or ("failed" if event.failing else "succeeded")
         if accept_terminal_metadata:
             self._capture_child_artifact(call, event.name, effects)
-            if (event.name in _DELEGATION_TOOLS and call.get("child_artifact_id")
+            if (event.name in _DELEGATION_TOOLS and call.get("child_operational_status")
                     and not event.failing and str(event.output or "").strip()):
-                # The bounded tool result is already in the parent trajectory.  Record that delivery
-                # separately from whether the parent later opens the full immutable artifact.
+                # The complete child outcome is already in the parent trajectory. Record that delivery
+                # independently from whether an optional artifact was persisted.
                 call["child_digest_delivered"] = True
 
         return _ToolFrame(
@@ -321,9 +322,13 @@ class SliceReducer:
 
         if name not in _DELEGATION_TOOLS:
             return
-        for effect in effects:
-            if getattr(effect, "kind", "") != "child_artifact":
-                continue
+        # Read the direct outcome first, then merge optional legacy/artifact metadata such as locators.
+        relevant = sorted(
+            (effect for effect in effects
+             if getattr(effect, "kind", "") in {"child_outcome", "child_artifact"}),
+            key=lambda effect: 0 if getattr(effect, "kind", "") == "child_outcome" else 1,
+        )
+        for effect in relevant:
             payload = getattr(effect, "payload", {}) or {}
             artifact_id = str(payload.get("artifact_id") or "")
             if artifact_id:
@@ -429,7 +434,6 @@ class SliceReducer:
                         break
             if valid_claims and normalized_claims:
                 call["child_claims"] = normalized_claims
-            break
 
     @staticmethod
     def _record_uncertainty(frame: _ToolFrame) -> None:
@@ -551,25 +555,10 @@ class SliceReducer:
 
     @staticmethod
     def _reduce_delegated_testimony(frame: _ToolFrame) -> None:
-        event = frame.event
-        if event.name not in _DELEGATION_TOOLS:
-            return
-        # A child tool result already carries a typed, immutable artifact/work-item join. Reflect its terminal
-        # lifecycle in L1 immediately so the model never has to copy the scheduler's facts back through
-        # update_work. The same reducer is replayed at seal/recovery and is idempotent.
-        if frame.call.get("child_artifact_id") and frame.call.get("child_work_item_id"):
-            from .active_work import attach_child_artifacts
-
-            item = frame.slice.active_work.get(str(frame.call.get("child_work_item_id") or ""))
-            workspace_epoch = int(getattr(item, "workspace_epoch", 0) or 0)
-            frame.slice.active_work = attach_child_artifacts(
-                frame.slice.active_work, (frame.call,), workspace_epoch=workspace_epoch,
-            )
-        if not event.failing and event.output:
-            frame.new_finding = (
-                record_note(frame.slice, event.output, source="delegated")
-                or frame.new_finding
-            )
+        # Delegation results already live in the current tool trajectory and in the turn ledger.  Promoting a
+        # full report into PFC findings duplicates it, while auto-advancing Active Work couples scheduler
+        # lifecycle to user commitments and creates stale-revision races.  Observers consume typed effects.
+        return
 
     @staticmethod
     def _reduce_resource_family(frame: _ToolFrame) -> None:

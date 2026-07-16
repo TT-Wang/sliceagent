@@ -77,13 +77,14 @@ def indeterminate_tool_is_unknown_not_an_ordinary_failure():
 
 
 def _agent_result(call_id, ordinal, task, status, *, cause="", report="report", source_coverage="",
-                  evidence_status="", evidence_account=None):
+                  evidence_status="", evidence_account=None, report_completion="complete"):
     invocation = ToolInvocation(call_id, "spawn_agent", {"agent": "explorer", "task": task}, ordinal - 1)
-    effect = ToolEffect(f"{call_id}:child", "child_artifact", {
+    effect = ToolEffect(f"{call_id}:child", "child_outcome", {
         "artifact_id": f"child-{ordinal}", "kind": "explorer", "launch_ordinal": ordinal,
         "status": "ok" if status is ToolStatus.SUCCEEDED else "error",
         "stop_reason": "end_turn" if status is ToolStatus.SUCCEEDED else "error",
         "stop_cause": cause or ("complete" if status is ToolStatus.SUCCEEDED else "error"),
+        "report_completion": report_completion,
         **({"source_coverage_status": source_coverage} if source_coverage else {}),
         **({"explorer_evidence_status": evidence_status} if evidence_status else {}),
         **({"explorer_evidence": evidence_account} if evidence_account is not None else {}),
@@ -104,11 +105,12 @@ def parallel_agents_render_as_one_typed_outcome_group():
                       report="a very long child report that belongs in its artifact"),
         StepEnd(1, {}, "tool_use"),
     ])
-    assert "agents · 1/2 sealed" in out and "1 timed out" in out, out
+    assert "agents · 1/2 reports ready" in out and "1 timed out" in out, out
     assert out.index("1 explorer") < out.index("2 explorer"), "launch order must survive reverse completion"
     assert "audit persistence" in out and "audit UI" in out, out
     assert "provider timeout" in out and "Error: provider timed out" in out, out
-    assert "a very long child report" not in out, "successful child prose belongs in the sealed report"
+    assert "a very long child report" not in out, \
+        "the TUI must not duplicate a direct report when its durable locator is available"
     assert "artifacts · artifacts/index.md · 2 stored" in out, out
 
 
@@ -119,7 +121,7 @@ def operational_success_and_partial_source_coverage_render_as_separate_facts():
         source_coverage="source_partial",
     )
     out, _ = _render([result, StepEnd(1, {}, "tool_use")])
-    assert "agents · 1/1 sealed" in out, out
+    assert "agents · 1/1 reports ready" in out, out
     assert "source coverage · 1 source partial" in out, out
     assert "source partial" in out and "ground" not in out and "verified" not in out, out
 
@@ -147,7 +149,7 @@ def typed_evidence_quality_is_visible_without_becoming_execution_failure():
         ),
         StepEnd(1, {}, "tool_use"),
     ])
-    assert "agents · 4/4 sealed" in out, out
+    assert "agents · 4/4 reports ready" in out, out
     assert "1 navigation only" in out and "1 content partial" in out and "1 no evidence" in out, out
     assert "1 not assessed" in out, "missing typed evidence must not be inferred from report prose"
     assert "evidence nav 4" in out and "evidence partial 2/5" in out, out
@@ -218,7 +220,7 @@ def mixed_rejected_and_started_agents_keep_distinct_request_ordinals():
     started_invocation = ToolInvocation(
         "agent-started", "spawn_agent", {"agent": "explorer", "task": "real audit"}, 1,
     )
-    child = ToolEffect("agent-started:child", "child_artifact", {
+    child = ToolEffect("agent-started:child", "child_outcome", {
         "artifact_id": "child-real", "kind": "explorer", "launch_ordinal": 1,
         "stop_cause": "complete",
     })

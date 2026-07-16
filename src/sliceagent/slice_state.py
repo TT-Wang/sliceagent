@@ -217,6 +217,12 @@ class ContinuityState:
     # contains no args/output; it stays visible without a lexical "what happened?" classifier.
     last_receipt: dict | None = None
     last_receipt_artifact_id: str = ""
+    # Recovery-only pointer to a canonical interrupted-turn artifact whose journal contains one or more
+    # complete child ToolResults that may not have reached parent synthesis before process death.  This is
+    # derived from immutable artifacts at startup, never serialized into TaskState, and consumed by the next
+    # turn seal.  Normal direct child delivery therefore has no second context path.
+    recovery_child_artifact_id: str = ""
+    recovery_child_report_count: int = 0
 
     def reset(self) -> None:
         self.conversation = []
@@ -226,12 +232,17 @@ class ContinuityState:
         self.previous_evidence_snapshot = None
         self.last_receipt = None
         self.last_receipt_artifact_id = ""
+        self.recovery_child_artifact_id = ""
+        self.recovery_child_report_count = 0
 
     def seal(self) -> None:
         # The conversation ring is bounded when written; raw requests belong to immutable turn artifacts.
         # Discourse focus and a pending proposal carry across adjacent turns so a bare ordinal/assent can be
         # resolved against an exact anchor. Their owner replaces/clears them explicitly.
-        return None
+        # A recovered child-result pointer is a one-turn repair seam, not durable task memory. If the turn
+        # cannot seal it remains on the live copy; a successful seal retires it with the interrupted segment.
+        self.recovery_child_artifact_id = ""
+        self.recovery_child_report_count = 0
 
 
 @dataclass

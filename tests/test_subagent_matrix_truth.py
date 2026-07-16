@@ -63,16 +63,18 @@ def rendered(machine: TurnProgress, *, now: float | None = None, width: int = 12
     )
 
 
-def failed_result(invocation: ToolInvocation, *, cause: str = "provider_timeout") -> ToolResult:
-    artifact_id = f"child-{invocation.provider_index + 1}"
-    effect = ToolEffect(f"{artifact_id}:artifact", "child_artifact", {
-        "artifact_id": artifact_id,
+def failed_result(invocation: ToolInvocation, *, cause: str = "provider_timeout",
+                  report_completion: str = "absent", partial: bool = True) -> ToolResult:
+    child_id = f"child-{invocation.provider_index + 1}"
+    effect = ToolEffect(f"{child_id}:outcome", "child_outcome", {
+        "artifact_id": "",
         "kind": "explorer",
         "launch_ordinal": invocation.provider_index + 1,
         "status": "failed",
         "stop_reason": "error",
         "stop_cause": cause,
-        "partial": True,
+        "report_completion": report_completion,
+        "partial": partial,
     })
     outcome = ToolOutcome(invocation, ToolStatus.FAILED, "child failed", (effect,))
     return ToolResult(
@@ -82,15 +84,17 @@ def failed_result(invocation: ToolInvocation, *, cause: str = "provider_timeout"
 
 
 def succeeded_result(invocation: ToolInvocation, *, evidence_status: str = "not_assessed",
-                     evidence_account: dict | None = None) -> ToolResult:
-    artifact_id = f"child-{invocation.provider_index + 1}"
-    effect = ToolEffect(f"{artifact_id}:artifact", "child_artifact", {
-        "artifact_id": artifact_id,
+                     evidence_account: dict | None = None,
+                     report_completion: str = "complete") -> ToolResult:
+    child_id = f"child-{invocation.provider_index + 1}"
+    effect = ToolEffect(f"{child_id}:outcome", "child_outcome", {
+        "artifact_id": "",
         "kind": "explorer",
         "launch_ordinal": invocation.provider_index + 1,
         "status": "ok",
         "stop_reason": "end_turn",
         "stop_cause": "complete",
+        "report_completion": report_completion,
         "explorer_evidence_status": evidence_status,
         **({"explorer_evidence": evidence_account} if evidence_account is not None else {}),
     })
@@ -167,10 +171,10 @@ def test_child_interruption_moves_to_nonterminal_settling_until_outer_result():
 
     row = machine.snapshot().subagents[0]
     assert row.phase == "settling"
-    assert row.detail == "sealing partial outcome"
+    assert row.detail == "finalizing outcome"
     assert row.finished_at is None, "child interruption is not the outer spawn's terminal result"
     text = rendered(machine, now=clock.now)
-    assert "sealing" in text and "sealing partial outcome" in text
+    assert "finalizing" in text and "finalizing outcome" in text
     assert "awaiting model" not in text and "responding" not in text
 
     settled = machine.reduce(succeeded_result(invocation))
@@ -279,19 +283,62 @@ def test_typed_timeout_settles_partial_row_and_late_callback_cannot_resurrect_it
     row = settled.subagents[0]
     assert row.phase == "timed_out"
     assert row.terminal_reason == "provider timeout" and row.partial
+    assert row.report_completion == "absent"
     assert settled.phase is ProgressPhase.INTEGRATING
     text = rendered(machine, now=clock.now)
-    assert "timed out" in text and "provider timeout" in text and "partial report" in text
+    assert "timed out" in text and "provider timeout" in text and "work incomplete" in text
+    assert "partial report" not in text
 
     late = update(machine, invocation, "reasoning", 99, attempt=2)
     assert late.subagents[0].phase == "timed_out"
 
     view = project_agent_result(failed_result(invocation), duration_s=5)
     assert view.timed_out and view.partial and view.terminal_reason == "provider_timeout"
+    assert view.report_completion == "absent"
     console = Console(record=True, width=100, force_terminal=False, color_system=None)
     console.print(_render_agent_batch([view], 100))
     durable = console.export_text()
-    assert "1 timed out" in durable and "partial report" in durable
+    assert "1 timed out" in durable and "work incomplete" in durable
+    assert "partial report" not in durable
+
+
+def test_partial_report_label_requires_typed_partial_report_completion():
+    machine, clock = started_machine()
+    invocation = spawn(machine)
+
+    settled = machine.reduce(failed_result(invocation, report_completion="partial"))
+    row = settled.subagents[0]
+    assert row.partial and row.report_completion == "partial"
+    text = rendered(machine, now=clock.now)
+    assert "partial report" in text and "work incomplete" not in text
+
+    view = project_agent_result(
+        failed_result(invocation, report_completion="partial"), duration_s=5,
+    )
+    console = Console(record=True, width=100, force_terminal=False, color_system=None)
+    console.print(_render_agent_batch([view], 100))
+    durable = console.export_text()
+    assert "partial report" in durable and "work incomplete" not in durable
+
+
+def test_success_without_report_is_completed_but_never_report_ready():
+    machine, clock = started_machine()
+    invocation = spawn(machine)
+
+    result = succeeded_result(invocation, report_completion="absent")
+    settled = machine.reduce(result)
+    row = settled.subagents[0]
+    assert row.phase == "completed" and row.report_completion == "absent"
+    text = rendered(machine, now=clock.now)
+    assert "completed, no report" in text and "report ready" not in text
+
+    view = project_agent_result(result, duration_s=5)
+    assert not view.report_ready and not view.sealed
+    console = Console(record=True, width=100, force_terminal=False, color_system=None)
+    console.print(_render_agent_batch([view], 100))
+    durable = console.export_text()
+    assert "0/1 reports ready" in durable and "1 completed without report" in durable
+    assert "completed · no report" in durable
 
 
 def test_reverse_fanout_settlement_transitions_to_results_and_step_end_clears_matrix():
@@ -307,7 +354,10 @@ def test_reverse_fanout_settlement_transitions_to_results_and_step_end_clears_ma
     all_settled = machine.reduce(succeeded_result(first))
     assert all_settled.phase is ProgressPhase.INTEGRATING
     assert {row.phase for row in all_settled.subagents} == {"report_ready"}
-    assert "2 sealed" in rendered(machine)
+    assert "2 ready" in rendered(machine)
+    direct_view = project_agent_result(succeeded_result(first), duration_s=5)
+    assert direct_view.report_ready and not direct_view.sealed, \
+        "successful direct computation is ready even when optional artifact persistence is absent"
 
     cleared = machine.reduce(StepEnd(1, {}, "tool_use"))
     assert cleared.subagents == () and cleared.phase is ProgressPhase.INTEGRATING
@@ -332,7 +382,7 @@ def test_typed_evidence_status_and_counts_get_a_separate_live_column():
     lines = _agent_matrix_plain_lines(settled, 120, now=100.0)
     rendered_text = "\n".join(line for _style, line in lines)
     row_styles = [style for style, line in lines if line.strip()[:1].isdigit()]
-    assert "2 sealed" in rendered_text and "evidence" in rendered_text
+    assert "2 ready" in rendered_text and "evidence" in rendered_text
     assert "nav 3" in rendered_text and "no evidence" in rendered_text
     assert "source complete" not in rendered_text
     assert row_styles == ["warn", "warn"], \

@@ -23,7 +23,7 @@ from sliceagent import scheduler  # noqa: E402
 from sliceagent.scheduler import ScheduledTool, run_ordered  # noqa: E402
 from sliceagent.subagent import (_GrantConsumptionSink, _assess_synthesis_source_coverage,  # noqa: E402
                                  _report_cites_ref)
-from sliceagent.subagent_contract import SubagentArtifact, SubagentBrief  # noqa: E402
+from sliceagent.subagent_contract import ChildOutcome, SubagentArtifact, SubagentBrief  # noqa: E402
 
 
 def _brief() -> SubagentBrief:
@@ -480,8 +480,11 @@ def test_delegation_deadline_cancels_child_closes_slot_and_reports_timed_out():
         assert elapsed < 0.8, elapsed
         outcome = rows[0]["outcome"]
         assert outcome.status is ToolStatus.FAILED
-        effect = next(item for item in outcome.effects if item.kind == "child_artifact")
+        effect = next(item for item in outcome.effects if item.kind == "child_outcome")
         assert effect.payload["stop_cause"] == "delegation_timeout"
+        assert effect.payload["operational_status"] == "failed"
+        assert effect.payload["artifact_id"] == "", \
+            "timeout truth must not pretend an optional archive was stored"
         assert scheduler._LIFECYCLE_READER_SLOTS.acquire(blocking=False), \
             "a proven closed child must release global lifecycle capacity before return"
         scheduler._LIFECYCLE_READER_SLOTS.release()
@@ -506,6 +509,43 @@ def test_delegation_deadline_cancels_child_closes_slot_and_reports_timed_out():
             os.environ.pop("LLM_STREAM_CLOSE_GRACE_SEC", None)
         else:
             os.environ["LLM_STREAM_CLOSE_GRACE_SEC"] = old_grace
+
+
+def test_deadline_grace_preserves_direct_full_report_without_artifact():
+    """Optional persistence must not decide whether a safely returned report reaches the parent."""
+    cancelled = threading.Event()
+    full_report = "FULL HEADLESS REPORT\n" + ("grounded detail\n" * 200)
+    child = ChildOutcome(
+        status="succeeded", report=full_report, kind="explorer", launch_ordinal=1,
+        report_completion="complete", stop_reason="end_turn", stop_cause="complete",
+    )
+    invocation = ToolInvocation("headless-late-child", "spawn_agent", {
+        "agent": "explorer", "task": "return a direct report without persistence",
+    }, 0)
+
+    def run():
+        assert cancelled.wait(1), "deadline never reached the child"
+        return ToolOutcome(
+            invocation, ToolStatus.SUCCEEDED, child.render(),
+            (ToolEffect("headless-late-child:outcome", "child_outcome", child.to_effect()),),
+        )
+
+    outcome = run_ordered([
+        ScheduledTool(
+            invocation, ToolPurity.PURE_READ, run, timeout_safe=False,
+            request_cancel=lambda reason: cancelled.set() if reason == "deadline" else None,
+            cancel_grace=0.08,
+        ),
+    ], lifecycle_timeout=0.03)[0]
+
+    assert outcome.status is ToolStatus.FAILED
+    assert full_report in outcome.text
+    assert "Lifecycle warning:" in outcome.text
+    effect = next(item for item in outcome.effects if item.kind == "child_outcome")
+    assert effect.payload["operational_status"] == "failed"
+    assert effect.payload["stop_cause"] == "delegation_timeout"
+    assert effect.payload["report_bytes"] == len(full_report.encode("utf-8"))
+    assert not any(item.kind == "child_artifact" for item in outcome.effects)
 
 
 def test_parent_cancellation_composes_into_each_child_and_releases_its_slot():
@@ -723,7 +763,7 @@ def test_writable_lifecycle_child_obeys_deadline_and_preserves_effect_uncertaint
     assert elapsed < 0.5, elapsed
     assert outcome.status is ToolStatus.INDETERMINATE
     assert "may have applied workspace effects" in outcome.text
-    effect = next(item for item in outcome.effects if item.kind == "child_artifact")
+    effect = next(item for item in outcome.effects if item.kind == "child_outcome")
     assert effect.payload["stop_cause"] == "delegation_timeout"
     assert effect.payload["operational_status"] == "indeterminate"
 
@@ -745,6 +785,7 @@ def main() -> int:
         test_lifecycle_wave_ramps_provider_launches_without_serialising_the_batch,
         test_global_capacity_cancellation_announces_every_child_once_without_start_accounting,
         test_delegation_deadline_cancels_child_closes_slot_and_reports_timed_out,
+        test_deadline_grace_preserves_direct_full_report_without_artifact,
         test_parent_cancellation_composes_into_each_child_and_releases_its_slot,
         test_keyboard_interrupt_signals_entered_lifecycle_child_before_propagating,
         test_unresolved_child_after_close_grace_stays_indeterminate_and_keeps_capacity,

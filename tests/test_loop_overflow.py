@@ -17,10 +17,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from sliceagent.context_overflow import ContextOverflow                # noqa: E402
 from sliceagent.errors import RetryCancelledError                     # noqa: E402
 from sliceagent.events import StepEnd, TurnInterrupted                 # noqa: E402
+from sliceagent.execution import ToolEffect                           # noqa: E402
 from sliceagent.hooks import BudgetHook, CompositeHooks, Hooks, OracleHook  # noqa: E402
 from sliceagent.interfaces import Snippet                              # noqa: E402
 from sliceagent.loop import run_turn                                   # noqa: E402
 from sliceagent.pfc import Slice  # noqa: E402
+from sliceagent.registry import ToolText  # noqa: E402
 from sliceagent.seed import make_build_slice  # noqa: E402
 
 CHECKS = []
@@ -144,6 +146,82 @@ def overflow_keeps_compacting_while_trajectory_can_still_shrink():
                       dispatch=lambda _event: None, hooks=Hooks(), max_steps=20)
     assert result.stop_reason == "end_turn", result.stop_reason
     assert len(llm.seen) == 16, "the loop stopped at an arbitrary overflow retry count"
+
+
+@check
+def overflow_parks_instead_of_deleting_just_returned_child_report():
+    report = "BEGIN CHILD REPORT\nRETURNED CHILD EVIDENCE\nEND CHILD REPORT"
+
+    class ChildTools(_Tools):
+        def run(self, name, args):
+            assert name == "spawn_agent"
+            return ToolText(report, effects=(ToolEffect(
+                "child-report:outcome", "child_outcome", {
+                    "status": "succeeded",
+                    "operational_status": "succeeded",
+                    "kind": "explorer",
+                    "launch_ordinal": 1,
+                    "report_completion": "complete",
+                    "report_bytes": len(report.encode("utf-8")),
+                    "report_sha256": "b" * 64,
+                    "report_handle": "artifacts/child-report.md",
+                },
+            ),))
+
+    llm = _ScriptLLM([
+        _Resp(tool_calls=[_TC("spawn_agent", {"task": "inspect"}, "child-report-call")]),
+        "OVERFLOW",
+        _Resp(content="incorrect clean final without the report", finish_reason="stop"),
+    ])
+    events = []
+    result = run_turn(
+        build_slice=_plain_build, llm=llm, tools=ChildTools(),
+        dispatch=events.append, hooks=Hooks(), max_steps=10,
+    )
+    assert result.stop_reason == "overflow"
+    assert len(llm.seen) == 2, "the loop must park before deleting the child exchange and clean-finalizing"
+    assert any(
+        message.get("role") == "tool" and message.get("content") == report
+        for message in llm.seen[-1]
+    ), "the overflowing provider call must still contain the complete direct child result"
+    interrupts = [event for event in events if isinstance(event, TurnInterrupted)]
+    assert len(interrupts) == 1
+    assert "No final synthesis was produced" in (interrupts[0].message or "")
+    assert "artifacts/child-report.md" in (interrupts[0].message or "")
+
+
+@check
+def overflow_without_child_archive_names_the_retained_tool_result():
+    report = "BEGIN CHILD REPORT\nREPORT WITH FAIL-SOFT PERSISTENCE\nEND CHILD REPORT"
+
+    class ChildTools(_Tools):
+        def run(self, name, args):
+            return ToolText(report, effects=(ToolEffect(
+                "unarchived:outcome", "child_outcome", {
+                    "status": "succeeded",
+                    "operational_status": "succeeded",
+                    "kind": "explorer",
+                    "report_completion": "complete",
+                    "report_bytes": len(report.encode("utf-8")),
+                    "report_sha256": "c" * 64,
+                    "report_handle": "",
+                    "artifact_id": "",
+                },
+            ),))
+
+    llm = _ScriptLLM([
+        _Resp(tool_calls=[_TC("spawn_agent", {"task": "inspect"}, "no-archive")]),
+        "OVERFLOW",
+    ])
+    events = []
+    result = run_turn(
+        build_slice=_plain_build, llm=llm, tools=ChildTools(),
+        dispatch=events.append, hooks=Hooks(), max_steps=10,
+    )
+    assert result.stop_reason == "overflow"
+    interruption = next(event for event in events if isinstance(event, TurnInterrupted))
+    assert "tool result no-archive__s1_" in (interruption.message or "")
+    assert "sha256 " + ("c" * 64) in (interruption.message or "")
 
 
 @check
