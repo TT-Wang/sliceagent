@@ -73,9 +73,11 @@ def prompt_history_is_created_and_repaired_private():
 
     home = tempfile.mkdtemp(prefix="tui-private-history-")
     old_home = os.environ.get("HOME")
+    old_userprofile = os.environ.get("USERPROFILE")
     old_umask = os.umask(0o022)
     try:
         os.environ["HOME"] = home
+        os.environ["USERPROFILE"] = home
         state = os.path.join(home, ".sliceagent")
         os.makedirs(state)
         path = os.path.join(state, "history")
@@ -84,14 +86,19 @@ def prompt_history_is_created_and_repaired_private():
         os.chmod(path, 0o644)
         history = _private_prompt_history()
         history.append_string("private request")
-        assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     finally:
         os.umask(old_umask)
         if old_home is None:
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = old_home
+        if old_userprofile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = old_userprofile
 
 
 @check

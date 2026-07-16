@@ -155,17 +155,24 @@ def open_files_outside_reach_for_escape():
     # a file that EXISTS on disk but is outside file-tool reach must NOT read "(not created yet)"
     h, _ = _host()
     ext = tempfile.mkdtemp(prefix="sliceagent-reach-of-")
+    fake_home = tempfile.mkdtemp(prefix="sliceagent-reach-home-")
     try:
         ext_file = _write(ext, "real.txt", "exists on disk")  # exists, but outside allowed_roots
         s = Slice(); s.reset("t")
         s.active_files = [ext_file]
-        out = build_artifacts(s, h)
+        # On Windows tempfile normally lives below USERPROFILE, which intentionally activates the host's
+        # exact-HOME-target auto-reach.  Give this boundary fixture a distinct home so it tests a genuinely
+        # out-of-reach path on every platform instead of contradicting that product behavior.
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"HOME": fake_home, "USERPROFILE": fake_home}):
+            out = build_artifacts(s, h)
         assert "(not created yet)" not in out, "lied about an existing out-of-reach file"
         assert "outside file-tool reach" in out
         assert "run_command" in out or "execute_code" in out
     finally:
         import shutil
         shutil.rmtree(ext, ignore_errors=True)
+        shutil.rmtree(fake_home, ignore_errors=True)
 
 
 @check

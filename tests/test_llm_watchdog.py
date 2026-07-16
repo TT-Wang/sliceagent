@@ -368,12 +368,14 @@ def watchdog_capacity_wait_and_provider_execution_share_one_absolute_deadline():
             release_provider.wait(2)
             return "late"
 
-    stub = _Stub(delay=0, hard=0.2)
+    # Leave enough scheduling margin for loaded macOS runners. The assertion below still proves that the
+    # capacity wait and provider execution consume one deadline rather than receiving separate budgets.
+    stub = _Stub(delay=0, hard=1.0)
     stub._provider_call_gate = gate
     stub.client = type("Client", (), {
         "chat": type("Chat", (), {"completions": BlockingCompletions()})(),
     })()
-    releaser = threading.Thread(target=lambda: (time.sleep(0.12), occupied.release()), daemon=True)
+    releaser = threading.Thread(target=lambda: (time.sleep(0.35), occupied.release()), daemon=True)
     releaser.start()
     started = time.monotonic()
     try:
@@ -384,7 +386,9 @@ def watchdog_capacity_wait_and_provider_execution_share_one_absolute_deadline():
     elapsed = time.monotonic() - started
     try:
         assert provider_started.is_set()
-        assert elapsed < 0.27, f"capacity wait reset the watchdog deadline: {elapsed:.3f}s"
+        # A reset-at-admission implementation would now take about 1.35s. Keep the bands separate while
+        # allowing substantially more scheduler noise than the original 200ms test budget did.
+        assert 0.8 <= elapsed < 1.2, f"capacity wait reset the watchdog deadline: {elapsed:.3f}s"
     finally:
         release_provider.set()
     releaser.join(1)

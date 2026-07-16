@@ -28,9 +28,17 @@ def check(fn):
 
 
 def _render(events, *, width=100):
-    c = Console(file=StringIO(), force_terminal=True, width=width, color_system=None)
+    # This helper captures settled scrollback, not Rich's live cursor protocol.  An
+    # xterm-like TERM can otherwise make a forced-terminal StringIO interactive on
+    # Linux, adding Rich-owned cursor-hide/redraw escapes that the terminal-safety
+    # assertions correctly reject when they come from model or tool text.
+    c = Console(
+        file=StringIO(), force_terminal=True, force_interactive=False,
+        width=width, color_system=None,
+    )
     stats = {"model": "m", "topic": "", "tokens": 0}
     sink = tui.make_rich_sink(c, stats, await_commit=True)
+    sink._spinner_on = False
     for e in events:
         sink(e)
     sink._flush_reads()   # a real turn always ends with TurnEnd, which flushes buffered read-only cards

@@ -19,8 +19,10 @@ Design (a rich + prompt_toolkit terminal UI):
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import sys
 import threading
 import time
 from collections import Counter
@@ -2254,7 +2256,20 @@ def run_live(*, console: Console, stats: dict, banner_info: str, root: str | Non
             if show_banner:
                 banner(console, banner_info)
                 show_banner = False
-            with patch_stdout(raw=True):
+            # ``patch_stdout`` asks prompt_toolkit to autodetect a console from ``sys.stdout``.  There is no
+            # live renderer to protect when stdout is captured/piped, and on Windows under Git Bash that
+            # autodetection raises NoConsoleScreenBufferError before an injected/headless Application can run.
+            # Interactive terminals retain the proxy; non-interactive embedding/tests execute directly.
+            with contextlib.ExitStack() as stdout_stack:
+                if sys.stdout.isatty():
+                    # Bind the proxy to the Application's already-selected I/O.  Falling back to the global
+                    # AppSession makes prompt_toolkit re-detect sys.stdout; MSYS/Git-Bash then asks for a Win32
+                    # console screen buffer even when the Application is already using a valid VT output.
+                    from prompt_toolkit.application.current import create_app_session
+                    stdout_stack.enter_context(create_app_session(
+                        input=getattr(app, "input", None), output=getattr(app, "output", None),
+                    ))
+                    stdout_stack.enter_context(patch_stdout(raw=True))
                 app.run()
         finally:
             # Any exit path (EOF, renderer exception, startup/fallback failure) must retire the worker before the

@@ -64,11 +64,11 @@ class SessionManager:
     # ── lifecycle ──────────────────────────────────────────────────────────
     def open_problem(self, name: str) -> str:
         """Return a recoverable, pre-spawn reason an interactive session cannot open."""
+        if name in self._s:
+            return f"session {name!r} is already open (close it first, or use another name)"
         if pty is None:
             return ("interactive PTY sessions aren't available on Windows yet — use run_command for "
                     "one-shot commands or proc_start for background processes")
-        if name in self._s:
-            return f"session {name!r} is already open (close it first, or use another name)"
         return ""
 
     def open(self, name: str, *, cwd: str, command: str | None = None) -> str:

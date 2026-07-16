@@ -47,6 +47,9 @@ def direct_catastrophic_actions_are_recognized():
         'dd if=/dev/zero of="/dev/sda" bs=1M': "device",
         r"d\d if=/dev/zero of=/dev/sda bs=1M": "device",
         "rm -rf /": "deletion",
+        'rm -rf "/"': "deletion",
+        "rm -rf '/.'": "deletion",
+        "rm -rf /tmp/..": "deletion",
         r"\rm -rf /": "deletion",
         r"r\m -rf /": "deletion",
         "rm -rf / if": "deletion",
@@ -202,6 +205,11 @@ def mentions_examples_searches_and_comments_are_allowed():
         "false\n&& reboot",
     )
     for command in commands:
+        assert catastrophic_reason("run_command", {"command": command}) is None, command
+    if os.name != "nt":
+        # A backslash is a literal filename character on POSIX, not a path separator. Host-independent
+        # classification must not reinterpret this quoted executable through Windows path semantics.
+        command = '"foo\\shutdown" /s /t 0'
         assert catastrophic_reason("run_command", {"command": command}) is None, command
 
 

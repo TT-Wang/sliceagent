@@ -324,6 +324,54 @@ def repo_local_uv_on_path_is_not_executed():
 
 
 @check
+def symlinked_trusted_manager_bin_keeps_its_owned_target_reachable():
+    if os.name == "nt":
+        return
+    from unittest import mock
+    from sliceagent.updater import InstallOrigin, _find_uv
+
+    root = tempfile.mkdtemp(prefix="updater-nix-profile-")
+    store_root = os.path.join(root, "nix", "store")
+    store = os.path.join(store_root, "uv-package", "bin")
+    generation_bin = os.path.join(store_root, "profile-generation", "bin")
+    profile = os.path.join(root, "profile")
+    profile_bin = os.path.join(profile, "bin")
+    os.makedirs(store)
+    os.makedirs(generation_bin)
+    os.makedirs(profile)
+    os.symlink(generation_bin, profile_bin)
+    uv = os.path.join(store, "uv")
+    with open(uv, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(uv, 0o755)
+    os.symlink(uv, os.path.join(generation_bin, "uv"))
+
+    # Model the Nix pair in a hermetic root: the manager bin itself is a symlink, and its uv entry resolves
+    # into the manager-owned store. Both path forms must meet at one trusted-parent identity.
+    original_expanduser = os.path.expanduser
+    original_realpath = os.path.realpath
+
+    def mapped_expanduser(path):
+        return profile_bin if path == "~/.nix-profile/bin" else original_expanduser(path)
+
+    # Keep the production table intact except for replacing its Nix paths with this fixture. The other fixed
+    # locations cannot make the candidate pass because it is wholly inside the temporary root.
+    with mock.patch("sliceagent.updater.os.path.expanduser", side_effect=mapped_expanduser):
+        # _find_uv's Nix store root is an absolute constant; remap just that lexical root for this unit seam.
+        def mapped_realpath(path):
+            if path == "/nix/store":
+                return original_realpath(store_root)
+            return original_realpath(path)
+
+        with mock.patch("sliceagent.updater.os.path.realpath", side_effect=mapped_realpath):
+            found = _find_uv(
+                InstallOrigin("uv-tool"),
+                lambda name: os.path.join(profile_bin, name) if name == "uv" else None,
+            )
+    assert found == original_realpath(uv), found
+
+
+@check
 def installer_reruns_sanitize_resolution_environment():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "install.sh"), encoding="utf-8") as fh:

@@ -1399,6 +1399,7 @@ def sigint_does_not_freeze_on_no_timeout_parallel_reads():
         gate = threading.Event()
         ready_lock = threading.Lock()
         ready_path = __import__("sys").argv[1]
+        self_interrupt = len(__import__("sys").argv) > 2 and __import__("sys").argv[2] == "self"
         def task(index):
             invocation = ToolInvocation(str(index), "read_file", {"path": str(index)}, index)
             def read():
@@ -1408,6 +1409,19 @@ def sigint_does_not_freeze_on_no_timeout_parallel_reads():
                 gate.wait()
                 return ToolOutcome(invocation, ToolStatus.SUCCEEDED, "late")
             return ScheduledTool(invocation, ToolPurity.PURE_READ, read)
+        if self_interrupt:
+            def interrupt_when_ready():
+                import _thread
+                import time
+                while True:
+                    try:
+                        if len(open(ready_path, encoding="utf-8").read().splitlines()) == 2:
+                            _thread.interrupt_main()
+                            return
+                    except OSError:
+                        pass
+                    time.sleep(0.01)
+            threading.Thread(target=interrupt_when_ready, daemon=True).start()
         try:
             run_ordered([task(0), task(1)])
         except KeyboardInterrupt:
@@ -1418,7 +1432,7 @@ def sigint_does_not_freeze_on_no_timeout_parallel_reads():
     with tempfile.TemporaryDirectory() as directory:
         ready_path = os.path.join(directory, "ready")
         process = subprocess.Popen(
-            [sys.executable, "-c", code, ready_path], env=env,
+            [sys.executable, "-c", code, ready_path, "self" if os.name == "nt" else "external"], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         try:
@@ -1433,7 +1447,11 @@ def sigint_does_not_freeze_on_no_timeout_parallel_reads():
             else:
                 output, _ = process.communicate(timeout=1)
                 raise AssertionError(f"parallel read workers never became ready: {output!r}")
-            process.send_signal(signal.SIGINT)
+            # Windows' Popen.send_signal does not accept SIGINT (and CTRL_BREAK requires a real console plus
+            # process-group wiring that CI deliberately lacks).  The child uses Python's cross-platform
+            # interrupt_main seam there, exercising the same KeyboardInterrupt escape from the scheduler.
+            if os.name != "nt":
+                process.send_signal(signal.SIGINT)
             output, _ = process.communicate(timeout=1)
             assert process.returncode == 42, (process.returncode, output)
         except subprocess.TimeoutExpired:

@@ -817,6 +817,34 @@ def segment_and_cross_workspace_transition_identity_are_crash_visible():
 
 
 @check
+def case_insensitive_workspace_aliases_reuse_one_transition_identity():
+    source = tempfile.mkdtemp(prefix="transition-case-source-")
+    target = tempfile.mkdtemp(prefix="transition-case-target-")
+    root = tempfile.mkdtemp(prefix="transition-case-store-")
+
+    def case_insensitive(path):
+        return os.path.realpath(path).casefold()
+
+    # Deterministically emulate ntpath.normcase while running this suite on a case-sensitive POSIX host.
+    with mock.patch.object(WorkspaceTransitionStore, "_root_identity", side_effect=case_insensitive):
+        store = WorkspaceTransitionStore(root)
+        first = store.prepare(
+            session_id="case-session", logical_turn_id="case-logical", task_id="case-task",
+            request="switch once", source_root=source, target_root=target,
+            source_artifact_id="case-source-artifact", source_segment_index=0,
+            source_workspace_epoch=0,
+        )
+        retry = store.prepare(
+            session_id="case-session", logical_turn_id="case-logical", task_id="case-task",
+            request="switch once", source_root=source.swapcase(), target_root=target.swapcase(),
+            source_artifact_id="case-source-artifact", source_segment_index=0,
+            source_workspace_epoch=0,
+        )
+        assert retry == first
+        assert store.pending(workspace_root=source.swapcase()) == (first,)
+
+
+@check
 def crashed_target_segment_recovers_the_same_source_linked_work_root():
     from dataclasses import replace
     from sliceagent.active_work import WorkGraph
@@ -1038,7 +1066,9 @@ def inline_flow_automatically_continues_the_exact_request_and_delivers_once():
     assert len(result["calls"]) == 3
     target_prompt = json.dumps(result["calls"][2], ensure_ascii=False)
     assert result["request"] in target_prompt
-    assert result["target"] in target_prompt
+    # json.dumps escapes Windows backslashes; compare against the target's JSON spelling rather than a raw
+    # host path substring so this still proves the exact target entered the provider prompt.
+    assert json.dumps(result["target"], ensure_ascii=False)[1:-1] in target_prompt
     assert "TRANSPORT ONLY" not in target_prompt, "source transport prose must not become target continuity"
     assert "TARGET FINAL" in result["output"]
     assert "TRANSPORT ONLY" not in result["output"]

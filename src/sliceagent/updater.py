@@ -191,18 +191,23 @@ def _find_uv(origin: InstallOrigin, which) -> str:
         if (parent / ".git").exists():
             repo_root = parent
             break
-    fixed_dirs = (
-        os.path.expanduser("~/.local/bin"),
-        os.path.expanduser("~/.cargo/bin"),
-        os.path.expanduser("~/.nix-profile/bin"),
-        "/opt/homebrew/bin",
-        "/opt/local/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/run/current-system/sw/bin",
+    fixed_locations = (
+        (os.path.expanduser("~/.local/bin"), os.path.expanduser("~/.local")),
+        (os.path.expanduser("~/.cargo/bin"), os.path.expanduser("~/.cargo")),
+        # A Nix profile generation links executables into sibling package paths under /nix/store; the
+        # generation directory itself is not their ancestor.
+        (os.path.expanduser("~/.nix-profile/bin"), "/nix/store"),
+        ("/opt/homebrew/bin", "/opt/homebrew"),
+        ("/opt/local/bin", "/opt/local"),
+        ("/usr/local/bin", "/usr/local"),
+        ("/usr/bin", "/usr"),
+        ("/bin", "/usr"),
+        ("/run/current-system/sw/bin", "/nix/store"),
     )
-    trusted_dirs = {os.path.realpath(path) for path in fixed_dirs}
+    trusted_dirs = {os.path.realpath(path) for path, _ in fixed_locations}
+    trusted_symlink_roots: dict[str, set[str]] = {}
+    for path, root in fixed_locations:
+        trusted_symlink_roots.setdefault(os.path.realpath(path), set()).add(os.path.realpath(root))
     if origin.bin_dir:
         origin_bin = os.path.realpath(origin.bin_dir)
         try:
@@ -216,15 +221,24 @@ def _find_uv(origin: InstallOrigin, which) -> str:
         lexical = os.path.abspath(raw)
         candidate = os.path.realpath(raw)
         lexical_parent, real_parent = os.path.dirname(lexical), os.path.dirname(candidate)
-        if real_parent in trusted_dirs:
-            return candidate
-        if lexical_parent not in trusted_dirs:
-            return ""
+        trusted_parent = os.path.realpath(lexical_parent)
         try:
             target_in_repo = os.path.commonpath((candidate, str(repo_root))) == str(repo_root)
         except ValueError:
             target_in_repo = False
-        return "" if target_in_repo else candidate
+        if target_in_repo:
+            return ""
+        if real_parent in trusted_dirs:
+            return candidate
+        if trusted_parent not in trusted_dirs:
+            return ""
+        for root in trusted_symlink_roots.get(trusted_parent, ()):
+            try:
+                if os.path.commonpath((candidate, root)) == root:
+                    return candidate
+            except ValueError:
+                continue
+        return ""
 
     for filename in ("uv", "uv.exe"):
         sibling = os.path.join(origin.bin_dir, filename) if origin.bin_dir else ""

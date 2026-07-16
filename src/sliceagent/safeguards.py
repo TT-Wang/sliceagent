@@ -8,7 +8,9 @@ uncertainty are allowed. Sandbox and workspace boundaries remain the binding pro
 from __future__ import annotations
 
 import ast
+import ntpath
 import os
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass
@@ -37,6 +39,12 @@ _DISKUTIL_DEVICE = re.compile(r"^(?:/dev/)?r?disk\d+(?:s\d+)?$", re.IGNORECASE)
 _FORK_BOMB = re.compile(
     r"^\s*:\s*\(\s*\)\s*\{[^\n]*:\s*\|\s*:\s*&[^\n]*\}\s*;\s*:\s*$",
 )
+_SHELL_COMMAND_WORDS = frozenset({
+    "rm", "sudo", "command", "nohup", "exec", "time", "env", "shutdown", "shutdown.exe",
+    "reboot", "halt", "poweroff", "systemctl", "launchctl", "wipefs", "mkfs", "mke2fs",
+    "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "newfs_apfs", "diskutil",
+    "dd", "sh", "bash", "zsh", "tee", "exit", "true", "false",
+})
 
 
 @dataclass(frozen=True)
@@ -54,9 +62,20 @@ def _normalized_shell_token(raw: str, value: str) -> str:
     to an assignment-style word (``of="/dev/sda"``) is safe to normalize as one value; this covers the normal
     ``dd`` spelling without guessing across composite shell words.
     """
-    # In cmd/PowerShell a backslash is a path separator, not POSIX quote removal. Bare Windows power commands
-    # are still classified below; do not corrupt an absolute executable spelling by applying sh semantics.
+    # Assignment values use shell quoting on every supported command surface.  Normalize the common
+    # ``dd of="/dev/sda"`` spelling before the host-specific backslash rule below; otherwise a Windows host
+    # retains the quotes inside the value and misses the same literal device operation it catches on POSIX.
+    match = re.fullmatch(r"[^'\"]+=([\"'])(.*)\1", raw, re.DOTALL)
+    if match is not None:
+        return value
+    # Windows executes this surface through Git Bash, but an executable may still be spelled as a Windows
+    # absolute path whose backslashes are separators. Do not corrupt that path by applying sh unescaping.
+    # Git Bash also accepts alias-bypass spellings such as ``\rm`` and ``r\m``; normalize only when POSIX shlex
+    # resolves the whole token to a command word this classifier understands, never arbitrary path/arg tokens.
     if os.name == "nt":
+        if value.casefold() in _SHELL_COMMAND_WORDS and re.fullmatch(
+                r"(?:[^\\]|\\[A-Za-z0-9_.-])+", raw, re.DOTALL):
+            return value
         return raw
     if "'" not in raw and '"' not in raw:
         if raw == value:
@@ -68,8 +87,18 @@ def _normalized_shell_token(raw: str, value: str) -> str:
         return value if safe_escapes is not None else raw
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
         return raw
-    match = re.fullmatch(r"[^'\"]+=([\"'])(.*)\1", raw, re.DOTALL)
-    return value if match is not None else raw
+    return raw
+
+
+def _executable_basename(value: str) -> str:
+    """Return a shell executable basename under the supported host's command semantics.
+
+    POSIX treats backslashes in quoted names literally. Windows uses Git Bash for the command surface but also
+    accepts Windows executable spellings, so only that host applies both lexical path grammars. This is a
+    deterministic string operation and never resolves or executes the supplied path.
+    """
+    basename = posixpath.basename(value)
+    return ntpath.basename(basename) if os.name == "nt" else basename
 
 
 def _stages(body: str) -> tuple[_Stage, ...] | None:
@@ -191,7 +220,7 @@ def _command_index(tokens: tuple[str, ...]) -> int | None:
         raw_command, quote = _token_value(tokens[index])
         if quote == "complex":
             return None
-        command = os.path.basename(raw_command).casefold()
+        command = _executable_basename(raw_command).casefold()
         if command == "!":
             index += 1
             continue
@@ -364,7 +393,12 @@ def _recursive_rm_reason(tokens: tuple[str, ...], index: int) -> str | None:
             expanded = os.path.expandvars(expanded)
         if not quote:
             expanded = os.path.expanduser(expanded)
-        if os.path.isabs(expanded) and os.path.realpath(expanded) == "/":
+        # This is shell syntax, not only a path lookup on the classifier host.  Keep the realpath check (it
+        # catches POSIX spellings such as /./, /tmp/.., and symlinks to root), and add a lexical POSIX check so
+        # those same root operands remain visible when the classifier itself runs on Windows.
+        host_root = os.path.isabs(expanded) and os.path.realpath(expanded) == "/"
+        posix_root = posixpath.isabs(expanded) and posixpath.normpath(expanded) == "/"
+        if host_root or posix_root:
             if preserve_root:
                 continue
             return "recursive deletion of root or home"
@@ -451,7 +485,7 @@ def _stage_reason(stage: _Stage, *, depth: int = 0) -> str | None:
     index = _command_index(stage.tokens)
     if index is None:
         return None
-    executable = os.path.basename(_token_value(stage.tokens[index])[0]).casefold()
+    executable = _executable_basename(_token_value(stage.tokens[index])[0]).casefold()
     arg_values = tuple(_token_value(token)[0] for token in stage.tokens[index + 1:])
     if _option_present(arg_values, {"--help", "--version"}):
         return None
@@ -559,7 +593,7 @@ def _shell_terminates_after_stage(tokens: tuple[str, ...]) -> bool:
             return None
         return current
 
-    if index < len(tokens) and os.path.basename(_token_value(tokens[index])[0]).casefold() == "time":
+    if index < len(tokens) and _executable_basename(_token_value(tokens[index])[0]).casefold() == "time":
         index += 1
         while index < len(tokens):
             option = _token_value(tokens[index])[0]
@@ -577,7 +611,7 @@ def _shell_terminates_after_stage(tokens: tuple[str, ...]) -> bool:
             break
 
     if index < len(tokens):
-        wrapper = os.path.basename(_token_value(tokens[index])[0]).casefold()
+        wrapper = _executable_basename(_token_value(tokens[index])[0]).casefold()
         if wrapper == "command":
             next_index = skip_command(index)
             if next_index is None:
@@ -591,7 +625,7 @@ def _shell_terminates_after_stage(tokens: tuple[str, ...]) -> bool:
     if index >= len(tokens):
         return False
     value, quote = _token_value(tokens[index])
-    return not quote and os.path.basename(value).casefold() in {"exit", "exec"}
+    return not quote and _executable_basename(value).casefold() in {"exit", "exec"}
 
 
 def _body_reason(body: str, *, depth: int = 0) -> str | None:
@@ -620,7 +654,7 @@ def _body_reason(body: str, *, depth: int = 0) -> str | None:
         if index is None:
             last_status = None
             continue
-        executable = os.path.basename(_token_value(stage.tokens[index])[0]).casefold()
+        executable = _executable_basename(_token_value(stage.tokens[index])[0]).casefold()
         negated = sum(_token_value(token)[0] == "!" for token in stage.tokens[:index]) % 2
         if executable in {"true", ":"}:
             last_status = not negated

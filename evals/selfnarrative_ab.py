@@ -49,7 +49,6 @@ if not os.environ.get("LLM_BASE_URL"):
 os.environ["SLICEAGENT_PROMPT_FILE"] = ""
 os.environ["SLICEAGENT_MEMORY_MODEL_FILE"] = ""
 
-from usersim_pty import PtyAgent                             # noqa: E402
 from receipt_claims import (ClaimCategory, extract_receipt_truth,  # noqa: E402
                             latest_receipt_bundle, load_artifacts, merge_receipt_truth,
                             score_reply)
@@ -453,6 +452,14 @@ def _has_supported(score, categories: set[ClaimCategory], *, count: int | None =
 
 def run_arm(arm: str, seed: int, *, workspace: str | None = None,
             model_judge: bool = False, experiment_manifest: dict | None = None) -> dict:
+    # The offline receipt/evidence helpers in this module are portable and are imported by the normal test
+    # suite. Only a live A/B run needs a POSIX pseudo-terminal, so keep that dependency at the execution seam
+    # instead of making ``import selfnarrative_ab`` fail on Windows via stdlib ``pty -> termios``.
+    try:
+        from usersim_pty import PtyAgent
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError("live self-narrative A/B runs require a POSIX pseudo-terminal") from exc
+
     rng = random.Random(seed)
     env = arm_environment(arm)
     root = make_fixture(workspace)

@@ -938,12 +938,16 @@ class LocalToolHost:
         classification seam shared by execution effects and slice reconstruction, so an artifact can never
         silently become an ``OPEN FILES`` workspace path (or vice versa).
         """
-        original_ref = reserved_resource_ref(path)
+        # A physical workspace handle is the spelling the file tools actually resolved.  The reserved-resource
+        # classifier normalizes backslashes because virtual handles are POSIX-shaped, but applying that
+        # normalization to a real Windows path makes execution provenance name a different handle than the
+        # invocation.  Keep virtual handles canonical and physical handles native.
+        physical_ref = ResourceRef(ResourceKind.WORKSPACE_FILE, str(path) if path else ".")
         ref = reserved_resource_ref(self._archive_handle(path))
         if ref.kind is ResourceKind.WORKSPACE_FILE:
-            return original_ref
+            return physical_ref
         return (ref if self._history_route(path) is not None
-                else ResourceRef(ResourceKind.WORKSPACE_FILE, original_ref.handle))
+                else physical_ref)
 
     def _read_resource_effects(self, invocation, status, _text) -> tuple[ToolEffect, ...]:
         """Attach the read's resource kind to canonical execution truth."""

@@ -13,10 +13,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _launch(extra=None):
     import tempfile
     env = dict(os.environ)
+    home = tempfile.mkdtemp(prefix="smoke-home-")
     env.update({
         "PYTHONPATH": os.path.join(_ROOT, "src"),
-        "HOME": tempfile.mkdtemp(prefix="smoke-home-"),   # hermetic: the dev machine's ~/.sliceagent
-                                                          # config must not leak in (CI has none either)
+        # ntpath.expanduser uses USERPROFILE rather than HOME. Set both so the developer machine's
+        # ~/.sliceagent config cannot leak into this subprocess on either platform.
+        "HOME": home, "USERPROFILE": home,
         "AGENT_TUI": "off",                 # plain REPL — no prompt_toolkit app to drive
         "LLM_API_KEY": "sk-dummy-smoke", "OPENAI_API_KEY": "sk-dummy-smoke",
         "AGENT_MODEL": "dummy-model-smoke", # required since the no-default-model gate — without it the
@@ -46,8 +48,9 @@ def _no_key_env():
     env = {k: v for k, v in os.environ.items()
            if k not in ("LLM_API_KEY", "OPENAI_API_KEY", "MOONSHOT_API_KEY", "DEEPSEEK_API_KEY",
                         "AGENT_MODEL", "LLM_BASE_URL", "AGENT_PROVIDER")}
+    home = tempfile.mkdtemp(prefix="firstrun-home-")
     env.update({"PYTHONPATH": os.path.join(_ROOT, "src"),
-                "HOME": tempfile.mkdtemp(prefix="firstrun-home-"),
+                "HOME": home, "USERPROFILE": home,
                 "AGENT_TUI": "off", "AGENT_PROXY": "off"})
     return env
 
@@ -284,18 +287,21 @@ def durable_debug_log_is_created_and_repaired_private():
     try:
         sink = log_sink(path=path)
         sink(AssistantText("first private answer"))
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
         os.chmod(path, 0o644)
         sink(AssistantText("second private answer"))
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
         os.chmod(path, 0o644)
         old_cap, cli_mod.LOG_MAX_BYTES = cli_mod.LOG_MAX_BYTES, 0
         try:
             sink(AssistantText("rotate private answer"))
         finally:
             cli_mod.LOG_MAX_BYTES = old_cap
-        assert stat.S_IMODE(os.stat(path + ".1").st_mode) == 0o600
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(path + ".1").st_mode) == 0o600
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     finally:
         os.umask(old_umask)
 

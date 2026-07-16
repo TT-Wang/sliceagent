@@ -46,7 +46,10 @@ def exact_events_are_private_durable_and_deeply_read_only():
         pass
     else:
         raise AssertionError("payload must be deeply immutable")
-    assert os.stat(ledger.path).st_mode & 0o777 == 0o600
+    # Windows does not expose POSIX owner/group mode bits through chmod/stat; the file inherits the private
+    # user-profile/cache ACL there.  Assert the explicit 0600 repair on hosts where those bits are meaningful.
+    if os.name != "nt":
+        assert os.stat(ledger.path).st_mode & 0o777 == 0o600
     restored = EventLedger("session", root=root)
     assert restored.events()[0].to_dict() == event.to_dict()
 

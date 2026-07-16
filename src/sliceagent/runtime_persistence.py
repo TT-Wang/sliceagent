@@ -263,6 +263,11 @@ class WorkspaceTransitionStore:
 
     _LIVE = frozenset({"prepared", "activated", "continuing"})
 
+    @staticmethod
+    def _root_identity(path: str) -> str:
+        """Canonical comparison identity while retaining the original path for display/persistence."""
+        return os.path.normcase(os.path.realpath(path))
+
     def __init__(self, root: str | None = None):
         self.root = os.path.realpath(root or state_dir("workspace-transitions"))
         os.makedirs(self.root, mode=0o700, exist_ok=True)
@@ -326,10 +331,11 @@ class WorkspaceTransitionStore:
         source_segment_index: int, source_workspace_epoch: int,
     ) -> WorkspaceTransition:
         source, target = os.path.realpath(source_root), os.path.realpath(target_root)
-        if source == target:
+        if self._root_identity(source) == self._root_identity(target):
             raise ValueError("workspace transition source and target must differ")
         identity = json.dumps(
-            [str(session_id), str(logical_turn_id), source, target, int(source_segment_index)],
+            [str(session_id), str(logical_turn_id), self._root_identity(source),
+             self._root_identity(target), int(source_segment_index)],
             separators=(",", ":"), ensure_ascii=False,
         )
         transition = WorkspaceTransition(
@@ -348,6 +354,11 @@ class WorkspaceTransitionStore:
             comparable = {**existing.to_dict(), "status": "prepared", "target_artifact_id": ""}
             expected = transition.to_dict()
             expected["request"] = redact_text(transition.request, preserve_length=True)
+            # Case/separator aliases share one transition identity on case-insensitive filesystems. Compare
+            # their canonical identities too while retaining the first admitted spelling for diagnostics.
+            for field in ("source_root", "target_root"):
+                comparable[field] = self._root_identity(comparable[field])
+                expected[field] = self._root_identity(expected[field])
             if comparable != expected:
                 raise PersistenceError("workspace transition identity already names different content")
             return existing
@@ -399,7 +410,7 @@ class WorkspaceTransitionStore:
     def pending(
         self, *, workspace_root: str | None = None, session_id: str | None = None,
     ) -> tuple[WorkspaceTransition, ...]:
-        root = os.path.realpath(workspace_root) if workspace_root else ""
+        root = self._root_identity(workspace_root) if workspace_root else ""
         rows = []
         for name in sorted(os.listdir(self.root)):
             if not name.endswith(".json"):
@@ -414,7 +425,8 @@ class WorkspaceTransitionStore:
                 continue
             if session_id and row.session_id != str(session_id):
                 continue
-            if root and root not in {row.source_root, row.target_root}:
+            if root and root not in {
+                    self._root_identity(row.source_root), self._root_identity(row.target_root)}:
                 continue
             rows.append(row)
         return tuple(rows)

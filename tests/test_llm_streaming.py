@@ -564,11 +564,24 @@ def async_bridge_reports_capacity_admission_first_byte_and_low_rate_heartbeat():
 
     from sliceagent.llm import _AsyncTransportHub, _PhysicalCallGate
 
+    awaiting_heartbeat = threading.Event()
+    receiving_heartbeat = threading.Event()
+
     class TimelineHub(_AsyncTransportHub):
         async def _chat(self, _spec, _kwargs, publish):
-            await asyncio.sleep(0.11)
+            # Synchronize on the bridge's observations instead of assuming its caller thread will be
+            # scheduled inside a sub-100ms window on a busy CI host.
+            for _ in range(200):
+                if awaiting_heartbeat.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert awaiting_heartbeat.is_set(), "bridge never reported its pre-byte heartbeat"
             publish(object())
-            await asyncio.sleep(0.11)
+            for _ in range(200):
+                if receiving_heartbeat.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert receiving_heartbeat.is_set(), "bridge never reported its receiving heartbeat"
 
     hub, gate = TimelineHub(), _PhysicalCallGate(1)
     occupied = gate.acquire(timeout=1)
@@ -577,6 +590,7 @@ def async_bridge_reports_capacity_admission_first_byte_and_low_rate_heartbeat():
     def observe(event, detail):
         events.append((event, dict(detail)))
         if event == "stream_heartbeat":
+            (receiving_heartbeat if detail["state"] == "receiving" else awaiting_heartbeat).set()
             raise RuntimeError("diagnostic observer failure must stay fail-open")
 
     def call():
@@ -590,7 +604,10 @@ def async_bridge_reports_capacity_admission_first_byte_and_low_rate_heartbeat():
             box["error"] = error
 
     thread = threading.Thread(target=call); thread.start()
-    time.sleep(0.07)
+    deadline = time.monotonic() + 1
+    while not events and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert events and events[0][0] == "provider_queue", events
     occupied.release()
     thread.join(2)
     assert not thread.is_alive() and "error" not in box, box
@@ -599,8 +616,8 @@ def async_bridge_reports_capacity_admission_first_byte_and_low_rate_heartbeat():
     assert names.count("first_byte") == 1 and len(items) == 1
     first = next(detail for name, detail in events if name == "first_byte")
     admitted = next(detail for name, detail in events if name == "provider_admitted")
-    assert admitted["queued"] is True and admitted["queue_ms"] >= 40
-    assert first["ttfb_ms"] >= 70 and first["elapsed_ms"] >= admitted["queue_ms"]
+    assert admitted["queued"] is True
+    assert first["ttfb_ms"] > 0 and first["elapsed_ms"] >= admitted["queue_ms"]
     heartbeats = [detail for name, detail in events if name == "stream_heartbeat"]
     assert {detail["state"] for detail in heartbeats} == {"awaiting_first_byte", "receiving"}, heartbeats
     assert all(set(detail) >= {"state", "elapsed_ms", "idle_ms", "chunks"} for detail in heartbeats)
@@ -1228,7 +1245,9 @@ def admission_delay_cannot_resurrect_an_expired_request_with_a_positive_clamp():
     try:
         try:
             hub.run(
-                "chat", ("x", "", "none", 60), {}, timeout=0.01, close_grace=0.05,
+                # The close grace is deliberately generous: the invariant is that the delayed admission
+                # cannot start provider I/O, not that a loaded runner reports that result within 50ms.
+                "chat", ("x", "", "none", 60), {}, timeout=0.01, close_grace=0.5,
                 provider_gate=gate,
             )
             assert False, "post-admission expiry must surface before provider I/O"

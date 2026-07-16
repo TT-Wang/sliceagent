@@ -102,7 +102,14 @@ this project aims for [Semantic Versioning](https://semver.org/).
   late request and capacity wait shares the same absolute deadline as execution.
 - **Canonical installs can actually self-update.** The updater now recognizes the standard
   `python = "3.12"` field emitted by current `uv tool` receipts while continuing to reject custom
-  requirements, resolver settings, and non-public package sources.
+  requirements, resolver settings, and non-public package sources. Trusted executable discovery rejects
+  repository and arbitrary-PATH shims while correctly following Homebrew/Nix-style manager-owned symlink
+  chains; a receipt-provided bin can no longer redirect execution to an unrelated external target.
+- **Native Windows paths keep one identity across the runtime.** Model-facing mention handles stay
+  slash-normalized, physical workspace evidence retains its native invocation spelling, and workspace
+  transitions compare case-insensitive canonical identities without changing display paths. Git-Bash live
+  composition reuses the application-selected terminal I/O, while POSIX-only PTY eval support is loaded only
+  when a live eval actually runs.
 - **Private state modes do not leak into shared skills.** Personal vault/config/default-skill files remain
   owner-only, while an explicitly selected project/shared skill directory creates collaborator-readable
   `SKILL.md` files and preserves an existing file mode across atomic rewrites.

@@ -111,7 +111,10 @@ def workspace_mentions(text: str, root: str) -> list[str]:
                 )
                 if os.path.commonpath((workspace, full)) != workspace or not os.path.isfile(full):
                     continue
-                rel = os.path.relpath(full, workspace)
+                # Mentions are model-facing handles, not host shell paths.  Keep one stable syntax across
+                # platforms so a completion emitted as ``@app/jobs/[id]/page.tsx`` resolves to the same bytes
+                # and remains reusable after a workspace is moved between Windows and POSIX.
+                rel = os.path.relpath(full, workspace).replace(os.sep, "/")
                 break
             except (OSError, ValueError):
                 continue
