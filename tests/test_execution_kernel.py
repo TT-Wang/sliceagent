@@ -1700,12 +1700,16 @@ def exhausted_reader_slots_settle_without_a_configured_tool_timeout():
 def lifecycle_read_does_not_disable_an_adjacent_read_deadline():
     release = threading.Event()
     finished = threading.Event()
+    entered = threading.Event()
+    returned = threading.Event()
     read_inv = ToolInvocation("safe-timeout", "read_file", {"path": "fifo"}, 0)
     child_inv = ToolInvocation("child", "spawn_agent", {"task": "inspect"}, 1)
     child_ran = []
+    box = {}
 
     def read():
         try:
+            entered.set()
             release.wait()
             return ToolOutcome(read_inv, ToolStatus.SUCCEEDED, "late")
         finally:
@@ -1715,19 +1719,32 @@ def lifecycle_read_does_not_disable_an_adjacent_read_deadline():
         child_ran.append(True)
         return ToolOutcome(child_inv, ToolStatus.SUCCEEDED, "child")
 
-    started = time.monotonic()
+    def schedule():
+        try:
+            box["outcomes"] = run_ordered([
+                ScheduledTool(read_inv, ToolPurity.PURE_READ, read, timeout_safe=True),
+                ScheduledTool(child_inv, ToolPurity.PURE_READ, child, timeout_safe=False),
+            ], timeout=0.5)
+        except BaseException as error:  # noqa: BLE001 - surfaced on the test thread below
+            box["error"] = error
+        finally:
+            returned.set()
+
+    controller = threading.Thread(target=schedule, daemon=True)
+    controller.start()
     try:
-        outcomes = run_ordered([
-            ScheduledTool(read_inv, ToolPurity.PURE_READ, read, timeout_safe=True),
-            ScheduledTool(child_inv, ToolPurity.PURE_READ, child, timeout_safe=False),
-        ], timeout=0.02)
-        assert time.monotonic() - started < 0.4
+        assert entered.wait(2), "ordinary read never crossed the execution boundary"
+        assert returned.wait(3), "adjacent lifecycle work disabled the ordinary read deadline"
+        assert "error" not in box, box
+        outcomes = box["outcomes"]
         assert [outcome.status for outcome in outcomes] == [
             ToolStatus.INDETERMINATE, ToolStatus.CANCELLED,
-        ]
+        ], outcomes
         assert child_ran == []
     finally:
         release.set()
+        controller.join(1)
+        assert not controller.is_alive(), "scheduler controller did not retire after fixture release"
         assert finished.wait(1)
 
 
@@ -1735,25 +1752,56 @@ def lifecycle_read_does_not_disable_an_adjacent_read_deadline():
 def late_indeterminate_read_still_closes_later_effect_barriers():
     read_inv = ToolInvocation("late-unknown", "read_file", {"path": "remote"}, 0)
     edit_inv = ToolInvocation("later-edit", "edit_file", {"path": "x"}, 1)
+    entered = threading.Event()
+    cutoff = threading.Event()
+    return_read = threading.Event()
+    returned = threading.Event()
     edits = []
+    box = {}
 
     def uncertain_read():
-        time.sleep(0.04)
+        entered.set()
+        return_read.wait()
         return ToolOutcome(read_inv, ToolStatus.INDETERMINATE, "remote result uncertain")
 
-    outcomes = run_ordered([
-        ScheduledTool(read_inv, ToolPurity.PURE_READ, uncertain_read),
-        ScheduledTool(
-            edit_inv, ToolPurity.EFFECTFUL,
-            lambda: (edits.append(True), ToolOutcome(
-                edit_inv, ToolStatus.SUCCEEDED, "edited",
-            ))[1],
-        ),
-    ], timeout=0.02)
-    assert [outcome.status for outcome in outcomes] == [
-        ToolStatus.INDETERMINATE, ToolStatus.CANCELLED,
-    ]
-    assert edits == []
+    def schedule():
+        try:
+            box["outcomes"] = run_ordered([
+                ScheduledTool(
+                    read_inv, ToolPurity.PURE_READ, uncertain_read,
+                    request_cancel=lambda kind: cutoff.set() if kind == "deadline" else None,
+                    cancel_grace=3.0,
+                ),
+                ScheduledTool(
+                    edit_inv, ToolPurity.EFFECTFUL,
+                    lambda: (edits.append(True), ToolOutcome(
+                        edit_inv, ToolStatus.SUCCEEDED, "edited",
+                    ))[1],
+                ),
+            ], timeout=0.5)
+        except BaseException as error:  # noqa: BLE001 - surfaced on the test thread below
+            box["error"] = error
+        finally:
+            returned.set()
+
+    controller = threading.Thread(target=schedule, daemon=True)
+    controller.start()
+    try:
+        assert entered.wait(2), "read never crossed the execution boundary"
+        assert cutoff.wait(2), "read did not cross the configured deadline"
+        return_read.set()
+        assert returned.wait(2), "late indeterminate result did not settle during its cancellation grace"
+        assert "error" not in box, box
+        outcomes = box["outcomes"]
+        assert [outcome.status for outcome in outcomes] == [
+            ToolStatus.INDETERMINATE, ToolStatus.CANCELLED,
+        ], outcomes
+        assert "remote result uncertain" in outcomes[0].text, outcomes[0]
+        assert edits == []
+    finally:
+        return_read.set()
+        controller.join(1)
+        assert not controller.is_alive(), "scheduler controller did not retire after fixture release"
 
 
 @check
