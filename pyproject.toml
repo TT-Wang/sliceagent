@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "openai==2.45.0",
     "httpx==0.28.1",
-    "mcp==1.28.1",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
+    "mcp==2.0.0",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
 ]
 
 [project.optional-dependencies]
