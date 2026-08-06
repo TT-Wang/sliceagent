@@ -39,7 +39,7 @@ treesitter = ["tree-sitter==0.26.0", "tree-sitter-python==0.25.0"]
 # rich+prompt_toolkit stack; plugs into the event-sink seam, never touches the moat.
 tui = ["rich==15.0.0", "prompt_toolkit==3.0.52"]
 # Dev toolchain: test runner + linter (CI installs `.[dev]`). `pip install -e .[dev]`.
-dev = ["pytest==9.1.1", "ruff==0.15.21"]
+dev = ["pytest==9.1.1", "ruff==0.16.1"]
 
 [project.scripts]
 sliceagent = "sliceagent.cli:main"
