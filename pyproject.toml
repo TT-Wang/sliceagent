@@ -20,7 +20,7 @@ classifiers = [
 # Pi-style supply-chain policy: every DIRECT dependency is EXACT-pinned to the uv.lock tree
 # (dependency changes are reviewed code changes, not ambient resolution). Guard: scripts/check_pinned_deps.py.
 dependencies = [
-    "openai==2.45.0",
+    "openai==2.52.0",
     "httpx==0.28.1",
     "mcp==1.28.1",   # official MCP SDK — connect external MCP servers as tools (Step 3.3)
 ]
