@@ -21,7 +21,7 @@ memory = ["numpy>=1.24", "memem==2.9.7"]
 treesitter = ["tree-sitter==0.26.0", "tree-sitter-python==0.25.0"]
 # Rich terminal UI (falls back to plain print/input when absent).
 tui = ["rich==15.0.0", "prompt_toolkit==3.0.53"]
-dev = ["pytest==9.1.1", "ruff==0.16.5"]
+dev = ["pytest==9.1.1", "ruff==0.16.10"]
 
 # [project.scripts] parked while this package is unpublished — the root product owns
 # the `sliceagent` console script (dedup: two distributions must not claim one name).
