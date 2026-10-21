@@ -721,7 +721,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.6.0"
+version = "3.35.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -731,9 +731,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/76/913b755a1a6b54e2d9140eb8d488aa0d47c7359b1d7eac5e864cb7913bbf/openai-3.6.0.tar.gz", hash = "sha256:18fe3f6e96390ef41ee27b152fc9effefca321c33673bd9b956a572493d3ab9b", size = 1455376, upload-time = "2026-08-28T22:29:18.268Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/4c/609b16f2a6e9a99f27a82ce93ff75868e7cb364fe6daff50cc0c1d620772/openai-3.35.1.tar.gz", hash = "sha256:b33e6561b90586e450def8a388e7d364755325da6884fc71348be5542e043bd0", size = 2250942, upload-time = "2026-10-18T01:06:38.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/94/805b87ecc951c49ec8f247f5e8eb324ab064bd2ad73b6a0e704dd49aa073/openai-3.6.0-py3-none-any.whl", hash = "sha256:508e2158bf971687f953b62e44b02f207792c815aac306816386d7ba34d37f5f", size = 1699841, upload-time = "2026-08-28T22:29:16.436Z" },
+    { url = "https://files.pythonhosted.org/packages/22/7b/6d7e70f0762d1b286051bd7cb2fd0c364c1830d0f8826738673aeec05c2b/openai-3.35.1-py3-none-any.whl", hash = "sha256:264fd0fafc889021f526b7c1e5a2df5ca3e8dea874738ecd31da666434f25967", size = 2280230, upload-time = "2026-10-18T01:06:36.16Z" },
 ]
 
 [[package]]
@@ -1342,7 +1342,7 @@ requires-dist = [
     { name = "mcp", specifier = "==2.3.0" },
     { name = "memem", marker = "extra == 'memory'", specifier = "==2.9.7" },
     { name = "numpy", marker = "extra == 'memory'", specifier = ">=1.24" },
-    { name = "openai", specifier = "==3.6.0" },
+    { name = "openai", specifier = "==3.35.1" },
     { name = "prompt-toolkit", marker = "extra == 'tui'", specifier = "==3.0.53" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.1.1" },
     { name = "rich", marker = "extra == 'tui'", specifier = "==15.0.0" },
@@ -1413,7 +1413,7 @@ openai = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", marker = "extra == 'openai'", specifier = "==0.28.1" },
-    { name = "openai", marker = "extra == 'openai'", specifier = "==3.6.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = "==3.35.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.1.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.17.0" },
 ]
