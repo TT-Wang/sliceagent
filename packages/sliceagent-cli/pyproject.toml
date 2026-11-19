@@ -18,7 +18,7 @@ dependencies = [
 # The Memem memory stack, injected into core via the Memory contract.
 memory = ["numpy>=1.24", "memem==2.9.7"]
 # Precise symbol graph for the RELATED CODE map (code_index falls back to regex without it).
-treesitter = ["tree-sitter==0.26.0", "tree-sitter-python==0.25.0"]
+treesitter = ["tree-sitter==0.26.1", "tree-sitter-python==0.25.0"]
 # Rich terminal UI (falls back to plain print/input when absent).
 tui = ["rich==15.0.0", "prompt_toolkit==3.0.53"]
 dev = ["pytest==9.1.1", "ruff==0.17.0"]
